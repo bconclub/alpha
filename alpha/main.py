@@ -7,6 +7,7 @@ import signal
 import sys
 from typing import Any
 
+import aiohttp
 import ccxt.async_support as ccxt
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -319,13 +320,22 @@ class AlphaBot:
     # -- Exchange init ---------------------------------------------------------
 
     async def _init_exchanges(self) -> None:
-        """Create ccxt exchange instances."""
+        """Create ccxt exchange instances.
+
+        Uses the threaded DNS resolver to avoid aiodns failures on Windows.
+        """
+        # Force threaded resolver so aiohttp doesn't depend on aiodns/c-ares
+        resolver = aiohttp.resolver.ThreadedResolver()
+        connector = aiohttp.TCPConnector(resolver=resolver, ssl=True)
+        session = aiohttp.ClientSession(connector=connector)
+
         # Binance (required)
         self.binance = ccxt.binance({
             "apiKey": config.binance.api_key,
             "secret": config.binance.secret,
             "enableRateLimit": True,
             "options": {"defaultType": "spot"},
+            "session": session,
         })
         if not config.binance.api_key:
             logger.warning("Binance API key not set — running in sandbox/read-only mode")
@@ -333,11 +343,15 @@ class AlphaBot:
 
         # KuCoin (optional, for arbitrage)
         if config.kucoin.api_key:
+            kucoin_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver(), ssl=True)
+            )
             self.kucoin = ccxt.kucoin({
                 "apiKey": config.kucoin.api_key,
                 "secret": config.kucoin.secret,
                 "password": config.kucoin.passphrase,
                 "enableRateLimit": True,
+                "session": kucoin_session,
             })
             logger.info("KuCoin exchange initialized (arbitrage enabled)")
         else:
