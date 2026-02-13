@@ -166,6 +166,19 @@ class AlphaBot:
         binance_bal = await self._fetch_balance(self.binance, "USDT")
         delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
 
+        # Send debug info to Telegram so we can see what's happening
+        delta_url = self.delta.urls.get("api", "N/A") if self.delta else "no delta"
+        delta_sandbox = getattr(self.delta, "sandbox", "?") if self.delta else "N/A"
+        debug_msg = (
+            f"\U0001f527 *BALANCE DEBUG*\n"
+            f"Binance raw: `{binance_bal}`\n"
+            f"Delta raw: `{delta_bal}`\n"
+            f"Delta URL: `{delta_url}`\n"
+            f"Delta sandbox: `{delta_sandbox}`\n"
+            f"Delta obj: `{type(self.delta).__name__ if self.delta else 'None'}`"
+        )
+        await self.alerts._send(debug_msg)
+
         # Capital = sum of actual exchange balances
         total_capital = (binance_bal or 0) + (delta_bal or 0)
 
@@ -683,8 +696,18 @@ class AlphaBot:
             return None
         ex_id = getattr(exchange, "id", "?")
         try:
+            # Log the API URL being used (debug connectivity issues)
+            api_url = getattr(exchange, "urls", {}).get("api", "unknown")
+            logger.info("Fetching balance from %s (url=%s)", ex_id, api_url)
+
             balance = await exchange.fetch_balance()
+
+            # Debug: dump all keys with non-zero values
             free_map = balance.get("free", {})
+            total_map = balance.get("total", {})
+            all_free = {k: v for k, v in free_map.items() if v is not None and v != 0}
+            all_total = {k: v for k, v in total_map.items() if v is not None and v != 0}
+            logger.info("Balance dump for %s: free=%s total=%s", ex_id, all_free, all_total)
 
             # Try exact currency, then common alternatives
             for key in (currency, "USD", "USDC"):
@@ -694,8 +717,7 @@ class AlphaBot:
                     logger.info("Balance for %s: %s = %.4f", ex_id, key, result)
                     return result
 
-            # If no positive balance found, check total as fallback
-            total_map = balance.get("total", {})
+            # If no positive free balance, check total as fallback
             for key in (currency, "USD", "USDC"):
                 val = total_map.get(key)
                 if val is not None and float(val) > 0:
@@ -703,9 +725,7 @@ class AlphaBot:
                     logger.info("Balance for %s (total): %s = %.4f", ex_id, key, result)
                     return result
 
-            # Log available keys to help debug
-            available = {k: v for k, v in free_map.items() if v and float(v) > 0}
-            logger.warning("No %s balance found on %s. Available: %s", currency, ex_id, available)
+            logger.warning("No %s balance found on %s", currency, ex_id)
             return 0.0
         except Exception as e:
             logger.warning("Could not fetch balance from %s: %s (type: %s)", ex_id, e, type(e).__name__)
