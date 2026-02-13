@@ -24,7 +24,7 @@ jobs:
             git pull origin main
 
             echo ">>> Installing dependencies..."
-            pip install -r requirements.txt --quiet
+            pip3 install -r requirements.txt --break-system-packages --quiet
 
             echo ">>> Restarting alpha-bot service..."
             sudo systemctl restart alpha-bot
