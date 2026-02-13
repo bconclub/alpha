@@ -671,13 +671,34 @@ class AlphaBot:
         """Fetch free balance for a currency on an exchange. Returns None on failure."""
         if not exchange:
             return None
+        ex_id = getattr(exchange, "id", "?")
         try:
             balance = await exchange.fetch_balance()
-            free = float(balance.get("free", {}).get(currency, 0))
-            logger.info("Balance for %s: %s = %.4f", getattr(exchange, "id", "?"), currency, free)
-            return free
+            free_map = balance.get("free", {})
+
+            # Try exact currency, then common alternatives
+            for key in (currency, "USD", "USDC"):
+                val = free_map.get(key)
+                if val is not None and float(val) > 0:
+                    result = float(val)
+                    logger.info("Balance for %s: %s = %.4f", ex_id, key, result)
+                    return result
+
+            # If no positive balance found, check total as fallback
+            total_map = balance.get("total", {})
+            for key in (currency, "USD", "USDC"):
+                val = total_map.get(key)
+                if val is not None and float(val) > 0:
+                    result = float(val)
+                    logger.info("Balance for %s (total): %s = %.4f", ex_id, key, result)
+                    return result
+
+            # Log available keys to help debug
+            available = {k: v for k, v in free_map.items() if v and float(v) > 0}
+            logger.warning("No %s balance found on %s. Available: %s", currency, ex_id, available)
+            return 0.0
         except Exception as e:
-            logger.warning("Could not fetch balance from %s: %s", getattr(exchange, "id", "?"), e)
+            logger.warning("Could not fetch balance from %s: %s", ex_id, e)
             return None
 
 
