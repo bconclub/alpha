@@ -111,8 +111,10 @@ class AlertManager:
             strat = c.get("new_strategy") or "Paused"
             adx = c.get("adx", 0)
             rsi = c.get("rsi", 0)
+            exch = c.get("exchange", "")
+            exch_tag = f" [{exch}]" if exch else ""
             lines.append(
-                f"`{pair_short}`: {c.get('condition', '?')} {emoji} "
+                f"`{pair_short}`{exch_tag}: {c.get('condition', '?')} {emoji} "
                 f"(ADX=`{adx:.0f}`, RSI=`{rsi:.0f}`) \u2192 {strat}"
             )
         await self._send("\n".join(lines))
@@ -420,9 +422,11 @@ class AlertManager:
 
     async def send_strategy_switch(
         self, pair: str, old: str | None, new: str | None, reason: str,
+        exchange: str = "",
     ) -> None:
+        exch_tag = f" | {exchange}" if exchange else ""
         msg = (
-            f"\U0001f504 *Strategy Switch* [{pair}]\n"
+            f"\U0001f504 *Strategy Switch* [{pair}{exch_tag}]\n"
             f"{old or 'none'} \u2192 {new or 'paused'}\n"
             f"Reason: _{reason}_"
         )

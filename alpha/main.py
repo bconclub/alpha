@@ -288,6 +288,7 @@ class AlphaBot:
                 # Detect change
                 new_name = selected.value if selected else None
                 if new_name != old_name:
+                    exchange = "Delta" if (self.delta and pair in self.delta_pairs) else "Binance"
                     strategy_changes.append({
                         "pair": pair,
                         "condition": analysis.condition.value,
@@ -296,6 +297,7 @@ class AlphaBot:
                         "old_strategy": old_name,
                         "new_strategy": new_name,
                         "direction": analysis.direction,
+                        "exchange": exchange,
                     })
 
             # 4b. Send market update alert (only if strategies changed)
@@ -350,11 +352,13 @@ class AlphaBot:
             last = self.analyzer.last_analysis_for(pair)  # type: ignore[union-attr]
         if last is None and self.delta_analyzer:
             last = self.delta_analyzer.last_analysis_for(pair)
+        exchange = "Delta" if (self.delta and pair in self.delta_pairs) else "Binance"
         await self.alerts.send_strategy_switch(
             pair=pair,
             old=current_name.value if current_name else None,
             new=name.value,
             reason=last.reason if last else "initial",
+            exchange=exchange,
         )
 
     async def _check_arb_opportunity(self, pair: str) -> bool:
