@@ -54,7 +54,7 @@ class BaseStrategy(ABC):
         self.risk_manager = risk_manager
         self.is_active = False
         self._task: asyncio.Task[None] | None = None
-        self.logger = setup_logger(f"strategy.{self.name.value}")
+        self.logger = setup_logger(f"strategy.{self.name.value}.{pair.replace('/', '')}")
 
     async def start(self) -> None:
         """Activate the strategy and begin its check loop."""

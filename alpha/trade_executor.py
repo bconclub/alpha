@@ -1,4 +1,7 @@
-"""Trade executor — places orders via ccxt with retry logic and logging."""
+"""Trade executor — places orders via ccxt with retry logic and logging.
+
+Multi-pair aware: validates per-pair minimum order sizes from Binance.
+"""
 
 from __future__ import annotations
 
@@ -29,9 +32,57 @@ class TradeExecutor:
         self.exchange = exchange
         self.db = db  # alpha.db.Database
         self.alerts = alerts  # alpha.alerts.AlertManager
+        self._min_notional: dict[str, float] = {}  # pair → min order value in USD
+        self._min_amount: dict[str, float] = {}  # pair → min order qty
+
+    async def load_market_limits(self, pairs: list[str]) -> None:
+        """Pre-load Binance minimum order sizes for all tracked pairs."""
+        try:
+            await self.exchange.load_markets()
+            for pair in pairs:
+                market = self.exchange.markets.get(pair)
+                if market:
+                    limits = market.get("limits", {})
+                    cost_limits = limits.get("cost", {})
+                    amount_limits = limits.get("amount", {})
+                    self._min_notional[pair] = cost_limits.get("min", 0) or 0
+                    self._min_amount[pair] = amount_limits.get("min", 0) or 0
+                    logger.debug(
+                        "[%s] min notional=$%.2f, min amount=%.8f",
+                        pair, self._min_notional[pair], self._min_amount[pair],
+                    )
+                else:
+                    logger.warning("Market info not found for %s", pair)
+        except Exception:
+            logger.exception("Failed to load market limits")
+
+    def validate_order_size(self, signal: Signal) -> bool:
+        """Check if the order meets Binance minimum requirements."""
+        pair = signal.pair
+        value = signal.price * signal.amount
+        min_notional = self._min_notional.get(pair, 0)
+        min_amount = self._min_amount.get(pair, 0)
+
+        if min_notional and value < min_notional:
+            logger.warning(
+                "[%s] Order value $%.4f below min notional $%.2f — skipping",
+                pair, value, min_notional,
+            )
+            return False
+        if min_amount and signal.amount < min_amount:
+            logger.warning(
+                "[%s] Order amount %.8f below min %.8f — skipping",
+                pair, signal.amount, min_amount,
+            )
+            return False
+        return True
 
     async def execute(self, signal: Signal) -> dict | None:
         """Place an order for the given signal, with retry + logging."""
+        # Validate minimum order size
+        if not self.validate_order_size(signal):
+            return None
+
         logger.info(
             "Executing %s %s %s %.8f @ %.2f [%s] — %s",
             signal.order_type, signal.side, signal.pair,

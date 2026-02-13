@@ -90,7 +90,7 @@ class ArbitrageStrategy(BaseStrategy):
             sell_price = kucoin_price
 
         # Check if profitable after withdrawal fee
-        capital = config.trading.starting_capital * (config.trading.max_position_pct / 100)
+        capital = self.risk_manager.capital * (config.trading.max_position_pct / 100)
         amount = capital / buy_price
         gross_profit = (sell_price - buy_price) * amount
         net_profit = gross_profit - self.WITHDRAWAL_FEE_USD - (capital * self.TOTAL_FEE_PCT / 100)

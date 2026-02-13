@@ -1,4 +1,7 @@
-"""Telegram bot notifications for trade alerts and daily summaries."""
+"""Telegram bot notifications for trade alerts and daily summaries.
+
+Multi-pair aware: daily summary includes per-pair P&L breakdown.
+"""
 
 from __future__ import annotations
 
@@ -44,7 +47,7 @@ class AlertManager:
         strategy: str,
         reason: str,
     ) -> None:
-        emoji = "🟢" if side == "buy" else "🔴"
+        emoji = "\U0001f7e2" if side == "buy" else "\U0001f534"
         msg = (
             f"{emoji} *{side.upper()}* {pair}\n"
             f"Price: `{price:,.2f}`\n"
@@ -58,11 +61,11 @@ class AlertManager:
     # -- Strategy switch -------------------------------------------------------
 
     async def send_strategy_switch(
-        self, old: str | None, new: str | None, reason: str
+        self, pair: str, old: str | None, new: str | None, reason: str
     ) -> None:
         msg = (
-            f"🔄 *Strategy Switch*\n"
-            f"{old or 'none'} → {new or 'paused'}\n"
+            f"\U0001f504 *Strategy Switch* [{pair}]\n"
+            f"{old or 'none'} \u2192 {new or 'paused'}\n"
             f"Reason: _{reason}_"
         )
         await self._send(msg)
@@ -75,41 +78,60 @@ class AlertManager:
         win_rate: float,
         trades_count: int,
         capital: float,
-        strategy: str | None,
+        active_strategies: dict[str, str | None],
+        pnl_by_pair: dict[str, float] | None = None,
     ) -> None:
-        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+        pnl_emoji = "\U0001f4c8" if total_pnl >= 0 else "\U0001f4c9"
+        lines = [
+            f"\U0001f4ca *Daily Summary*",
+            f"{pnl_emoji} Total PnL: `{format_usd(total_pnl)}`",
+            f"Win Rate: `{win_rate:.1f}%`",
+            f"Trades: `{trades_count}`",
+            f"Capital: `{format_usd(capital)}`",
+        ]
+
+        # Per-pair P&L breakdown
+        if pnl_by_pair:
+            lines.append("")
+            lines.append("*Per-pair P&L:*")
+            for pair, pnl in sorted(pnl_by_pair.items(), key=lambda x: x[1], reverse=True):
+                icon = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
+                lines.append(f"  {icon} {pair}: `{format_usd(pnl)}`")
+
+        # Active strategies
+        if active_strategies:
+            lines.append("")
+            lines.append("*Active strategies:*")
+            for pair, strat in active_strategies.items():
+                lines.append(f"  {pair}: `{strat or 'paused'}`")
+
+        await self._send("\n".join(lines))
+
+    # -- Bot started (multi-pair) ----------------------------------------------
+
+    async def send_bot_started(self, pairs: list[str], capital: float) -> None:
+        pairs_str = ", ".join(f"`{p}`" for p in pairs)
         msg = (
-            f"📊 *Daily Summary*\n"
-            f"{pnl_emoji} PnL: `{format_usd(total_pnl)}`\n"
-            f"Win Rate: `{win_rate:.1f}%`\n"
-            f"Trades: `{trades_count}`\n"
-            f"Capital: `{format_usd(capital)}`\n"
-            f"Active Strategy: `{strategy or 'none'}`"
+            f"\U0001f916 *Alpha Bot Started*\n"
+            f"Pairs: {pairs_str}\n"
+            f"Capital: `{format_usd(capital)}`"
         )
         await self._send(msg)
 
     # -- Risk alerts -----------------------------------------------------------
 
     async def send_risk_alert(self, message: str) -> None:
-        msg = f"⚠️ *RISK ALERT*\n{message}"
+        msg = f"\u26a0\ufe0f *RISK ALERT*\n{message}"
         await self._send(msg)
 
     async def send_error_alert(self, message: str) -> None:
-        msg = f"❌ *ERROR*\n`{message}`"
+        msg = f"\u274c *ERROR*\n`{message}`"
         await self._send(msg)
 
     # -- Bot lifecycle ---------------------------------------------------------
 
-    async def send_bot_started(self, pair: str, capital: float) -> None:
-        msg = (
-            f"🤖 *Alpha Bot Started*\n"
-            f"Pair: `{pair}`\n"
-            f"Capital: `{format_usd(capital)}`"
-        )
-        await self._send(msg)
-
     async def send_bot_stopped(self, reason: str) -> None:
-        msg = f"🛑 *Alpha Bot Stopped*\n_{reason}_"
+        msg = f"\U0001f6d1 *Alpha Bot Stopped*\n_{reason}_"
         await self._send(msg)
 
     # -- Internal --------------------------------------------------------------

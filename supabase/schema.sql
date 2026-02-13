@@ -67,6 +67,9 @@ create table if not exists public.strategy_log (
     created_at          timestamptz not null default now(),
     timestamp           timestamptz not null default now(),
 
+    -- Pair
+    pair                text not null default 'BTC/USDT', -- e.g. 'BTC/USDT'
+
     -- Market regime
     market_condition    text not null                    -- 'trending', 'sideways', 'volatile'
                         check (market_condition in ('trending', 'sideways', 'volatile')),
@@ -84,10 +87,11 @@ create table if not exists public.strategy_log (
     volume_ratio        numeric(10,4)
 );
 
--- Indexes: timeline queries, filtering by condition/strategy
+-- Indexes: timeline queries, filtering by condition/strategy/pair
 create index if not exists idx_strategy_log_ts         on public.strategy_log (timestamp desc);
 create index if not exists idx_strategy_log_condition  on public.strategy_log (market_condition);
 create index if not exists idx_strategy_log_selected   on public.strategy_log (strategy_selected);
+create index if not exists idx_strategy_log_pair       on public.strategy_log (pair);
 
 
 -- ============================================================================
@@ -238,9 +242,10 @@ from (
     limit  20
 ) sub;
 
--- Strategy distribution (last 24h)
+-- Strategy distribution (last 24h) — grouped by pair
 create or replace view public.v_strategy_distribution_24h as
 select
+    pair,
     strategy_selected,
     market_condition,
     count(*)                    as occurrences,
@@ -248,5 +253,5 @@ select
     max(timestamp)              as last_seen
 from   public.strategy_log
 where  timestamp >= now() - interval '24 hours'
-group  by strategy_selected, market_condition
+group  by pair, strategy_selected, market_condition
 order  by occurrences desc;

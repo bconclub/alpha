@@ -105,7 +105,7 @@ class MomentumStrategy(BaseStrategy):
         else:
             # Entry: RSI oversold + MACD bullish crossover
             if rsi_now < 30 and macd_crossed_up:
-                capital = config.trading.starting_capital * (config.trading.max_position_pct / 100)
+                capital = self.risk_manager.capital * (config.trading.max_position_pct / 100)
                 amount = capital / current_price
                 stop_loss = current_price * (1 - config.trading.per_trade_stop_loss_pct / 100)
 
@@ -134,7 +134,7 @@ class MomentumStrategy(BaseStrategy):
     # -- Helpers ---------------------------------------------------------------
 
     def _exit_signal(self, price: float, reason: str) -> Signal:
-        capital = config.trading.starting_capital * (config.trading.max_position_pct / 100)
+        capital = self.risk_manager.capital * (config.trading.max_position_pct / 100)
         amount = capital / price
         return Signal(
             side="sell",

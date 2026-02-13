@@ -27,6 +27,14 @@ def _env_int(key: str, default: int = 0) -> int:
     return int(raw) if raw else default
 
 
+def _env_list(key: str, default: str = "") -> list[str]:
+    """Parse a comma-separated env var into a list of stripped strings."""
+    raw = os.getenv(key, default)
+    if not raw:
+        return []
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
 @dataclass(frozen=True)
 class BinanceConfig:
     api_key: str = field(default_factory=lambda: _env("BINANCE_API_KEY"))
@@ -54,20 +62,38 @@ class TelegramConfig:
 
 @dataclass(frozen=True)
 class TradingConfig:
-    pair: str = field(default_factory=lambda: _env("TRADING_PAIR", "BTC/USDT"))
+    # Multi-pair: comma-separated.  Falls back to single TRADING_PAIR for compat.
+    pairs: list[str] = field(
+        default_factory=lambda: _env_list("TRADING_PAIRS") or [_env("TRADING_PAIR", "BTC/USDT")]
+    )
+    capital_per_pair: str = field(default_factory=lambda: _env("CAPITAL_PER_PAIR", "auto"))
+
     starting_capital: float = field(default_factory=lambda: _env_float("STARTING_CAPITAL", 10.0))
     max_loss_daily_pct: float = field(default_factory=lambda: _env_float("MAX_LOSS_DAILY_PCT", 5.0))
     max_position_pct: float = field(default_factory=lambda: _env_float("MAX_POSITION_PCT", 30.0))
+    max_total_exposure_pct: float = 60.0  # total across all pairs
     max_concurrent_positions: int = 2
     per_trade_stop_loss_pct: float = 2.0
+
     # Timeframes
     candle_timeframe: str = "15m"
     candle_limit: int = 100
     analysis_interval_sec: int = 300  # 5 minutes
     grid_check_interval_sec: int = 30
     momentum_check_interval_sec: int = 15
+
     # Arbitrage
     arb_min_spread_pct: float = 1.5
+
+    @property
+    def primary_pair(self) -> str:
+        """First pair in the list is the primary."""
+        return self.pairs[0]
+
+    @property
+    def pair(self) -> str:
+        """Backward-compat alias — returns primary pair."""
+        return self.primary_pair
 
 
 @dataclass(frozen=True)

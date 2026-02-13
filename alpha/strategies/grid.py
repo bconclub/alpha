@@ -130,7 +130,7 @@ class GridStrategy(BaseStrategy):
         self.lower_bound -= price_range * 0.05
 
         # Determine order size — split capital across grid levels
-        capital = config.trading.starting_capital * (config.trading.max_position_pct / 100)
+        capital = self.risk_manager.capital * (config.trading.max_position_pct / 100)
         self.order_amount_usd = max(2.0, capital / self.num_levels)
 
         # Build levels

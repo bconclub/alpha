@@ -1,4 +1,4 @@
-"""Alpha — main entry point. Runs the bot loop with auto-strategy selection."""
+"""Alpha — main entry point. Multi-pair concurrent orchestrator."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ logger = setup_logger("main")
 
 
 class AlphaBot:
-    """Top-level bot orchestrator."""
+    """Top-level bot orchestrator — runs multiple pairs concurrently."""
 
     def __init__(self) -> None:
         # Core components (initialized in start())
@@ -41,9 +41,13 @@ class AlphaBot:
         self.analyzer: MarketAnalyzer | None = None
         self.selector: StrategySelector | None = None
 
-        # Strategies
-        self._strategies: dict[StrategyName, BaseStrategy] = {}
-        self._active_strategy: BaseStrategy | None = None
+        # Multi-pair
+        self.pairs: list[str] = config.trading.pairs
+
+        # Per-pair strategy instances:  pair → {StrategyName → instance}
+        self._strategies: dict[str, dict[StrategyName, BaseStrategy]] = {}
+        # Per-pair active strategy:  pair → running strategy or None
+        self._active_strategies: dict[str, BaseStrategy | None] = {}
 
         # Scheduler
         self._scheduler = AsyncIOScheduler()
@@ -54,8 +58,9 @@ class AlphaBot:
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
         logger.info("=" * 60)
-        logger.info("  ALPHA BOT — Starting up")
-        logger.info("  Pair: %s | Capital: $%.2f", config.trading.pair, config.trading.starting_capital)
+        logger.info("  ALPHA BOT — Starting up (multi-pair)")
+        logger.info("  Pairs: %s", ", ".join(self.pairs))
+        logger.info("  Capital: $%.2f", config.trading.starting_capital)
         logger.info("=" * 60)
 
         # Connect external services
@@ -68,27 +73,35 @@ class AlphaBot:
 
         # Build components
         self.executor = TradeExecutor(self.binance, db=self.db, alerts=self.alerts)  # type: ignore[arg-type]
-        self.analyzer = MarketAnalyzer(self.binance, config.trading.pair)  # type: ignore[arg-type]
+        self.analyzer = MarketAnalyzer(self.binance, pair=self.pairs[0])  # type: ignore[arg-type]
         self.selector = StrategySelector(db=self.db, arb_enabled=self.kucoin is not None)
 
-        # Register strategies
-        self._strategies = {
-            StrategyName.GRID: GridStrategy(config.trading.pair, self.executor, self.risk_manager),
-            StrategyName.MOMENTUM: MomentumStrategy(config.trading.pair, self.executor, self.risk_manager),
-            StrategyName.ARBITRAGE: ArbitrageStrategy(
-                config.trading.pair, self.executor, self.risk_manager, self.kucoin
-            ),
-        }
+        # Load Binance minimum order sizes for all pairs
+        await self.executor.load_market_limits(self.pairs)
+
+        # Register strategies per pair
+        for pair in self.pairs:
+            self._strategies[pair] = {
+                StrategyName.GRID: GridStrategy(pair, self.executor, self.risk_manager),
+                StrategyName.MOMENTUM: MomentumStrategy(pair, self.executor, self.risk_manager),
+                StrategyName.ARBITRAGE: ArbitrageStrategy(
+                    pair, self.executor, self.risk_manager, self.kucoin,
+                ),
+            }
+            self._active_strategies[pair] = None
 
         # Schedule periodic tasks
-        self._scheduler.add_job(self._analysis_cycle, "interval", seconds=config.trading.analysis_interval_sec)
+        self._scheduler.add_job(
+            self._analysis_cycle, "interval",
+            seconds=config.trading.analysis_interval_sec,
+        )
         self._scheduler.add_job(self._daily_reset, "cron", hour=0, minute=0)
         self._scheduler.add_job(self._save_status, "interval", minutes=5)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=10)
         self._scheduler.start()
 
         # Notify
-        await self.alerts.send_bot_started(config.trading.pair, config.trading.starting_capital)
+        await self.alerts.send_bot_started(self.pairs, config.trading.starting_capital)
 
         # Register shutdown signals
         self._running = True
@@ -101,7 +114,7 @@ class AlphaBot:
         await self._analysis_cycle()
 
         # Keep running
-        logger.info("Bot running — press Ctrl+C to stop")
+        logger.info("Bot running — %d pairs — press Ctrl+C to stop", len(self.pairs))
         try:
             while self._running:
                 await asyncio.sleep(1)
@@ -109,15 +122,20 @@ class AlphaBot:
             await self.shutdown("KeyboardInterrupt")
 
     async def shutdown(self, reason: str = "Shutdown requested") -> None:
-        """Graceful shutdown — stop strategies, save state, close connections."""
+        """Graceful shutdown — stop all strategies, save state, close connections."""
         if not self._running:
             return
         self._running = False
         logger.info("Shutting down: %s", reason)
 
-        # Stop active strategy
-        if self._active_strategy:
-            await self._active_strategy.stop()
+        # Stop all active strategies concurrently
+        stop_tasks = []
+        for pair, strategy in self._active_strategies.items():
+            if strategy:
+                stop_tasks.append(strategy.stop())
+        if stop_tasks:
+            await asyncio.gather(*stop_tasks, return_exceptions=True)
+        self._active_strategies = {p: None for p in self.pairs}
 
         # Save final state
         await self._save_status()
@@ -139,64 +157,92 @@ class AlphaBot:
     # -- Core cycle ------------------------------------------------------------
 
     async def _analysis_cycle(self) -> None:
-        """Run market analysis and switch strategy if needed."""
+        """Analyze all pairs concurrently, then switch strategies by signal strength priority."""
         if not self._running:
             return
 
         try:
-            analysis = await self.analyzer.analyze()  # type: ignore[union-attr]
+            # 1. Analyze all pairs in parallel
+            analysis_tasks = [
+                self.analyzer.analyze(pair)  # type: ignore[union-attr]
+                for pair in self.pairs
+            ]
+            results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
 
-            # Check for arbitrage opportunity
-            arb_opportunity = False
-            if self.kucoin:
-                arb_opportunity = await self._check_arb_opportunity()
+            # 2. Collect successful analyses
+            analyses = []
+            for pair, result in zip(self.pairs, results):
+                if isinstance(result, Exception):
+                    logger.error("Analysis failed for %s: %s", pair, result)
+                else:
+                    analyses.append(result)
 
-            selected = await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
+            # 3. Sort by signal_strength descending — best opportunities first
+            analyses.sort(key=lambda a: a.signal_strength, reverse=True)
 
-            await self._switch_strategy(selected)
+            logger.info(
+                "Analysis complete — strength ranking: %s",
+                ", ".join(f"{a.pair}={a.signal_strength:.0f}" for a in analyses),
+            )
+
+            # 4. Select strategy per pair and switch
+            for analysis in analyses:
+                pair = analysis.pair
+
+                # Check for arb opportunity on this pair
+                arb_opportunity = False
+                if self.kucoin:
+                    arb_opportunity = await self._check_arb_opportunity(pair)
+
+                selected = await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
+                await self._switch_strategy(pair, selected)
 
         except Exception:
             logger.exception("Error in analysis cycle")
 
-    async def _switch_strategy(self, name: StrategyName | None) -> None:
-        """Stop current strategy and start the new one."""
-        current_name = self._active_strategy.name if self._active_strategy else None
+    async def _switch_strategy(self, pair: str, name: StrategyName | None) -> None:
+        """Stop current strategy for a pair and start the new one."""
+        current = self._active_strategies.get(pair)
+        current_name = current.name if current else None
 
         if current_name == name:
             return  # no change
 
         # Stop current
-        if self._active_strategy:
-            await self._active_strategy.stop()
-            self._active_strategy = None
+        if current:
+            await current.stop()
+            self._active_strategies[pair] = None
 
         if name is None:
-            logger.info("No strategy active (paused)")
+            logger.info("[%s] No strategy active (paused)", pair)
             return
 
         # Start new
-        strategy = self._strategies.get(name)
+        pair_strategies = self._strategies.get(pair, {})
+        strategy = pair_strategies.get(name)
         if strategy is None:
-            logger.error("Strategy %s not registered", name)
+            logger.error("[%s] Strategy %s not registered", pair, name)
             return
 
-        self._active_strategy = strategy
+        self._active_strategies[pair] = strategy
         await strategy.start()
 
         # Alert
+        last = self.analyzer.last_analysis_for(pair) if self.analyzer else None  # type: ignore[union-attr]
         await self.alerts.send_strategy_switch(
+            pair=pair,
             old=current_name.value if current_name else None,
             new=name.value,
-            reason=self.analyzer.last_analysis.reason if self.analyzer and self.analyzer.last_analysis else "initial",
+            reason=last.reason if last else "initial",
         )
 
-    async def _check_arb_opportunity(self) -> bool:
-        """Quick check if there's a cross-exchange spread."""
+    async def _check_arb_opportunity(self, pair: str) -> bool:
+        """Quick check if there's a cross-exchange spread for a pair."""
         if not self.kucoin:
             return False
         try:
-            binance_ticker = await self.binance.fetch_ticker(config.trading.pair)  # type: ignore[union-attr]
-            kucoin_ticker = await self.kucoin.fetch_ticker(config.trading.pair)
+            binance_ticker = await self.binance.fetch_ticker(pair)  # type: ignore[union-attr]
+            kucoin_ticker = await self.kucoin.fetch_ticker(pair)
             bp = binance_ticker["last"]
             kp = kucoin_ticker["last"]
             spread_pct = abs((bp - kp) / bp) * 100
@@ -209,19 +255,36 @@ class AlphaBot:
     async def _daily_reset(self) -> None:
         """Midnight reset: send daily summary, reset daily P&L."""
         logger.info("Daily reset triggered")
+
+        # Build active strategies map for summary
+        active_map: dict[str, str | None] = {}
+        for pair in self.pairs:
+            strat = self._active_strategies.get(pair)
+            active_map[pair] = strat.name.value if strat else None
+
         await self.alerts.send_daily_summary(
             total_pnl=self.risk_manager.daily_pnl,
             win_rate=self.risk_manager.win_rate,
             trades_count=len(self.risk_manager.trade_results),
             capital=self.risk_manager.capital,
-            strategy=self._active_strategy.name.value if self._active_strategy else None,
+            active_strategies=active_map,
+            pnl_by_pair=dict(self.risk_manager.daily_pnl_by_pair),
         )
         self.risk_manager.reset_daily()
 
     async def _save_status(self) -> None:
         """Persist bot state to Supabase for crash recovery + dashboard display."""
         rm = self.risk_manager
+
+        # Build per-pair info
+        active_map: dict[str, str | None] = {}
+        for pair in self.pairs:
+            strat = self._active_strategies.get(pair)
+            active_map[pair] = strat.name.value if strat else None
+
+        # Use primary pair's analysis for condition
         last = self.analyzer.last_analysis if self.analyzer else None
+
         status = {
             "total_pnl": rm.capital - config.trading.starting_capital,
             "daily_pnl": rm.daily_pnl,
@@ -229,10 +292,10 @@ class AlphaBot:
             "win_rate": rm.win_rate,
             "total_trades": len(rm.trade_results),
             "open_positions": len(rm.open_positions),
-            "active_strategy": self._active_strategy.name.value if self._active_strategy else None,
+            "active_strategy": active_map.get(self.pairs[0]) if self.pairs else None,
             "market_condition": last.condition.value if last else None,
             "capital": rm.capital,
-            "pair": config.trading.pair,
+            "pair": ", ".join(self.pairs),
             "is_running": self._running,
             "is_paused": rm.is_paused,
             "pause_reason": rm._pause_reason or None,
@@ -261,42 +324,44 @@ class AlphaBot:
             if command == "pause":
                 self.risk_manager.is_paused = True
                 self.risk_manager._pause_reason = params.get("reason", "Paused via dashboard")
-                if self._active_strategy:
-                    await self._active_strategy.stop()
-                    self._active_strategy = None
+                # Stop all active strategies
+                stop_tasks = []
+                for pair, strategy in self._active_strategies.items():
+                    if strategy:
+                        stop_tasks.append(strategy.stop())
+                        self._active_strategies[pair] = None
+                if stop_tasks:
+                    await asyncio.gather(*stop_tasks, return_exceptions=True)
                 await self.alerts.send_risk_alert("Bot paused via dashboard")
                 result_msg = "Bot paused"
 
             elif command == "resume":
                 self.risk_manager.unpause()
-                await self._analysis_cycle()  # re-evaluate and start strategy
+                await self._analysis_cycle()  # re-evaluate and start strategies
                 await self.alerts.send_risk_alert("Bot resumed via dashboard")
                 result_msg = "Bot resumed"
 
             elif command == "force_strategy":
                 strategy_name = params.get("strategy")
+                target_pair = params.get("pair", self.pairs[0])  # default to primary pair
                 if strategy_name:
                     try:
                         target = StrategyName(strategy_name)
                         self.risk_manager.unpause()
-                        await self._switch_strategy(target)
-                        result_msg = f"Forced strategy: {strategy_name}"
+                        await self._switch_strategy(target_pair, target)
+                        result_msg = f"Forced {strategy_name} on {target_pair}"
                     except ValueError:
                         result_msg = f"Unknown strategy: {strategy_name}"
                 else:
                     result_msg = "Missing 'strategy' param"
 
             elif command == "update_config":
-                # Apply runtime config overrides (non-persistent)
-                if "pair" in params:
-                    logger.info("Pair override not supported at runtime (restart required)")
-                    result_msg = "Pair change requires restart"
-                elif "max_position_pct" in params:
+                if "max_position_pct" in params:
                     self.risk_manager.max_position_pct = float(params["max_position_pct"])
-                    result_msg = f"max_position_pct → {params['max_position_pct']}"
+                    result_msg = f"max_position_pct -> {params['max_position_pct']}"
                 elif "daily_loss_limit_pct" in params:
                     self.risk_manager.daily_loss_limit_pct = float(params["daily_loss_limit_pct"])
-                    result_msg = f"daily_loss_limit_pct → {params['daily_loss_limit_pct']}"
+                    result_msg = f"daily_loss_limit_pct -> {params['daily_loss_limit_pct']}"
                 else:
                     result_msg = f"Config updated: {params}"
             else:

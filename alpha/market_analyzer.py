@@ -1,4 +1,4 @@
-"""Market analyzer — fetches candles and classifies market condition."""
+"""Market analyzer — fetches candles and classifies market condition per pair."""
 
 from __future__ import annotations
 
@@ -17,48 +17,55 @@ logger = setup_logger("market_analyzer")
 
 @dataclass
 class MarketAnalysis:
-    """Result of a single analysis pass."""
+    """Result of a single analysis pass for one pair."""
+    pair: str
     condition: MarketCondition
     adx: float
     atr: float
     bb_width: float
     rsi: float
     volume_ratio: float  # current vol vs 20-period avg
+    signal_strength: float  # 0-100 — how strong is the signal for trading
     reason: str
     timestamp: str
 
 
 class MarketAnalyzer:
-    """Fetches OHLCV data and determines the current market regime."""
+    """Fetches OHLCV data and determines the current market regime.
+
+    One instance per pair, or call analyze(pair) with any pair.
+    """
 
     def __init__(self, exchange: ccxt.Exchange, pair: str | None = None) -> None:
         self.exchange = exchange
         self.pair = pair or config.trading.pair
         self.timeframe = config.trading.candle_timeframe
         self.limit = config.trading.candle_limit
-        self._last_analysis: MarketAnalysis | None = None
+        self._last_analysis: dict[str, MarketAnalysis] = {}
+
+    def last_analysis_for(self, pair: str) -> MarketAnalysis | None:
+        return self._last_analysis.get(pair)
 
     @property
     def last_analysis(self) -> MarketAnalysis | None:
-        return self._last_analysis
+        """Backward-compat: return analysis for the default pair."""
+        return self._last_analysis.get(self.pair)
 
-    async def analyze(self) -> MarketAnalysis:
-        """Fetch candles, compute indicators, classify condition."""
-        logger.info("Analyzing market for %s (%s, %d candles)", self.pair, self.timeframe, self.limit)
+    async def analyze(self, pair: str | None = None) -> MarketAnalysis:
+        """Fetch candles, compute indicators, classify condition for a given pair."""
+        pair = pair or self.pair
+        logger.info("Analyzing %s (%s, %d candles)", pair, self.timeframe, self.limit)
 
-        ohlcv = await self.exchange.fetch_ohlcv(self.pair, self.timeframe, limit=self.limit)
+        ohlcv = await self.exchange.fetch_ohlcv(pair, self.timeframe, limit=self.limit)
         df = self._to_dataframe(ohlcv)
-        analysis = self._classify(df)
-        self._last_analysis = analysis
+        analysis = self._classify(df, pair)
+        self._last_analysis[pair] = analysis
 
         logger.info(
-            "Market condition: %s | ADX=%.1f ATR=%.2f BBW=%.4f RSI=%.1f VolRatio=%.2f | %s",
-            analysis.condition.value,
-            analysis.adx,
-            analysis.atr,
-            analysis.bb_width,
-            analysis.rsi,
-            analysis.volume_ratio,
+            "[%s] %s | ADX=%.1f ATR=%.2f BBW=%.4f RSI=%.1f VolR=%.2f Str=%.0f | %s",
+            pair, analysis.condition.value,
+            analysis.adx, analysis.atr, analysis.bb_width,
+            analysis.rsi, analysis.volume_ratio, analysis.signal_strength,
             analysis.reason,
         )
         return analysis
@@ -72,7 +79,7 @@ class MarketAnalyzer:
         return df
 
     @staticmethod
-    def _classify(df: pd.DataFrame) -> MarketAnalysis:
+    def _classify(df: pd.DataFrame, pair: str) -> MarketAnalysis:
         close = df["close"]
         high = df["high"]
         low = df["low"]
@@ -132,13 +139,52 @@ class MarketAnalyzer:
             condition = MarketCondition.SIDEWAYS
             reason = f"Low ADX={adx:.1f}, defaulting to sideways"
 
+        # -- Signal strength (0-100) --
+        # Higher = stronger signal = should be prioritised for trading
+        strength = _compute_signal_strength(adx, rsi, bb_width, volume_ratio, condition)
+
         return MarketAnalysis(
+            pair=pair,
             condition=condition,
             adx=adx,
             atr=atr,
             bb_width=bb_width,
             rsi=rsi,
             volume_ratio=volume_ratio,
+            signal_strength=strength,
             reason=reason,
             timestamp=iso_now(),
         )
+
+
+def _compute_signal_strength(
+    adx: float, rsi: float, bb_width: float, volume_ratio: float, condition: MarketCondition,
+) -> float:
+    """Score 0-100 indicating how tradeable the current setup is.
+
+    Used by the orchestrator to prioritise pairs when capital is limited.
+    """
+    score = 0.0
+
+    # RSI divergence from neutral (50) — extreme values = stronger signal
+    rsi_divergence = abs(rsi - 50)
+    score += min(rsi_divergence, 30)  # max 30 pts
+
+    # ADX strength — stronger trend = better momentum signal
+    score += min(adx / 2, 20)  # max 20 pts
+
+    # Volume confirmation
+    if volume_ratio > 1.2:
+        score += min((volume_ratio - 1.0) * 15, 20)  # max 20 pts
+
+    # Bollinger Band width — wider = more room for grid profit
+    if condition == MarketCondition.SIDEWAYS:
+        score += min(bb_width * 500, 15)  # max 15 pts
+    elif condition == MarketCondition.TRENDING:
+        score += min(adx - 20, 15) if adx > 20 else 0  # max 15 pts
+
+    # Penalise volatile — uncertain
+    if condition == MarketCondition.VOLATILE:
+        score *= 0.5
+
+    return min(score, 100.0)
