@@ -63,6 +63,12 @@ class AlphaBot:
         # Shutdown flag
         self._running = False
 
+        # Hourly tracking
+        self._hourly_pnl: float = 0.0
+        self._hourly_wins: int = 0
+        self._hourly_losses: int = 0
+        self._daily_loss_warned: bool = False
+
     @property
     def all_pairs(self) -> list[str]:
         """All tracked pairs across both exchanges."""
@@ -85,6 +91,19 @@ class AlphaBot:
 
         # Restore state from DB if available
         await self._restore_state()
+
+        # Hook into risk_manager.record_close to track hourly stats
+        _original_record_close = self.risk_manager.record_close
+
+        def _tracked_record_close(pair: str, pnl: float) -> None:
+            _original_record_close(pair, pnl)
+            self._hourly_pnl += pnl
+            if pnl >= 0:
+                self._hourly_wins += 1
+            else:
+                self._hourly_losses += 1
+
+        self.risk_manager.record_close = _tracked_record_close  # type: ignore[assignment]
 
         # Build components
         self.executor = TradeExecutor(
@@ -138,12 +157,20 @@ class AlphaBot:
             seconds=config.trading.analysis_interval_sec,
         )
         self._scheduler.add_job(self._daily_reset, "cron", hour=0, minute=0)
+        self._scheduler.add_job(self._hourly_report, "cron", minute=0)  # every hour
         self._scheduler.add_job(self._save_status, "interval", minutes=5)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=10)
         self._scheduler.start()
 
+        # Fetch exchange balances for startup alert
+        binance_bal = await self._fetch_balance(self.binance, "USDT")
+        delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
+
         # Notify
-        await self.alerts.send_bot_started(self.all_pairs, config.trading.starting_capital)
+        await self.alerts.send_bot_started(
+            self.all_pairs, config.trading.starting_capital,
+            binance_balance=binance_bal, delta_balance=delta_bal,
+        )
 
         # Register shutdown signals
         self._running = True
@@ -238,9 +265,14 @@ class AlphaBot:
                 ", ".join(f"{a.pair}={a.signal_strength:.0f}" for a in analyses),
             )
 
-            # 4. Select strategy per pair and switch
+            # 4. Select strategy per pair, switch, and collect changes for alert
+            strategy_changes: list[dict[str, Any]] = []
             for analysis in analyses:
                 pair = analysis.pair
+
+                # Record old strategy before switching
+                old_strat = self._active_strategies.get(pair)
+                old_name = old_strat.name.value if old_strat else None
 
                 # Check for arb opportunity on Binance pairs only
                 arb_opportunity = False
@@ -250,8 +282,34 @@ class AlphaBot:
                 selected = await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
                 await self._switch_strategy(pair, selected)
 
+                # Detect change
+                new_name = selected.value if selected else None
+                if new_name != old_name:
+                    strategy_changes.append({
+                        "pair": pair,
+                        "condition": analysis.condition.value,
+                        "adx": analysis.adx,
+                        "rsi": analysis.rsi,
+                        "old_strategy": old_name,
+                        "new_strategy": new_name,
+                        "direction": analysis.direction,
+                    })
+
+            # 4b. Send market update alert (only if strategies changed)
+            if strategy_changes:
+                await self.alerts.send_market_update(strategy_changes)
+
             # 5. Check liquidation risk for futures positions
             await self._check_liquidation_risks()
+
+            # 6. Check daily loss warning (alert once when > 80% of limit)
+            rm = self.risk_manager
+            loss_threshold = rm.daily_loss_limit_pct * 0.8
+            if rm.daily_loss_pct >= loss_threshold and not self._daily_loss_warned:
+                self._daily_loss_warned = True
+                await self.alerts.send_daily_loss_warning(
+                    rm.daily_loss_pct, rm.daily_loss_limit_pct,
+                )
 
         except Exception:
             logger.exception("Error in analysis cycle")
@@ -323,8 +381,14 @@ class AlphaBot:
                     # Find position info for alert
                     for pos in self.risk_manager.open_positions:
                         if pos.pair == pair and pos.leverage > 1:
+                            # Calculate liq price for the alert
+                            if pos.position_type == "long":
+                                liq_price = pos.entry_price * (1 - 1 / pos.leverage)
+                            else:
+                                liq_price = pos.entry_price * (1 + 1 / pos.leverage)
                             await self.alerts.send_liquidation_warning(
                                 pair, distance, pos.position_type, pos.leverage,
+                                current_price=current_price, liq_price=liq_price,
                             )
                             logger.warning(
                                 "[%s] LIQUIDATION WARNING: %.1f%% from liquidation (%s %dx)",
@@ -339,22 +403,75 @@ class AlphaBot:
     async def _daily_reset(self) -> None:
         """Midnight reset: send daily summary, reset daily P&L."""
         logger.info("Daily reset triggered")
+        rm = self.risk_manager
 
-        # Build active strategies map for summary
-        active_map: dict[str, str | None] = {}
-        for pair in self.all_pairs:
-            strat = self._active_strategies.get(pair)
-            active_map[pair] = strat.name.value if strat else None
+        # Count today's wins and losses
+        total = len(rm.trade_results)
+        wins = sum(1 for w in rm.trade_results if w)
+        losses = total - wins
+
+        # Find best and worst trades from daily pnl by pair
+        pnl_map = dict(rm.daily_pnl_by_pair)
+        best_trade = None
+        worst_trade = None
+        if pnl_map:
+            best_pair = max(pnl_map, key=pnl_map.get)  # type: ignore[arg-type]
+            worst_pair = min(pnl_map, key=pnl_map.get)  # type: ignore[arg-type]
+            best_trade = {"pair": best_pair, "pnl": pnl_map[best_pair]}
+            worst_trade = {"pair": worst_pair, "pnl": pnl_map[worst_pair]}
 
         await self.alerts.send_daily_summary(
-            total_pnl=self.risk_manager.daily_pnl,
-            win_rate=self.risk_manager.win_rate,
-            trades_count=len(self.risk_manager.trade_results),
-            capital=self.risk_manager.capital,
-            active_strategies=active_map,
-            pnl_by_pair=dict(self.risk_manager.daily_pnl_by_pair),
+            total_trades=total,
+            wins=wins,
+            losses=losses,
+            win_rate=rm.win_rate,
+            daily_pnl=rm.daily_pnl,
+            capital=rm.capital,
+            pnl_by_pair=pnl_map,
+            best_trade=best_trade,
+            worst_trade=worst_trade,
         )
-        self.risk_manager.reset_daily()
+        rm.reset_daily()
+        self._daily_loss_warned = False
+        # Also reset hourly counters at midnight
+        self._hourly_pnl = 0.0
+        self._hourly_wins = 0
+        self._hourly_losses = 0
+
+    async def _hourly_report(self) -> None:
+        """Send hourly summary to Telegram, then reset hourly counters."""
+        try:
+            rm = self.risk_manager
+
+            # Build open positions list for the alert
+            open_pos = [
+                {"pair": p.pair, "position_type": p.position_type, "exchange": p.exchange}
+                for p in rm.open_positions
+            ]
+
+            # Build active strategies map
+            active_map: dict[str, str | None] = {}
+            for pair in self.all_pairs:
+                strat = self._active_strategies.get(pair)
+                active_map[pair] = strat.name.value if strat else None
+
+            await self.alerts.send_hourly_summary(
+                open_positions=open_pos,
+                hourly_wins=self._hourly_wins,
+                hourly_losses=self._hourly_losses,
+                hourly_pnl=self._hourly_pnl,
+                daily_pnl=rm.daily_pnl,
+                capital=rm.capital,
+                active_strategies=active_map,
+                win_rate_24h=rm.win_rate,
+            )
+
+            # Reset hourly counters
+            self._hourly_pnl = 0.0
+            self._hourly_wins = 0
+            self._hourly_losses = 0
+        except Exception:
+            logger.exception("Error sending hourly report")
 
     async def _save_status(self) -> None:
         """Persist bot state to Supabase for crash recovery + dashboard display."""
@@ -416,13 +533,13 @@ class AlphaBot:
                         self._active_strategies[pair] = None
                 if stop_tasks:
                     await asyncio.gather(*stop_tasks, return_exceptions=True)
-                await self.alerts.send_risk_alert("Bot paused via dashboard")
+                await self.alerts.send_command_confirmation("pause")
                 result_msg = "Bot paused"
 
             elif command == "resume":
                 self.risk_manager.unpause()
                 await self._analysis_cycle()  # re-evaluate and start strategies
-                await self.alerts.send_risk_alert("Bot resumed via dashboard")
+                await self.alerts.send_command_confirmation("resume")
                 result_msg = "Bot resumed"
 
             elif command == "force_strategy":
@@ -433,6 +550,10 @@ class AlphaBot:
                         target = StrategyName(strategy_name)
                         self.risk_manager.unpause()
                         await self._switch_strategy(target_pair, target)
+                        short = target_pair.split("/")[0] if "/" in target_pair else target_pair
+                        await self.alerts.send_command_confirmation(
+                            "force_strategy", f"{strategy_name.capitalize()} on {short}",
+                        )
                         result_msg = f"Forced {strategy_name} on {target_pair}"
                     except ValueError:
                         result_msg = f"Unknown strategy: {strategy_name}"
@@ -448,6 +569,7 @@ class AlphaBot:
                     result_msg = f"daily_loss_limit_pct -> {params['daily_loss_limit_pct']}"
                 else:
                     result_msg = f"Config updated: {params}"
+                await self.alerts.send_command_confirmation("update_config", result_msg)
             else:
                 result_msg = f"Unknown command: {command}"
 
@@ -531,6 +653,18 @@ class AlphaBot:
         else:
             self.delta_pairs = []  # no Delta pairs if no credentials
             logger.info("Delta credentials not set -- futures disabled")
+
+    @staticmethod
+    async def _fetch_balance(exchange: ccxt.Exchange | None, currency: str = "USDT") -> float | None:
+        """Fetch free balance for a currency on an exchange. Returns None on failure."""
+        if not exchange:
+            return None
+        try:
+            balance = await exchange.fetch_balance()
+            return float(balance.get("free", {}).get(currency, 0))
+        except Exception:
+            logger.debug("Could not fetch balance from %s", getattr(exchange, "id", "?"))
+            return None
 
 
 def main() -> None:
