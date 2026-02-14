@@ -31,11 +31,13 @@ class TradeExecutor:
         db: Any | None = None,
         alerts: Any | None = None,
         delta_exchange: ccxt.Exchange | None = None,
+        risk_manager: Any | None = None,
     ) -> None:
         self.exchange = exchange                      # Binance (primary)
         self.delta_exchange = delta_exchange           # Delta (optional, futures)
         self.db = db  # alpha.db.Database
         self.alerts = alerts  # alpha.alerts.AlertManager
+        self.risk_manager = risk_manager              # alpha.risk_manager.RiskManager
         self._min_notional: dict[str, float] = {}     # pair -> min order value
         self._min_amount: dict[str, float] = {}       # pair -> min order qty
 
@@ -90,13 +92,29 @@ class TradeExecutor:
             except Exception:
                 logger.exception("Failed to load Delta market limits")
 
+    def _is_exit_order(self, signal: Signal) -> bool:
+        """Determine if this signal is closing/exiting an existing position."""
+        return signal.reduce_only or (
+            signal.position_type == "spot" and signal.side == "sell"
+        )
+
     def validate_order_size(self, signal: Signal) -> bool:
         """Check if the order meets exchange minimum requirements.
 
+        NEVER blocks exit orders — exits must always be attempted.
         For futures (Delta): the notional value is collateral × leverage,
         which easily clears minimums. We check the leveraged notional.
         For spot (Binance): check order value directly against $5 min.
         """
+        # Never block exit orders — we must always try to close positions
+        if self._is_exit_order(signal):
+            order_value = signal.price * signal.amount
+            logger.debug(
+                "[%s] Exit order: $%.4f — skipping min notional validation (exits always allowed)",
+                signal.pair, order_value,
+            )
+            return True
+
         pair = signal.pair
         order_value = signal.price * signal.amount  # for futures, amount is already leveraged
         min_notional = self._min_notional.get(pair, 0)
@@ -127,12 +145,16 @@ class TradeExecutor:
         return True
 
     def _enforce_binance_min(self, signal: Signal) -> Signal:
-        """Ensure Binance spot orders meet the $5 minimum notional.
+        """Ensure Binance spot ENTRY orders meet the $5 minimum notional.
 
         If order value < $5.01, bump the amount up to 5.01 / price.
         Also round amount up to the exchange's LOT_SIZE step if available.
+        Skips exit orders — exits sell what was bought, even if below minimum.
         """
         if signal.exchange_id != "binance" or signal.position_type != "spot":
+            return signal
+        # Don't bump exit orders — sell what you have
+        if self._is_exit_order(signal):
             return signal
 
         order_value = signal.price * signal.amount
@@ -167,11 +189,20 @@ class TradeExecutor:
         return signal
 
     async def execute(self, signal: Signal) -> dict | None:
-        """Place an order for the given signal, with retry + logging."""
-        # Enforce Binance $5.01 minimum notional for spot orders
-        signal = self._enforce_binance_min(signal)
+        """Place an order for the given signal, with retry + logging.
 
-        # Validate minimum order size
+        Exit orders get special treatment:
+        - All errors are retried (not just network errors)
+        - If Binance rejects for min notional, try quoteOrderQty fallback
+        - On total failure, send a critical Telegram alert (never silent)
+        """
+        is_exit = self._is_exit_order(signal)
+
+        # Enforce Binance $5.01 minimum notional for ENTRY orders only
+        if not is_exit:
+            signal = self._enforce_binance_min(signal)
+
+        # Validate minimum order size (exits skip validation)
         if not self.validate_order_size(signal):
             return None
 
@@ -232,21 +263,79 @@ class TradeExecutor:
                 )
                 await asyncio.sleep(delay)
             except ccxt.InsufficientFunds as e:
-                logger.error("Insufficient funds for order: %s", e)
-                await self._notify_error(signal, str(e))
-                return None
+                last_error = e
+                if is_exit:
+                    # Exit: retry — balance may have updated
+                    logger.warning(
+                        "Exit attempt %d/%d insufficient funds: %s -- retrying in 2s",
+                        attempt, MAX_RETRIES, e,
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    logger.error("Insufficient funds for order: %s", e)
+                    await self._notify_error(signal, str(e))
+                    return None
             except ccxt.InvalidOrder as e:
-                logger.error("Invalid order: %s", e)
-                await self._notify_error(signal, str(e))
-                return None
+                last_error = e
+                if is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
+                    # Binance rejected exit for min notional — try quoteOrderQty fallback
+                    logger.warning(
+                        "[%s] Exit rejected for MIN_NOTIONAL — trying quoteOrderQty fallback",
+                        signal.pair,
+                    )
+                    try:
+                        quote_value = signal.price * signal.amount
+                        order = await exchange.create_order(
+                            symbol=signal.pair,
+                            type="market",
+                            side=signal.side,
+                            amount=signal.amount,
+                            params={**params, "quoteOrderQty": quote_value},
+                        )
+                        break
+                    except Exception as e2:
+                        last_error = e2
+                        logger.warning(
+                            "[%s] quoteOrderQty fallback also failed: %s",
+                            signal.pair, e2,
+                        )
+                        await asyncio.sleep(2)
+                elif is_exit:
+                    # Exit: retry all errors
+                    logger.warning(
+                        "Exit attempt %d/%d invalid order: %s -- retrying in 2s",
+                        attempt, MAX_RETRIES, e,
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    logger.error("Invalid order: %s", e)
+                    await self._notify_error(signal, str(e))
+                    return None
             except Exception as e:
-                logger.exception("Unexpected error placing order")
-                await self._notify_error(signal, str(e))
-                return None
+                last_error = e
+                if is_exit:
+                    # Exit: retry ALL errors — never give up silently
+                    logger.warning(
+                        "Exit attempt %d/%d error: %s -- retrying in 2s",
+                        attempt, MAX_RETRIES, e,
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    logger.exception("Unexpected error placing order")
+                    await self._notify_error(signal, str(e))
+                    return None
 
         if order is None:
-            logger.error("All %d retries exhausted for order. Last error: %s", MAX_RETRIES, last_error)
-            await self._notify_error(signal, f"Retries exhausted: {last_error}")
+            if is_exit:
+                # CRITICAL: exit failed — alert for manual intervention
+                logger.error(
+                    "EXIT FAILED: All %d retries exhausted for %s %s. STUCK IN POSITION! Last error: %s",
+                    MAX_RETRIES, signal.pair, signal.side, last_error,
+                )
+                await self._notify_exit_failure(signal, last_error)
+            else:
+                logger.error("All %d retries exhausted for order. Last error: %s", MAX_RETRIES, last_error)
+                await self._notify_error(signal, f"Retries exhausted: {last_error}")
             return None
 
         # Log success
@@ -260,15 +349,25 @@ class TradeExecutor:
             signal.exchange_id,
         )
 
-        # Log to Supabase
-        await self._log_trade(signal, order)
+        # Determine if this is an entry (opening) or exit (closing) trade
+        is_exit = signal.reduce_only or (
+            signal.position_type == "spot" and signal.side == "sell"
+        )
+
+        if is_exit:
+            # EXIT: update the existing open trade row in DB
+            await self._close_trade_in_db(signal, order)
+        else:
+            # ENTRY: insert a new trade row in DB
+            await self._open_trade_in_db(signal, order)
 
         # Send Telegram alert
         await self._notify_trade(signal, order)
 
         return order
 
-    async def _log_trade(self, signal: Signal, order: dict) -> None:
+    async def _open_trade_in_db(self, signal: Signal, order: dict) -> None:
+        """INSERT a new trade row for an entry/open position."""
         if self.db is None:
             return
         try:
@@ -276,7 +375,7 @@ class TradeExecutor:
             filled_amount = order.get("filled") or signal.amount
             cost = fill_price * filled_amount
 
-            await self.db.log_trade({
+            trade_id = await self.db.log_trade({
                 "pair": signal.pair,
                 "side": signal.side,
                 "entry_price": fill_price,
@@ -285,14 +384,99 @@ class TradeExecutor:
                 "strategy": signal.strategy.value,
                 "order_type": signal.order_type,
                 "exchange": signal.exchange_id,
-                "status": "open" if not signal.reduce_only else "closed",
+                "status": "open",
                 "reason": signal.reason,
                 "order_id": order.get("id"),
                 "leverage": signal.leverage,
                 "position_type": signal.position_type,
             })
+            logger.info(
+                "Trade opened in DB: id=%s %s %s @ $%.2f [%s]",
+                trade_id, signal.side, signal.pair, fill_price, signal.exchange_id,
+            )
         except Exception:
-            logger.exception("Failed to log trade to DB")
+            logger.exception("Failed to log open trade to DB")
+
+    async def _close_trade_in_db(self, signal: Signal, order: dict) -> None:
+        """UPDATE the existing open trade row with exit price and P&L."""
+        if self.db is None:
+            return
+        try:
+            fill_price = order.get("average") or order.get("price") or signal.price
+            filled_amount = order.get("filled") or signal.amount
+
+            # Find the open trade for this pair + exchange
+            open_trade = await self.db.get_open_trade(
+                pair=signal.pair,
+                exchange=signal.exchange_id,
+                strategy=signal.strategy.value,
+            )
+
+            if not open_trade:
+                logger.warning(
+                    "No open trade found in DB for %s/%s/%s — inserting as closed row",
+                    signal.pair, signal.exchange_id, signal.strategy.value,
+                )
+                # Fallback: insert a standalone closed row (legacy behavior)
+                await self.db.log_trade({
+                    "pair": signal.pair,
+                    "side": signal.side,
+                    "entry_price": fill_price,
+                    "amount": filled_amount,
+                    "cost": fill_price * filled_amount,
+                    "strategy": signal.strategy.value,
+                    "order_type": signal.order_type,
+                    "exchange": signal.exchange_id,
+                    "status": "closed",
+                    "reason": signal.reason,
+                    "order_id": order.get("id"),
+                    "leverage": signal.leverage,
+                    "position_type": signal.position_type,
+                })
+                return
+
+            # Calculate P&L from the original entry
+            entry_price = open_trade.get("entry_price", fill_price)
+            entry_amount = open_trade.get("amount", filled_amount)
+            entry_cost = open_trade.get("cost", entry_price * entry_amount)
+            position_type = open_trade.get("position_type", signal.position_type)
+            trade_leverage = open_trade.get("leverage", signal.leverage) or 1
+
+            # PnL calculation:
+            # LONG/spot buy-then-sell: (exit - entry) * amount
+            # SHORT sell-then-buy: (entry - exit) * amount
+            if position_type in ("long", "spot"):
+                pnl = (fill_price - entry_price) * entry_amount
+            else:  # short
+                pnl = (entry_price - fill_price) * entry_amount
+
+            # For futures, P&L is on the notional (leveraged) amount
+            # entry_amount in the DB is already the leveraged amount
+            pnl_pct = (pnl / entry_cost * 100) if entry_cost > 0 else 0.0
+
+            trade_id = open_trade["id"]
+
+            await self.db.update_trade(trade_id, {
+                "status": "closed",
+                "exit_price": fill_price,
+                "closed_at": iso_now(),
+                "pnl": round(pnl, 8),
+                "pnl_pct": round(pnl_pct, 4),
+                "reason": signal.reason,
+            })
+
+            logger.info(
+                "Trade closed in DB: id=%s %s %s entry=$%.2f exit=$%.2f pnl=$%.4f (%.2f%%) [%s]",
+                trade_id, position_type, signal.pair,
+                entry_price, fill_price, pnl, pnl_pct, signal.exchange_id,
+            )
+
+            # Record P&L in the risk manager
+            if self.risk_manager is not None:
+                self.risk_manager.record_close(signal.pair, pnl)
+
+        except Exception:
+            logger.exception("Failed to close trade in DB")
 
     async def _notify_trade(self, signal: Signal, order: dict) -> None:
         if self.alerts is None:
@@ -325,3 +509,19 @@ class TradeExecutor:
             )
         except Exception:
             logger.exception("Failed to send error alert")
+
+    async def _notify_exit_failure(self, signal: Signal, error: Exception | None) -> None:
+        """Send critical Telegram alert when an exit order fails completely."""
+        if self.alerts is None:
+            return
+        try:
+            msg = (
+                f"\u26a0\ufe0f EXIT FAILED — {signal.pair} stuck in position, "
+                f"manual intervention needed!\n"
+                f"Side: {signal.side} | Exchange: {signal.exchange_id} | "
+                f"Amount: {signal.amount:.8f} | Strategy: {signal.strategy.value}\n"
+                f"Error: {error}"
+            )
+            await self.alerts.send_error_alert(msg)
+        except Exception:
+            logger.exception("Failed to send exit failure alert")

@@ -113,6 +113,7 @@ class ScalpStrategy(BaseStrategy):
         self.in_position = False
         self.position_side: str | None = None  # "long" or "short"
         self.entry_price: float = 0.0
+        self.entry_amount: float = 0.0  # amount used at entry (for consistent exit)
         self.entry_time: float = 0.0
         self.highest_since_entry: float = 0.0
         self.lowest_since_entry: float = float("inf")
@@ -141,6 +142,7 @@ class ScalpStrategy(BaseStrategy):
         self.in_position = False
         self.position_side = None
         self.entry_price = 0.0
+        self.entry_amount = 0.0
         self._positions_on_pair = 0
         self._tick_count = 0
         self._last_heartbeat = time.monotonic()
@@ -473,7 +475,7 @@ class ScalpStrategy(BaseStrategy):
                         position_type="long" if self.is_futures else "spot",
                         exchange_id="delta" if self.is_futures else "binance",
                     ))
-                    self._open_position("long", current_price)
+                    self._open_position("long", current_price, amount)
 
                 elif side == "short":
                     sl = current_price * (1 + self.STOP_LOSS_PCT / 100)
@@ -492,16 +494,17 @@ class ScalpStrategy(BaseStrategy):
                         position_type="short",
                         exchange_id="delta",
                     ))
-                    self._open_position("short", current_price)
+                    self._open_position("short", current_price, amount)
 
         return signals
 
     # -- Position management ---------------------------------------------------
 
-    def _open_position(self, side: str, price: float) -> None:
+    def _open_position(self, side: str, price: float, amount: float = 0.0) -> None:
         self.in_position = True
         self.position_side = side
         self.entry_price = price
+        self.entry_amount = amount
         self.entry_time = time.monotonic()
         self.highest_since_entry = price
         self.lowest_since_entry = price
@@ -509,7 +512,8 @@ class ScalpStrategy(BaseStrategy):
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
-        actual_pnl = self.entry_price * (pnl_pct / 100) * (self.capital_pct / 100)
+        # Actual dollar P&L based on entry amount and price change
+        actual_pnl = self.entry_price * self.entry_amount * (pnl_pct / 100)
         self.hourly_pnl += actual_pnl
         self._daily_scalp_loss += actual_pnl if actual_pnl < 0 else 0
 
@@ -537,18 +541,23 @@ class ScalpStrategy(BaseStrategy):
         self.in_position = False
         self.position_side = None
         self.entry_price = 0.0
+        self.entry_amount = 0.0
         self._positions_on_pair = max(0, self._positions_on_pair - 1)
 
     def _exit_signal(self, price: float, side: str, reason: str) -> Signal:
-        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-        capital = exchange_capital * (self.capital_pct / 100)
-        amount = capital / price
-        if self.is_futures:
-            amount *= self.leverage
+        # Use the same amount as entry for consistent P&L tracking
+        amount = self.entry_amount
+        if amount <= 0:
+            # Fallback: recalculate (shouldn't happen)
+            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+            capital = exchange_capital * (self.capital_pct / 100)
+            amount = capital / price
+            if self.is_futures:
+                amount *= self.leverage
 
         self.logger.debug(
-            "[%s] Exit sizing: %s_capital=$%.2f × %.0f%% = $%.2f → amount=%.8f",
-            self.pair, self._exchange_id, exchange_capital, self.capital_pct, capital, amount,
+            "[%s] Exit sizing: amount=%.8f (entry_amount), entry=$%.2f, exit=$%.2f",
+            self.pair, amount, self.entry_price, price,
         )
 
         exit_side = "sell" if side == "long" else "buy"

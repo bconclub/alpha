@@ -92,7 +92,15 @@ class BaseStrategy(ABC):
                 signals = await self.check()
                 for signal in signals:
                     if self.risk_manager.approve_signal(signal):
-                        await self.executor.execute(signal)
+                        order = await self.executor.execute(signal)
+                        if order is not None:
+                            # Track position in risk manager for opening trades
+                            is_opening = (
+                                (signal.position_type == "spot" and signal.side == "buy")
+                                or (signal.position_type in ("long", "short") and not signal.reduce_only)
+                            )
+                            if is_opening:
+                                self.risk_manager.record_open(signal)
                     else:
                         self.logger.info("Risk manager rejected signal: %s", signal.reason)
             except asyncio.CancelledError:

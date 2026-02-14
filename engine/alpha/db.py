@@ -45,16 +45,26 @@ class Database:
 
     # ── Trades ────────────────────────────────────────────────────────────────
 
-    async def log_trade(self, data: dict[str, Any]) -> None:
-        """Insert a new trade row (opened_at is set by DB default)."""
+    async def log_trade(self, data: dict[str, Any]) -> int | None:
+        """Insert a new trade row and return its Supabase row ID."""
         if not self.is_connected:
-            return
-        await self._insert(self.TABLE_TRADES, data)
+            return None
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .insert(data)
+                .execute()
+            ),
+        )
+        row_id = result.data[0].get("id") if result.data else None
         logger.debug(
-            "Trade logged: %s %s %s @ %s",
-            data.get("side"), data.get("pair"),
+            "Trade logged (id=%s): %s %s %s @ %s",
+            row_id, data.get("side"), data.get("pair"),
             data.get("strategy"), data.get("entry_price"),
         )
+        return row_id
 
     async def close_trade(
         self, order_id: str, exit_price: float, pnl: float, pnl_pct: float
@@ -79,6 +89,45 @@ class Database:
             ),
         )
         logger.debug("Trade closed: order_id=%s pnl=%.8f", order_id, pnl)
+
+    async def update_trade(self, trade_id: int, data: dict[str, Any]) -> None:
+        """Update an existing trade row by its Supabase row ID."""
+        if not self.is_connected:
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .update(data)
+                .eq("id", trade_id)
+                .execute()
+            ),
+        )
+        logger.debug("Trade updated: id=%d, data=%s", trade_id, data)
+
+    async def get_open_trade(
+        self, pair: str, exchange: str, strategy: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Find the most recent open trade for a pair+exchange (optionally filtered by strategy)."""
+        if not self.is_connected:
+            return None
+        loop = asyncio.get_running_loop()
+
+        def _query() -> Any:
+            q = (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("*")
+                .eq("pair", pair)
+                .eq("exchange", exchange)
+                .eq("status", "open")
+            )
+            if strategy:
+                q = q.eq("strategy", strategy)
+            return q.order("opened_at", desc=True).limit(1).execute()
+
+        result = await loop.run_in_executor(None, _query)
+        return result.data[0] if result.data else None
 
     async def cancel_trade(self, order_id: str, reason: str = "cancelled") -> None:
         """Mark a trade as cancelled."""

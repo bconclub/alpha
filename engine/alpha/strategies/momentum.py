@@ -45,6 +45,7 @@ class MomentumStrategy(BaseStrategy):
         super().__init__(pair, executor, risk_manager)
         self.in_position = False
         self.entry_price: float = 0.0
+        self.entry_amount: float = 0.0
         self.highest_since_entry: float = 0.0
         self._tick_count: int = 0
         self._last_heartbeat: float = 0.0
@@ -52,6 +53,7 @@ class MomentumStrategy(BaseStrategy):
     async def on_start(self) -> None:
         self.in_position = False
         self.entry_price = 0.0
+        self.entry_amount = 0.0
         self.highest_since_entry = 0.0
         self._tick_count = 0
         self._last_heartbeat = time.monotonic()
@@ -175,6 +177,7 @@ class MomentumStrategy(BaseStrategy):
                 ))
                 self.in_position = True
                 self.entry_price = current_price
+                self.entry_amount = amount
                 self.highest_since_entry = current_price
 
         return signals
@@ -182,8 +185,12 @@ class MomentumStrategy(BaseStrategy):
     # -- Helpers ---------------------------------------------------------------
 
     def _exit_signal(self, price: float, reason: str) -> Signal:
-        capital = self.risk_manager.get_exchange_capital("binance") * (config.trading.max_position_pct / 100)
-        amount = capital / price
+        # Use the same amount as entry for consistent P&L
+        amount = self.entry_amount
+        if amount <= 0:
+            # Fallback: recalculate
+            capital = self.risk_manager.get_exchange_capital("binance") * (config.trading.max_position_pct / 100)
+            amount = capital / price
         return Signal(
             side="sell",
             price=price,
@@ -197,4 +204,5 @@ class MomentumStrategy(BaseStrategy):
     def _reset_position(self) -> None:
         self.in_position = False
         self.entry_price = 0.0
+        self.entry_amount = 0.0
         self.highest_since_entry = 0.0

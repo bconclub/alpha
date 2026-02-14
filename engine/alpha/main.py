@@ -121,6 +121,7 @@ class AlphaBot:
             db=self.db,
             alerts=self.alerts,
             delta_exchange=self.delta,
+            risk_manager=self.risk_manager,
         )
         self.analyzer = MarketAnalyzer(self.binance, pair=self.pairs[0])  # type: ignore[arg-type]
         if self.delta:

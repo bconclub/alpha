@@ -58,6 +58,7 @@ class FuturesMomentumStrategy(BaseStrategy):
         # Position tracking
         self.position_side: str | None = None  # "long" or "short" or None
         self.entry_price: float = 0.0
+        self.entry_amount: float = 0.0
         self.highest_since_entry: float = 0.0
         self.lowest_since_entry: float = float("inf")
 
@@ -68,6 +69,7 @@ class FuturesMomentumStrategy(BaseStrategy):
     async def on_start(self) -> None:
         self.position_side = None
         self.entry_price = 0.0
+        self.entry_amount = 0.0
         self.highest_since_entry = 0.0
         self.lowest_since_entry = float("inf")
         self._tick_count = 0
@@ -241,6 +243,7 @@ class FuturesMomentumStrategy(BaseStrategy):
                 ))
                 self.position_side = "long"
                 self.entry_price = current_price
+                self.entry_amount = amount
                 self.highest_since_entry = current_price
 
             # SHORT entry: RSI overbought + MACD bearish crossover
@@ -268,6 +271,7 @@ class FuturesMomentumStrategy(BaseStrategy):
                 ))
                 self.position_side = "short"
                 self.entry_price = current_price
+                self.entry_amount = amount
                 self.lowest_since_entry = current_price
 
         return signals
@@ -276,8 +280,10 @@ class FuturesMomentumStrategy(BaseStrategy):
 
     def _close_long_signal(self, price: float, reason: str) -> Signal:
         """Generate a signal to close a long position (sell to close)."""
-        capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
-        amount = (capital / price) * self.leverage
+        amount = self.entry_amount
+        if amount <= 0:
+            capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
+            amount = (capital / price) * self.leverage
         return Signal(
             side="sell",
             price=price,
@@ -294,8 +300,10 @@ class FuturesMomentumStrategy(BaseStrategy):
 
     def _close_short_signal(self, price: float, reason: str) -> Signal:
         """Generate a signal to close a short position (buy to close)."""
-        capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
-        amount = (capital / price) * self.leverage
+        amount = self.entry_amount
+        if amount <= 0:
+            capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
+            amount = (capital / price) * self.leverage
         return Signal(
             side="buy",
             price=price,
@@ -313,5 +321,6 @@ class FuturesMomentumStrategy(BaseStrategy):
     def _reset_position(self) -> None:
         self.position_side = None
         self.entry_price = 0.0
+        self.entry_amount = 0.0
         self.highest_since_entry = 0.0
         self.lowest_since_entry = float("inf")
