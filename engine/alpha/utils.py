@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any
 
 
@@ -64,6 +65,15 @@ def format_usd(amount: float) -> str:
 def safe_divide(a: float, b: float, default: float = 0.0) -> float:
     """Divide without ZeroDivisionError."""
     return a / b if b != 0 else default
+
+
+def get_version() -> str:
+    """Read version from VERSION file (one level up from alpha/)."""
+    try:
+        vfile = Path(__file__).resolve().parent.parent / "VERSION"
+        return vfile.read_text().strip()
+    except Exception:
+        return "?.?.?"
 
 
 log = setup_logger("alpha")

@@ -142,7 +142,7 @@ export function Sidebar() {
             {isConnected ? 'Realtime active' : 'Disconnected'}
           </span>
         </div>
-        <p className="text-[10px] text-zinc-700 mt-1">Alpha Bot v1.0</p>
+        <p className="text-[10px] text-zinc-700 mt-1">Alpha v{process.env.APP_VERSION ?? '?'}</p>
       </div>
     </aside>
   );

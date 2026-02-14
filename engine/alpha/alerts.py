@@ -19,7 +19,7 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from alpha.config import config
-from alpha.utils import format_usd, ist_now, setup_logger
+from alpha.utils import format_usd, get_version, ist_now, setup_logger
 
 logger = setup_logger("alerts")
 
@@ -100,9 +100,10 @@ class AlertManager:
             f"\n   \U0001f7e0 Delta: <code>{_bal(delta_balance)}</code>"
         )
 
+        version = get_version()
         msg = (
             f"{LINE}\n"
-            f"\U0001f7e2 <b>ALPHA BOT ONLINE</b>\n"
+            f"\U0001f7e2 <b>ALPHA BOT ONLINE</b> <code>v{version}</code>\n"
             f"{LINE}\n"
             f"\U0001f4ca Exchanges: <code>{exchanges}</code>\n"
             f"\U0001f4b0 Capital: <code>{format_usd(capital)}</code>{balance_lines}\n"
