@@ -53,7 +53,7 @@ class FuturesMomentumStrategy(BaseStrategy):
     ) -> None:
         super().__init__(pair, executor, risk_manager)
         self.delta_exchange: ccxt.Exchange | None = exchange
-        self.leverage: int = min(config.delta.leverage, 10)  # hard cap at 10x
+        self.leverage: int = min(config.delta.leverage, 20)  # hard cap at 20x
 
         # Position tracking
         self.position_side: str | None = None  # "long" or "short" or None

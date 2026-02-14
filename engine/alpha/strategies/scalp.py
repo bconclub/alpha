@@ -15,12 +15,17 @@ Entry Patterns (ANY one pattern triggers entry):
   8. BB Touch + Confirm: Price at BB + (RSI or volume or candle pattern) → enter
 
 Exit:
-  - TP: 1.5% price (= 7.5% capital at 5x)
-  - SL: 0.75% (= 3.75% capital at 5x)
+  - TP: 1.5% price (= 30% capital at 20x)
+  - SL: 0.75% (= 15% capital at 20x, liquidation at ~5%)
   - Trailing: activate 0.80%, trail 0.40%
   - Timeout: 45 min
   - Flatline: close if < 0.1% move for 30 min
   - Risk/reward: 2:1 — need 34% win rate to profit
+
+Position sizing (Delta futures):
+  - 2 contracts per trade (min), 3 max for safety
+  - 2 contracts × $20.80 = $41.60 notional, $2.08 collateral at 20x
+  - Max 2 concurrent positions = 4 contracts total
 """
 
 from __future__ import annotations
@@ -53,6 +58,7 @@ class ScalpStrategy(BaseStrategy):
 
     Exit: TP=1.5%, SL=0.75%, Trail=0.80/0.40, Timeout=45min, Flatline=30min.
     Risk/reward 2:1 — only need 34% win rate to profit.
+    Futures: 20x leverage, 2-3 contracts per trade, SL well within liq zone.
     """
 
     name = StrategyName.SCALP
@@ -100,7 +106,7 @@ class ScalpStrategy(BaseStrategy):
         super().__init__(pair, executor, risk_manager)
         self.trade_exchange: ccxt.Exchange | None = exchange
         self.is_futures = is_futures
-        self.leverage: int = min(config.delta.leverage, 10) if is_futures else 1
+        self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.CAPITAL_PCT_SPOT
         self._exchange_id: str = "delta" if is_futures else "binance"
 
@@ -592,7 +598,8 @@ class ScalpStrategy(BaseStrategy):
                 return None
 
             contracts = int(capital * self.leverage / (contract_size * current_price))
-            contracts = max(contracts, 1)
+            contracts = max(contracts, 2)  # minimum 2 contracts per scalp
+            contracts = min(contracts, 3)  # cap at 3 contracts for safety
             total_collateral = contracts * one_contract_collateral
             if total_collateral > available:
                 contracts = max(1, int(available / one_contract_collateral))
