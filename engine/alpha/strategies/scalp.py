@@ -757,9 +757,10 @@ class ScalpStrategy(BaseStrategy):
         notional = self.entry_price * coin_amount
         gross_pnl = notional * (pnl_pct / 100)
 
-        # Fees: ~0.05% per side on Delta, ~0.1% on Binance
-        fee_rate = 0.001 if self._exchange_id == "delta" else 0.002
-        est_fees = notional * fee_rate
+        # Fees: use actual rate from executor (fetched from API on startup)
+        # Round trip = entry fee + exit fee (both at taker rate for market orders)
+        fee_rate = getattr(self.executor, "_delta_taker_fee", 0.0005) if self._exchange_id == "delta" else getattr(self.executor, "_binance_taker_fee", 0.001)
+        est_fees = notional * fee_rate * 2  # both sides
         net_pnl = gross_pnl - est_fees
 
         capital_pnl_pct = pnl_pct * self.leverage

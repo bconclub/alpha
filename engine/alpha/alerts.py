@@ -87,31 +87,42 @@ class AlertManager:
         delta_balance: float | None = None,
     ) -> None:
         """Rich startup banner with exchange and pair info."""
-        binance_short = ", ".join(_pair_short(p) for p in binance_pairs)
-        delta_short = ", ".join(delta_pairs) if delta_pairs else "None"
-        exchanges = "Binance (Spot)"
-        if delta_pairs:
-            exchanges += ", Delta (Futures)"
-        shorting = "Enabled" if shorting_enabled else "Disabled"
-        now = ist_now().strftime("%Y-%m-%d %H:%M IST")
-
-        balance_lines = (
-            f"\n   \U0001f7e1 Binance: <code>{_bal(binance_balance)}</code>"
-            f"\n   \U0001f7e0 Delta: <code>{_bal(delta_balance)}</code>"
+        # Clean pair names: "ETH/USD:USD" → "ETH", "BTC/USDT" → "BTC"
+        all_pairs = sorted(
+            {_pair_short(p) for p in binance_pairs}
+            | {_pair_short(p) for p in delta_pairs}
         )
+        pairs_str = ", ".join(all_pairs) if all_pairs else "None"
+
+        exchanges: list[str] = []
+        if binance_pairs:
+            exchanges.append("Binance")
+        if delta_pairs:
+            exchanges.append("Delta")
+        exchanges_str = ", ".join(exchanges) if exchanges else "None"
+
+        shorting = "Yes" if shorting_enabled else "No"
+        now = ist_now().strftime("%Y-%m-%d %H:%M IST")
+        leverage = config.delta.leverage
+
+        balance_lines = ""
+        if binance_balance is not None or delta_balance is not None:
+            balance_lines = (
+                f"\n   Binance: <code>{_bal(binance_balance)}</code>"
+                f"\n   Delta: <code>{_bal(delta_balance)}</code>"
+            )
 
         engine_ver = get_version()
         dash_ver = get_dashboard_version()
         msg = (
             f"{LINE}\n"
-            f"\U0001f7e2 <b>ALPHA BOT ONLINE</b>\n"
+            f"\U0001f7e2 <b>ALPHA v{engine_ver}</b>\n"
             f"<code>Engine v{engine_ver} | Dashboard v{dash_ver}</code>\n"
             f"{LINE}\n"
-            f"\U0001f4ca Exchanges: <code>{exchanges}</code>\n"
             f"\U0001f4b0 Capital: <code>{format_usd(capital)}</code>{balance_lines}\n"
-            f"\U0001f4c8 Pairs: <code>{binance_short}</code>\n"
-            f"\u26a1 Delta Pairs: <code>{delta_short}</code>\n"
-            f"\U0001f504 Shorting: <code>{shorting}</code>\n"
+            f"\u26a1 Pairs: <code>{pairs_str}</code>\n"
+            f"\U0001f4ca Exchange: <code>{exchanges_str}</code>\n"
+            f"\U0001f4aa Leverage: <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
             f"\U0001f550 Started: <code>{now}</code>\n"
             f"{LINE}"
         )

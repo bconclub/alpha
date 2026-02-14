@@ -56,6 +56,10 @@ class TradeExecutor:
         self._ERROR_DEDUP_SECONDS = 300  # 5 minutes
         # EXIT FAILED alerts: only send ONCE per pair (permanent suppression)
         self._exit_failure_alerted: set[str] = set()
+        # Fee rates fetched from exchange on startup (taker rate per side)
+        self._delta_taker_fee: float = 0.0005  # default 0.05% — overridden by API
+        self._delta_maker_fee: float = 0.0002  # default 0.02% — overridden by API
+        self._binance_taker_fee: float = 0.001  # default 0.1%
 
     def _get_exchange(self, signal: Signal) -> ccxt.Exchange:
         """Return the correct exchange instance for a signal."""
@@ -178,12 +182,24 @@ class TradeExecutor:
                         amount_limits = limits.get("amount", {})
                         self._min_notional[pair] = cost_limits.get("min", 0) or 0
                         self._min_amount[pair] = amount_limits.get("min", 0) or 0
+                        # Extract fee rates from market info (ccxt provides these)
+                        taker = market.get("taker")
+                        maker = market.get("maker")
+                        if taker is not None:
+                            self._delta_taker_fee = float(taker)
+                        if maker is not None:
+                            self._delta_maker_fee = float(maker)
                         logger.debug(
                             "[%s] Delta min notional=$%.2f, min amount=%.8f",
                             pair, self._min_notional[pair], self._min_amount[pair],
                         )
                     else:
                         logger.warning("Market info not found for %s on Delta", pair)
+                logger.info(
+                    "Delta fee rates from API: taker=%.6f (%.4f%%), maker=%.6f (%.4f%%)",
+                    self._delta_taker_fee, self._delta_taker_fee * 100,
+                    self._delta_maker_fee, self._delta_maker_fee * 100,
+                )
             except Exception:
                 logger.exception("Failed to load Delta market limits")
 
@@ -627,6 +643,8 @@ class TradeExecutor:
             #
             # IMPORTANT: For Delta futures, entry_amount is in CONTRACTS (e.g. 1),
             # not coin amount (e.g. 0.01 ETH). Must convert back using contract_size.
+            #
+            # Fees are deducted: round-trip fee = (entry_notional + exit_notional) * taker_rate
             coin_amount = entry_amount
             exchange_id = open_trade.get("exchange", signal.exchange_id)
             if exchange_id == "delta":
@@ -634,13 +652,27 @@ class TradeExecutor:
                 coin_amount = entry_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
 
             if position_type in ("long", "spot"):
-                pnl = (fill_price - entry_price) * coin_amount
+                gross_pnl = (fill_price - entry_price) * coin_amount
             else:  # short
-                pnl = (entry_price - fill_price) * coin_amount
+                gross_pnl = (entry_price - fill_price) * coin_amount
+
+            # Calculate round-trip trading fees
+            entry_notional = entry_price * coin_amount
+            exit_notional = fill_price * coin_amount
+            if exchange_id == "delta":
+                fee_rate = self._delta_taker_fee  # fetched from API
+            else:
+                fee_rate = self._binance_taker_fee
+            entry_fee = entry_notional * fee_rate
+            exit_fee = exit_notional * fee_rate
+            total_fees = entry_fee + exit_fee
+
+            # Net P&L = gross - fees
+            pnl = gross_pnl - total_fees
 
             # P&L percentage is against COLLATERAL (actual capital at risk)
             # For futures: collateral = notional / leverage
-            notional_cost = entry_price * coin_amount
+            notional_cost = entry_notional
             if trade_leverage > 1:
                 collateral = notional_cost / trade_leverage
             else:
@@ -659,9 +691,12 @@ class TradeExecutor:
             })
 
             logger.info(
-                "Trade closed in DB: id=%s %s %s entry=$%.2f exit=$%.2f pnl=$%.4f (%.2f%%) [%s]",
+                "Trade closed in DB: id=%s %s %s entry=$%.2f exit=$%.2f "
+                "gross=$%.6f fees=$%.6f net=$%.6f (%.2f%%) [%s] fee_rate=%.4f%%",
                 trade_id, position_type, signal.pair,
-                entry_price, fill_price, pnl, pnl_pct, signal.exchange_id,
+                entry_price, fill_price,
+                gross_pnl, total_fees, pnl, pnl_pct, signal.exchange_id,
+                fee_rate * 100,
             )
 
             # Record P&L in the risk manager
