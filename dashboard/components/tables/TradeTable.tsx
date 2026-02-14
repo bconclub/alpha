@@ -5,6 +5,7 @@ import type { Trade, Strategy, Exchange, PositionType } from '@/lib/types';
 import {
   formatCurrency,
   formatPnL,
+  formatPercentage,
   formatDate,
   cn,
   getPnLColor,
@@ -25,7 +26,7 @@ import { Badge } from '@/components/ui/Badge';
 
 type SortKey = keyof Pick<
   Trade,
-  'timestamp' | 'pair' | 'side' | 'price' | 'amount' | 'strategy' | 'pnl' | 'status' | 'exchange' | 'position_type' | 'leverage'
+  'timestamp' | 'pair' | 'side' | 'price' | 'amount' | 'strategy' | 'pnl' | 'pnl_pct' | 'status' | 'exchange' | 'position_type' | 'leverage'
 >;
 
 type SortDirection = 'asc' | 'desc';
@@ -40,7 +41,7 @@ interface TradeTableProps {
 // Constants
 // ---------------------------------------------------------------------------
 
-const STRATEGIES: Strategy[] = ['momentum', 'futures_momentum', 'grid', 'scalp'];
+const STRATEGIES: Strategy[] = ['scalp', 'futures_momentum', 'momentum'];
 const EXCHANGES: { label: string; value: Exchange | 'All' }[] = [
   { label: 'All', value: 'All' },
   { label: 'Binance', value: 'binance' },
@@ -70,6 +71,7 @@ const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
   { key: 'amount', label: 'Amount', align: 'right' },
   { key: 'strategy', label: 'Strategy' },
   { key: 'pnl', label: 'P&L', align: 'right' },
+  { key: 'pnl_pct', label: 'P&L %', align: 'right' },
   { key: 'status', label: 'Status' },
 ];
 
@@ -89,8 +91,8 @@ function getStatusBadgeVariant(status: Trade['status']) {
 }
 
 function compareTrades(a: Trade, b: Trade, key: SortKey, dir: SortDirection): number {
-  let aVal: string | number = a[key];
-  let bVal: string | number = b[key];
+  let aVal: string | number = (a[key] as string | number | undefined | null) ?? 0;
+  let bVal: string | number = (b[key] as string | number | undefined | null) ?? 0;
 
   // For timestamp, compare as dates
   if (key === 'timestamp') {
@@ -518,6 +520,18 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       )}
                     >
                       {formatPnL(trade.pnl)}
+                    </td>
+
+                    {/* P&L % (return on collateral) */}
+                    <td
+                      className={cn(
+                        'whitespace-nowrap px-4 py-3 text-right font-mono text-xs',
+                        getPnLColor(trade.pnl_pct ?? 0),
+                      )}
+                    >
+                      {trade.pnl_pct != null && trade.pnl_pct !== 0
+                        ? formatPercentage(trade.pnl_pct)
+                        : '—'}
                     </td>
 
                     {/* Status */}

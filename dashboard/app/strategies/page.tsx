@@ -23,7 +23,7 @@ import type { Strategy, Trade } from '@/lib/types';
 // Constants
 // ---------------------------------------------------------------------------
 
-const STRATEGIES: Strategy[] = ['momentum', 'futures_momentum', 'grid', 'scalp'];
+const STRATEGIES: Strategy[] = ['scalp', 'futures_momentum', 'momentum'];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,7 +69,7 @@ function computeStats(trades: Trade[], strategy: Strategy) {
 
 export default function StrategiesPage() {
   const { trades, strategyLog, strategyPerformance } = useSupabase();
-  const [activeTab, setActiveTab] = useState<Strategy>('grid');
+  const [activeTab, setActiveTab] = useState<Strategy>('scalp');
 
   const statsMap = useMemo(() => {
     const map = {} as Record<Strategy, ReturnType<typeof computeStats>>;
@@ -95,7 +95,7 @@ export default function StrategiesPage() {
       {/* ------------------------------------------------------------------- */}
       {/* Strategy cards                                                       */}
       {/* ------------------------------------------------------------------- */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         {STRATEGIES.map((strategy) => {
           const stats = statsMap[strategy];
           const color = getStrategyColor(strategy);
