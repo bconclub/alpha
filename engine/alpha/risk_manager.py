@@ -34,10 +34,10 @@ class RiskManager:
     Enforces risk rules before any trade is executed.
 
     Rules:
-    - Max 30% of capital per single trade (leveraged value counted)
+    - Max position per trade: check COLLATERAL (margin) for futures, order value for spot
     - Max 2 concurrent positions across ALL pairs/exchanges
     - Max 1 position per pair at a time
-    - Total exposure capped at 60% of capital (leverage amplifies)
+    - Total exposure capped at 60% of capital (collateral-based for futures)
     - Daily loss limit: stop bot at threshold
     - Per-trade stop-loss: 2%
     - Win-rate circuit breaker: if < 40% over last 20 trades -> pause
@@ -75,8 +75,22 @@ class RiskManager:
 
     @property
     def total_exposure(self) -> float:
-        """Sum of all open position values, accounting for leverage."""
-        return sum(p.entry_price * p.amount * p.leverage for p in self.open_positions)
+        """Sum of capital at risk across all positions.
+
+        Spot: order value (price * amount).
+        Futures: collateral/margin (price * amount), NOT notional.
+        The actual capital locked is the margin, not the leveraged value.
+        """
+        total = 0.0
+        for p in self.open_positions:
+            order_value = p.entry_price * p.amount
+            if p.position_type in ("long", "short") and p.leverage > 1:
+                # Futures: collateral = order_value (margin posted)
+                total += order_value
+            else:
+                # Spot: full order value
+                total += order_value
+        return total
 
     @property
     def total_exposure_pct(self) -> float:
@@ -94,7 +108,15 @@ class RiskManager:
 
     @property
     def futures_exposure(self) -> float:
-        """Futures positions only (leveraged value)."""
+        """Futures collateral (margin) only — NOT notional."""
+        return sum(
+            p.entry_price * p.amount
+            for p in self.open_positions if p.position_type in ("long", "short")
+        )
+
+    @property
+    def futures_notional(self) -> float:
+        """Futures notional value (for display/logging only)."""
         return sum(
             p.entry_price * p.amount * p.leverage
             for p in self.open_positions if p.position_type in ("long", "short")
@@ -146,20 +168,36 @@ class RiskManager:
             logger.info("Already have open position on %s -- rejecting", signal.pair)
             return False
 
-        # 5. Position size limit (per trade, leverage-adjusted)
+        # 5. Position size limit
+        #    Futures: check COLLATERAL (margin), not notional value.
+        #    Spot: check order value directly.
         trade_value = signal.price * signal.amount
-        effective_value = trade_value * signal.leverage  # futures amplification
+        is_futures = signal.position_type in ("long", "short") and signal.leverage > 1
         max_value = self.capital * (self.max_position_pct / 100)
-        if effective_value > max_value * 1.05:  # 5% tolerance
-            logger.info(
-                "Effective value $%.2f (%.0fx) exceeds max $%.2f (%.0f%% of capital) -- rejecting %s",
-                effective_value, signal.leverage, max_value, self.max_position_pct, signal.pair,
-            )
-            return False
 
-        # 6. Total exposure cap (across all pairs/exchanges, leverage-adjusted)
+        if is_futures:
+            # Collateral = trade_value (the margin posted). Notional = trade_value * leverage.
+            collateral = trade_value
+            if collateral > max_value * 1.05:  # 5% tolerance
+                logger.info(
+                    "Futures collateral $%.2f exceeds max $%.2f (%.0f%% of $%.2f capital) -- rejecting %s",
+                    collateral, max_value, self.max_position_pct, self.capital, signal.pair,
+                )
+                return False
+        else:
+            # Spot: order value checked directly
+            if trade_value > max_value * 1.05:
+                logger.info(
+                    "Order value $%.2f exceeds max $%.2f (%.0f%% of $%.2f capital) -- rejecting %s",
+                    trade_value, max_value, self.max_position_pct, self.capital, signal.pair,
+                )
+                return False
+
+        # 6. Total exposure cap (collateral-based for futures, value-based for spot)
         if is_opening:
-            new_exposure = self.total_exposure + effective_value
+            # For futures, add collateral; for spot, add order value
+            added_exposure = trade_value  # both cases: collateral = order value
+            new_exposure = self.total_exposure + added_exposure
             new_exposure_pct = (new_exposure / self.capital) * 100 if self.capital else 0
             if new_exposure_pct > self.max_total_exposure_pct:
                 logger.info(
@@ -168,10 +206,11 @@ class RiskManager:
                 )
                 return False
 
+        notional_str = f" notional=${trade_value * signal.leverage:.2f}" if is_futures else ""
         logger.info(
-            "Signal approved: %s %s %s %.6f @ %.2f ($%.2f, %dx) | positions=%d, exposure=%.1f%%, daily_pnl=$%.2f",
+            "Signal approved: %s %s %s %.6f @ $%.2f (collateral=$%.2f, %dx%s) | positions=%d, exposure=%.1f%%, daily_pnl=$%.2f",
             signal.position_type, signal.side, signal.pair, signal.amount, signal.price,
-            trade_value, signal.leverage, len(self.open_positions), self.total_exposure_pct, self.daily_pnl,
+            trade_value, signal.leverage, notional_str, len(self.open_positions), self.total_exposure_pct, self.daily_pnl,
         )
         return True
 
@@ -268,7 +307,8 @@ class RiskManager:
             "open_positions": len(self.open_positions),
             "total_exposure_pct": self.total_exposure_pct,
             "spot_exposure": self.spot_exposure,
-            "futures_exposure": self.futures_exposure,
+            "futures_exposure": self.futures_exposure,       # collateral/margin
+            "futures_notional": self.futures_notional,       # leveraged value
             "win_rate": self.win_rate,
             "is_paused": self.is_paused,
             "pause_reason": self._pause_reason,
