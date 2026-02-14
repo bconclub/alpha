@@ -215,16 +215,55 @@ class FuturesMomentumStrategy(BaseStrategy):
                 self.RSI_LONG_ENTRY, self.RSI_SHORT_ENTRY,
             )
 
-            capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
-            amount = (capital / current_price) * self.leverage
+            # Delta uses INTEGER contracts, not fractional coin amounts
+            from alpha.trade_executor import DELTA_CONTRACT_SIZE
+            contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0)
+            if contract_size <= 0:
+                self.logger.warning("[%s] Unknown Delta contract size — skipping", self.pair)
+                return signals
+
+            exchange_capital = self.risk_manager.get_exchange_capital("delta")
+            available = self.risk_manager.get_available_capital("delta")
+            capital = exchange_capital * (config.trading.max_position_pct / 100)
+            capital = min(capital, available)
+
+            # Minimum collateral for 1 contract
+            one_contract_collateral = (contract_size * current_price) / self.leverage
+            if one_contract_collateral > available:
+                if self._tick_count % 5 == 0:
+                    self.logger.info(
+                        "[%s] 1 contract needs $%.2f collateral > $%.2f available — skipping",
+                        self.pair, one_contract_collateral, available,
+                    )
+                return signals
+
+            # Calculate contracts: collateral * leverage / (contract_size * price)
+            contracts = int(capital * self.leverage / (contract_size * current_price))
+            contracts = max(contracts, 1)
+            # Verify affordability
+            total_collateral = contracts * one_contract_collateral
+            if total_collateral > available:
+                contracts = max(1, int(available / one_contract_collateral))
+
+            # Convert to coin amount for signal (trade_executor re-converts to contracts)
+            amount = contracts * contract_size
+
+            self.logger.debug(
+                "[%s] Sizing: delta_capital=$%.2f, avail=$%.2f → %d contracts "
+                "(collateral=$%.2f, notional=$%.2f, %dx)",
+                self.pair, exchange_capital, available, contracts,
+                contracts * one_contract_collateral,
+                contracts * one_contract_collateral * self.leverage, self.leverage,
+            )
 
             # LONG entry: RSI oversold + MACD bullish crossover
             if rsi_now < self.RSI_LONG_ENTRY and macd_crossed_up:
                 stop_loss = current_price * (1 - self.TRAILING_STOP_PCT / 100)
 
                 self.logger.info(
-                    "[%s] LONG ENTRY SIGNAL — RSI=%.1f + MACD crossover! Opening %dx LONG $%.2f",
-                    self.pair, rsi_now, self.leverage, capital,
+                    "[%s] LONG ENTRY SIGNAL — RSI=%.1f + MACD crossover! %d contracts %dx (collateral=$%.2f)",
+                    self.pair, rsi_now, contracts, self.leverage,
+                    contracts * one_contract_collateral,
                 )
 
                 signals.append(Signal(
@@ -251,8 +290,9 @@ class FuturesMomentumStrategy(BaseStrategy):
                 stop_loss = current_price * (1 + self.TRAILING_STOP_PCT / 100)
 
                 self.logger.info(
-                    "[%s] SHORT ENTRY SIGNAL — RSI=%.1f + MACD cross down! Opening %dx SHORT $%.2f",
-                    self.pair, rsi_now, self.leverage, capital,
+                    "[%s] SHORT ENTRY SIGNAL — RSI=%.1f + MACD cross down! %d contracts %dx (collateral=$%.2f)",
+                    self.pair, rsi_now, contracts, self.leverage,
+                    contracts * one_contract_collateral,
                 )
 
                 signals.append(Signal(

@@ -130,18 +130,19 @@ class RiskManager:
 
     @property
     def total_exposure(self) -> float:
-        """Sum of capital at risk across all positions.
+        """Sum of capital at risk (collateral/margin) across all positions.
 
         Spot: order value (price * amount).
-        Futures: collateral/margin (price * amount), NOT notional.
-        The actual capital locked is the margin, not the leveraged value.
+        Futures: collateral = notional / leverage = (price * amount) / leverage.
+        signal.amount for futures is the leveraged contract amount, so we must
+        divide by leverage to get actual capital at risk.
         """
         total = 0.0
         for p in self.open_positions:
             order_value = p.entry_price * p.amount
             if p.position_type in ("long", "short") and p.leverage > 1:
-                # Futures: collateral = order_value (margin posted)
-                total += order_value
+                # Futures: amount is leveraged, collateral = notional / leverage
+                total += order_value / p.leverage
             else:
                 # Spot: full order value
                 total += order_value
@@ -163,11 +164,17 @@ class RiskManager:
 
     @property
     def futures_exposure(self) -> float:
-        """Futures collateral (margin) only — NOT notional."""
-        return sum(
-            p.entry_price * p.amount
-            for p in self.open_positions if p.position_type in ("long", "short")
-        )
+        """Futures collateral (margin) only — NOT notional.
+
+        signal.amount for futures is the leveraged amount, so
+        collateral = (price * amount) / leverage.
+        """
+        total = 0.0
+        for p in self.open_positions:
+            if p.position_type in ("long", "short"):
+                notional = p.entry_price * p.amount
+                total += notional / p.leverage if p.leverage > 1 else notional
+        return total
 
     @property
     def futures_notional(self) -> float:
@@ -247,8 +254,14 @@ class RiskManager:
             return False
 
         # 5. Available balance check — don't trade with $0
-        trade_value = signal.price * signal.amount
         is_futures = signal.position_type in ("long", "short") and signal.leverage > 1
+        notional = signal.price * signal.amount  # amount is leveraged for futures
+        # Collateral = actual capital at risk (margin posted)
+        # For futures: signal.amount = (collateral * leverage) / price
+        #   so price * amount = collateral * leverage = notional
+        #   and collateral = notional / leverage
+        # For spot: collateral = notional (no leverage)
+        collateral = notional / signal.leverage if is_futures else notional
         available = self.get_available_capital(signal.exchange_id)
 
         # Minimum balance thresholds
@@ -260,33 +273,24 @@ class RiskManager:
             )
             return False
 
-        # 6. Position size limit
+        # 6. Position size limit — check COLLATERAL against max allowed
         exchange_capital = self.get_exchange_capital(signal.exchange_id)
         if exchange_capital <= 0:
             exchange_capital = self.capital  # fallback to total if not set
         max_value = exchange_capital * (self.max_position_pct / 100)
 
-        if is_futures:
-            collateral = trade_value
-            if collateral > max_value * 1.05:
-                logger.info(
-                    "Futures collateral $%.2f exceeds max $%.2f (%.0f%% of $%.2f %s capital) -- rejecting %s",
-                    collateral, max_value, self.max_position_pct, exchange_capital,
-                    signal.exchange_id, signal.pair,
-                )
-                return False
-        else:
-            if trade_value > max_value * 1.05:
-                logger.info(
-                    "Order value $%.2f exceeds max $%.2f (%.0f%% of $%.2f %s capital) -- rejecting %s",
-                    trade_value, max_value, self.max_position_pct, exchange_capital,
-                    signal.exchange_id, signal.pair,
-                )
-                return False
+        if collateral > max_value * 1.05:
+            logger.info(
+                "%s collateral $%.2f exceeds max $%.2f (%.0f%% of $%.2f %s capital) -- rejecting %s%s",
+                "Futures" if is_futures else "Spot",
+                collateral, max_value, self.max_position_pct, exchange_capital,
+                signal.exchange_id, signal.pair,
+                f" (notional=${notional:.2f}, {signal.leverage}x)" if is_futures else "",
+            )
+            return False
 
-        # 7. Total exposure cap
-        added_exposure = trade_value
-        new_exposure = self.total_exposure + added_exposure
+        # 7. Total exposure cap — based on collateral, not notional
+        new_exposure = self.total_exposure + collateral
         new_exposure_pct = (new_exposure / self.capital) * 100 if self.capital else 0
         if new_exposure_pct > self.max_total_exposure_pct:
             logger.info(
@@ -295,12 +299,12 @@ class RiskManager:
             )
             return False
 
-        notional_str = f" notional=${trade_value * signal.leverage:.2f}" if is_futures else ""
+        notional_str = f" notional=${notional:.2f}" if is_futures else ""
         logger.info(
             "Signal approved: %s %s %s %.6f @ $%.2f (collateral=$%.2f, %dx%s) | "
             "%s avail=$%.2f total=$%.2f | positions=%d (%s:%d), exposure=%.1f%%, daily_pnl=$%.2f",
             signal.position_type, signal.side, signal.pair, signal.amount, signal.price,
-            trade_value, signal.leverage, notional_str,
+            collateral, signal.leverage, notional_str,
             signal.exchange_id, available, exchange_capital,
             len(self.open_positions), signal.exchange_id, ex_count,
             self.total_exposure_pct, self.daily_pnl,

@@ -22,6 +22,16 @@ logger = setup_logger("trade_executor")
 MAX_RETRIES = 3
 BASE_DELAY = 1.0  # seconds
 
+# Delta Exchange India contract sizes (linear perpetual, settled in USD)
+# 1 ETH contract = 0.01 ETH, 1 BTC contract = 0.001 BTC
+# The amount in create_order is the number of INTEGER contracts.
+DELTA_CONTRACT_SIZE: dict[str, float] = {
+    "ETH/USD:USD": 0.01,     # 1 contract = 0.01 ETH
+    "ETHUSD": 0.01,          # alias
+    "BTC/USD:USD": 0.001,    # 1 contract = 0.001 BTC
+    "BTCUSD": 0.001,         # alias
+}
+
 
 class TradeExecutor:
     """Unified order execution layer on top of ccxt."""
@@ -50,6 +60,33 @@ class TradeExecutor:
         if signal.exchange_id == "delta" and self.delta_exchange:
             return self.delta_exchange
         return self.exchange  # default: Binance
+
+    @staticmethod
+    def _to_delta_contracts(pair: str, coin_amount: float, price: float) -> int:
+        """Convert a fractional coin amount to integer Delta Exchange contracts.
+
+        Delta uses integer contract quantities:
+          1 ETH contract = 0.01 ETH (~$20.80 notional at $2080)
+          1 BTC contract = 0.001 BTC (~$69.70 notional at $69700)
+
+        Returns: number of contracts (minimum 1).
+        """
+        contract_size = DELTA_CONTRACT_SIZE.get(pair, 0)
+        if contract_size <= 0:
+            # Unknown pair — try to derive from ccxt market info (fallback)
+            logger.warning("[%s] Unknown Delta contract size, using raw amount", pair)
+            return max(1, int(coin_amount))
+
+        contracts = int(coin_amount / contract_size)
+        return max(contracts, 1)
+
+    @staticmethod
+    def _delta_contracts_to_coin(pair: str, contracts: int) -> float:
+        """Convert integer Delta contracts back to coin amount."""
+        contract_size = DELTA_CONTRACT_SIZE.get(pair, 0)
+        if contract_size <= 0:
+            return float(contracts)
+        return contracts * contract_size
 
     async def _get_spot_exit_amount(self, signal: Signal) -> float | None:
         """Fetch actual asset balance and truncate to exchange step size for spot exits.
@@ -296,15 +333,23 @@ class TradeExecutor:
 
         exchange = self._get_exchange(signal)
 
+        # Log with collateral and notional for clarity
+        is_futures = signal.leverage > 1 and signal.exchange_id == "delta"
+        notional = signal.price * signal.amount
+        collateral = notional / signal.leverage if is_futures else notional
+
         logger.info(
-            "Executing %s %s %s %.8f @ %.2f [%s/%s] -- %s",
+            "Executing %s %s %s %.8f @ $%.2f [%s/%s] -- collateral=$%.2f%s -- %s",
             signal.order_type, signal.side, signal.pair,
             signal.amount, signal.price, signal.exchange_id,
-            signal.strategy.value, signal.reason,
+            signal.strategy.value,
+            collateral,
+            f" notional=${notional:.2f} ({signal.leverage}x)" if is_futures else "",
+            signal.reason,
         )
 
         # Futures: set leverage before placing order
-        if signal.leverage > 1 and signal.exchange_id == "delta":
+        if is_futures:
             try:
                 await exchange.set_leverage(signal.leverage, signal.pair)
                 logger.info("[%s] Leverage set to %dx", signal.pair, signal.leverage)
@@ -318,6 +363,27 @@ class TradeExecutor:
         params: dict[str, Any] = {}
         if signal.reduce_only:
             params["reduceOnly"] = True
+        # Pass leverage to Delta so the exchange knows the position leverage
+        if is_futures:
+            params["leverage"] = signal.leverage
+
+        # Delta Exchange uses INTEGER contracts, not fractional coin amounts
+        # Convert signal.amount (leveraged coin qty) to integer contracts
+        order_amount = signal.amount
+        if signal.exchange_id == "delta":
+            contracts = self._to_delta_contracts(signal.pair, signal.amount, signal.price)
+            coin_equiv = self._delta_contracts_to_coin(signal.pair, contracts)
+            contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0)
+            contract_notional = contracts * (contract_size * signal.price) if contract_size else 0
+            contract_collateral = contract_notional / signal.leverage if signal.leverage > 1 else contract_notional
+
+            logger.info(
+                "[%s] Delta contracts: coin_amount=%.6f → %d contracts "
+                "(contract_size=%.4f, coin_equiv=%.6f, notional=$%.2f, collateral=$%.2f)",
+                signal.pair, signal.amount, contracts,
+                contract_size, coin_equiv, contract_notional, contract_collateral,
+            )
+            order_amount = float(contracts)  # Delta expects integer as amount
 
         order: dict | None = None
         last_error: Exception | None = None
@@ -340,19 +406,28 @@ class TradeExecutor:
                         params={**params, "quoteOrderQty": quote_value},
                     )
                 elif signal.order_type == "market":
+                    # Log exact params sent to exchange (critical for debugging)
+                    logger.debug(
+                        "[%s] create_order(symbol=%s, type=market, side=%s, amount=%s, params=%s)",
+                        signal.pair, signal.pair, signal.side, order_amount, params,
+                    )
                     order = await exchange.create_order(
                         symbol=signal.pair,
                         type="market",
                         side=signal.side,
-                        amount=signal.amount,
+                        amount=order_amount,
                         params=params,
                     )
                 else:
+                    logger.debug(
+                        "[%s] create_order(symbol=%s, type=limit, side=%s, amount=%s, price=%.2f, params=%s)",
+                        signal.pair, signal.pair, signal.side, order_amount, signal.price, params,
+                    )
                     order = await exchange.create_order(
                         symbol=signal.pair,
                         type="limit",
                         side=signal.side,
-                        amount=signal.amount,
+                        amount=order_amount,
                         price=signal.price,
                         params=params,
                     )
@@ -462,7 +537,11 @@ class TradeExecutor:
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
-            cost = fill_price * filled_amount
+            notional = fill_price * filled_amount
+            # Cost = collateral (actual capital at risk)
+            # For futures: amount is leveraged, so collateral = notional / leverage
+            is_futures = signal.leverage > 1 and signal.position_type in ("long", "short")
+            cost = notional / signal.leverage if is_futures else notional
 
             trade_id = await self.db.log_trade({
                 "pair": signal.pair,
@@ -527,21 +606,29 @@ class TradeExecutor:
             # Calculate P&L from the original entry
             entry_price = open_trade.get("entry_price", fill_price)
             entry_amount = open_trade.get("amount", filled_amount)
-            entry_cost = open_trade.get("cost", entry_price * entry_amount)
             position_type = open_trade.get("position_type", signal.position_type)
             trade_leverage = open_trade.get("leverage", signal.leverage) or 1
 
             # PnL calculation:
             # LONG/spot buy-then-sell: (exit - entry) * amount
             # SHORT sell-then-buy: (entry - exit) * amount
+            # For futures, entry_amount is the LEVERAGED amount (notional / price)
+            # so the P&L = price_diff * leveraged_amount = actual USD profit
             if position_type in ("long", "spot"):
                 pnl = (fill_price - entry_price) * entry_amount
             else:  # short
                 pnl = (entry_price - fill_price) * entry_amount
 
-            # For futures, P&L is on the notional (leveraged) amount
-            # entry_amount in the DB is already the leveraged amount
-            pnl_pct = (pnl / entry_cost * 100) if entry_cost > 0 else 0.0
+            # P&L percentage is against COLLATERAL (actual capital at risk)
+            # For futures: collateral = notional / leverage
+            # entry_cost field stores collateral for new trades; for old trades it
+            # may store notional — use leverage to derive collateral either way.
+            notional_cost = entry_price * entry_amount
+            if trade_leverage > 1:
+                collateral = notional_cost / trade_leverage
+            else:
+                collateral = notional_cost
+            pnl_pct = (pnl / collateral * 100) if collateral > 0 else 0.0
 
             trade_id = open_trade["id"]
 
