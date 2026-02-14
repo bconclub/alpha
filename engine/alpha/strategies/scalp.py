@@ -524,8 +524,10 @@ class ScalpStrategy(BaseStrategy):
                         leverage=self.leverage if self.is_futures else 1,
                         position_type="long" if self.is_futures else "spot",
                         exchange_id="delta" if self.is_futures else "binance",
+                        metadata={"pending_side": "long", "pending_amount": amount},
                     ))
-                    self._open_position("long", current_price, amount)
+                    # NOTE: position state set in on_fill(), NOT here
+                    # This prevents phantom positions when orders fail
 
                 elif side == "short":
                     sl = current_price * (1 + self.STOP_LOSS_PCT / 100)
@@ -543,10 +545,37 @@ class ScalpStrategy(BaseStrategy):
                         leverage=self.leverage,
                         position_type="short",
                         exchange_id="delta",
+                        metadata={"pending_side": "short", "pending_amount": amount},
                     ))
-                    self._open_position("short", current_price, amount)
+                    # NOTE: position state set in on_fill(), NOT here
 
         return signals
+
+    # -- Order fill / rejection callbacks -------------------------------------
+
+    def on_fill(self, signal: Signal, order: dict) -> None:
+        """Called by _run_loop when an order fills — NOW safe to track position."""
+        pending_side = signal.metadata.get("pending_side")
+        pending_amount = signal.metadata.get("pending_amount", 0.0)
+        if pending_side:
+            fill_price = order.get("average") or order.get("price") or signal.price
+            filled_amount = order.get("filled") or pending_amount or signal.amount
+            self._open_position(pending_side, fill_price, filled_amount)
+            self.logger.info(
+                "[%s] Order FILLED — tracking %s position @ $%.2f, amount=%.8f",
+                self.pair, pending_side, fill_price, filled_amount,
+            )
+
+    def on_rejected(self, signal: Signal) -> None:
+        """Called by _run_loop when an order fails — do NOT track position."""
+        pending_side = signal.metadata.get("pending_side")
+        if pending_side:
+            self.logger.warning(
+                "[%s] Order FAILED — NOT tracking %s position (phantom prevention)",
+                self.pair, pending_side,
+            )
+            # Ensure no stale position state
+            # (check() did NOT call _open_position, so nothing to undo)
 
     # -- Position management ---------------------------------------------------
 

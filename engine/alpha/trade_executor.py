@@ -373,22 +373,16 @@ class TradeExecutor:
             params["leverage"] = signal.leverage
 
         # Delta Exchange uses INTEGER contracts, not fractional coin amounts
-        # Convert signal.amount (leveraged coin qty) to integer contracts
+        # Convert coin amount to contracts for Delta
         order_amount = signal.amount
         if signal.exchange_id == "delta":
-            contracts = self._to_delta_contracts(signal.pair, signal.amount, signal.price)
-            coin_equiv = self._delta_contracts_to_coin(signal.pair, contracts)
-            contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0)
-            contract_notional = contracts * (contract_size * signal.price) if contract_size else 0
-            contract_collateral = contract_notional / signal.leverage if signal.leverage > 1 else contract_notional
-
+            contract_sizes = {"ETH/USD:USD": 0.01, "BTC/USD:USD": 0.001}
+            cs = contract_sizes.get(signal.pair, DELTA_CONTRACT_SIZE.get(signal.pair, 0.01))
+            order_amount = float(max(1, round(signal.amount / cs)))  # 0.01 ETH / 0.01 = 1 contract
             logger.info(
-                "[%s] Delta contracts: coin_amount=%.6f → %d contracts "
-                "(contract_size=%.4f, coin_equiv=%.6f, notional=$%.2f, collateral=$%.2f)",
-                signal.pair, signal.amount, contracts,
-                contract_size, coin_equiv, contract_notional, contract_collateral,
+                "[%s] Delta: %.6f coin / %.4f contract_size = %d contracts",
+                signal.pair, signal.amount, cs, int(order_amount),
             )
-            order_amount = float(contracts)  # Delta expects integer as amount
 
         order: dict | None = None
         last_error: Exception | None = None

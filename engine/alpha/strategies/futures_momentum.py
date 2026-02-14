@@ -279,11 +279,10 @@ class FuturesMomentumStrategy(BaseStrategy):
                     leverage=self.leverage,
                     position_type="long",
                     exchange_id="delta",
+                    metadata={"pending_side": "long", "pending_amount": amount},
                 ))
-                self.position_side = "long"
-                self.entry_price = current_price
-                self.entry_amount = amount
-                self.highest_since_entry = current_price
+                # NOTE: position state set in on_fill(), NOT here
+                # This prevents phantom positions when orders fail
 
             # SHORT entry: RSI overbought + MACD bearish crossover
             elif rsi_now > self.RSI_SHORT_ENTRY and macd_crossed_down and config.delta.enable_shorting:
@@ -308,13 +307,42 @@ class FuturesMomentumStrategy(BaseStrategy):
                     leverage=self.leverage,
                     position_type="short",
                     exchange_id="delta",
+                    metadata={"pending_side": "short", "pending_amount": amount},
                 ))
-                self.position_side = "short"
-                self.entry_price = current_price
-                self.entry_amount = amount
-                self.lowest_since_entry = current_price
+                # NOTE: position state set in on_fill(), NOT here
 
         return signals
+
+    # -- Order fill / rejection callbacks -------------------------------------
+
+    def on_fill(self, signal: Signal, order: dict) -> None:
+        """Called by _run_loop when an order fills — NOW safe to track position."""
+        pending_side = signal.metadata.get("pending_side")
+        pending_amount = signal.metadata.get("pending_amount", 0.0)
+        if pending_side:
+            fill_price = order.get("average") or order.get("price") or signal.price
+            filled_amount = order.get("filled") or pending_amount or signal.amount
+            self.position_side = pending_side
+            self.entry_price = fill_price
+            self.entry_amount = filled_amount
+            if pending_side == "long":
+                self.highest_since_entry = fill_price
+            else:
+                self.lowest_since_entry = fill_price
+            self.logger.info(
+                "[%s] Order FILLED — tracking %s position @ $%.2f, amount=%.8f",
+                self.pair, pending_side, fill_price, filled_amount,
+            )
+
+    def on_rejected(self, signal: Signal) -> None:
+        """Called by _run_loop when an order fails — do NOT track position."""
+        pending_side = signal.metadata.get("pending_side")
+        if pending_side:
+            self.logger.warning(
+                "[%s] Order FAILED — NOT tracking %s position (phantom prevention)",
+                self.pair, pending_side,
+            )
+            # Ensure no stale position state (check() did NOT set it, so nothing to undo)
 
     # -- Helpers ---------------------------------------------------------------
 

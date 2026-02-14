@@ -101,8 +101,14 @@ class BaseStrategy(ABC):
                             )
                             if is_opening:
                                 self.risk_manager.record_open(signal)
+                            # Notify strategy that the order filled
+                            self.on_fill(signal, order)
+                        else:
+                            # Order failed or was skipped — notify strategy
+                            self.on_rejected(signal)
                     else:
                         self.logger.info("Risk manager rejected signal: %s", signal.reason)
+                        self.on_rejected(signal)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -116,6 +122,12 @@ class BaseStrategy(ABC):
 
     async def on_stop(self) -> None:
         """Called once when the strategy stops. Override to clean up."""
+
+    def on_fill(self, signal: Signal, order: dict) -> None:
+        """Called when an order fills successfully. Override to update position state."""
+
+    def on_rejected(self, signal: Signal) -> None:
+        """Called when an order fails or is rejected. Override to clean up pending state."""
 
     @abstractmethod
     async def check(self) -> list[Signal]:
