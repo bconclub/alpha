@@ -142,7 +142,9 @@ export function Sidebar() {
             {isConnected ? 'Realtime active' : 'Disconnected'}
           </span>
         </div>
-        <p className="text-[10px] text-zinc-700 mt-1">Alpha v{process.env.APP_VERSION ?? '?'}</p>
+        <p className="text-[10px] text-zinc-700 mt-1">
+          Dashboard v{process.env.APP_VERSION ?? '?'}
+        </p>
       </div>
     </aside>
   );

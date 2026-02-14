@@ -68,10 +68,23 @@ def safe_divide(a: float, b: float, default: float = 0.0) -> float:
 
 
 def get_version() -> str:
-    """Read version from VERSION file (one level up from alpha/)."""
+    """Read engine version from engine/VERSION file."""
     try:
         vfile = Path(__file__).resolve().parent.parent / "VERSION"
         return vfile.read_text().strip()
+    except Exception:
+        return "?.?.?"
+
+
+def get_dashboard_version() -> str:
+    """Read dashboard version from dashboard/VERSION file.
+
+    Path: engine/../dashboard/VERSION (sibling directory).
+    """
+    try:
+        engine_dir = Path(__file__).resolve().parent.parent  # engine/
+        dashboard_version = engine_dir.parent / "dashboard" / "VERSION"
+        return dashboard_version.read_text().strip()
     except Exception:
         return "?.?.?"
 

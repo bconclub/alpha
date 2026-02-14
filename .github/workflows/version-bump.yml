@@ -6,27 +6,69 @@ on:
 
 jobs:
   bump:
-    # Skip if the commit message already contains [skip ci]
+    # Skip if the commit was a version bump itself (prevents infinite loop)
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 2  # Need parent commit to detect changed files
 
-      - name: Bump versions
+      - name: Detect changed paths
+        id: changes
         run: |
-          # Bump dashboard package.json patch version
-          cd dashboard
-          npm version patch --no-git-tag-version
-          cd ..
+          # Compare HEAD with parent commit to find changed files
+          ENGINE_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^engine/' | head -1 || true)
+          DASHBOARD_CHANGED=$(git diff --name-only HEAD~1 HEAD | grep '^dashboard/' | head -1 || true)
+          echo "engine_changed=$([[ -n "$ENGINE_CHANGED" ]] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+          echo "dashboard_changed=$([[ -n "$DASHBOARD_CHANGED" ]] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+          echo "Engine changed: $ENGINE_CHANGED"
+          echo "Dashboard changed: $DASHBOARD_CHANGED"
 
-          # Bump engine VERSION file
+      - name: Bump engine version
+        if: steps.changes.outputs.engine_changed == 'true'
+        run: |
           cd engine
-          CURRENT=$(cat VERSION 2>/dev/null || echo "1.0.0")
+          CURRENT=$(cat VERSION 2>/dev/null || echo "2.0.0")
           IFS='.' read -r major minor patch <<< "$CURRENT"
-          echo "$major.$minor.$((patch + 1))" > VERSION
-          cd ..
+
+          # Increment patch
+          patch=$((patch + 1))
+
+          # Rollover: if patch reaches 10, reset to 0 and increment minor
+          if [ "$patch" -ge 10 ]; then
+            patch=0
+            minor=$((minor + 1))
+          fi
+
+          NEW_VERSION="$major.$minor.$patch"
+          echo "$NEW_VERSION" > VERSION
+          echo "Engine: $CURRENT -> $NEW_VERSION"
+
+      - name: Bump dashboard version
+        if: steps.changes.outputs.dashboard_changed == 'true'
+        run: |
+          cd dashboard
+          CURRENT=$(cat VERSION 2>/dev/null || echo "2.0.0")
+          IFS='.' read -r major minor patch <<< "$CURRENT"
+
+          # Increment patch
+          patch=$((patch + 1))
+
+          # Rollover: if patch reaches 10, reset to 0 and increment minor
+          if [ "$patch" -ge 10 ]; then
+            patch=0
+            minor=$((minor + 1))
+          fi
+
+          NEW_VERSION="$major.$minor.$patch"
+          echo "$NEW_VERSION" > VERSION
+          echo "Dashboard: $CURRENT -> $NEW_VERSION"
+
+          # Also sync package.json version (Vercel reads this)
+          npm version "$NEW_VERSION" --no-git-tag-version --allow-same-version 2>/dev/null || true
 
       - name: Commit version bump
         run: |
