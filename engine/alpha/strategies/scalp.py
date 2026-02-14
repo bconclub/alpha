@@ -352,15 +352,28 @@ class ScalpStrategy(BaseStrategy):
             except Exception:
                 pass
 
+            # Check available balance before sizing
+            available = self.risk_manager.get_available_capital(self._exchange_id)
+            min_balance = 5.50 if self._exchange_id == "binance" else 1.00
+            if available < min_balance:
+                if self._tick_count % 30 == 0:  # Log once every ~5 min, not every tick
+                    self.logger.info(
+                        "[%s] Insufficient %s balance: $%.2f < $%.2f — skipping",
+                        self.pair, self._exchange_id, available, min_balance,
+                    )
+                return signals
+
             exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
             capital = exchange_capital * (self.capital_pct / 100)
+            # Don't size more than available
+            capital = min(capital, available)
             amount = capital / current_price
             if self.is_futures:
                 amount *= self.leverage
 
             self.logger.debug(
-                "[%s] Sizing: %s_capital=$%.2f × %.0f%% = $%.2f → amount=%.8f%s",
-                self.pair, self._exchange_id, exchange_capital, self.capital_pct,
+                "[%s] Sizing: %s_capital=$%.2f, avail=$%.2f × %.0f%% = $%.2f → amount=%.8f%s",
+                self.pair, self._exchange_id, exchange_capital, available, self.capital_pct,
                 capital, amount,
                 f" (×{self.leverage}x leverage)" if self.is_futures else "",
             )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from typing import Any
 
 import ccxt.async_support as ccxt
@@ -40,12 +41,39 @@ class TradeExecutor:
         self.risk_manager = risk_manager              # alpha.risk_manager.RiskManager
         self._min_notional: dict[str, float] = {}     # pair -> min order value
         self._min_amount: dict[str, float] = {}       # pair -> min order qty
+        # Error spam suppression: pair -> (error_key, timestamp)
+        self._last_error_alert: dict[str, tuple[str, float]] = {}
+        self._ERROR_DEDUP_SECONDS = 300  # 5 minutes
 
     def _get_exchange(self, signal: Signal) -> ccxt.Exchange:
         """Return the correct exchange instance for a signal."""
         if signal.exchange_id == "delta" and self.delta_exchange:
             return self.delta_exchange
         return self.exchange  # default: Binance
+
+    async def _get_actual_asset_balance(self, signal: Signal) -> float | None:
+        """Fetch the actual balance of the base asset for exit orders.
+
+        For selling ETH/USDT: returns how much ETH the account holds.
+        For futures reduce_only: returns None (futures use contract amounts).
+        """
+        if signal.reduce_only:
+            return None  # futures — use signal amount directly
+        try:
+            exchange = self._get_exchange(signal)
+            balance = await exchange.fetch_balance()
+            # Base asset: e.g. "ETH" from "ETH/USDT"
+            base = signal.pair.split("/")[0] if "/" in signal.pair else signal.pair
+            free = float(balance.get("free", {}).get(base, 0) or 0)
+            total = float(balance.get("total", {}).get(base, 0) or 0)
+            logger.debug(
+                "[%s] Asset balance: %s free=%.8f, total=%.8f",
+                signal.pair, base, free, total,
+            )
+            return free if free > 0 else total
+        except Exception:
+            logger.warning("[%s] Could not fetch asset balance for exit", signal.pair)
+            return None
 
     async def load_market_limits(
         self, pairs: list[str], delta_pairs: list[str] | None = None,
@@ -197,6 +225,31 @@ class TradeExecutor:
         - On total failure, send a critical Telegram alert (never silent)
         """
         is_exit = self._is_exit_order(signal)
+
+        # For spot exits: use actual asset balance instead of calculated amount
+        if is_exit and signal.exchange_id == "binance" and not signal.reduce_only:
+            actual_balance = await self._get_actual_asset_balance(signal)
+            if actual_balance and actual_balance > 0:
+                if abs(actual_balance - signal.amount) / max(signal.amount, 1e-12) > 0.01:
+                    logger.info(
+                        "[%s] Exit: adjusting amount from %.8f to actual balance %.8f",
+                        signal.pair, signal.amount, actual_balance,
+                    )
+                signal = Signal(
+                    side=signal.side,
+                    price=signal.price,
+                    amount=actual_balance,
+                    order_type=signal.order_type,
+                    reason=signal.reason,
+                    strategy=signal.strategy,
+                    pair=signal.pair,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    leverage=signal.leverage,
+                    position_type=signal.position_type,
+                    reduce_only=signal.reduce_only,
+                    exchange_id=signal.exchange_id,
+                )
 
         # Enforce Binance $5.01 minimum notional for ENTRY orders only
         if not is_exit:
@@ -501,8 +554,20 @@ class TradeExecutor:
             logger.exception("Failed to send trade alert")
 
     async def _notify_error(self, signal: Signal, error: str) -> None:
+        """Send error alert to Telegram, with 5-minute dedup per pair."""
         if self.alerts is None:
             return
+        # Deduplicate: same pair + similar error within 5 minutes → log only
+        error_key = f"{signal.pair}:{type(error).__name__ if isinstance(error, Exception) else str(error)[:50]}"
+        now = time.monotonic()
+        last = self._last_error_alert.get(signal.pair)
+        if last and last[0] == error_key and (now - last[1]) < self._ERROR_DEDUP_SECONDS:
+            logger.debug(
+                "Suppressed duplicate error alert for %s (last sent %.0fs ago)",
+                signal.pair, now - last[1],
+            )
+            return
+        self._last_error_alert[signal.pair] = (error_key, now)
         try:
             await self.alerts.send_error_alert(
                 f"Order failed [{signal.exchange_id}]: {signal.side} {signal.pair} -- {error}"

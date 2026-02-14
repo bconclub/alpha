@@ -75,10 +75,43 @@ class RiskManager:
         )
 
     def get_exchange_capital(self, exchange_id: str) -> float:
-        """Return capital for a specific exchange."""
+        """Return total capital for a specific exchange."""
         if exchange_id == "delta":
             return self.delta_capital
         return self.binance_capital
+
+    def get_available_capital(self, exchange_id: str) -> float:
+        """Return available (unlocked) capital for an exchange.
+
+        Available = total balance - cost of open positions on that exchange.
+        This prevents over-allocating when positions are already open.
+        """
+        total = self.get_exchange_capital(exchange_id)
+        locked = self._locked_capital(exchange_id)
+        available = total - locked
+        return max(available, 0.0)
+
+    def _locked_capital(self, exchange_id: str) -> float:
+        """Sum of cost locked in open positions for a given exchange."""
+        locked = 0.0
+        for p in self.open_positions:
+            if p.exchange != exchange_id:
+                continue
+            cost = p.entry_price * p.amount
+            if p.position_type in ("long", "short") and p.leverage > 1:
+                # Futures: locked capital = collateral (cost / leverage)
+                locked += cost / p.leverage
+            else:
+                # Spot: full cost
+                locked += cost
+        return locked
+
+    def exchange_position_count(self, exchange_id: str) -> int:
+        """Count open positions on a specific exchange."""
+        return sum(1 for p in self.open_positions if p.exchange == exchange_id)
+
+    # Per-exchange position limits
+    MAX_POSITIONS_PER_EXCHANGE = 2
 
     # -- Properties ------------------------------------------------------------
 
@@ -155,17 +188,31 @@ class RiskManager:
     # -- Signal approval -------------------------------------------------------
 
     def approve_signal(self, signal: Signal) -> bool:
-        """Return True if the signal passes all risk checks."""
-        if self.is_paused:
-            logger.warning("Bot is paused: %s -- rejecting %s %s", self._pause_reason, signal.side, signal.pair)
-            return False
+        """Return True if the signal passes all risk checks.
 
+        EXIT orders (reduce_only or spot sell) are ALWAYS approved — we must
+        never block a position close.
+        """
         # Determine if this signal opens a new position
-        # Spot: only "buy" opens. Futures: any non-reduce_only signal opens.
         is_opening = (
             (signal.position_type == "spot" and signal.side == "buy")
             or (signal.position_type in ("long", "short") and not signal.reduce_only)
         )
+        is_exit = not is_opening
+
+        # EXIT orders always approved — never block a close
+        if is_exit:
+            trade_value = signal.price * signal.amount
+            logger.info(
+                "Exit approved (always): %s %s %s %.6f @ $%.2f [%s]",
+                signal.position_type, signal.side, signal.pair,
+                signal.amount, signal.price, signal.exchange_id,
+            )
+            return True
+
+        if self.is_paused:
+            logger.warning("Bot is paused: %s -- rejecting %s %s", self._pause_reason, signal.side, signal.pair)
+            return False
 
         # 1. Daily loss limit
         if self.daily_loss_pct >= self.daily_loss_limit_pct:
@@ -178,34 +225,50 @@ class RiskManager:
             return False
 
         # 3. Max concurrent positions (across ALL pairs/exchanges)
-        if is_opening and len(self.open_positions) >= self.max_concurrent:
+        if len(self.open_positions) >= self.max_concurrent:
             logger.info(
                 "Max concurrent positions (%d) reached -- rejecting %s %s",
                 self.max_concurrent, signal.pair, signal.position_type,
             )
             return False
 
+        # 3b. Max positions per exchange (2 per exchange)
+        ex_count = self.exchange_position_count(signal.exchange_id)
+        if ex_count >= self.MAX_POSITIONS_PER_EXCHANGE:
+            logger.info(
+                "Max positions on %s (%d/%d) reached -- rejecting %s",
+                signal.exchange_id, ex_count, self.MAX_POSITIONS_PER_EXCHANGE, signal.pair,
+            )
+            return False
+
         # 4. Max 1 position per pair
-        if is_opening and self.has_position(signal.pair):
+        if self.has_position(signal.pair):
             logger.info("Already have open position on %s -- rejecting", signal.pair)
             return False
 
-        # 5. Position size limit
-        #    Futures: check COLLATERAL (margin), not notional value.
-        #    Spot: check order value directly.
-        #    Use per-exchange capital so Binance trades size from Binance balance
-        #    and Delta trades size from Delta balance.
+        # 5. Available balance check — don't trade with $0
         trade_value = signal.price * signal.amount
         is_futures = signal.position_type in ("long", "short") and signal.leverage > 1
+        available = self.get_available_capital(signal.exchange_id)
+
+        # Minimum balance thresholds
+        min_balance = 5.50 if signal.exchange_id == "binance" else 1.00
+        if available < min_balance:
+            logger.info(
+                "Insufficient available %s balance: $%.2f < $%.2f — rejecting %s",
+                signal.exchange_id, available, min_balance, signal.pair,
+            )
+            return False
+
+        # 6. Position size limit
         exchange_capital = self.get_exchange_capital(signal.exchange_id)
         if exchange_capital <= 0:
             exchange_capital = self.capital  # fallback to total if not set
         max_value = exchange_capital * (self.max_position_pct / 100)
 
         if is_futures:
-            # Collateral = trade_value (the margin posted). Notional = trade_value * leverage.
             collateral = trade_value
-            if collateral > max_value * 1.05:  # 5% tolerance
+            if collateral > max_value * 1.05:
                 logger.info(
                     "Futures collateral $%.2f exceeds max $%.2f (%.0f%% of $%.2f %s capital) -- rejecting %s",
                     collateral, max_value, self.max_position_pct, exchange_capital,
@@ -213,7 +276,6 @@ class RiskManager:
                 )
                 return False
         else:
-            # Spot: order value checked directly
             if trade_value > max_value * 1.05:
                 logger.info(
                     "Order value $%.2f exceeds max $%.2f (%.0f%% of $%.2f %s capital) -- rejecting %s",
@@ -222,26 +284,26 @@ class RiskManager:
                 )
                 return False
 
-        # 6. Total exposure cap (collateral-based for futures, value-based for spot)
-        if is_opening:
-            # For futures, add collateral; for spot, add order value
-            added_exposure = trade_value  # both cases: collateral = order value
-            new_exposure = self.total_exposure + added_exposure
-            new_exposure_pct = (new_exposure / self.capital) * 100 if self.capital else 0
-            if new_exposure_pct > self.max_total_exposure_pct:
-                logger.info(
-                    "Total exposure would be %.1f%% (cap %.1f%%) -- rejecting %s",
-                    new_exposure_pct, self.max_total_exposure_pct, signal.pair,
-                )
-                return False
+        # 7. Total exposure cap
+        added_exposure = trade_value
+        new_exposure = self.total_exposure + added_exposure
+        new_exposure_pct = (new_exposure / self.capital) * 100 if self.capital else 0
+        if new_exposure_pct > self.max_total_exposure_pct:
+            logger.info(
+                "Total exposure would be %.1f%% (cap %.1f%%) -- rejecting %s",
+                new_exposure_pct, self.max_total_exposure_pct, signal.pair,
+            )
+            return False
 
         notional_str = f" notional=${trade_value * signal.leverage:.2f}" if is_futures else ""
         logger.info(
             "Signal approved: %s %s %s %.6f @ $%.2f (collateral=$%.2f, %dx%s) | "
-            "%s_capital=$%.2f | positions=%d, exposure=%.1f%%, daily_pnl=$%.2f",
+            "%s avail=$%.2f total=$%.2f | positions=%d (%s:%d), exposure=%.1f%%, daily_pnl=$%.2f",
             signal.position_type, signal.side, signal.pair, signal.amount, signal.price,
-            trade_value, signal.leverage, notional_str, signal.exchange_id, exchange_capital,
-            len(self.open_positions), self.total_exposure_pct, self.daily_pnl,
+            trade_value, signal.leverage, notional_str,
+            signal.exchange_id, available, exchange_capital,
+            len(self.open_positions), signal.exchange_id, ex_count,
+            self.total_exposure_pct, self.daily_pnl,
         )
         return True
 
@@ -344,4 +406,8 @@ class RiskManager:
             "is_paused": self.is_paused,
             "pause_reason": self._pause_reason,
             "pairs_with_positions": list(self.pairs_with_positions()),
+            "binance_available": self.get_available_capital("binance"),
+            "delta_available": self.get_available_capital("delta"),
+            "binance_positions": self.exchange_position_count("binance"),
+            "delta_positions": self.exchange_position_count("delta"),
         }
