@@ -9,6 +9,55 @@ Format: `MAJOR.MINOR.PATCH`
 
 ---
 
+## v2.0.0 — 2026-02-15 — Delta Scalping Agent
+
+**FULL REFOCUS: Delta-only, aggressive momentum scalping.**
+
+### Architecture
+- **Delta-only mode**: Disabled ALL Binance trading (kept as fallback exchange reference)
+- **SOUL.md**: Bot identity document read on startup, guides behavior
+- **Grid strategy removed**: No longer used
+- **Binance dust cleanup**: All Binance open trades auto-closed on startup
+
+### Scalp Strategy Rewrite
+- **3-second ticks** (was 5s) — faster reaction to momentum
+- **1.0% TP / 0.50% SL** (2:1 R/R at 20x leverage)
+- **Trailing stop**: activate at 0.60%, trail at 0.30%
+- **Profit lock**: SL moves to breakeven after +0.50% — winners never become losers
+- **15-minute timeout** (was 45 min) — don't hold forever
+- **NEVER IDLE**: If no signal for 5 min, force entry on EMA slope direction
+- **60-second momentum detection**: 0.10% price move in 60s triggers entry
+- **ONE signal is enough**: RSI extreme, volume spike, BB breakout, acceleration, or 60s momentum
+- **Immediate re-entry**: After profitable exit, hunt for next trade instantly
+
+### Leverage & Position Sizing
+- **20x leverage** (was 5x) on Delta futures
+- **3 contracts per trade** ($3.12 collateral at 20x)
+- **Max 3 concurrent positions** ($9.36 total collateral)
+
+### Critical P&L Fix
+- **Fixed**: P&L calculation for Delta futures — now correctly multiplies by `contract_size`
+  - 1 ETH contract = 0.01 ETH, not 1 ETH
+  - Formula: `pnl = (exit - entry) × contract_size × contracts`
+  - Fixed in 4 places: `_close_trade_in_db`, `_open_trade_in_db`, `_notify_trade`, `_record_scalp_result`
+- **Fixed**: Retroactive SQL migration to correct all existing trades in DB
+- **Fixed**: Binance dust trades zeroed out (pnl=0, never properly closed)
+
+### Daily Expiry Awareness
+- **New**: Delta India daily contracts expire at 5:30 PM IST
+- **New**: No new entries within 30 min of expiry (5:00 PM IST)
+- **New**: Force close all positions 5 min before expiry (5:25 PM IST)
+
+### Position Restore
+- **Improved**: Uses Delta `fetch_positions()` for real contract verification on restart
+- **New**: Discovers positions on exchange not in DB (creates records)
+- **New**: Injects restored position state into strategy instances
+
+### Other
+- **New**: EXIT FAILED alert suppression — only alerts once per pair (no spam)
+- **Updated**: Startup banner shows version, leverage, and soul reference
+- **Removed**: numpy dependency (no longer needed)
+
 ## v1.1.0 — 2026-02-15
 - **New**: Pattern-based scalp entry system (8 patterns, any-one-triggers)
 - **New**: Version tracking system (VERSION file, CHANGELOG, auto-bump)

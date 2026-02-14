@@ -543,9 +543,15 @@ class TradeExecutor:
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
-            notional = fill_price * filled_amount
+
+            # For Delta: filled_amount is in contracts. Convert to coin for notional calc.
+            coin_qty = filled_amount
+            if signal.exchange_id == "delta":
+                contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
+                coin_qty = filled_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
+
+            notional = fill_price * coin_qty
             # Cost = collateral (actual capital at risk)
-            # For futures: amount is leveraged, so collateral = notional / leverage
             is_futures = signal.leverage > 1 and signal.position_type in ("long", "short")
             cost = notional / signal.leverage if is_futures else notional
 
@@ -616,20 +622,25 @@ class TradeExecutor:
             trade_leverage = open_trade.get("leverage", signal.leverage) or 1
 
             # PnL calculation:
-            # LONG/spot buy-then-sell: (exit - entry) * amount
-            # SHORT sell-then-buy: (entry - exit) * amount
-            # For futures, entry_amount is the LEVERAGED amount (notional / price)
-            # so the P&L = price_diff * leveraged_amount = actual USD profit
+            # LONG/spot buy-then-sell: (exit - entry) * coin_amount
+            # SHORT sell-then-buy: (entry - exit) * coin_amount
+            #
+            # IMPORTANT: For Delta futures, entry_amount is in CONTRACTS (e.g. 1),
+            # not coin amount (e.g. 0.01 ETH). Must convert back using contract_size.
+            coin_amount = entry_amount
+            exchange_id = open_trade.get("exchange", signal.exchange_id)
+            if exchange_id == "delta":
+                contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
+                coin_amount = entry_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
+
             if position_type in ("long", "spot"):
-                pnl = (fill_price - entry_price) * entry_amount
+                pnl = (fill_price - entry_price) * coin_amount
             else:  # short
-                pnl = (entry_price - fill_price) * entry_amount
+                pnl = (entry_price - fill_price) * coin_amount
 
             # P&L percentage is against COLLATERAL (actual capital at risk)
             # For futures: collateral = notional / leverage
-            # entry_cost field stores collateral for new trades; for old trades it
-            # may store notional — use leverage to derive collateral either way.
-            notional_cost = entry_price * entry_amount
+            notional_cost = entry_price * coin_amount
             if trade_leverage > 1:
                 collateral = notional_cost / trade_leverage
             else:
@@ -666,7 +677,12 @@ class TradeExecutor:
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
-            value = fill_price * filled_amount
+            # For Delta: amount is in contracts, convert to coin for value display
+            coin_qty = filled_amount
+            if signal.exchange_id == "delta":
+                contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
+                coin_qty = filled_amount * contract_size
+            value = fill_price * coin_qty
             await self.alerts.send_trade_alert(
                 side=signal.side,
                 pair=signal.pair,

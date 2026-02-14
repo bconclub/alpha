@@ -87,20 +87,32 @@ class AlphaBot:
 
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
+        from pathlib import Path
         from alpha.utils import get_version
         version = get_version()
+
+        # Load soul document
+        soul_path = Path(__file__).resolve().parent.parent / "SOUL.md"
+        if soul_path.exists():
+            soul_lines = soul_path.read_text().strip().splitlines()
+            for line in soul_lines[:3]:
+                if line.strip():
+                    logger.info("  %s", line.strip().lstrip("#").strip())
+
         logger.info("=" * 60)
-        logger.info("  ALPHA BOT v%s -- Starting up", version)
-        logger.info("  Binance pairs: %s", ", ".join(self.pairs))
-        if self.delta_pairs:
-            logger.info("  Delta pairs:   %s", ", ".join(self.delta_pairs))
-        logger.info("  Capital: $%.2f", config.trading.starting_capital)
+        logger.info("  ALPHA v%s — Delta Scalping Agent", version)
+        logger.info("  DELTA ONLY — %s, %dx leverage",
+                     ", ".join(self.delta_pairs), config.delta.leverage)
+        logger.info("  Soul: Momentum is everything. Speed wins. Never idle.")
         logger.info("=" * 60)
 
         # Connect external services
         await self._init_exchanges()
         await self.db.connect()
         await self.alerts.connect()
+
+        # Mark ALL Binance open trades as closed (dust, unsellable)
+        await self._close_all_binance_trades()
 
         # Restore state from DB if available
         await self._restore_state()
@@ -118,7 +130,7 @@ class AlphaBot:
 
         self.risk_manager.record_close = _tracked_record_close  # type: ignore[assignment]
 
-        # Build components
+        # Build components — Delta only (Binance kept as fallback exchange reference)
         self.executor = TradeExecutor(
             self.binance,  # type: ignore[arg-type]
             db=self.db,
@@ -126,51 +138,27 @@ class AlphaBot:
             delta_exchange=self.delta,
             risk_manager=self.risk_manager,
         )
-        self.analyzer = MarketAnalyzer(self.binance, pair=self.pairs[0])  # type: ignore[arg-type]
+
+        # No Binance analyzer — Delta only
+        self.pairs = []  # clear Binance pairs entirely
+
         if self.delta:
             self.delta_analyzer = MarketAnalyzer(
                 self.delta, pair=self.delta_pairs[0] if self.delta_pairs else None,
             )
         self.selector = StrategySelector(
             db=self.db,
-            arb_enabled=self.kucoin is not None,
+            arb_enabled=False,
             futures_pairs=set(self.delta_pairs) if self.delta else None,
         )
 
-        # Load minimum order sizes for all exchanges
+        # Load Delta market limits only
         await self.executor.load_market_limits(
-            self.pairs,
+            [],  # no Binance pairs
             delta_pairs=self.delta_pairs if self.delta else None,
         )
 
-        # Check Binance balance — disable Binance strategies if < $5 (dust only)
-        binance_enabled = True
-        try:
-            binance_check = await self._fetch_portfolio_usd(self.binance)
-            if binance_check is not None and binance_check < 5.0:
-                logger.warning(
-                    "Binance balance $%.2f — Binance strategies disabled (dust only)",
-                    binance_check,
-                )
-                binance_enabled = False
-        except Exception:
-            pass
-
-        # Register strategies per Binance pair (only if balance is sufficient)
-        if binance_enabled:
-            for pair in self.pairs:
-                self._strategies[pair] = {
-                    StrategyName.MOMENTUM: MomentumStrategy(pair, self.executor, self.risk_manager),
-                    StrategyName.ARBITRAGE: ArbitrageStrategy(
-                        pair, self.executor, self.risk_manager, self.kucoin,
-                    ),
-                }
-                self._active_strategies[pair] = None
-        else:
-            # Clear Binance pairs so the bot doesn't try to analyze/trade them
-            self.pairs = []
-
-        # Register strategies per Delta pair
+        # Register strategies — Delta only
         if self.delta:
             for pair in self.delta_pairs:
                 self._strategies[pair] = {
@@ -181,14 +169,7 @@ class AlphaBot:
                 }
                 self._active_strategies[pair] = None
 
-        # Register scalp overlay (Binance only if enabled, Delta always)
-        if binance_enabled:
-            for pair in self.pairs:
-                self._scalp_strategies[pair] = ScalpStrategy(
-                    pair, self.executor, self.risk_manager,
-                    exchange=self.binance,
-                    is_futures=False,
-                )
+        # Register scalp overlay — Delta only
         if self.delta:
             for pair in self.delta_pairs:
                 self._scalp_strategies[pair] = ScalpStrategy(
@@ -241,8 +222,8 @@ class AlphaBot:
 
         # Keep running
         logger.info(
-            "Bot running -- %d Binance pairs + %d Delta pairs -- press Ctrl+C to stop",
-            len(self.pairs), len(self.delta_pairs) if self.delta else 0,
+            "Bot running — DELTA ONLY — %d pairs, %dx leverage — Ctrl+C to stop",
+            len(self.delta_pairs) if self.delta else 0, config.delta.leverage,
         )
         try:
             while self._running:
@@ -758,6 +739,26 @@ class AlphaBot:
             logger.exception("Failed to handle command %d", cmd_id)
 
         await self.db.mark_command_executed(cmd_id, result_msg)
+
+    async def _close_all_binance_trades(self) -> None:
+        """Mark all open Binance trades as closed — they're unsellable dust."""
+        try:
+            open_trades = await self.db.get_all_open_trades()
+            binance_trades = [t for t in open_trades if t.get("exchange") == "binance"]
+            if binance_trades:
+                for trade in binance_trades:
+                    trade_id = trade.get("id")
+                    if trade_id:
+                        await self.db.update_trade(trade_id, {
+                            "status": "closed",
+                            "closed_at": iso_now(),
+                            "reason": "dust_unsellable_delta_only_mode",
+                        })
+                logger.info(
+                    "Closed %d Binance dust trades (Delta-only mode)", len(binance_trades),
+                )
+        except Exception:
+            logger.exception("Failed to close Binance trades")
 
     async def _restore_state(self) -> None:
         """Restore capital, state, and open positions from last saved status.

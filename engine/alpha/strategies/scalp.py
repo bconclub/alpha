@@ -1,39 +1,42 @@
-"""Momentum scalping strategy — spot momentum, get in, get out.
+"""Alpha v2.0 — Aggressive momentum scalping. Get in, get out.
 
-Core principle: detect momentum, jump on it, ride it, exit fast.
-Runs every 5 seconds. ONE strong condition is enough to enter.
+NEVER IDLE. Every second without a position is money left on the table.
+Runs every 3 seconds. ONE condition is enough to enter. Follow momentum.
 
-Entry — Momentum detection:
-  1. Price acceleration: current candle faster than last 3 avg
-  2. Volume confirmation: current volume > 1.5x recent avg
-  3. RSI extreme: RSI < 30 or > 70 = instant entry
-  4. BB breakout: price breaks outside Bollinger Bands
-  Direction: FOLLOW the momentum (not fade it)
-    - Price up + volume = LONG
-    - Price down + volume = SHORT
+Entry — See momentum? Get in:
+  1. 60s momentum > 0.10% → enter direction
+  2. RSI < 35 or > 65 → mean reversion
+  3. Volume > 2x average → enter candle direction
+  4. BB breakout → enter direction
+  5. Price acceleration > 1.5x avg → enter direction
+  If NONE trigger for 5 minutes → force entry on EMA slope
 
-Exit — Get out fast:
-  - TP: 1.5% (= 30% capital at 20x)
-  - SL: 0.75% (= 15% capital at 20x, liq at ~5%)
-  - Trailing: activate 0.80%, trail 0.40%
-  - Profit lock: if +1.0%, move SL to breakeven
-  - Timeout: 30 min max
-  - Risk/reward: 2:1 — need 34% win rate to profit
+Exit — Take the money:
+  - TP: 1.0% (= 20% capital at 20x)
+  - SL: 0.50% (= 10% capital at 20x, liq at ~5%)
+  - Trailing: activate 0.60%, trail 0.30%
+  - Profit lock: at +0.50%, SL moves to breakeven
+  - Timeout: 15 min max
+  - On profitable exit: immediately hunt for next trade
 
 Leverage: 20x on Delta futures
-Position size: 2 contracts per trade ($2.08 collateral)
-Max concurrent: 3 positions
-Tick speed: 5 seconds
+Position size: 3 contracts ($3.12 collateral at 20x)
+Max concurrent: 3 positions ($9.36 total collateral)
+Tick speed: 3 seconds
 """
 
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Any
 
 import ccxt.async_support as ccxt
 import pandas as pd
 import ta
+
+# IST timezone offset (UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 from alpha.config import config
 from alpha.strategies.base import BaseStrategy, Signal, StrategyName
@@ -54,38 +57,46 @@ class ScalpStrategy(BaseStrategy):
     """
 
     name = StrategyName.SCALP
-    check_interval_sec = 5  # 5 second ticks — fast momentum hunting
+    check_interval_sec = 3  # 3 second ticks — aggressive
 
     # ── Exit thresholds (2:1 R/R) ─────────────────────────────────────────
-    TAKE_PROFIT_PCT = 1.5         # 1.5% price move (30% capital at 20x)
-    STOP_LOSS_PCT = 0.75          # 0.75% price move (15% capital at 20x)
-    TRAILING_ACTIVATE_PCT = 0.80  # start trailing after 0.80%
-    TRAILING_DISTANCE_PCT = 0.40  # trail at 0.40% from high/low
-    PROFIT_LOCK_PCT = 1.0         # move SL to breakeven after +1.0%
-    MAX_HOLD_SECONDS = 30 * 60    # 30 minutes max
-    FLATLINE_SECONDS = 15 * 60    # close if flat for 15 min
-    FLATLINE_MIN_MOVE_PCT = 0.1   # "flat" means < 0.1% total move
+    TAKE_PROFIT_PCT = 1.0         # 1.0% price move (20% capital at 20x)
+    STOP_LOSS_PCT = 0.50          # 0.50% price move (10% capital at 20x)
+    TRAILING_ACTIVATE_PCT = 0.60  # start trailing after 0.60%
+    TRAILING_DISTANCE_PCT = 0.30  # trail at 0.30% from high/low
+    PROFIT_LOCK_PCT = 0.50        # move SL to breakeven after +0.50%
+    MAX_HOLD_SECONDS = 15 * 60    # 15 minutes max — don't hold forever
+    FLATLINE_SECONDS = 10 * 60    # close if flat for 10 min
+    FLATLINE_MIN_MOVE_PCT = 0.05  # "flat" means < 0.05% total move
 
     # ── Momentum thresholds ──────────────────────────────────────────────
-    RSI_EXTREME_LONG = 30         # instant long entry
-    RSI_EXTREME_SHORT = 70        # instant short entry
-    VOL_SPIKE_RATIO = 1.5         # volume > 1.5x average
-    ACCEL_MIN_PCT = 0.05          # minimum candle move to count as momentum
-    ACCEL_MULTIPLIER = 1.5        # current candle must be 1.5x avg of last 3
+    RSI_EXTREME_LONG = 35         # RSI < 35 = mean reversion long
+    RSI_EXTREME_SHORT = 65        # RSI > 65 = mean reversion short
+    VOL_SPIKE_RATIO = 2.0         # volume > 2x average
+    ACCEL_MIN_PCT = 0.03          # minimum candle move for momentum
+    ACCEL_MULTIPLIER = 1.5        # current candle 1.5x avg → momentum
+    MOMENTUM_60S_PCT = 0.20       # 0.2% move in 60s = momentum
 
     # ── Position sizing ───────────────────────────────────────────────────
-    CAPITAL_PCT_SPOT = 50.0       # 50% for spot (Binance $5 min)
-    CAPITAL_PCT_FUTURES = 30.0    # 30% for futures (leverage handles the rest)
-    TARGET_CONTRACTS = 2          # 2 contracts per trade
+    CAPITAL_PCT_SPOT = 50.0       # unused in Delta-only mode
+    CAPITAL_PCT_FUTURES = 30.0    # 30% of exchange capital
+    TARGET_CONTRACTS = 3          # 3 contracts per trade ($3.12 collateral at 20x)
     MAX_CONTRACTS = 3             # hard cap per trade
-    MAX_POSITIONS = 3             # max concurrent positions
+    MAX_POSITIONS = 3             # max 3 concurrent ($9.36 max collateral)
     MAX_SPREAD_PCT = 0.15         # skip if spread > 0.15%
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
-    MAX_TRADES_PER_HOUR = 30
+    MAX_TRADES_PER_HOUR = 40
     CONSECUTIVE_LOSS_PAUSE = 5    # pause after 5 consecutive losses
-    PAUSE_DURATION_SEC = 5 * 60   # 5 minutes pause (was 15 — get back faster)
+    PAUSE_DURATION_SEC = 3 * 60   # 3 minutes pause — get back fast
     DAILY_LOSS_LIMIT_PCT = 5.0
+
+    # ── Daily expiry (Delta India) ──────────────────────────────────────
+    # Delta India daily contracts expire at 5:30 PM IST
+    EXPIRY_HOUR_IST = 17          # 5 PM
+    EXPIRY_MINUTE_IST = 30        # 5:30 PM
+    NO_NEW_ENTRY_MINUTES = 30     # stop opening 30 min before expiry (5:00 PM)
+    FORCE_CLOSE_MINUTES = 5       # force close 5 min before expiry (5:25 PM)
 
     def __init__(
         self,
@@ -118,6 +129,10 @@ class ScalpStrategy(BaseStrategy):
         self._paused_until: float = 0.0
         self._daily_scalp_loss: float = 0.0
 
+        # Idle tracking — force entry if idle too long
+        self._last_position_exit: float = 0.0  # when we last exited or started
+        self.FORCE_ENTRY_AFTER_SEC = 5 * 60     # force entry after 5 min idle
+
         # Stats for hourly summary
         self.hourly_wins: int = 0
         self.hourly_losses: int = 0
@@ -135,6 +150,7 @@ class ScalpStrategy(BaseStrategy):
             self.entry_amount = 0.0
         self._tick_count = 0
         self._last_heartbeat = time.monotonic()
+        self._last_position_exit = time.monotonic()  # start idle timer
         tag = f"{self.leverage}x futures" if self.is_futures else "spot"
         pos_info = ""
         if self.in_position:
@@ -175,6 +191,19 @@ class ScalpStrategy(BaseStrategy):
                     self.pair, self._consecutive_losses, remaining,
                 )
             return signals
+
+        # ── Daily expiry check (5:30 PM IST) — block new entries ─────────
+        _expiry_no_new = False
+        _expiry_force_close = False
+        _mins_to_expiry = 999.0
+        if self.is_futures:
+            _expiry_no_new, _expiry_force_close, _mins_to_expiry = self._is_near_expiry()
+            if _expiry_no_new and not self.in_position:
+                if self._tick_count % 20 == 0:  # log every ~60s
+                    self.logger.info(
+                        "[%s] EXPIRY in %.0f min — no new entries", self.pair, _mins_to_expiry,
+                    )
+                return signals
 
         # ── Daily loss limit ─────────────────────────────────────────────
         exchange_cap = self.risk_manager.get_exchange_capital(self._exchange_id)
@@ -225,6 +254,15 @@ class ScalpStrategy(BaseStrategy):
             sum(abs(c) for c in candle_changes[:-1]) / max(len(candle_changes) - 1, 1)
         )
 
+        # 60-second momentum: price change over last ~1 minute (1 candle on 1m timeframe)
+        price_60s_ago = float(close.iloc[-2]) if len(close) >= 2 else current_price
+        momentum_60s = ((current_price - price_60s_ago) / price_60s_ago * 100) if price_60s_ago > 0 else 0
+
+        # 5-minute EMA slope for forced entry direction
+        ema_5 = float(close.ewm(span=5, adjust=False).mean().iloc[-1])
+        ema_5_prev = float(close.ewm(span=5, adjust=False).mean().iloc[-2]) if len(close) >= 2 else ema_5
+        ema_slope = "up" if ema_5 > ema_5_prev else "down"
+
         # ── Heartbeat every 60 seconds ───────────────────────────────────
         if now - self._last_heartbeat >= 60:
             self._last_heartbeat = now
@@ -249,6 +287,17 @@ class ScalpStrategy(BaseStrategy):
 
         # ── In position: check exit ──────────────────────────────────────
         if self.in_position:
+            # Force close before daily expiry (5 min before 5:30 PM IST)
+            if _expiry_force_close:
+                pnl_pct = self._calc_pnl_pct(current_price)
+                self.logger.warning(
+                    "[%s] EXPIRY in %.1f min — FORCE CLOSING %s @ $%.2f (PnL=%+.2f%%)",
+                    self.pair, _mins_to_expiry, self.position_side, current_price, pnl_pct,
+                )
+                return self._do_exit(
+                    current_price, pnl_pct, self.position_side or "long",
+                    "EXPIRY", time.monotonic() - self.entry_time,
+                )
             return self._check_exits(current_price, rsi_now)
 
         # ── No position: detect momentum ─────────────────────────────────
@@ -292,15 +341,37 @@ class ScalpStrategy(BaseStrategy):
             return signals
 
         # ── Detect momentum ──────────────────────────────────────────────
+        idle_seconds = int(now - self._last_position_exit)
         entry = self._detect_momentum(
             current_price, rsi_now, vol_ratio,
             current_candle_pct, avg_candle_pct,
-            bb_upper, bb_lower,
+            bb_upper, bb_lower, momentum_60s,
         )
 
         if entry is not None:
             side, reason = entry
             signals.append(self._build_entry_signal(side, current_price, amount, reason))
+        elif idle_seconds >= self.FORCE_ENTRY_AFTER_SEC:
+            # IDLE TOO LONG — force entry in dominant direction
+            side = "long" if ema_slope == "up" else "short"
+            can_short = self.is_futures and config.delta.enable_shorting
+            if side == "short" and not can_short:
+                side = "long"  # can't short on spot, force long
+            reason = (
+                f"IDLE {idle_seconds}s — forcing {side.upper()} based on "
+                f"EMA slope ({ema_slope}), momentum={momentum_60s:+.3f}%"
+            )
+            self.logger.info("[%s] %s", self.pair, reason)
+            signals.append(self._build_entry_signal(side, current_price, amount, reason))
+        else:
+            # Log idle status periodically (every 30s)
+            if self._tick_count % 10 == 0:
+                self.logger.info(
+                    "[%s] HUNTING — no signal (%ds idle) | $%.2f | "
+                    "m60s=%+.3f%% vol=%.1fx RSI=%.1f",
+                    self.pair, idle_seconds, current_price,
+                    momentum_60s, vol_ratio, rsi_now,
+                )
 
         return signals
 
@@ -317,6 +388,7 @@ class ScalpStrategy(BaseStrategy):
         avg_candle_pct: float,
         bb_upper: float,
         bb_lower: float,
+        momentum_60s: float = 0.0,
     ) -> tuple[str, str] | None:
         """Detect momentum. Returns (side, reason) or None.
 
@@ -324,68 +396,52 @@ class ScalpStrategy(BaseStrategy):
         """
         can_short = self.is_futures and config.delta.enable_shorting
 
-        # ── 1. RSI Extreme — instant entry, strongest signal ─────────────
+        # ── 1. 60-second momentum — price moved 0.10%+ in 60s ───────────
+        if abs(momentum_60s) >= self.MOMENTUM_60S_PCT:
+            if momentum_60s > 0:
+                return ("long",
+                        f"MOMENTUM: {momentum_60s:+.3f}% in 60s → LONG")
+            elif can_short:
+                return ("short",
+                        f"MOMENTUM: {momentum_60s:+.3f}% in 60s → SHORT")
+
+        # ── 2. RSI Extreme — mean reversion entry ────────────────────────
         if rsi_now < self.RSI_EXTREME_LONG:
             return ("long",
-                    f"MOMENTUM: RSI extreme {rsi_now:.1f} — oversold bounce")
+                    f"MOMENTUM: RSI {rsi_now:.1f} < {self.RSI_EXTREME_LONG} → oversold LONG")
         if rsi_now > self.RSI_EXTREME_SHORT and can_short:
             return ("short",
-                    f"MOMENTUM: RSI extreme {rsi_now:.1f} — overbought fade")
+                    f"MOMENTUM: RSI {rsi_now:.1f} > {self.RSI_EXTREME_SHORT} → overbought SHORT")
 
-        # ── 2. Price acceleration + volume — core momentum signal ────────
-        is_accelerating = (
-            abs(current_candle_pct) >= self.ACCEL_MIN_PCT
-            and avg_candle_pct > 0
-            and abs(current_candle_pct) >= avg_candle_pct * self.ACCEL_MULTIPLIER
-        )
-        has_volume = vol_ratio >= self.VOL_SPIKE_RATIO
-
-        if is_accelerating and has_volume:
+        # ── 3. Volume spike — big volume = enter candle direction ────────
+        if vol_ratio >= self.VOL_SPIKE_RATIO and abs(current_candle_pct) >= self.ACCEL_MIN_PCT:
             if current_candle_pct > 0:
                 return ("long",
-                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
-                        f"({self.ACCEL_MULTIPLIER}x avg {avg_candle_pct:.3f}%), "
-                        f"Vol {vol_ratio:.1f}x")
+                        f"MOMENTUM: Vol {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → LONG")
             elif can_short:
                 return ("short",
-                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
-                        f"({self.ACCEL_MULTIPLIER}x avg {avg_candle_pct:.3f}%), "
-                        f"Vol {vol_ratio:.1f}x")
+                        f"MOMENTUM: Vol {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → SHORT")
 
-        # ── 3. Price acceleration alone (strong move) ────────────────────
-        strong_accel = (
-            abs(current_candle_pct) >= self.ACCEL_MIN_PCT * 2  # 0.10% min
-            and avg_candle_pct > 0
-            and abs(current_candle_pct) >= avg_candle_pct * 2.0  # 2x avg
-        )
-        if strong_accel:
-            if current_candle_pct > 0:
-                return ("long",
-                        f"MOMENTUM: strong accel {current_candle_pct:+.3f}% "
-                        f"(2x avg {avg_candle_pct:.3f}%)")
-            elif can_short:
-                return ("short",
-                        f"MOMENTUM: strong accel {current_candle_pct:+.3f}% "
-                        f"(2x avg {avg_candle_pct:.3f}%)")
-
-        # ── 4. Volume spike alone (big volume = something happening) ─────
-        if vol_ratio >= 2.0 and abs(current_candle_pct) >= self.ACCEL_MIN_PCT:
-            if current_candle_pct > 0:
-                return ("long",
-                        f"MOMENTUM: volume spike {vol_ratio:.1f}x, "
-                        f"candle {current_candle_pct:+.3f}%")
-            elif can_short:
-                return ("short",
-                        f"MOMENTUM: volume spike {vol_ratio:.1f}x, "
-                        f"candle {current_candle_pct:+.3f}%")
-
-        # ── 5. BB Breakout — price outside bands = momentum confirmed ────
+        # ── 4. BB Breakout — price outside bands ─────────────────────────
         if price > bb_upper:
             return ("long",
-                    f"MOMENTUM: BB breakout (${price:.2f} > upper ${bb_upper:.2f})")
+                    f"MOMENTUM: BB breakout ${price:.2f} > ${bb_upper:.2f} → LONG")
         if price < bb_lower and can_short:
             return ("short",
-                    f"MOMENTUM: BB breakdown (${price:.2f} < lower ${bb_lower:.2f})")
+                    f"MOMENTUM: BB breakdown ${price:.2f} < ${bb_lower:.2f} → SHORT")
+
+        # ── 5. Price acceleration (current candle faster than avg) ───────
+        if (abs(current_candle_pct) >= self.ACCEL_MIN_PCT
+                and avg_candle_pct > 0
+                and abs(current_candle_pct) >= avg_candle_pct * self.ACCEL_MULTIPLIER):
+            if current_candle_pct > 0:
+                return ("long",
+                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
+                        f"({self.ACCEL_MULTIPLIER:.1f}x avg) → LONG")
+            elif can_short:
+                return ("short",
+                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
+                        f"({self.ACCEL_MULTIPLIER:.1f}x avg) → SHORT")
 
         return None
 
@@ -498,6 +554,36 @@ class ScalpStrategy(BaseStrategy):
         elif self.position_side == "short":
             return ((self.entry_price - current_price) / self.entry_price) * 100
         return 0.0
+
+    def _minutes_to_expiry(self) -> float:
+        """Minutes until next daily expiry (5:30 PM IST).
+
+        Delta India daily contracts expire at 17:30 IST.
+        Returns negative if already past today's expiry (next is tomorrow).
+        """
+        now_ist = datetime.now(IST)
+        expiry_today = now_ist.replace(
+            hour=self.EXPIRY_HOUR_IST,
+            minute=self.EXPIRY_MINUTE_IST,
+            second=0, microsecond=0,
+        )
+        diff = (expiry_today - now_ist).total_seconds() / 60.0
+        return diff  # positive = before expiry, negative = after expiry
+
+    def _is_near_expiry(self) -> tuple[bool, bool, float]:
+        """Check if we're near daily expiry.
+
+        Returns: (no_new_entries, force_close, minutes_left)
+        - no_new_entries: True if within 30 min of expiry (don't open new)
+        - force_close: True if within 5 min of expiry (close everything)
+        - minutes_left: minutes until expiry
+        """
+        mins = self._minutes_to_expiry()
+        if mins < 0:
+            return False, False, mins  # past today's expiry
+        no_new = mins <= self.NO_NEW_ENTRY_MINUTES
+        force = mins <= self.FORCE_CLOSE_MINUTES
+        return no_new, force, mins
 
     # ======================================================================
     # POSITION SIZING — 2 contracts target, 3 max
@@ -661,8 +747,14 @@ class ScalpStrategy(BaseStrategy):
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
-        # Gross P&L
-        notional = self.entry_price * self.entry_amount
+        # Convert contracts to coin amount for correct P&L
+        coin_amount = self.entry_amount
+        if self.is_futures:
+            from alpha.trade_executor import DELTA_CONTRACT_SIZE
+            contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0.01)
+            coin_amount = self.entry_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
+
+        notional = self.entry_price * coin_amount
         gross_pnl = notional * (pnl_pct / 100)
 
         # Fees: ~0.05% per side on Delta, ~0.1% on Binance
@@ -706,6 +798,8 @@ class ScalpStrategy(BaseStrategy):
         self.entry_price = 0.0
         self.entry_amount = 0.0
         self._breakeven_locked = False
+        # Reset idle timer — immediately start hunting for next trade
+        self._last_position_exit = time.monotonic()
 
     # ======================================================================
     # STATS
