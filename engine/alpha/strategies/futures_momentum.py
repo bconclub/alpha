@@ -213,7 +213,7 @@ class FuturesMomentumStrategy(BaseStrategy):
                 self.RSI_LONG_ENTRY, self.RSI_SHORT_ENTRY,
             )
 
-            capital = self.risk_manager.capital * (config.trading.max_position_pct / 100)
+            capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
             amount = (capital / current_price) * self.leverage
 
             # LONG entry: RSI oversold + MACD bullish crossover
@@ -276,7 +276,7 @@ class FuturesMomentumStrategy(BaseStrategy):
 
     def _close_long_signal(self, price: float, reason: str) -> Signal:
         """Generate a signal to close a long position (sell to close)."""
-        capital = self.risk_manager.capital * (config.trading.max_position_pct / 100)
+        capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
         amount = (capital / price) * self.leverage
         return Signal(
             side="sell",
@@ -294,7 +294,7 @@ class FuturesMomentumStrategy(BaseStrategy):
 
     def _close_short_signal(self, price: float, reason: str) -> Signal:
         """Generate a signal to close a short position (buy to close)."""
-        capital = self.risk_manager.capital * (config.trading.max_position_pct / 100)
+        capital = self.risk_manager.get_exchange_capital("delta") * (config.trading.max_position_pct / 100)
         amount = (capital / price) * self.leverage
         return Signal(
             side="buy",

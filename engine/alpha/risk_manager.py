@@ -51,12 +51,34 @@ class RiskManager:
         self.daily_loss_limit_pct = config.trading.max_loss_daily_pct
         self.per_trade_sl_pct = config.trading.per_trade_stop_loss_pct
 
+        # Per-exchange capital: strategies size off their own exchange balance
+        self.binance_capital: float = 0.0
+        self.delta_capital: float = 0.0
+
         self.open_positions: list[Position] = []
         self.daily_pnl: float = 0.0
         self.daily_pnl_by_pair: dict[str, float] = {}
         self.trade_results: list[bool] = []  # True=win, False=loss (last N)
         self.is_paused = False
         self._pause_reason: str = ""
+
+    def update_exchange_balances(self, binance: float | None, delta: float | None) -> None:
+        """Update per-exchange capital from live balance fetches."""
+        if binance is not None:
+            self.binance_capital = binance
+        if delta is not None:
+            self.delta_capital = delta
+        self.capital = self.binance_capital + self.delta_capital
+        logger.info(
+            "Balances updated: Binance=$%.2f, Delta=$%.2f, Total=$%.2f",
+            self.binance_capital, self.delta_capital, self.capital,
+        )
+
+    def get_exchange_capital(self, exchange_id: str) -> float:
+        """Return capital for a specific exchange."""
+        if exchange_id == "delta":
+            return self.delta_capital
+        return self.binance_capital
 
     # -- Properties ------------------------------------------------------------
 
@@ -171,25 +193,32 @@ class RiskManager:
         # 5. Position size limit
         #    Futures: check COLLATERAL (margin), not notional value.
         #    Spot: check order value directly.
+        #    Use per-exchange capital so Binance trades size from Binance balance
+        #    and Delta trades size from Delta balance.
         trade_value = signal.price * signal.amount
         is_futures = signal.position_type in ("long", "short") and signal.leverage > 1
-        max_value = self.capital * (self.max_position_pct / 100)
+        exchange_capital = self.get_exchange_capital(signal.exchange_id)
+        if exchange_capital <= 0:
+            exchange_capital = self.capital  # fallback to total if not set
+        max_value = exchange_capital * (self.max_position_pct / 100)
 
         if is_futures:
             # Collateral = trade_value (the margin posted). Notional = trade_value * leverage.
             collateral = trade_value
             if collateral > max_value * 1.05:  # 5% tolerance
                 logger.info(
-                    "Futures collateral $%.2f exceeds max $%.2f (%.0f%% of $%.2f capital) -- rejecting %s",
-                    collateral, max_value, self.max_position_pct, self.capital, signal.pair,
+                    "Futures collateral $%.2f exceeds max $%.2f (%.0f%% of $%.2f %s capital) -- rejecting %s",
+                    collateral, max_value, self.max_position_pct, exchange_capital,
+                    signal.exchange_id, signal.pair,
                 )
                 return False
         else:
             # Spot: order value checked directly
             if trade_value > max_value * 1.05:
                 logger.info(
-                    "Order value $%.2f exceeds max $%.2f (%.0f%% of $%.2f capital) -- rejecting %s",
-                    trade_value, max_value, self.max_position_pct, self.capital, signal.pair,
+                    "Order value $%.2f exceeds max $%.2f (%.0f%% of $%.2f %s capital) -- rejecting %s",
+                    trade_value, max_value, self.max_position_pct, exchange_capital,
+                    signal.exchange_id, signal.pair,
                 )
                 return False
 
@@ -208,9 +237,11 @@ class RiskManager:
 
         notional_str = f" notional=${trade_value * signal.leverage:.2f}" if is_futures else ""
         logger.info(
-            "Signal approved: %s %s %s %.6f @ $%.2f (collateral=$%.2f, %dx%s) | positions=%d, exposure=%.1f%%, daily_pnl=$%.2f",
+            "Signal approved: %s %s %s %.6f @ $%.2f (collateral=$%.2f, %dx%s) | "
+            "%s_capital=$%.2f | positions=%d, exposure=%.1f%%, daily_pnl=$%.2f",
             signal.position_type, signal.side, signal.pair, signal.amount, signal.price,
-            trade_value, signal.leverage, notional_str, len(self.open_positions), self.total_exposure_pct, self.daily_pnl,
+            trade_value, signal.leverage, notional_str, signal.exchange_id, exchange_capital,
+            len(self.open_positions), self.total_exposure_pct, self.daily_pnl,
         )
         return True
 

@@ -192,12 +192,12 @@ class AlphaBot:
         self._scheduler.add_job(self._poll_commands, "interval", seconds=10)
         self._scheduler.start()
 
-        # Fetch exchange balances for startup alert
+        # Fetch live exchange balances → per-exchange capital for trade sizing
         binance_bal = await self._fetch_portfolio_usd(self.binance)
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
+        self.risk_manager.update_exchange_balances(binance_bal, delta_bal)
 
-        # Capital = sum of actual exchange balances
-        total_capital = (binance_bal or 0) + (delta_bal or 0)
+        total_capital = self.risk_manager.capital
 
         # Notify
         await self.alerts.send_bot_started(
@@ -560,9 +560,10 @@ class AlphaBot:
         # Use primary pair's analysis for condition
         last = self.analyzer.last_analysis if self.analyzer else None
 
-        # Fetch exchange balances
+        # Fetch exchange balances and update per-exchange capital
         binance_bal = await self._fetch_portfolio_usd(self.binance)
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
+        rm.update_exchange_balances(binance_bal, delta_bal)
 
         # Determine bot state
         if rm.is_paused:
@@ -685,8 +686,23 @@ class AlphaBot:
         """Restore capital and state from last saved status."""
         last = await self.db.get_last_bot_status()
         if last:
-            self.risk_manager.capital = last.get("capital", config.trading.starting_capital)
-            logger.info("Restored state from DB -- capital: $%.2f", self.risk_manager.capital)
+            # Restore per-exchange balances if available
+            binance_bal = last.get("binance_balance")
+            delta_bal = last.get("delta_balance")
+            if binance_bal is not None or delta_bal is not None:
+                self.risk_manager.update_exchange_balances(
+                    float(binance_bal) if binance_bal else None,
+                    float(delta_bal) if delta_bal else None,
+                )
+                logger.info(
+                    "Restored state from DB -- Binance=$%.2f, Delta=$%.2f, Total=$%.2f",
+                    self.risk_manager.binance_capital, self.risk_manager.delta_capital,
+                    self.risk_manager.capital,
+                )
+            else:
+                # Fallback to single capital field
+                self.risk_manager.capital = last.get("capital", config.trading.starting_capital)
+                logger.info("Restored state from DB -- capital: $%.2f (legacy)", self.risk_manager.capital)
         else:
             logger.info("No previous state found -- starting fresh")
 

@@ -107,6 +107,7 @@ class ScalpStrategy(BaseStrategy):
         self.is_futures = is_futures
         self.leverage: int = min(config.delta.leverage, 10) if is_futures else 1
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.CAPITAL_PCT_SPOT
+        self._exchange_id: str = "delta" if is_futures else "binance"
 
         # Position state
         self.in_position = False
@@ -178,7 +179,7 @@ class ScalpStrategy(BaseStrategy):
             return signals
 
         # ── Daily scalp loss limit ───────────────────────────────────────
-        if self._daily_scalp_loss <= -(self.risk_manager.capital * self.DAILY_LOSS_LIMIT_PCT / 100):
+        if self._daily_scalp_loss <= -(self.risk_manager.get_exchange_capital(self._exchange_id) * self.DAILY_LOSS_LIMIT_PCT / 100):
             if self._tick_count % 30 == 0:
                 self.logger.info(
                     "[%s] Scalp STOPPED — daily loss limit hit ($%.4f)",
@@ -349,10 +350,18 @@ class ScalpStrategy(BaseStrategy):
             except Exception:
                 pass
 
-            capital = self.risk_manager.capital * (self.capital_pct / 100)
+            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+            capital = exchange_capital * (self.capital_pct / 100)
             amount = capital / current_price
             if self.is_futures:
                 amount *= self.leverage
+
+            self.logger.debug(
+                "[%s] Sizing: %s_capital=$%.2f × %.0f%% = $%.2f → amount=%.8f%s",
+                self.pair, self._exchange_id, exchange_capital, self.capital_pct,
+                capital, amount,
+                f" (×{self.leverage}x leverage)" if self.is_futures else "",
+            )
 
             entry_signal = None
 
@@ -531,10 +540,16 @@ class ScalpStrategy(BaseStrategy):
         self._positions_on_pair = max(0, self._positions_on_pair - 1)
 
     def _exit_signal(self, price: float, side: str, reason: str) -> Signal:
-        capital = self.risk_manager.capital * (self.capital_pct / 100)
+        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+        capital = exchange_capital * (self.capital_pct / 100)
         amount = capital / price
         if self.is_futures:
             amount *= self.leverage
+
+        self.logger.debug(
+            "[%s] Exit sizing: %s_capital=$%.2f × %.0f%% = $%.2f → amount=%.8f",
+            self.pair, self._exchange_id, exchange_capital, self.capital_pct, capital, amount,
+        )
 
         exit_side = "sell" if side == "long" else "buy"
         return Signal(

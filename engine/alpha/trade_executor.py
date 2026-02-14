@@ -7,6 +7,7 @@ based on signal.exchange_id. Sets leverage for futures orders.
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any
 
 import ccxt.async_support as ccxt
@@ -125,8 +126,51 @@ class TradeExecutor:
             return False
         return True
 
+    def _enforce_binance_min(self, signal: Signal) -> Signal:
+        """Ensure Binance spot orders meet the $5 minimum notional.
+
+        If order value < $5.01, bump the amount up to 5.01 / price.
+        Also round amount up to the exchange's LOT_SIZE step if available.
+        """
+        if signal.exchange_id != "binance" or signal.position_type != "spot":
+            return signal
+
+        order_value = signal.price * signal.amount
+        min_required = 5.01  # Binance $5 min + buffer
+
+        if order_value < min_required and signal.price > 0:
+            new_amount = min_required / signal.price
+            # Round up to LOT_SIZE step size
+            step = self._min_amount.get(signal.pair, 0)
+            if step and step > 0:
+                new_amount = math.ceil(new_amount / step) * step
+            logger.info(
+                "[%s] Binance min notional: order $%.4f < $%.2f — bumping amount %.8f -> %.8f ($%.4f)",
+                signal.pair, order_value, min_required, signal.amount, new_amount,
+                new_amount * signal.price,
+            )
+            signal = Signal(
+                side=signal.side,
+                price=signal.price,
+                amount=new_amount,
+                order_type=signal.order_type,
+                reason=signal.reason,
+                strategy=signal.strategy,
+                pair=signal.pair,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                leverage=signal.leverage,
+                position_type=signal.position_type,
+                reduce_only=signal.reduce_only,
+                exchange_id=signal.exchange_id,
+            )
+        return signal
+
     async def execute(self, signal: Signal) -> dict | None:
         """Place an order for the given signal, with retry + logging."""
+        # Enforce Binance $5.01 minimum notional for spot orders
+        signal = self._enforce_binance_min(signal)
+
         # Validate minimum order size
         if not self.validate_order_size(signal):
             return None
