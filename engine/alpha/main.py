@@ -143,16 +143,32 @@ class AlphaBot:
             delta_pairs=self.delta_pairs if self.delta else None,
         )
 
-        # Register strategies per Binance pair
-        for pair in self.pairs:
-            self._strategies[pair] = {
-                StrategyName.GRID: GridStrategy(pair, self.executor, self.risk_manager),
-                StrategyName.MOMENTUM: MomentumStrategy(pair, self.executor, self.risk_manager),
-                StrategyName.ARBITRAGE: ArbitrageStrategy(
-                    pair, self.executor, self.risk_manager, self.kucoin,
-                ),
-            }
-            self._active_strategies[pair] = None
+        # Check Binance balance — disable Binance strategies if < $5 (dust only)
+        binance_enabled = True
+        try:
+            binance_check = await self._fetch_portfolio_usd(self.binance)
+            if binance_check is not None and binance_check < 5.0:
+                logger.warning(
+                    "Binance balance $%.2f — Binance strategies disabled (dust only)",
+                    binance_check,
+                )
+                binance_enabled = False
+        except Exception:
+            pass
+
+        # Register strategies per Binance pair (only if balance is sufficient)
+        if binance_enabled:
+            for pair in self.pairs:
+                self._strategies[pair] = {
+                    StrategyName.MOMENTUM: MomentumStrategy(pair, self.executor, self.risk_manager),
+                    StrategyName.ARBITRAGE: ArbitrageStrategy(
+                        pair, self.executor, self.risk_manager, self.kucoin,
+                    ),
+                }
+                self._active_strategies[pair] = None
+        else:
+            # Clear Binance pairs so the bot doesn't try to analyze/trade them
+            self.pairs = []
 
         # Register strategies per Delta pair
         if self.delta:
@@ -165,13 +181,14 @@ class AlphaBot:
                 }
                 self._active_strategies[pair] = None
 
-        # Register scalp overlay for ALL pairs (runs independently)
-        for pair in self.pairs:
-            self._scalp_strategies[pair] = ScalpStrategy(
-                pair, self.executor, self.risk_manager,
-                exchange=self.binance,
-                is_futures=False,
-            )
+        # Register scalp overlay (Binance only if enabled, Delta always)
+        if binance_enabled:
+            for pair in self.pairs:
+                self._scalp_strategies[pair] = ScalpStrategy(
+                    pair, self.executor, self.risk_manager,
+                    exchange=self.binance,
+                    is_futures=False,
+                )
         if self.delta:
             for pair in self.delta_pairs:
                 self._scalp_strategies[pair] = ScalpStrategy(
@@ -851,10 +868,16 @@ class AlphaBot:
 
             if exchange_id == "binance":
                 held = float(binance_balance.get(base, 0) or 0)
-                # Check if held amount is worth at least $1
+                # Check if held amount is worth at least $5 (Binance min notional)
+                # Below $5 = unsellable dust, mark as closed
                 if held > 0 and entry_price > 0:
                     held_value = held * entry_price
-                    position_exists = held_value > 1.0
+                    position_exists = held_value >= 5.0
+                    if not position_exists and held_value > 0:
+                        logger.info(
+                            "Binance position %s is dust ($%.2f < $5 min) — marking closed",
+                            pair, held_value,
+                        )
                 elif held > 0:
                     position_exists = True
             elif exchange_id == "delta":

@@ -62,30 +62,33 @@ class StrategySelector:
             selected = StrategyName.ARBITRAGE
             reason = f"[{pair}] Arbitrage opportunity detected (cross-exchange spread > threshold)"
 
-        # Priority 2: market-condition mapping
+        # Priority 2: market-condition mapping (no grid — momentum only)
         elif analysis.condition == MarketCondition.SIDEWAYS:
-            selected = StrategyName.GRID
-            reason = f"[{pair}] Sideways market -- {analysis.reason}"
+            # Sideways: pause (no grid — not aligned with scalping approach)
+            logger.info("[%s] Sideways market -- pausing (grid disabled)", pair)
+            self._current[pair] = None
+            await self._log_selection(analysis, None, f"[{pair}] Sideways -- pausing (grid disabled)")
+            return None
 
         elif analysis.condition == MarketCondition.TRENDING:
             selected = StrategyName.MOMENTUM
             reason = f"[{pair}] Trending market -- {analysis.reason}"
 
         elif analysis.condition == MarketCondition.VOLATILE:
-            # High volatility: pause or use tight grid
             if analysis.atr and analysis.volume_ratio > 2.0:
-                # Extreme -- pause this pair
+                # Extreme -- pause
                 logger.warning("[%s] Extreme volatility detected -- pausing", pair)
                 self._current[pair] = None
                 await self._log_selection(analysis, None, f"[{pair}] Extreme volatility -- pausing")
                 return None
             else:
-                # Moderate volatility -- tight grid
-                selected = StrategyName.GRID
-                reason = f"[{pair}] Moderate volatility -- using tight grid -- {analysis.reason}"
+                # Moderate volatility -- use momentum (not grid)
+                selected = StrategyName.MOMENTUM
+                reason = f"[{pair}] Moderate volatility -- using momentum -- {analysis.reason}"
         else:
-            selected = StrategyName.GRID
-            reason = f"[{pair}] Fallback to grid"
+            # Fallback: momentum (not grid)
+            selected = StrategyName.MOMENTUM
+            reason = f"[{pair}] Fallback to momentum"
 
         switched = previous != selected
         self._current[pair] = selected

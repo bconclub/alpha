@@ -54,6 +54,8 @@ class TradeExecutor:
         # Error spam suppression: pair -> (error_key, timestamp)
         self._last_error_alert: dict[str, tuple[str, float]] = {}
         self._ERROR_DEDUP_SECONDS = 300  # 5 minutes
+        # EXIT FAILED alerts: only send ONCE per pair (permanent suppression)
+        self._exit_failure_alerted: set[str] = set()
 
     def _get_exchange(self, signal: Signal) -> ccxt.Exchange:
         """Return the correct exchange instance for a signal."""
@@ -703,7 +705,19 @@ class TradeExecutor:
             logger.exception("Failed to send error alert")
 
     async def _notify_exit_failure(self, signal: Signal, error: Exception | None) -> None:
-        """Send critical Telegram alert when an exit order fails completely."""
+        """Send critical Telegram alert when an exit order fails completely.
+
+        Only sends ONCE per pair — suppressed permanently after the first alert
+        to avoid spamming on unsellable dust or stuck positions.
+        """
+        pair_key = f"{signal.exchange_id}:{signal.pair}"
+        if pair_key in self._exit_failure_alerted:
+            logger.debug(
+                "EXIT FAILED alert already sent for %s — suppressed", pair_key,
+            )
+            return
+        self._exit_failure_alerted.add(pair_key)
+
         if self.alerts is None:
             return
         try:
