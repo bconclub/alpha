@@ -4,10 +4,16 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   bump:
     # Skip if the commit was a version bump itself (prevents infinite loop)
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    # Also skip if pre-commit hook already bumped (commit message has version info)
+    if: >-
+      !contains(github.event.head_commit.message, '[skip ci]') &&
+      !contains(github.event.head_commit.message, 'chore: bump version')
     runs-on: ubuntu-latest
 
     steps:

@@ -214,8 +214,11 @@ export function LiveStatusBar() {
               <span className="text-[#2196f3] font-mono">{derivedStrategyCount}</span>
             </div>
           </div>
-          <div className="border-l border-zinc-800 pl-4">
+          <div className="border-l border-zinc-800 pl-4 flex flex-col items-end gap-1">
             <ISTClock />
+            <span className="text-[9px] text-zinc-600 font-mono">
+              v{process.env.APP_VERSION ?? '?'}
+            </span>
           </div>
         </div>
       </div>
