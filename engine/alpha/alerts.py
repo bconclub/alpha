@@ -6,21 +6,20 @@ Message types:
 3. Strategy changes (batched into one message, only when something changes)
 4. Trade alerts (open / close with full detail)
 5. Hourly summary
-6. Daily summary (midnight UTC)
+6. Daily summary (midnight IST)
 7. Risk / liquidation alerts
 8. Command confirmations (dashboard -> bot)
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from telegram import Bot
 from telegram.constants import ParseMode
 
 from alpha.config import config
-from alpha.utils import format_usd, setup_logger
+from alpha.utils import format_usd, ist_now, setup_logger
 
 logger = setup_logger("alerts")
 
@@ -94,7 +93,7 @@ class AlertManager:
         if delta_pairs:
             exchanges += ", Delta (Futures)"
         shorting = "Enabled" if shorting_enabled else "Disabled"
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        now = ist_now().strftime("%Y-%m-%d %H:%M IST")
 
         balance_lines = (
             f"\n   \U0001f7e1 Binance: <code>{_bal(binance_balance)}</code>"
@@ -132,7 +131,7 @@ class AlertManager:
         if not analyses:
             return
 
-        now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        now = ist_now().strftime("%H:%M IST")
 
         # Split into Binance (spot) vs Delta (futures)
         binance_set = set(config.trading.pairs)

@@ -186,7 +186,7 @@ class AlphaBot:
             self._analysis_cycle, "interval",
             seconds=config.trading.analysis_interval_sec,
         )
-        self._scheduler.add_job(self._daily_reset, "cron", hour=0, minute=0)
+        self._scheduler.add_job(self._daily_reset, "cron", hour=18, minute=30)  # midnight IST = 18:30 UTC
         self._scheduler.add_job(self._hourly_report, "cron", minute=0)  # every hour
         self._scheduler.add_job(self._save_status, "interval", minutes=5)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=10)

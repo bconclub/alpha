@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 
@@ -26,9 +26,17 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     return logger
 
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def utcnow() -> datetime:
     """Timezone-aware UTC now."""
     return datetime.now(timezone.utc)
+
+
+def ist_now() -> datetime:
+    """Timezone-aware IST now."""
+    return datetime.now(IST)
 
 
 def iso_now() -> str:
