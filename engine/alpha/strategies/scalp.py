@@ -5,7 +5,7 @@ is active. Checks every 10 seconds on 1m candles. Designed for small,
 frequent gains with tight TP/SL and time-based exits.
 
 Features:
-  - Triple entry: RSI + BB proximity + volume (loosened thresholds)
+  - 2-of-3 entry: any 2 of [RSI, BB proximity, volume] triggers entry
   - Momentum burst detection: 0.3%+ move in 1min on 2x volume
   - Quick reversal: flip direction after SL if conditions allow
   - Works on both Binance (spot) and Delta (futures with leverage)
@@ -35,10 +35,10 @@ class ScalpStrategy(BaseStrategy):
     """
     Aggressive scalping overlay — runs alongside primary strategies.
 
-    Entry (loosened thresholds):
-      LONG:  RSI(14) < 45 + price within 0.5% of lower BB(20,2) + volume > 0.8x avg
-      SHORT: RSI(14) > 55 + price within 0.5% of upper BB(20,2) + volume > 0.8x avg
-      Extreme RSI (<30 / >70) bypasses volume requirement.
+    Entry (2 of 3 conditions required):
+      LONG:  2 of [RSI(14) < 45, price within 0.5% of lower BB(20,2), volume > 0.8x avg]
+      SHORT: 2 of [RSI(14) > 55, price within 0.5% of upper BB(20,2), volume > 0.8x avg]
+      Extreme RSI (<30 / >70) enters regardless — bypasses all conditions.
 
     Momentum Burst:
       Price moves 0.3%+ in 1 minute on 2x volume -> enter in direction of move.
@@ -386,33 +386,61 @@ class ScalpStrategy(BaseStrategy):
                     )
                     entry_signal = ("short", f"Burst SHORT: {candle_change_pct:.2f}% @ {vol_ratio:.1f}x vol")
 
-            # ── Standard Entry: RSI + BB proximity + volume ──────────
+            # ── Standard Entry: 2 of 3 conditions (RSI + BB + Volume) ──
             if entry_signal is None:
                 vol_ok = vol_ratio >= self.VOL_RATIO_MIN
                 extreme_long = rsi_now < self.RSI_EXTREME_LONG
                 extreme_short = rsi_now > self.RSI_EXTREME_SHORT
 
-                if (rsi_now < self.RSI_LONG_ENTRY
-                        and lower_dist_pct <= self.BB_PROXIMITY_PCT
-                        and (vol_ok or extreme_long)):
-                    label = "extreme" if extreme_long else "standard"
+                # ── Extreme RSI bypass: enter regardless ──
+                if extreme_long:
                     self.logger.info(
-                        "[%s] SCALP LONG (%s) — RSI=%.1f, BB=%.2f%%, Vol=%.1fx",
-                        self.pair, label, rsi_now, lower_dist_pct, vol_ratio,
+                        "[%s] SCALP LONG (extreme) — RSI=%.1f <%d, bypasses other conditions",
+                        self.pair, rsi_now, self.RSI_EXTREME_LONG,
                     )
-                    entry_signal = ("long", f"Scalp LONG: RSI={rsi_now:.1f} BB={lower_dist_pct:.2f}% Vol={vol_ratio:.1f}x")
+                    entry_signal = ("long", f"Scalp LONG extreme: RSI={rsi_now:.1f} BB={lower_dist_pct:.2f}% Vol={vol_ratio:.1f}x")
 
-                elif (self.is_futures
-                        and config.delta.enable_shorting
-                        and rsi_now > self.RSI_SHORT_ENTRY
-                        and upper_dist_pct <= self.BB_PROXIMITY_PCT
-                        and (vol_ok or extreme_short)):
-                    label = "extreme" if extreme_short else "standard"
+                elif extreme_short and self.is_futures and config.delta.enable_shorting:
                     self.logger.info(
-                        "[%s] SCALP SHORT (%s) — RSI=%.1f, BB=%.2f%%, Vol=%.1fx",
-                        self.pair, label, rsi_now, upper_dist_pct, vol_ratio,
+                        "[%s] SCALP SHORT (extreme) — RSI=%.1f >%d, bypasses other conditions",
+                        self.pair, rsi_now, self.RSI_EXTREME_SHORT,
                     )
-                    entry_signal = ("short", f"Scalp SHORT: RSI={rsi_now:.1f} BB={upper_dist_pct:.2f}% Vol={vol_ratio:.1f}x")
+                    entry_signal = ("short", f"Scalp SHORT extreme: RSI={rsi_now:.1f} BB={upper_dist_pct:.2f}% Vol={vol_ratio:.1f}x")
+
+                else:
+                    # ── 2-of-3 scoring: RSI + BB proximity + Volume ──
+                    # LONG check
+                    long_rsi_ok = rsi_now < self.RSI_LONG_ENTRY
+                    long_bb_ok = lower_dist_pct <= self.BB_PROXIMITY_PCT
+                    long_conds = int(long_rsi_ok) + int(long_bb_ok) + int(vol_ok)
+
+                    long_rsi_tag = f"RSI={rsi_now:.1f} ✓" if long_rsi_ok else f"RSI={rsi_now:.1f} ✗"
+                    long_bb_tag = f"BB={lower_dist_pct:.2f}% ✓" if long_bb_ok else f"BB={lower_dist_pct:.2f}% ✗"
+                    long_vol_tag = f"Vol={vol_ratio:.1f}x ✓" if vol_ok else f"Vol={vol_ratio:.1f}x ✗"
+
+                    if long_conds >= 2:
+                        self.logger.info(
+                            "[%s] SCALP LONG — %d/3 conditions: %s, %s, %s",
+                            self.pair, long_conds, long_rsi_tag, long_bb_tag, long_vol_tag,
+                        )
+                        entry_signal = ("long", f"Scalp LONG {long_conds}/3: {long_rsi_tag}, {long_bb_tag}, {long_vol_tag}")
+
+                    # SHORT check (only on futures with shorting enabled)
+                    if entry_signal is None and self.is_futures and config.delta.enable_shorting:
+                        short_rsi_ok = rsi_now > self.RSI_SHORT_ENTRY
+                        short_bb_ok = upper_dist_pct <= self.BB_PROXIMITY_PCT
+                        short_conds = int(short_rsi_ok) + int(short_bb_ok) + int(vol_ok)
+
+                        short_rsi_tag = f"RSI={rsi_now:.1f} ✓" if short_rsi_ok else f"RSI={rsi_now:.1f} ✗"
+                        short_bb_tag = f"BB={upper_dist_pct:.2f}% ✓" if short_bb_ok else f"BB={upper_dist_pct:.2f}% ✗"
+                        short_vol_tag = f"Vol={vol_ratio:.1f}x ✓" if vol_ok else f"Vol={vol_ratio:.1f}x ✗"
+
+                        if short_conds >= 2:
+                            self.logger.info(
+                                "[%s] SCALP SHORT — %d/3 conditions: %s, %s, %s",
+                                self.pair, short_conds, short_rsi_tag, short_bb_tag, short_vol_tag,
+                            )
+                            entry_signal = ("short", f"Scalp SHORT {short_conds}/3: {short_rsi_tag}, {short_bb_tag}, {short_vol_tag}")
 
             # ── Execute entry ────────────────────────────────────────
             if entry_signal is not None:
