@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 from typing import Any
 
 import aiohttp
@@ -178,6 +179,9 @@ class AlphaBot:
                     exchange=self.delta,
                     is_futures=True,
                 )
+
+        # Inject restored position state into strategy instances
+        self._restore_strategy_state()
 
         # Start all scalp strategies immediately (they run as parallel overlays)
         for pair, scalp in self._scalp_strategies.items():
@@ -774,10 +778,15 @@ class AlphaBot:
 
         For each open trade:
         - Spot (Binance): check if we still hold the base asset (> $1 worth)
-        - Futures (Delta): check if position still open via exchange balance
+        - Futures (Delta): check via fetch_positions() for real contract holdings
         If position no longer exists, mark trade as closed in DB.
         If it does exist, register it with the risk manager.
+
+        NOTE: Restored trades are saved in self._restored_trades for later
+        injection into strategy instances (see _restore_strategy_state).
         """
+        self._restored_trades: list[dict[str, Any]] = []
+
         open_trades = await self.db.get_all_open_trades()
         if not open_trades:
             logger.info("No open trades to restore from DB")
@@ -787,7 +796,6 @@ class AlphaBot:
 
         # Fetch exchange balances once (not per-trade)
         binance_balance: dict[str, Any] = {}
-        delta_balance: dict[str, Any] = {}
 
         try:
             if self.binance:
@@ -796,12 +804,31 @@ class AlphaBot:
         except Exception:
             logger.warning("Could not fetch Binance balance for position restore")
 
+        # Fetch Delta positions via fetch_positions() — actual open contracts
+        delta_positions: dict[str, dict[str, Any]] = {}
         try:
             if self.delta:
-                bal = await self.delta.fetch_balance()
-                delta_balance = bal.get("free", {})
-        except Exception:
-            logger.warning("Could not fetch Delta balance for position restore")
+                positions = await self.delta.fetch_positions()
+                for pos in positions:
+                    contracts = float(pos.get("contracts", 0) or 0)
+                    if contracts != 0:
+                        symbol = pos.get("symbol", "")
+                        side = "long" if contracts > 0 else "short"
+                        entry_px = float(pos.get("entryPrice", 0) or 0)
+                        delta_positions[symbol] = {
+                            "side": side,
+                            "contracts": abs(contracts),
+                            "entry_price": entry_px,
+                            "info": pos,
+                        }
+                        logger.info(
+                            "Found open Delta position: %s %s %.0f contracts @ $%.2f",
+                            symbol, side, abs(contracts), entry_px,
+                        )
+                if not delta_positions:
+                    logger.info("No open Delta positions on exchange")
+        except Exception as e:
+            logger.error("Failed to fetch Delta positions on startup: %s", e)
 
         restored = 0
         closed = 0
@@ -831,11 +858,26 @@ class AlphaBot:
                 elif held > 0:
                     position_exists = True
             elif exchange_id == "delta":
-                # For futures, check if we have any balance in that asset
-                held = float(delta_balance.get(base, 0) or 0)
-                # Delta futures positions may not show as asset balance;
-                # trust the DB if we can't verify
-                position_exists = True
+                # Verify against actual Delta positions from fetch_positions()
+                delta_pos = delta_positions.get(pair)
+                if delta_pos:
+                    position_exists = True
+                    # Use exchange data for accuracy (overrides DB if available)
+                    if delta_pos["entry_price"] > 0:
+                        entry_price = delta_pos["entry_price"]
+                    amount = delta_pos["contracts"]
+                    position_type = delta_pos["side"]
+                    logger.info(
+                        "Delta position %s verified: %s %.0f contracts @ $%.2f (exchange data)",
+                        pair, position_type, amount, entry_price,
+                    )
+                else:
+                    # Position not found on Delta — it was closed externally
+                    logger.info(
+                        "Delta position %s NOT found on exchange — was closed externally",
+                        pair,
+                    )
+                    position_exists = False
 
             if position_exists:
                 # Register with risk manager using a synthetic Signal
@@ -859,6 +901,15 @@ class AlphaBot:
                     exchange_id=exchange_id,
                 )
                 self.risk_manager.record_open(synthetic_signal)
+                self._restored_trades.append({
+                    "pair": pair,
+                    "exchange_id": exchange_id,
+                    "entry_price": entry_price,
+                    "amount": amount,
+                    "position_type": position_type,
+                    "leverage": leverage,
+                    "strategy": strategy,
+                })
                 restored += 1
                 logger.info(
                     "Restored position: %s %s %s (%.6f @ $%.2f) on %s [%s]",
@@ -878,9 +929,127 @@ class AlphaBot:
                     pair, exchange_id, trade_id,
                 )
 
+        # Also check for Delta positions NOT in DB (opened manually or DB out of sync)
+        if delta_positions:
+            db_delta_pairs = {
+                t.get("pair") for t in open_trades if t.get("exchange") == "delta"
+            }
+            for symbol, dpos in delta_positions.items():
+                if symbol not in db_delta_pairs:
+                    logger.warning(
+                        "Delta position %s %s %.0f contracts exists on exchange "
+                        "but NOT in DB — creating DB record",
+                        symbol, dpos["side"], dpos["contracts"],
+                    )
+                    # Create a DB trade record so the bot can manage exit
+                    await self.db.log_trade({
+                        "pair": symbol,
+                        "exchange": "delta",
+                        "strategy": "scalp",
+                        "side": "buy" if dpos["side"] == "long" else "sell",
+                        "entry_price": dpos["entry_price"],
+                        "amount": dpos["contracts"],
+                        "position_type": dpos["side"],
+                        "leverage": config.delta.leverage,
+                        "status": "open",
+                        "opened_at": iso_now(),
+                        "reason": "discovered_on_restart",
+                    })
+                    self._restored_trades.append({
+                        "pair": symbol,
+                        "exchange_id": "delta",
+                        "entry_price": dpos["entry_price"],
+                        "amount": dpos["contracts"],
+                        "position_type": dpos["side"],
+                        "leverage": config.delta.leverage,
+                        "strategy": "scalp",
+                    })
+                    # Also register with risk manager
+                    from alpha.strategies.base import Signal, StrategyName
+                    synthetic_signal = Signal(
+                        side="buy" if dpos["side"] == "long" else "sell",
+                        price=dpos["entry_price"],
+                        amount=dpos["contracts"],
+                        order_type="market",
+                        reason="discovered on exchange",
+                        strategy=StrategyName.SCALP,
+                        pair=symbol,
+                        leverage=config.delta.leverage,
+                        position_type=dpos["side"],
+                        exchange_id="delta",
+                    )
+                    self.risk_manager.record_open(synthetic_signal)
+                    restored += 1
+
         logger.info(
             "Position restore complete: %d restored, %d marked closed (of %d DB open)",
             restored, closed, len(open_trades),
+        )
+
+    def _restore_strategy_state(self) -> None:
+        """Inject restored positions into strategy instances.
+
+        Called AFTER strategies are created but BEFORE they start ticking.
+        This tells scalp/futures_momentum strategies about positions that
+        were open before the restart, so they manage exits instead of
+        opening duplicate positions.
+        """
+        if not hasattr(self, "_restored_trades") or not self._restored_trades:
+            return
+
+        for trade in self._restored_trades:
+            pair = trade["pair"]
+            exchange_id = trade["exchange_id"]
+            entry_price = trade["entry_price"]
+            amount = trade["amount"]
+            position_type = trade["position_type"]  # "long", "short", or "spot"
+            strategy_name = trade.get("strategy", "")
+
+            # Try scalp strategy first (most common)
+            scalp = self._scalp_strategies.get(pair)
+            if scalp and strategy_name in ("scalp", ""):
+                scalp.in_position = True
+                scalp.position_side = position_type if position_type in ("long", "short") else "long"
+                scalp.entry_price = entry_price
+                scalp.entry_amount = amount
+                scalp.entry_time = time.monotonic()  # treat as just entered (for timeout)
+                scalp.highest_since_entry = entry_price
+                scalp.lowest_since_entry = entry_price
+                scalp._positions_on_pair = 1
+                logger.info(
+                    "Injected restored position into ScalpStrategy: "
+                    "%s %s %.6f @ $%.2f on %s",
+                    pair, scalp.position_side, amount, entry_price, exchange_id,
+                )
+                continue
+
+            # Try futures_momentum strategy
+            if strategy_name == "futures_momentum":
+                pair_strats = self._strategies.get(pair, {})
+                fm = pair_strats.get(StrategyName.FUTURES_MOMENTUM)
+                if fm and hasattr(fm, "position_side"):
+                    fm.position_side = position_type
+                    fm.entry_price = entry_price
+                    fm.entry_amount = amount
+                    if position_type == "long":
+                        fm.highest_since_entry = entry_price
+                    else:
+                        fm.lowest_since_entry = entry_price
+                    logger.info(
+                        "Injected restored position into FuturesMomentumStrategy: "
+                        "%s %s %.6f @ $%.2f",
+                        pair, position_type, amount, entry_price,
+                    )
+                    continue
+
+            logger.warning(
+                "Could not inject restored position %s (%s) into any strategy",
+                pair, strategy_name,
+            )
+
+        logger.info(
+            "Strategy state restoration complete — %d positions injected",
+            len(self._restored_trades),
         )
 
     # -- Exchange init ---------------------------------------------------------
