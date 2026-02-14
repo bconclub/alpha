@@ -1,23 +1,23 @@
-"""Alpha v2.0 — Aggressive momentum scalping. Get in, get out.
+"""Alpha v2.1 — ULTRA-AGGRESSIVE momentum scalping.
 
-NEVER IDLE. Every second without a position is money left on the table.
-Runs every 3 seconds. ONE condition is enough to enter. Follow momentum.
+NEVER IDLE. ZERO COOLDOWN. Every tick without a position is wasted money.
+Runs every 3 seconds. ANY SINGLE condition triggers entry.
 
-Entry — See momentum? Get in:
-  1. 60s momentum > 0.10% → enter direction
-  2. RSI < 35 or > 65 → mean reversion
-  3. Volume > 2x average → enter candle direction
-  4. BB breakout → enter direction
-  5. Price acceleration > 1.5x avg → enter direction
-  If NONE trigger for 5 minutes → force entry on EMA slope
+Entry — see ANY movement? GET IN:
+  1. 30s momentum > 0.05% → enter direction
+  2. RSI < 45 (long) or > 55 (short) → slight imbalance = opportunity
+  3. Volume > 1.2x average → enter candle direction
+  4. BB: price within 0.3% of any band → enter direction
+  5. Price acceleration > 1.2x avg → enter direction
+  If NONE trigger for 2 minutes → force entry on EMA slope
 
 Exit — Take the money:
   - TP: 1.0% (= 20% capital at 20x)
-  - SL: 0.50% (= 10% capital at 20x, liq at ~5%)
+  - SL: 0.50% (= 10% capital at 20x)
   - Trailing: activate 0.60%, trail 0.30%
   - Profit lock: at +0.50%, SL moves to breakeven
   - Timeout: 15 min max
-  - On profitable exit: immediately hunt for next trade
+  - On exit: IMMEDIATELY scan next tick. ZERO cooldown.
 
 Leverage: 20x on Delta futures
 Position size: 3 contracts ($3.12 collateral at 20x)
@@ -50,10 +50,10 @@ logger = setup_logger("scalp")
 
 
 class ScalpStrategy(BaseStrategy):
-    """Momentum scalp — spot momentum, get in, get out.
+    """Ultra-aggressive momentum scalp — ANY movement = entry.
 
-    Detects momentum via price acceleration + volume, follows it.
-    ONE strong signal is enough. 5-second ticks. 20x leverage on Delta.
+    Detects the slightest momentum and enters immediately.
+    ONE weak signal is enough. 3-second ticks. 20x leverage. ZERO cooldown.
     """
 
     name = StrategyName.SCALP
@@ -69,13 +69,14 @@ class ScalpStrategy(BaseStrategy):
     FLATLINE_SECONDS = 10 * 60    # close if flat for 10 min
     FLATLINE_MIN_MOVE_PCT = 0.05  # "flat" means < 0.05% total move
 
-    # ── Momentum thresholds ──────────────────────────────────────────────
-    RSI_EXTREME_LONG = 35         # RSI < 35 = mean reversion long
-    RSI_EXTREME_SHORT = 65        # RSI > 65 = mean reversion short
-    VOL_SPIKE_RATIO = 2.0         # volume > 2x average
-    ACCEL_MIN_PCT = 0.03          # minimum candle move for momentum
-    ACCEL_MULTIPLIER = 1.5        # current candle 1.5x avg → momentum
-    MOMENTUM_60S_PCT = 0.20       # 0.2% move in 60s = momentum
+    # ── Momentum thresholds (ULTRA-AGGRESSIVE) ───────────────────────────
+    RSI_EXTREME_LONG = 45         # RSI < 45 = slight oversold → long
+    RSI_EXTREME_SHORT = 55        # RSI > 55 = slight overbought → short
+    VOL_SPIKE_RATIO = 1.2         # volume > 1.2x average = above normal
+    ACCEL_MIN_PCT = 0.02          # minimum candle move for momentum
+    ACCEL_MULTIPLIER = 1.2        # current candle 1.2x avg → momentum
+    MOMENTUM_WINDOW_PCT = 0.05    # 0.05% move in 30s = momentum
+    BB_PROXIMITY_PCT = 0.30       # enter if within 0.3% of any BB band
 
     # ── Position sizing ───────────────────────────────────────────────────
     CAPITAL_PCT_SPOT = 50.0       # unused in Delta-only mode
@@ -88,7 +89,7 @@ class ScalpStrategy(BaseStrategy):
     # ── Rate limiting / risk ──────────────────────────────────────────────
     MAX_TRADES_PER_HOUR = 40
     CONSECUTIVE_LOSS_PAUSE = 5    # pause after 5 consecutive losses
-    PAUSE_DURATION_SEC = 3 * 60   # 3 minutes pause — get back fast
+    PAUSE_DURATION_SEC = 60       # 1 minute pause — get back FAST
     DAILY_LOSS_LIMIT_PCT = 5.0
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
@@ -131,7 +132,7 @@ class ScalpStrategy(BaseStrategy):
 
         # Idle tracking — force entry if idle too long
         self._last_position_exit: float = 0.0  # when we last exited or started
-        self.FORCE_ENTRY_AFTER_SEC = 5 * 60     # force entry after 5 min idle
+        self.FORCE_ENTRY_AFTER_SEC = 2 * 60     # force entry after 2 min idle — NEVER be idle
 
         # Stats for hourly summary
         self.hourly_wins: int = 0
@@ -156,12 +157,17 @@ class ScalpStrategy(BaseStrategy):
         if self.in_position:
             pos_info = f" | RESTORED {self.position_side} @ ${self.entry_price:.2f}"
         self.logger.info(
-            "[%s] Scalp ACTIVE (%s) — MOMENTUM-BASED, tick=%ds, "
-            "TP=%.2f%% SL=%.2f%% Trail=%.2f/%.2f%% ProfitLock=%.1f%% Timeout=%dm%s",
+            "[%s] Scalp ACTIVE (%s) — ULTRA-AGGRESSIVE, tick=%ds, "
+            "TP=%.2f%% SL=%.2f%% Trail=%.2f/%.2f%% Lock=%.1f%% "
+            "Mom=%.2f%% RSI=%d/%d Vol=%.1fx BB=%.1f%% Accel=%.1fx "
+            "ForceEntry=%ds Pause=%ds%s",
             self.pair, tag, self.check_interval_sec,
             self.TAKE_PROFIT_PCT, self.STOP_LOSS_PCT,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
-            self.PROFIT_LOCK_PCT, self.MAX_HOLD_SECONDS // 60,
+            self.PROFIT_LOCK_PCT,
+            self.MOMENTUM_WINDOW_PCT, self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
+            self.VOL_SPIKE_RATIO, self.BB_PROXIMITY_PCT, self.ACCEL_MULTIPLIER,
+            self.FORCE_ENTRY_AFTER_SEC, self.PAUSE_DURATION_SEC,
             pos_info,
         )
 
@@ -254,9 +260,14 @@ class ScalpStrategy(BaseStrategy):
             sum(abs(c) for c in candle_changes[:-1]) / max(len(candle_changes) - 1, 1)
         )
 
-        # 60-second momentum: price change over last ~1 minute (1 candle on 1m timeframe)
-        price_60s_ago = float(close.iloc[-2]) if len(close) >= 2 else current_price
-        momentum_60s = ((current_price - price_60s_ago) / price_60s_ago * 100) if price_60s_ago > 0 else 0
+        # 30-second momentum: approximate using difference between last two closes
+        # On 1m candles, interpolate: the current partial candle vs previous close
+        price_prev = float(close.iloc[-2]) if len(close) >= 2 else current_price
+        momentum_30s = ((current_price - price_prev) / price_prev * 100) if price_prev > 0 else 0
+
+        # BB proximity: how close is price to each band?
+        bb_dist_upper = ((bb_upper - current_price) / current_price * 100) if current_price > 0 else 999
+        bb_dist_lower = ((current_price - bb_lower) / current_price * 100) if current_price > 0 else 999
 
         # 5-minute EMA slope for forced entry direction
         ema_5 = float(close.ewm(span=5, adjust=False).mean().iloc[-1])
@@ -345,7 +356,8 @@ class ScalpStrategy(BaseStrategy):
         entry = self._detect_momentum(
             current_price, rsi_now, vol_ratio,
             current_candle_pct, avg_candle_pct,
-            bb_upper, bb_lower, momentum_60s,
+            bb_upper, bb_lower, momentum_30s,
+            bb_dist_upper, bb_dist_lower,
         )
 
         if entry is not None:
@@ -359,19 +371,23 @@ class ScalpStrategy(BaseStrategy):
                 side = "long"  # can't short on spot, force long
             reason = (
                 f"IDLE {idle_seconds}s — forcing {side.upper()} based on "
-                f"EMA slope ({ema_slope}), momentum={momentum_60s:+.3f}%"
+                f"EMA slope ({ema_slope}), momentum={momentum_30s:+.3f}%"
             )
             self.logger.info("[%s] %s", self.pair, reason)
             signals.append(self._build_entry_signal(side, current_price, amount, reason))
         else:
-            # Log idle status periodically (every 30s)
-            if self._tick_count % 10 == 0:
-                self.logger.info(
-                    "[%s] HUNTING — no signal (%ds idle) | $%.2f | "
-                    "m60s=%+.3f%% vol=%.1fx RSI=%.1f",
-                    self.pair, idle_seconds, current_price,
-                    momentum_60s, vol_ratio, rsi_now,
-                )
+            # Log EVERY TICK while hunting — show how close each condition is
+            self.logger.info(
+                "[%s] HUNT %ds | $%.2f | m30s=%+.3f%%/%.2f | RSI=%.1f/%d/%d | "
+                "vol=%.1fx/%.1f | accel=%+.3f%%/%.3f×%.1f | BB↑%.2f%%/↓%.2f%%/%.1f%% | EMA=%s",
+                self.pair, idle_seconds, current_price,
+                momentum_30s, self.MOMENTUM_WINDOW_PCT,           # momentum vs threshold
+                rsi_now, self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,  # RSI vs thresholds
+                vol_ratio, self.VOL_SPIKE_RATIO,                   # volume vs threshold
+                current_candle_pct, avg_candle_pct, self.ACCEL_MULTIPLIER,  # accel
+                bb_dist_upper, bb_dist_lower, self.BB_PROXIMITY_PCT,  # BB proximity
+                ema_slope,
+            )
 
         return signals
 
@@ -388,47 +404,57 @@ class ScalpStrategy(BaseStrategy):
         avg_candle_pct: float,
         bb_upper: float,
         bb_lower: float,
-        momentum_60s: float = 0.0,
+        momentum_30s: float = 0.0,
+        bb_dist_upper: float = 999.0,
+        bb_dist_lower: float = 999.0,
     ) -> tuple[str, str] | None:
-        """Detect momentum. Returns (side, reason) or None.
+        """Detect ANY momentum. Returns (side, reason) or None.
 
-        ONE strong condition triggers entry. Follow the momentum direction.
+        ULTRA-AGGRESSIVE: ONE condition, any strength, triggers entry.
+        Thresholds are intentionally low — we want to be in the market.
         """
         can_short = self.is_futures and config.delta.enable_shorting
 
-        # ── 1. 60-second momentum — price moved 0.10%+ in 60s ───────────
-        if abs(momentum_60s) >= self.MOMENTUM_60S_PCT:
-            if momentum_60s > 0:
+        # ── 1. 30-second momentum — price moved 0.05%+ ──────────────────
+        if abs(momentum_30s) >= self.MOMENTUM_WINDOW_PCT:
+            if momentum_30s > 0:
                 return ("long",
-                        f"MOMENTUM: {momentum_60s:+.3f}% in 60s → LONG")
+                        f"MOM: {momentum_30s:+.3f}% in 30s → LONG")
             elif can_short:
                 return ("short",
-                        f"MOMENTUM: {momentum_60s:+.3f}% in 60s → SHORT")
+                        f"MOM: {momentum_30s:+.3f}% in 30s → SHORT")
 
-        # ── 2. RSI Extreme — mean reversion entry ────────────────────────
+        # ── 2. RSI imbalance — any tilt from neutral ─────────────────────
         if rsi_now < self.RSI_EXTREME_LONG:
             return ("long",
-                    f"MOMENTUM: RSI {rsi_now:.1f} < {self.RSI_EXTREME_LONG} → oversold LONG")
+                    f"RSI: {rsi_now:.1f} < {self.RSI_EXTREME_LONG} → LONG")
         if rsi_now > self.RSI_EXTREME_SHORT and can_short:
             return ("short",
-                    f"MOMENTUM: RSI {rsi_now:.1f} > {self.RSI_EXTREME_SHORT} → overbought SHORT")
+                    f"RSI: {rsi_now:.1f} > {self.RSI_EXTREME_SHORT} → SHORT")
 
-        # ── 3. Volume spike — big volume = enter candle direction ────────
+        # ── 3. Volume above average — follow candle direction ────────────
         if vol_ratio >= self.VOL_SPIKE_RATIO and abs(current_candle_pct) >= self.ACCEL_MIN_PCT:
             if current_candle_pct > 0:
                 return ("long",
-                        f"MOMENTUM: Vol {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → LONG")
+                        f"VOL: {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → LONG")
             elif can_short:
                 return ("short",
-                        f"MOMENTUM: Vol {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → SHORT")
+                        f"VOL: {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → SHORT")
 
-        # ── 4. BB Breakout — price outside bands ─────────────────────────
+        # ── 4. BB proximity — within 0.3% of any band ───────────────────
+        if bb_dist_upper <= self.BB_PROXIMITY_PCT:
+            return ("long",
+                    f"BB: {bb_dist_upper:.2f}% from upper → breakout LONG")
+        if bb_dist_lower <= self.BB_PROXIMITY_PCT and can_short:
+            return ("short",
+                    f"BB: {bb_dist_lower:.2f}% from lower → breakdown SHORT")
+        # Also classic breakout
         if price > bb_upper:
             return ("long",
-                    f"MOMENTUM: BB breakout ${price:.2f} > ${bb_upper:.2f} → LONG")
+                    f"BB: breakout ${price:.2f} > ${bb_upper:.2f} → LONG")
         if price < bb_lower and can_short:
             return ("short",
-                    f"MOMENTUM: BB breakdown ${price:.2f} < ${bb_lower:.2f} → SHORT")
+                    f"BB: breakdown ${price:.2f} < ${bb_lower:.2f} → SHORT")
 
         # ── 5. Price acceleration (current candle faster than avg) ───────
         if (abs(current_candle_pct) >= self.ACCEL_MIN_PCT
@@ -436,12 +462,12 @@ class ScalpStrategy(BaseStrategy):
                 and abs(current_candle_pct) >= avg_candle_pct * self.ACCEL_MULTIPLIER):
             if current_candle_pct > 0:
                 return ("long",
-                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
-                        f"({self.ACCEL_MULTIPLIER:.1f}x avg) → LONG")
+                        f"ACCEL: {current_candle_pct:+.3f}% "
+                        f"({abs(current_candle_pct)/avg_candle_pct:.1f}x avg) → LONG")
             elif can_short:
                 return ("short",
-                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
-                        f"({self.ACCEL_MULTIPLIER:.1f}x avg) → SHORT")
+                        f"ACCEL: {current_candle_pct:+.3f}% "
+                        f"({abs(current_candle_pct)/avg_candle_pct:.1f}x avg) → SHORT")
 
         return None
 
