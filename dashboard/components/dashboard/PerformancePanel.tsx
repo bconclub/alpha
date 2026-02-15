@@ -132,8 +132,8 @@ export function PerformancePanel() {
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Performance
         </h3>
-        <div className="flex items-center gap-4">
-          <div className="flex gap-3 text-xs">
+        <div className="flex items-center gap-3 md:gap-4">
+          <div className="flex flex-wrap gap-2 md:gap-3 text-xs">
             <span className={cn('font-mono', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
               {formatPnL(totalPnL)}
             </span>
@@ -154,7 +154,7 @@ export function PerformancePanel() {
       </button>
 
       {!isCollapsed && (
-        <div className="px-5 pb-5 space-y-6">
+        <div className="px-3 pb-4 md:px-5 md:pb-5 space-y-4 md:space-y-6">
           {/* Time range toggle */}
           <div className="flex gap-1">
             {(['1d', '7d', '30d', 'all'] as TimeRange[]).map((range) => (
@@ -174,14 +174,14 @@ export function PerformancePanel() {
           </div>
 
           {/* P&L Chart */}
-          <div className="h-64">
+          <div className="h-48 md:h-64">
             {filteredDaily.length === 0 ? (
               <div className="h-full flex items-center justify-center">
                 <p className="text-sm text-zinc-500">No P&L data for this period</p>
               </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={filteredDaily} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
+                <LineChart data={filteredDaily} margin={{ top: 5, right: 10, bottom: 5, left: 5 }}>
                   <XAxis
                     dataKey="trade_date"
                     tickFormatter={(v: string) => formatShortDate(v)}
@@ -208,7 +208,7 @@ export function PerformancePanel() {
           </div>
 
           {/* Bottom grid: exchange split, strategy breakdown, per-pair, long vs short */}
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
             {/* Per-Exchange P&L */}
             <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-4">
               <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">By Exchange</h4>

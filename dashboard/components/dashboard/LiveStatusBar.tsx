@@ -81,11 +81,11 @@ export function LiveStatusBar() {
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-4">
-      <div className="flex items-center justify-between flex-wrap gap-4">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         {/* Exchange Cards */}
-        <div className="flex gap-3 flex-1 min-w-0">
+        <div className="flex flex-col sm:flex-row gap-3 flex-1 min-w-0">
           {/* Binance Card */}
-          <div className="flex-1 min-w-[200px] bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
+          <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
             <div className="flex items-center gap-2 mb-2">
               <span
                 className={cn(
@@ -123,7 +123,7 @@ export function LiveStatusBar() {
           </div>
 
           {/* Delta Card */}
-          <div className="flex-1 min-w-[200px] bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
+          <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
             <div className="flex items-center gap-2 mb-2">
               <span
                 className={cn(
@@ -164,9 +164,9 @@ export function LiveStatusBar() {
         </div>
 
         {/* Center: Total Capital + Bot State */}
-        <div className="flex flex-col items-center gap-1 px-6 border-x border-zinc-800">
+        <div className="flex flex-col items-center gap-1 border-y md:border-y-0 md:border-x border-zinc-800 py-3 md:py-0 md:px-6">
           <span className="text-[10px] uppercase tracking-wider text-zinc-500">Total Capital</span>
-          <span className="font-mono text-xl font-bold text-white">
+          <span className="font-mono text-lg md:text-xl font-bold text-white">
             {formatCurrency(totalCapital)}
           </span>
           <div className="flex items-center gap-3 mt-1">
@@ -198,7 +198,7 @@ export function LiveStatusBar() {
         </div>
 
         {/* Right: Indicators + Clock */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center justify-between sm:justify-start gap-4">
           <div className="flex flex-col gap-1.5 text-[10px]">
             <div className="flex items-center gap-2">
               <span className="text-zinc-500">Shorting</span>

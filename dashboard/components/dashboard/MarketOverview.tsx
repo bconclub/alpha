@@ -35,7 +35,7 @@ function SignalBar({ strength }: { strength: number }) {
     capped >= 70 ? '#00c853' : capped >= 40 ? '#ffd600' : '#ff1744';
 
   return (
-    <div className="flex items-center gap-2 w-28">
+    <div className="flex items-center gap-2 w-20 md:w-28">
       <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
         <div
           className="h-full rounded-full transition-all duration-500"
@@ -220,7 +220,7 @@ export function MarketOverview() {
   }, [strategyLog, trades]);
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-5 overflow-hidden">
+    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5 overflow-hidden">
       <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
         Market Overview
       </h3>
@@ -236,9 +236,9 @@ export function MarketOverview() {
                 <th className="pb-2 pr-3 font-medium w-6">Ex</th>
                 <th className="pb-2 pr-3 font-medium text-right">Price</th>
                 <th className="pb-2 pr-3 font-medium">Condition</th>
-                <th className="pb-2 pr-3 font-medium">Strategy</th>
-                <th className="pb-2 pr-3 font-medium text-right">ADX</th>
-                <th className="pb-2 pr-3 font-medium text-right">RSI</th>
+                <th className="pb-2 pr-3 font-medium hidden sm:table-cell">Strategy</th>
+                <th className="pb-2 pr-3 font-medium text-right hidden md:table-cell">ADX</th>
+                <th className="pb-2 pr-3 font-medium text-right hidden md:table-cell">RSI</th>
                 <th className="pb-2 font-medium">Signal</th>
               </tr>
             </thead>
@@ -282,13 +282,13 @@ export function MarketOverview() {
                       <td className="py-2.5 pr-3">
                         <Badge variant={condition.variant}>{condition.label}</Badge>
                       </td>
-                      <td className="py-2.5 pr-3 text-zinc-300 text-xs">
+                      <td className="py-2.5 pr-3 text-zinc-300 text-xs hidden sm:table-cell">
                         {getStrategyLabel(row.strategy)}
                       </td>
-                      <td className="py-2.5 pr-3 text-right font-mono text-zinc-300">
+                      <td className="py-2.5 pr-3 text-right font-mono text-zinc-300 hidden md:table-cell">
                         {row.adx != null ? row.adx.toFixed(0) : '—'}
                       </td>
-                      <td className="py-2.5 pr-3 text-right font-mono">
+                      <td className="py-2.5 pr-3 text-right font-mono hidden md:table-cell">
                         {row.rsi != null ? (
                           <span
                             className={

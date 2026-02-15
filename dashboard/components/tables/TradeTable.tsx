@@ -41,7 +41,7 @@ interface TradeTableProps {
 // Constants
 // ---------------------------------------------------------------------------
 
-const STRATEGIES: Strategy[] = ['scalp', 'futures_momentum', 'momentum'];
+const STRATEGIES: Strategy[] = ['scalp', 'futures_momentum', 'momentum', 'options_scalp'];
 const EXCHANGES: { label: string; value: Exchange | 'All' }[] = [
   { label: 'All', value: 'All' },
   { label: 'Binance', value: 'binance' },
@@ -268,11 +268,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {/* ----------------------------------------------------------------- */}
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         {/* Left side filters */}
-        <div className="flex flex-wrap items-end gap-4">
+        <div className="flex flex-wrap items-end gap-3 md:gap-4">
           {/* Strategy filter */}
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">Strategy</span>
-            <div className="flex gap-1">
+            <div className="flex gap-1 overflow-x-auto">
               {(['All', ...STRATEGIES] as const).map((s) => (
                 <button
                   key={s}
@@ -346,34 +346,34 @@ export default function TradeTable({ trades }: TradeTableProps) {
           </div>
 
           {/* Date range */}
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 w-full sm:w-auto">
             <span className="text-xs font-medium text-zinc-400">Date Range</span>
             <div className="flex items-center gap-2">
               <input
                 type="date"
                 value={dateFrom}
                 onChange={(e) => handleDateFrom(e.target.value)}
-                className="h-8 rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+                className="h-9 md:h-8 flex-1 sm:flex-none rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500"
               />
               <span className="text-zinc-500">&ndash;</span>
               <input
                 type="date"
                 value={dateTo}
                 onChange={(e) => handleDateTo(e.target.value)}
-                className="h-8 rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+                className="h-9 md:h-8 flex-1 sm:flex-none rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500"
               />
             </div>
           </div>
 
           {/* Search */}
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 w-full sm:w-auto">
             <span className="text-xs font-medium text-zinc-400">Search</span>
             <input
               type="text"
               value={search}
               onChange={(e) => handleSearch(e.target.value)}
               placeholder="Search pair..."
-              className="h-8 w-40 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-zinc-500"
+              className="h-9 md:h-8 w-full sm:w-40 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-zinc-500"
             />
           </div>
         </div>
@@ -382,7 +382,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
         <button
           onClick={exportCSV}
           disabled={filteredTrades.length === 0}
-          className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-9 md:h-8 shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -392,14 +392,99 @@ export default function TradeTable({ trades }: TradeTableProps) {
           >
             <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H12.5A1.5 1.5 0 0 1 14 5.5v1.382a1.5 1.5 0 0 1-.44 1.06l-.293.294a1 1 0 0 0-.293.707V12.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 12.5v-9Z" />
           </svg>
-          Export CSV
+          <span className="hidden sm:inline">Export CSV</span>
         </button>
       </div>
 
       {/* ----------------------------------------------------------------- */}
-      {/* Table                                                             */}
+      {/* Mobile card view                                                   */}
       {/* ----------------------------------------------------------------- */}
-      <div className="bg-card overflow-hidden rounded-xl border border-zinc-800">
+      <div className="md:hidden">
+        {visibleTrades.length === 0 ? (
+          <div className="rounded-xl border border-zinc-800 bg-card px-4 py-16 text-center text-sm text-zinc-500">
+            No trades match your filters
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {visibleTrades.map((trade) => (
+              <div
+                key={trade.id}
+                className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3"
+              >
+                {/* Top row: Pair + Side + P&L */}
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-white">{trade.pair}</span>
+                    <Badge variant={trade.side === 'buy' ? 'success' : 'danger'}>
+                      {trade.side.toUpperCase()}
+                    </Badge>
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ backgroundColor: getExchangeColor(trade.exchange) }}
+                    />
+                  </div>
+                  <span
+                    className={cn(
+                      'text-sm font-mono font-semibold',
+                      getPnLColor(trade.pnl),
+                    )}
+                  >
+                    {formatPnL(trade.pnl)}
+                  </span>
+                </div>
+                {/* Details row */}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+                  <span>{formatDate(trade.timestamp)}</span>
+                  <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
+                    {getStrategyLabel(trade.strategy)}
+                  </Badge>
+                  {trade.leverage > 1 && (
+                    <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
+                  )}
+                  {trade.pnl_pct != null && trade.pnl_pct !== 0 && (
+                    <span className={cn('font-mono', getPnLColor(trade.pnl_pct))}>
+                      {formatPercentage(trade.pnl_pct)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Mobile pagination */}
+        {filteredTrades.length > 0 && (
+          <div className="flex items-center justify-between mt-3">
+            <span className="text-xs text-zinc-400">
+              {startIdx + 1}&ndash;{endIdx} of {filteredTrades.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={safePage <= 1}
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 disabled:opacity-40"
+              >
+                Prev
+              </button>
+              <span className="text-xs text-zinc-400">
+                {safePage}/{totalPages}
+              </span>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={safePage >= totalPages}
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ----------------------------------------------------------------- */}
+      {/* Desktop table                                                      */}
+      {/* ----------------------------------------------------------------- */}
+      <div className="hidden md:block bg-card overflow-hidden rounded-xl border border-zinc-800">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1200px] text-sm">
             {/* Header */}
@@ -547,9 +632,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
           </table>
         </div>
 
-        {/* --------------------------------------------------------------- */}
-        {/* Pagination                                                       */}
-        {/* --------------------------------------------------------------- */}
+        {/* Pagination */}
         {filteredTrades.length > 0 && (
           <div className="flex items-center justify-between border-t border-zinc-800 px-4 py-3">
             <span className="text-xs text-zinc-400">

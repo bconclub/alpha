@@ -371,7 +371,7 @@ export function AnalyticsPanel() {
         </h3>
       </div>
 
-      <div className="px-5 pb-5 pt-4 space-y-6">
+      <div className="px-3 pb-4 pt-3 md:px-5 md:pb-5 md:pt-4 space-y-4 md:space-y-6">
         {/* ----------------------------------------------------------------
             1. Time Range Selector
         ---------------------------------------------------------------- */}
@@ -423,7 +423,7 @@ export function AnalyticsPanel() {
         {/* ----------------------------------------------------------------
             Charts grid: 2x2 on large screens
         ---------------------------------------------------------------- */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-5">
           {/* --------------------------------------------------------------
               3. Cumulative P&L Line Chart
           -------------------------------------------------------------- */}
@@ -431,14 +431,14 @@ export function AnalyticsPanel() {
             <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">
               Cumulative P&L
             </h4>
-            <div className="h-56">
+            <div className="h-44 md:h-56">
               {cumulativePnLData.length === 0 ? (
                 <EmptyChart message="No closed trades yet" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart
                     data={cumulativePnLData}
-                    margin={{ top: 5, right: 20, bottom: 5, left: 10 }}
+                    margin={{ top: 5, right: 10, bottom: 5, left: 5 }}
                   >
                     <XAxis
                       dataKey="timestamp"
@@ -477,14 +477,14 @@ export function AnalyticsPanel() {
             <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">
               Daily P&L
             </h4>
-            <div className="h-56">
+            <div className="h-44 md:h-56">
               {dailyBarData.length === 0 ? (
                 <EmptyChart message="No daily P&L data" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart
                     data={dailyBarData}
-                    margin={{ top: 5, right: 20, bottom: 5, left: 10 }}
+                    margin={{ top: 5, right: 10, bottom: 5, left: 5 }}
                   >
                     <XAxis
                       dataKey="trade_date"
@@ -523,7 +523,7 @@ export function AnalyticsPanel() {
             <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">
               P&L by Pair
             </h4>
-            <div className="h-56 overflow-y-auto">
+            <div className="h-44 md:h-56 overflow-y-auto">
               {pairBreakdown.length === 0 ? (
                 <EmptyChart message="No pair data" />
               ) : (
@@ -574,7 +574,7 @@ export function AnalyticsPanel() {
             <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">
               Exchange Split
             </h4>
-            <div className="h-56 flex items-center justify-center">
+            <div className="h-44 md:h-56 flex items-center justify-center">
               {exchangePieData.length === 0 ? (
                 <EmptyChart message="No exchange data" />
               ) : (
@@ -617,14 +617,14 @@ export function AnalyticsPanel() {
             <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">
               Drawdown
             </h4>
-            <div className="h-56">
+            <div className="h-44 md:h-56">
               {drawdownData.length === 0 ? (
                 <EmptyChart message="No drawdown data" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart
                     data={drawdownData}
-                    margin={{ top: 5, right: 20, bottom: 5, left: 10 }}
+                    margin={{ top: 5, right: 10, bottom: 5, left: 5 }}
                   >
                     <defs>
                       <linearGradient id="drawdownFill" x1="0" y1="0" x2="0" y2="1">
@@ -669,14 +669,14 @@ export function AnalyticsPanel() {
             <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">
               Win Rate (Rolling 10-Trade)
             </h4>
-            <div className="h-56">
+            <div className="h-44 md:h-56">
               {winRateOverTime.length === 0 ? (
                 <EmptyChart message="Need at least 10 closed trades" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart
                     data={winRateOverTime}
-                    margin={{ top: 5, right: 20, bottom: 5, left: 10 }}
+                    margin={{ top: 5, right: 10, bottom: 5, left: 5 }}
                   >
                     <XAxis
                       dataKey="tradeIndex"

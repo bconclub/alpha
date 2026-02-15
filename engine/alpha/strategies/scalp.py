@@ -241,6 +241,9 @@ class ScalpStrategy(BaseStrategy):
         self._tick_count: int = 0
         self._last_heartbeat: float = 0.0
 
+        # Shared signal state (read by options_scalp strategy)
+        self.last_signal_state: dict[str, Any] | None = None
+
         # Load soul on init
         _load_soul()
 
@@ -474,12 +477,34 @@ class ScalpStrategy(BaseStrategy):
         )
 
         if entry is not None:
-            side, reason, use_limit = entry
+            side, reason, use_limit, signal_strength = entry
+            # Share signal state with options strategy
+            self.last_signal_state = {
+                "side": side,
+                "reason": reason,
+                "strength": signal_strength,
+                "trend_15m": trend_15m,
+                "rsi": rsi_now,
+                "momentum_60s": momentum_60s,
+                "current_price": current_price,
+                "timestamp": time.monotonic(),
+            }
             soul_msg = _soul_check("quality entry")
             self.logger.info("[%s] TREND ENTRY — %s | 15m=%s | Soul: %s", self.pair, reason, trend_15m, soul_msg)
             order_type = "limit" if use_limit else "market"
             signals.append(self._build_entry_signal(side, current_price, amount, reason, order_type))
         else:
+            # Update signal state even when no entry (options can see what's happening)
+            self.last_signal_state = {
+                "side": None,
+                "reason": None,
+                "strength": 0,
+                "trend_15m": trend_15m,
+                "rsi": rsi_now,
+                "momentum_60s": momentum_60s,
+                "current_price": current_price,
+                "timestamp": time.monotonic(),
+            }
             # Log scanning status every 30 seconds (not every tick)
             if self._tick_count % 6 == 0:
                 idle_sec = int(idle_seconds)
@@ -610,7 +635,7 @@ class ScalpStrategy(BaseStrategy):
             reason = f"LONG 2-of-4: {' + '.join(bull_signals)} [15m={trend_15m}]{widen_tag}"
             # Use limit order if we have time (RSI signal, not breakout)
             use_limit = "MOM" not in bull_signals[0]  # limit if not urgent momentum
-            return ("long", reason, use_limit)
+            return ("long", reason, use_limit, len(bull_signals))
 
         elif len(bull_signals) >= 2 and not allow_long:
             # Would have entered long but 15m trend is bearish — BLOCK
@@ -637,7 +662,7 @@ class ScalpStrategy(BaseStrategy):
 
             reason = f"SHORT 2-of-4: {' + '.join(bear_signals)} [15m={trend_15m}]{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
-            return ("short", reason, use_limit)
+            return ("short", reason, use_limit, len(bear_signals))
 
         elif len(bear_signals) >= 2 and can_short and not allow_short:
             # Would have entered short but 15m trend is bullish — BLOCK

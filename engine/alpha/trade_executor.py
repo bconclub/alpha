@@ -43,9 +43,11 @@ class TradeExecutor:
         alerts: Any | None = None,
         delta_exchange: ccxt.Exchange | None = None,
         risk_manager: Any | None = None,
+        options_exchange: ccxt.Exchange | None = None,
     ) -> None:
         self.exchange = exchange                      # Binance (primary)
         self.delta_exchange = delta_exchange           # Delta (optional, futures)
+        self.options_exchange = options_exchange       # Delta options (optional)
         self.db = db  # alpha.db.Database
         self.alerts = alerts  # alpha.alerts.AlertManager
         self.risk_manager = risk_manager              # alpha.risk_manager.RiskManager
@@ -62,8 +64,19 @@ class TradeExecutor:
         self._delta_maker_fee: float = config.delta.maker_fee_with_gst  # 0.024% per side
         self._binance_taker_fee: float = 0.001  # default 0.1%
 
+    @staticmethod
+    def _is_option_symbol(pair: str) -> bool:
+        """Check if a pair is an option symbol (contains -C or -P suffix)."""
+        return pair.endswith("-C") or pair.endswith("-P")
+
     def _get_exchange(self, signal: Signal) -> ccxt.Exchange:
-        """Return the correct exchange instance for a signal."""
+        """Return the correct exchange instance for a signal.
+
+        Routes option symbols (-C/-P suffix) to the options exchange,
+        Delta futures to delta_exchange, and everything else to Binance.
+        """
+        if self._is_option_symbol(signal.pair) and self.options_exchange:
+            return self.options_exchange
         if signal.exchange_id == "delta" and self.delta_exchange:
             return self.delta_exchange
         return self.exchange  # default: Binance
@@ -358,7 +371,8 @@ class TradeExecutor:
             signal = self._enforce_binance_min(signal)
 
         # Convert Delta coin amounts to integer contracts BEFORE validation
-        if signal.exchange_id == "delta":
+        # Skip for option symbols — options use their own contract sizing (1 contract = 1 option)
+        if signal.exchange_id == "delta" and not self._is_option_symbol(signal.pair):
             contracts = self._to_delta_contracts(signal.pair, signal.amount, signal.price)
             logger.info("[%s] Delta: %.8f coins -> %d contracts", signal.pair, signal.amount, contracts)
             signal = Signal(

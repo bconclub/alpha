@@ -73,7 +73,7 @@ export function OpenPositions() {
   const { openPositions } = useSupabase();
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-5">
+    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
       <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
         Open Positions
       </h3>
@@ -81,7 +81,7 @@ export function OpenPositions() {
       {!openPositions || openPositions.length === 0 ? (
         <p className="text-sm text-zinc-500 text-center py-8">No open positions</p>
       ) : (
-        <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1">
+        <div className="space-y-3 max-h-none md:max-h-[500px] overflow-y-auto pr-1">
           {openPositions.map((pos) => {
             const entryPrice = pos.entry_price;
             const currentPrice = pos.current_price ?? entryPrice;
@@ -124,7 +124,7 @@ export function OpenPositions() {
                 </div>
 
                 {/* Price grid */}
-                <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs mb-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 md:gap-x-6 gap-y-1 text-xs mb-2">
                   <div className="flex justify-between">
                     <span className="text-zinc-500">Entry</span>
                     <span className="font-mono text-zinc-300">${formatNumber(entryPrice)}</span>

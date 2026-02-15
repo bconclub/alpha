@@ -6,6 +6,9 @@ import { Sidebar } from '@/components/ui/Sidebar';
 export const metadata: Metadata = {
   title: 'Alpha Dashboard — Trading Command Center',
   description: 'Real-time trading command center for Alpha crypto bot',
+  icons: {
+    icon: '/icon.png',
+  },
 };
 
 export default function RootLayout({
@@ -21,9 +24,9 @@ export default function RootLayout({
             {/* Left sidebar */}
             <Sidebar />
 
-            {/* Main content — offset by sidebar width */}
-            <main className="flex-1 ml-56 min-h-screen">
-              <div className="max-w-[1920px] mx-auto px-5 py-4">
+            {/* Main content — offset by sidebar width on desktop */}
+            <main className="flex-1 ml-0 md:ml-56 min-h-screen pt-14 md:pt-0 pb-16 md:pb-0">
+              <div className="max-w-[1920px] mx-auto px-3 py-3 md:px-5 md:py-4">
                 {children}
               </div>
             </main>

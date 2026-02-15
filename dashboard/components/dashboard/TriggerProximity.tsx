@@ -187,7 +187,7 @@ function Dot({ active, label }: { active: boolean; label: string }) {
     <div className="flex flex-col items-center gap-0.5">
       <div
         className={cn(
-          'w-2.5 h-2.5 rounded-full border transition-all duration-500',
+          'w-3 h-3 md:w-2.5 md:h-2.5 rounded-full border transition-all duration-500',
           active
             ? 'bg-[#00c853] border-[#00c853] shadow-[0_0_6px_rgba(0,200,83,0.5)]'
             : 'bg-zinc-800 border-zinc-700',
@@ -292,7 +292,7 @@ export function TriggerProximity() {
   }, [strategyLog]);
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-5">
+    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Entry Signals
@@ -303,14 +303,14 @@ export function TriggerProximity() {
       {triggers.length === 0 ? (
         <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
       ) : (
-        <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
+        <div className="space-y-3 max-h-none md:max-h-[600px] overflow-y-auto pr-1">
           {triggers.map((t) => (
             <div
               key={`${t.pair}-${t.exchange}`}
               className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3"
             >
               {/* Header */}
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-white">{t.pair}</span>
                   <span

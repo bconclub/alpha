@@ -62,6 +62,7 @@ export function getStrategyLabel(strategy: string): string {
     case 'arbitrage': return 'Arbitrage';
     case 'futures_momentum': return 'Futures Momentum';
     case 'scalp': return 'Scalp';
+    case 'options_scalp': return 'Options Scalp';
     default: return strategy;
   }
 }
@@ -73,6 +74,7 @@ export function getStrategyColor(strategy: string): string {
     case 'arbitrage': return '#8b5cf6';
     case 'futures_momentum': return '#f97316';
     case 'scalp': return '#00bcd4';
+    case 'options_scalp': return '#ec407a';
     default: return '#6b7280';
   }
 }
@@ -84,6 +86,7 @@ export function getStrategyBadgeVariant(strategy: string): 'blue' | 'warning' | 
     case 'arbitrage': return 'purple';
     case 'futures_momentum': return 'warning';
     case 'scalp': return 'blue';
+    case 'options_scalp': return 'purple';
     default: return 'default';
   }
 }

@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
@@ -85,68 +86,209 @@ const navItems = [
   },
 ];
 
+// Bottom nav items — subset for mobile
+const bottomNavItems = [
+  { name: 'Dashboard', href: '/', icon: navItems[0].icon },
+  { name: 'Trades', href: '/trades', icon: navItems[1].icon },
+  { name: 'Strategies', href: '/strategies', icon: navItems[2].icon },
+  { name: 'Settings', href: '/settings', icon: navItems[4].icon },
+];
+
 export function Sidebar() {
   const pathname = usePathname();
   const { isConnected } = useSupabase();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // Close drawer on route change
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [pathname]);
+
+  // Lock body scroll when drawer is open
+  useEffect(() => {
+    if (drawerOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => { document.body.style.overflow = ''; };
+  }, [drawerOpen]);
 
   return (
-    <aside className="fixed left-0 top-0 z-40 flex h-full w-56 flex-col border-r border-zinc-800 bg-[#0a0a0f]">
-      {/* Logo */}
-      <div className="flex items-center gap-2.5 px-5 py-5 border-b border-zinc-800/50">
-        <span className={cn(
-          'inline-block h-2 w-2 rounded-full',
-          isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-        )} />
-        <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
-        <span className="text-[10px] font-mono text-zinc-600 ml-auto">v{process.env.APP_VERSION ?? '?'}</span>
+    <>
+      {/* ── Mobile top bar ──────────────────────────────────────────────── */}
+      <div className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between border-b border-zinc-800 bg-[#0a0a0f] px-4 py-3 md:hidden">
+        <button
+          onClick={() => setDrawerOpen(true)}
+          className="flex items-center justify-center w-9 h-9 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+          aria-label="Open menu"
+        >
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        </button>
+        <div className="flex items-center gap-2">
+          <span className={cn(
+            'inline-block h-2 w-2 rounded-full',
+            isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+          )} />
+          <span className="text-base font-bold tracking-widest text-white">ALPHA</span>
+        </div>
+        <div className="w-9" /> {/* spacer for centering */}
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-0.5">
-        {navItems.map((item) => {
-          const isActive = pathname === item.href;
+      {/* ── Mobile drawer overlay ───────────────────────────────────────── */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-50 md:hidden">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/60"
+            onClick={() => setDrawerOpen(false)}
+          />
+          {/* Drawer */}
+          <aside className="absolute left-0 top-0 h-full w-64 bg-[#0a0a0f] border-r border-zinc-800 flex flex-col animate-slide-in">
+            {/* Drawer header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
+              <div className="flex items-center gap-2.5">
+                <span className={cn(
+                  'inline-block h-2 w-2 rounded-full',
+                  isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+                )} />
+                <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
+              </div>
+              <button
+                onClick={() => setDrawerOpen(false)}
+                className="flex items-center justify-center w-8 h-8 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                aria-label="Close menu"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
 
+            {/* Drawer nav */}
+            <nav className="flex-1 px-3 py-4 space-y-1">
+              {navItems.map((item) => {
+                const isActive = pathname === item.href;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      'flex items-center gap-3 rounded-lg px-4 py-3.5 text-base font-medium transition-all duration-150',
+                      isActive
+                        ? 'bg-[#2196f3]/10 text-[#2196f3]'
+                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40',
+                    )}
+                  >
+                    <span className={cn(
+                      'flex-shrink-0 transition-colors',
+                      isActive ? 'text-[#2196f3]' : 'text-zinc-600',
+                    )}>
+                      {item.icon}
+                    </span>
+                    {item.name}
+                  </Link>
+                );
+              })}
+            </nav>
+
+            {/* Drawer footer */}
+            <div className="px-5 py-4 border-t border-zinc-800/50">
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  'w-1.5 h-1.5 rounded-full',
+                  isConnected ? 'bg-[#00c853]' : 'bg-red-500',
+                )} />
+                <span className="text-xs text-zinc-600">
+                  {isConnected ? 'Realtime active' : 'Disconnected'}
+                </span>
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* ── Desktop sidebar ─────────────────────────────────────────────── */}
+      <aside className="fixed left-0 top-0 z-40 hidden h-full w-56 flex-col border-r border-zinc-800 bg-[#0a0a0f] md:flex">
+        {/* Logo */}
+        <div className="flex items-center gap-2.5 px-5 py-5 border-b border-zinc-800/50">
+          <span className={cn(
+            'inline-block h-2 w-2 rounded-full',
+            isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+          )} />
+          <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
+          <span className="text-[10px] font-mono text-zinc-600 ml-auto">v{process.env.APP_VERSION ?? '?'}</span>
+        </div>
+
+        {/* Navigation */}
+        <nav className="flex-1 px-3 py-4 space-y-0.5">
+          {navItems.map((item) => {
+            const isActive = pathname === item.href;
+
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-150',
+                  isActive
+                    ? 'bg-[#2196f3]/10 text-[#2196f3]'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40',
+                )}
+              >
+                <span className={cn(
+                  'flex-shrink-0 transition-colors',
+                  isActive ? 'text-[#2196f3]' : 'text-zinc-600',
+                )}>
+                  {item.icon}
+                </span>
+                {item.name}
+                {isActive && (
+                  <span className="ml-auto w-1 h-4 rounded-full bg-[#2196f3]" />
+                )}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* Footer */}
+        <div className="px-5 py-4 border-t border-zinc-800/50">
+          <div className="flex items-center gap-2">
+            <span className={cn(
+              'w-1.5 h-1.5 rounded-full',
+              isConnected ? 'bg-[#00c853]' : 'bg-red-500',
+            )} />
+            <span className="text-[10px] text-zinc-600">
+              {isConnected ? 'Realtime active' : 'Disconnected'}
+            </span>
+          </div>
+          <p className="text-[10px] text-zinc-700 mt-1">
+            Dashboard v{process.env.APP_VERSION ?? '?'}
+          </p>
+        </div>
+      </aside>
+
+      {/* ── Mobile bottom nav bar ───────────────────────────────────────── */}
+      <nav className="fixed bottom-0 left-0 right-0 z-50 flex items-stretch border-t border-zinc-800 bg-[#0a0a0f] md:hidden pb-safe">
+        {bottomNavItems.map((item) => {
+          const isActive = pathname === item.href;
           return (
             <Link
               key={item.href}
               href={item.href}
               className={cn(
-                'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-150',
-                isActive
-                  ? 'bg-[#2196f3]/10 text-[#2196f3]'
-                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40',
+                'flex-1 flex flex-col items-center justify-center gap-1 py-2 transition-colors',
+                isActive ? 'text-[#2196f3]' : 'text-zinc-500',
               )}
             >
-              <span className={cn(
-                'flex-shrink-0 transition-colors',
-                isActive ? 'text-[#2196f3]' : 'text-zinc-600',
-              )}>
-                {item.icon}
-              </span>
-              {item.name}
-              {isActive && (
-                <span className="ml-auto w-1 h-4 rounded-full bg-[#2196f3]" />
-              )}
+              <span className="flex-shrink-0">{item.icon}</span>
+              <span className="text-[10px] font-medium">{item.name}</span>
             </Link>
           );
         })}
       </nav>
-
-      {/* Footer */}
-      <div className="px-5 py-4 border-t border-zinc-800/50">
-        <div className="flex items-center gap-2">
-          <span className={cn(
-            'w-1.5 h-1.5 rounded-full',
-            isConnected ? 'bg-[#00c853]' : 'bg-red-500',
-          )} />
-          <span className="text-[10px] text-zinc-600">
-            {isConnected ? 'Realtime active' : 'Disconnected'}
-          </span>
-        </div>
-        <p className="text-[10px] text-zinc-700 mt-1">
-          Dashboard v{process.env.APP_VERSION ?? '?'}
-        </p>
-      </div>
-    </aside>
+    </>
   );
 }

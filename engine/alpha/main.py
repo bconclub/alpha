@@ -25,6 +25,7 @@ from alpha.strategies.base import BaseStrategy, StrategyName
 from alpha.strategies.futures_momentum import FuturesMomentumStrategy
 from alpha.strategies.grid import GridStrategy
 from alpha.strategies.momentum import MomentumStrategy
+from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
 from alpha.strategy_selector import StrategySelector
 from alpha.trade_executor import TradeExecutor
@@ -41,6 +42,7 @@ class AlphaBot:
         self.binance: ccxt.Exchange | None = None
         self.kucoin: ccxt.Exchange | None = None
         self.delta: ccxt.Exchange | None = None
+        self.delta_options: ccxt.Exchange | None = None  # Delta options exchange
         self.db = Database()
         self.alerts = AlertManager()
         self.risk_manager = RiskManager()
@@ -61,6 +63,8 @@ class AlphaBot:
 
         # Scalp overlay strategies: pair -> ScalpStrategy (run independently)
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
+        # Options overlay strategies: pair -> OptionsScalpStrategy
+        self._options_strategies: dict[str, OptionsScalpStrategy] = {}
 
         # Scheduler
         self._scheduler = AsyncIOScheduler()
@@ -138,6 +142,7 @@ class AlphaBot:
             alerts=self.alerts,
             delta_exchange=self.delta,
             risk_manager=self.risk_manager,
+            options_exchange=self.delta_options,
         )
 
         # No Binance analyzer — Delta only
@@ -180,6 +185,18 @@ class AlphaBot:
                     market_analyzer=self.delta_analyzer,
                 )
 
+        # Register options overlay — Delta only (reads signals from scalp)
+        if self.delta and self.delta_options:
+            for pair in self.delta_pairs:
+                scalp = self._scalp_strategies.get(pair)
+                self._options_strategies[pair] = OptionsScalpStrategy(
+                    pair, self.executor, self.risk_manager,
+                    options_exchange=self.delta_options,
+                    futures_exchange=self.delta,
+                    scalp_strategy=scalp,
+                    market_analyzer=self.delta_analyzer,
+                )
+
         # Inject restored position state into strategy instances
         self._restore_strategy_state()
 
@@ -187,6 +204,12 @@ class AlphaBot:
         for pair, scalp in self._scalp_strategies.items():
             await scalp.start()
         logger.info("Scalp overlay started on %d pairs", len(self._scalp_strategies))
+
+        # Start options strategies (run as parallel overlays alongside scalp)
+        for pair, opts in self._options_strategies.items():
+            await opts.start()
+        if self._options_strategies:
+            logger.info("Options overlay started on %d pairs", len(self._options_strategies))
 
         # Schedule periodic tasks
         self._scheduler.add_job(
@@ -249,6 +272,9 @@ class AlphaBot:
         for pair, scalp in self._scalp_strategies.items():
             if scalp.is_active:
                 stop_tasks.append(scalp.stop())
+        for pair, opts in self._options_strategies.items():
+            if opts.is_active:
+                stop_tasks.append(opts.stop())
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
         self._active_strategies = {p: None for p in self.all_pairs}
@@ -269,6 +295,8 @@ class AlphaBot:
             await self.kucoin.close()
         if self.delta:
             await self.delta.close()
+        if self.delta_options:
+            await self.delta_options.close()
 
         logger.info("Shutdown complete")
 
@@ -813,6 +841,9 @@ class AlphaBot:
                 for pair, scalp in self._scalp_strategies.items():
                     if scalp.is_active:
                         stop_tasks.append(scalp.stop())
+                for pair, opts in self._options_strategies.items():
+                    if opts.is_active:
+                        stop_tasks.append(opts.stop())
                 if stop_tasks:
                     await asyncio.gather(*stop_tasks, return_exceptions=True)
                 await self.alerts.send_command_confirmation("pause")
@@ -821,10 +852,13 @@ class AlphaBot:
             elif command == "resume":
                 self.risk_manager.unpause()
                 await self._analysis_cycle()  # re-evaluate and start strategies
-                # Restart scalp overlays
+                # Restart scalp + options overlays
                 for pair, scalp in self._scalp_strategies.items():
                     if not scalp.is_active:
                         await scalp.start()
+                for pair, opts in self._options_strategies.items():
+                    if not opts.is_active:
+                        await opts.start()
                 await self.alerts.send_command_confirmation("resume")
                 result_msg = "Bot resumed"
 
@@ -1280,6 +1314,25 @@ class AlphaBot:
                 "Delta Exchange India initialized (futures enabled, testnet=%s, leverage=%dx, url=%s)",
                 config.delta.testnet, config.delta.leverage, config.delta.base_url,
             )
+
+            # Delta Options — separate ccxt instance with defaultType=option
+            delta_options_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(
+                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
+                )
+            )
+            self.delta_options = ccxt.delta({
+                "apiKey": delta_key,
+                "secret": delta_secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "option"},
+                "session": delta_options_session,
+            })
+            self.delta_options.urls["api"] = {
+                "public": config.delta.base_url,
+                "private": config.delta.base_url,
+            }
+            logger.info("Delta Exchange India options initialized")
         else:
             self.delta_pairs = []  # no Delta pairs if no credentials
             logger.info("Delta credentials not set -- futures disabled")
