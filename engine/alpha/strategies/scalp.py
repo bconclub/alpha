@@ -433,6 +433,10 @@ class ScalpStrategy(BaseStrategy):
 
         # ── In position: check exit ────────────────────────────────────
         if self.in_position:
+            # Write live position state to DB every 10s (dashboard reads this)
+            if self._tick_count % 2 == 0:
+                await self._update_position_state_in_db(current_price)
+
             if _expiry_force_close:
                 pnl_pct = self._calc_pnl_pct(current_price)
                 self.logger.warning(
@@ -982,6 +986,55 @@ class ScalpStrategy(BaseStrategy):
         elif self.position_side == "short":
             return ((self.entry_price - current_price) / self.entry_price) * 100
         return 0.0
+
+    async def _update_position_state_in_db(self, current_price: float) -> None:
+        """Write live position state to the trades table so dashboard shows real state.
+
+        Updates: position_state, trail_stop_price, current_pnl, current_price, peak_pnl
+        Runs every ~10s (throttled in caller).
+        """
+        if not self.executor.db or not self.executor.db.is_connected:
+            return
+        try:
+            pnl_pct = self._calc_pnl_pct(current_price)
+
+            # Determine position state
+            if self._trailing_active:
+                state = "trailing"
+            else:
+                state = "holding"
+
+            # Calculate trail stop price (from actual peak, not current price)
+            trail_stop: float | None = None
+            if self._trailing_active:
+                if self.position_side == "long":
+                    trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
+                elif self.position_side == "short":
+                    trail_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
+
+            # Peak P&L (highest/lowest price relative to entry)
+            if self.position_side == "long" and self.entry_price > 0:
+                peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+            elif self.position_side == "short" and self.entry_price > 0:
+                peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+            else:
+                peak_pnl = 0.0
+
+            # Find the open trade and update it
+            open_trade = await self.executor.db.get_open_trade(
+                pair=self.pair, exchange=self._exchange_id, strategy="scalp",
+            )
+            if open_trade:
+                await self.executor.db.update_trade(open_trade["id"], {
+                    "position_state": state,
+                    "trail_stop_price": round(trail_stop, 8) if trail_stop else None,
+                    "current_pnl": round(pnl_pct, 4),
+                    "current_price": round(current_price, 8),
+                    "peak_pnl": round(peak_pnl, 4),
+                })
+        except Exception:
+            # Non-critical — don't crash the trade loop for a dashboard update
+            self.logger.debug("[%s] Failed to update position state in DB", self.pair)
 
     def _minutes_to_expiry(self) -> float:
         """Minutes until next daily expiry (5:30 PM IST)."""

@@ -3,7 +3,7 @@
 import { useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
-import type { StrategyLog, Exchange } from '@/lib/types';
+import type { StrategyLog, Exchange, OpenPosition } from '@/lib/types';
 
 // ── Engine thresholds (Trend-Guided Sniper v4.2) ────────────────────
 const RSI_LONG_THRESHOLD = 40;        // standard (trend-guided: 45)
@@ -44,6 +44,8 @@ interface TriggerInfo {
   bestCount: number;
   overallStatus: string;
   statusColor: string;
+  // Active position on this pair (if any)
+  activePosition: OpenPosition | null;
 }
 
 /** Derive 15m trend direction — use DB field if present, else compute from DI/ADX. */
@@ -188,6 +190,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     longIndicators, longCount, longBlocked,
     shortIndicators, shortCount, shortBlocked,
     bestCount, overallStatus, statusColor,
+    activePosition: null,  // populated later in component
   };
 }
 
@@ -291,8 +294,13 @@ function SideRow({
   );
 }
 
+function extractBaseAsset(pair: string): string {
+  if (pair.includes('/')) return pair.split('/')[0];
+  return pair.replace(/USD.*$/, '');
+}
+
 export function TriggerProximity() {
-  const { strategyLog } = useSupabase();
+  const { strategyLog, openPositions } = useSupabase();
 
   const triggers = useMemo(() => {
     const latestByPair = new Map<string, StrategyLog>();
@@ -305,9 +313,22 @@ export function TriggerProximity() {
       }
     }
 
+    // Build lookup of open positions by base asset + exchange
+    const positionMap = new Map<string, OpenPosition>();
+    for (const pos of (openPositions ?? [])) {
+      const asset = extractBaseAsset(pos.pair);
+      const key = `${asset}-${pos.exchange}`;
+      positionMap.set(key, pos);
+    }
+
     const results: TriggerInfo[] = [];
     for (const log of Array.from(latestByPair.values())) {
-      results.push(computeTrigger(log));
+      const trigger = computeTrigger(log);
+      // Attach active position if one exists for this pair+exchange
+      const asset = extractBaseAsset(trigger.pair);
+      const posKey = `${asset}-${trigger.exchange}`;
+      trigger.activePosition = positionMap.get(posKey) ?? null;
+      results.push(trigger);
     }
 
     results.sort((a, b) => {
@@ -317,7 +338,7 @@ export function TriggerProximity() {
     });
 
     return results;
-  }, [strategyLog]);
+  }, [strategyLog, openPositions]);
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
@@ -332,10 +353,21 @@ export function TriggerProximity() {
         <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
       ) : (
         <div className="space-y-3 max-h-none md:max-h-[600px] overflow-y-auto overflow-x-hidden pr-1">
-          {triggers.map((t) => (
+          {triggers.map((t) => {
+            const hasActivePos = t.activePosition != null;
+            const posState = t.activePosition?.position_state;
+            const posPnl = t.activePosition?.current_pnl;
+            const isTrailing = posState === 'trailing';
+
+            return (
             <div
               key={`${t.pair}-${t.exchange}`}
-              className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3"
+              className={cn(
+                'bg-zinc-900/40 border rounded-lg p-3',
+                hasActivePos
+                  ? isTrailing ? 'border-[#00c853]/30' : 'border-amber-400/30'
+                  : 'border-zinc-800/50',
+              )}
             >
               {/* Header */}
               <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
@@ -359,14 +391,27 @@ export function TriggerProximity() {
                 </div>
                 <div className="flex items-center gap-2">
                   {t.isFutures && t.hasData && <TrendBadge trend={t.trend} />}
-                  <span className={cn('text-[11px] font-medium', t.statusColor)}>
-                    {t.overallStatus}
-                  </span>
+                  {hasActivePos ? (
+                    <span className={cn(
+                      'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
+                      isTrailing
+                        ? 'bg-[#00c853]/10 text-[#00c853]'
+                        : 'bg-amber-400/10 text-amber-400',
+                    )}>
+                      {isTrailing && <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />}
+                      IN TRADE — {isTrailing ? 'TRAILING' : 'HOLDING'}
+                      {posPnl != null && ` ${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%`}
+                    </span>
+                  ) : (
+                    <span className={cn('text-[11px] font-medium', t.statusColor)}>
+                      {t.overallStatus}
+                    </span>
+                  )}
                 </div>
               </div>
 
               {t.hasData ? (
-                <div className="space-y-2.5">
+                <div className={cn('space-y-2.5', hasActivePos && 'opacity-40')}>
                   {/* Long: bar + dots */}
                   <SideRow
                     side="Long"
@@ -426,7 +471,8 @@ export function TriggerProximity() {
                 <p className="text-[11px] text-zinc-600">Awaiting indicator data from bot...</p>
               )}
             </div>
-          ))}
+          );
+          })}
         </div>
       )}
     </div>

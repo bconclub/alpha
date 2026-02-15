@@ -132,6 +132,11 @@ export interface OpenPosition {
   pnl?: number;
   stop_loss?: number | null;
   take_profit?: number | null;
+  // Live position state (written by bot every ~10s)
+  position_state?: 'holding' | 'trailing' | null;
+  trail_stop_price?: number | null;
+  current_pnl?: number | null;   // unrealized P&L % (price move)
+  peak_pnl?: number | null;      // highest P&L % reached
 }
 
 export interface PnLByExchange {

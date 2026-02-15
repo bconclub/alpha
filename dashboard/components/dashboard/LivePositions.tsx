@@ -62,7 +62,8 @@ export function LivePositions() {
 
     return openPositions.map((pos) => {
       const asset = extractBaseAsset(pos.pair);
-      const currentPrice = currentPrices.get(asset) ?? null;
+      // Prefer bot's live price (updated every ~10s) over strategy_log price (every ~5min)
+      const currentPrice = pos.current_price ?? currentPrices.get(asset) ?? null;
       const leverage = pos.leverage > 1 ? pos.leverage : 1;
 
       // Calculate P&L
@@ -98,13 +99,15 @@ export function LivePositions() {
         collateral = leverage > 1 ? notional / leverage : notional;
       }
 
-      // Determine trailing status:
-      // If price P&L >= 0.50%, trail is likely active (matches engine TRAILING_ACTIVATE_PCT)
-      const trailActive = pricePnlPct != null && pricePnlPct >= 0.50;
+      // Use ACTUAL position state from bot (written to DB every ~10s)
+      // Falls back to estimation if bot hasn't written state yet
+      const trailActive = pos.position_state === 'trailing'
+        || (pos.position_state == null && pricePnlPct != null && pricePnlPct >= 0.50);
 
-      // Estimate trail stop price based on dynamic tiers
-      let trailStopPrice: number | null = null;
-      if (trailActive && currentPrice != null && pricePnlPct != null) {
+      // Use ACTUAL trail stop price from bot, or estimate if not available
+      let trailStopPrice: number | null = pos.trail_stop_price ?? null;
+      if (trailStopPrice == null && trailActive && currentPrice != null && pricePnlPct != null) {
+        // Fallback estimation when bot hasn't written state yet
         let trailDist = 0.30;
         const tiers: [number, number][] = [[0.50, 0.30], [1.00, 0.50], [2.00, 0.70], [3.00, 1.00]];
         for (const [minProfit, dist] of tiers) {

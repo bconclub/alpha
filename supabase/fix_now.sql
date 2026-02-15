@@ -217,5 +217,31 @@ from public.trades
 where status = 'closed'
   and pnl is null;
 
+-- ── 14. Add live position state columns to trades table ──
+-- The bot writes these every 10s while a position is open.
+-- Dashboard reads them for real-time HOLDING/TRAILING status.
+alter table public.trades add column if not exists position_state  text default null;
+alter table public.trades add column if not exists trail_stop_price numeric(20,8) default null;
+alter table public.trades add column if not exists current_pnl     numeric(10,4) default null;
+alter table public.trades add column if not exists current_price   numeric(20,8) default null;
+alter table public.trades add column if not exists peak_pnl        numeric(10,4) default null;
+
+-- ── 15. Recreate v_open_positions view with live state columns ──
+create or replace view public.v_open_positions as
+select
+    id, opened_at, pair, side,
+    entry_price, amount, cost,
+    strategy, exchange, leverage, position_type,
+    reason, order_id,
+    round((cost * leverage)::numeric, 8) as effective_exposure,
+    position_state,
+    trail_stop_price,
+    current_pnl,
+    current_price,
+    peak_pnl
+from   public.trades
+where  status = 'open'
+order  by opened_at desc;
+
 -- Done! If SOL/XRP rows appear above, the dashboard will show them.
 -- If only BTC/ETH appear, the engine isn't logging SOL/XRP (check VPS logs).
