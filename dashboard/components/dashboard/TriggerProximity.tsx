@@ -5,148 +5,219 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { StrategyLog, Exchange } from '@/lib/types';
 
+// ── Engine thresholds (Quality Sniper v3.1) ─────────────────────────
+// Entry requires 2-of-4 confirmations. These match engine/alpha/strategies/scalp.py
+const RSI_LONG_THRESHOLD = 30;      // RSI < 30 = oversold → long
+const RSI_SHORT_THRESHOLD = 70;     // RSI > 70 = overbought → short
+const MOMENTUM_MIN_PCT = 0.30;      // 0.30%+ move = real momentum
+const VOL_SPIKE_RATIO = 2.0;        // volume > 2x avg = institutional
+
+interface IndicatorStatus {
+  active: boolean;
+  label: string;
+  value: string;
+}
+
 interface TriggerInfo {
   pair: string;
   exchange: Exchange;
-  rsi: number | null;
-  longDistancePct: number;
-  shortDistancePct: number;
-  longReady: boolean;
-  shortReady: boolean;
   isFutures: boolean;
-  macdStatus: string;
+  hasData: boolean;
+  // Raw values
+  rsi: number | null;
+  volumeRatio: number | null;
+  priceChangePct: number | null;
+  currentPrice: number | null;
+  bbUpper: number | null;
+  bbLower: number | null;
+  // 4 indicators for long
+  longIndicators: IndicatorStatus[];
+  longCount: number;
+  // 4 indicators for short
+  shortIndicators: IndicatorStatus[];
+  shortCount: number;
+  // Overall
+  bestSide: 'long' | 'short' | 'none';
+  bestCount: number;
   overallStatus: string;
   statusColor: string;
-  triggerText: string;
-  hasIndicatorData: boolean;
 }
-
-// Thresholds matching engine's Quality Sniper v3.1 (2-of-4 confirmation):
-//   Engine entry requires RSI < 30 (long) or RSI > 70 (short)
-//   PLUS a second confirmation (momentum 0.3%+, volume 2x+, or BB breakout).
-//   Dashboard shows proximity to the RSI threshold only — the second signal
-//   is checked by the engine at trade time.
-const RSI_BUY_THRESHOLD = 30;
-const RSI_SHORT_THRESHOLD = 70;
 
 function computeTrigger(log: StrategyLog): TriggerInfo {
   const pair = log.pair;
   const exchange: Exchange = log.exchange ?? 'binance';
-  const rsi = log.rsi ?? null;
   const isFutures = exchange === 'delta';
 
-  let longDistancePct = 100;
-  let shortDistancePct = 100;
-  let longReady = false;
-  let shortReady = false;
+  const rsi = log.rsi ?? null;
+  const volumeRatio = log.volume_ratio ?? null;
+  const priceChangePct = log.price_change_15m ?? null;
+  const currentPrice = log.current_price ?? null;
+  const bbUpper = log.bb_upper ?? null;
+  const bbLower = log.bb_lower ?? null;
 
-  if (rsi != null) {
-    // Buy distance: how far RSI is from the buy threshold
-    if (rsi > RSI_BUY_THRESHOLD) {
-      longDistancePct = ((rsi - RSI_BUY_THRESHOLD) / RSI_BUY_THRESHOLD) * 100;
-    } else {
-      longDistancePct = 0;
-      longReady = true;
-    }
+  const hasData = rsi != null;
 
-    // Short distance: how far RSI is from the short threshold
-    if (rsi < RSI_SHORT_THRESHOLD) {
-      shortDistancePct = ((RSI_SHORT_THRESHOLD - rsi) / (100 - RSI_SHORT_THRESHOLD)) * 100;
-    } else {
-      shortDistancePct = 0;
-      shortReady = true;
-    }
+  // ── Build 4 indicators for LONG ──────────────────────────────────
+  const longIndicators: IndicatorStatus[] = [];
+  let longCount = 0;
+
+  // 1. Momentum (bullish = positive price change)
+  const momBull = priceChangePct != null && priceChangePct >= MOMENTUM_MIN_PCT;
+  longIndicators.push({
+    active: momBull,
+    label: 'MOM',
+    value: priceChangePct != null ? `${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(2)}%` : '—',
+  });
+  if (momBull) longCount++;
+
+  // 2. Volume spike
+  const volHigh = volumeRatio != null && volumeRatio >= VOL_SPIKE_RATIO;
+  longIndicators.push({
+    active: volHigh && (priceChangePct == null || priceChangePct >= 0),
+    label: 'VOL',
+    value: volumeRatio != null ? `${volumeRatio.toFixed(1)}x` : '—',
+  });
+  if (volHigh && (priceChangePct == null || priceChangePct >= 0)) longCount++;
+
+  // 3. RSI extreme (oversold → long)
+  const rsiLong = rsi != null && rsi < RSI_LONG_THRESHOLD;
+  longIndicators.push({
+    active: rsiLong,
+    label: 'RSI',
+    value: rsi != null ? rsi.toFixed(0) : '—',
+  });
+  if (rsiLong) longCount++;
+
+  // 4. BB breakout (price above upper band → bullish breakout)
+  const bbBreakLong = currentPrice != null && bbUpper != null && currentPrice > bbUpper;
+  longIndicators.push({
+    active: bbBreakLong,
+    label: 'BB',
+    value: bbBreakLong ? 'Break' : (bbUpper != null ? 'In' : '—'),
+  });
+  if (bbBreakLong) longCount++;
+
+  // ── Build 4 indicators for SHORT ─────────────────────────────────
+  const shortIndicators: IndicatorStatus[] = [];
+  let shortCount = 0;
+
+  // 1. Momentum (bearish = negative price change)
+  const momBear = priceChangePct != null && priceChangePct <= -MOMENTUM_MIN_PCT;
+  shortIndicators.push({
+    active: momBear,
+    label: 'MOM',
+    value: priceChangePct != null ? `${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(2)}%` : '—',
+  });
+  if (momBear) shortCount++;
+
+  // 2. Volume spike (with bearish direction)
+  shortIndicators.push({
+    active: volHigh && (priceChangePct == null || priceChangePct <= 0),
+    label: 'VOL',
+    value: volumeRatio != null ? `${volumeRatio.toFixed(1)}x` : '—',
+  });
+  if (volHigh && (priceChangePct == null || priceChangePct <= 0)) shortCount++;
+
+  // 3. RSI extreme (overbought → short)
+  const rsiShort = rsi != null && rsi > RSI_SHORT_THRESHOLD;
+  shortIndicators.push({
+    active: rsiShort,
+    label: 'RSI',
+    value: rsi != null ? rsi.toFixed(0) : '—',
+  });
+  if (rsiShort) shortCount++;
+
+  // 4. BB breakdown (price below lower band → bearish breakdown)
+  const bbBreakShort = currentPrice != null && bbLower != null && currentPrice < bbLower;
+  shortIndicators.push({
+    active: bbBreakShort,
+    label: 'BB',
+    value: bbBreakShort ? 'Break' : (bbLower != null ? 'In' : '—'),
+  });
+  if (bbBreakShort) shortCount++;
+
+  // ── Overall status ───────────────────────────────────────────────
+  const bestCount = isFutures ? Math.max(longCount, shortCount) : longCount;
+  const bestSide: 'long' | 'short' | 'none' =
+    bestCount === 0 ? 'none' :
+    longCount >= shortCount ? 'long' : 'short';
+
+  let overallStatus: string;
+  let statusColor: string;
+
+  if (bestCount >= 2) {
+    overallStatus = `${bestCount}/4 — TRADE READY`;
+    statusColor = 'text-[#00c853]';
+  } else if (bestCount === 1) {
+    overallStatus = `1/4 — Needs 1 more`;
+    statusColor = 'text-[#ffd600]';
+  } else {
+    overallStatus = '0/4 — Scanning';
+    statusColor = 'text-zinc-500';
   }
 
-  // MACD status
-  let macdStatus = 'No data';
-  if (log.macd_histogram != null) {
-    const hist = log.macd_histogram;
-    if (Math.abs(hist) < 0.0005) {
-      macdStatus = 'Converging — possible cross soon';
-    } else if (hist > 0) {
-      macdStatus = 'Bullish — above signal';
-    } else {
-      macdStatus = 'Bearish — below signal';
-    }
-  }
-
-  // Build trigger text: "RSI=72 → need <30 for long (far) | need >70 for short (READY — needs 2nd signal)"
-  let triggerText = 'Awaiting indicator data...';
-  let overallStatus = 'Watching';
-  let statusColor = 'text-zinc-400';
-
-  if (rsi != null) {
-    // "READY" means RSI threshold met, but engine still needs a 2nd confirmation
-    const longLabel = longReady
-      ? 'RSI ✓ (needs 2nd)'
-      : longDistancePct < 25 ? 'close' : 'far';
-    const shortLabel = shortReady
-      ? 'RSI ✓ (needs 2nd)'
-      : shortDistancePct < 25 ? 'close' : 'far';
-
-    const parts: string[] = [];
-    parts.push(`need <${RSI_BUY_THRESHOLD} for long (${longLabel})`);
-    if (isFutures) {
-      parts.push(`need >${RSI_SHORT_THRESHOLD} for short (${shortLabel})`);
-    }
-    triggerText = `RSI=${rsi.toFixed(0)} → ${parts.join(' | ')}`;
-
-    // Determine closest signal
-    const closestDist = isFutures
-      ? Math.min(longDistancePct, shortDistancePct)
-      : longDistancePct;
-
-    if (longReady || shortReady) {
-      // RSI threshold met but engine needs 2-of-4 confirmation
-      overallStatus = 'RSI Ready — needs 2nd signal';
-      statusColor = 'text-[#ffd600]';  // yellow — not guaranteed trade
-    } else if (closestDist < 25) {
-      overallStatus = 'Getting Close';
-      statusColor = 'text-[#ffd600]';
-    } else {
-      overallStatus = 'Watching';
-      statusColor = 'text-zinc-500';
-    }
+  if (!hasData) {
+    overallStatus = 'Awaiting data...';
+    statusColor = 'text-zinc-600';
   }
 
   return {
-    pair,
-    exchange,
-    rsi,
-    longDistancePct,
-    shortDistancePct,
-    longReady,
-    shortReady,
-    isFutures,
-    macdStatus,
-    overallStatus,
-    statusColor,
-    triggerText,
-    hasIndicatorData: rsi != null,
+    pair, exchange, isFutures, hasData,
+    rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
+    longIndicators, longCount,
+    shortIndicators, shortCount,
+    bestSide, bestCount,
+    overallStatus, statusColor,
   };
 }
 
-function ProximityBar({ distance, label, ready }: { distance: number; label: string; ready: boolean }) {
-  const filled = ready ? 100 : Math.max(0, Math.min(100, 100 - distance));
-  // Yellow when RSI ready (still needs 2nd confirmation), not green
-  const color = ready
-    ? '#ffd600'
-    : distance < 25
-      ? '#ffd600'
-      : '#ff1744';
+// ── Indicator dot: green=active, dark=inactive ───────────────────────
+function IndicatorDot({ indicator }: { indicator: IndicatorStatus }) {
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <div
+        className={cn(
+          'w-3 h-3 rounded-full border transition-all duration-500',
+          indicator.active
+            ? 'bg-[#00c853] border-[#00c853] shadow-[0_0_6px_rgba(0,200,83,0.5)]'
+            : 'bg-zinc-800 border-zinc-700',
+        )}
+      />
+      <span className={cn(
+        'text-[9px] font-mono',
+        indicator.active ? 'text-[#00c853]' : 'text-zinc-600',
+      )}>
+        {indicator.label}
+      </span>
+    </div>
+  );
+}
+
+// ── Row of 4 dots with side label ────────────────────────────────────
+function IndicatorRow({
+  side,
+  indicators,
+  count,
+}: {
+  side: 'Long' | 'Short';
+  indicators: IndicatorStatus[];
+  count: number;
+}) {
+  const countColor =
+    count >= 2 ? 'text-[#00c853]' :
+    count === 1 ? 'text-[#ffd600]' :
+    'text-zinc-600';
 
   return (
-    <div className="flex items-center gap-2 mt-1">
-      <span className="text-[10px] text-zinc-500 w-10 shrink-0">{label}</span>
-      <div className="flex-1 h-2 bg-zinc-800 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${filled}%`, backgroundColor: color }}
-        />
+    <div className="flex items-center gap-3">
+      <span className="text-[10px] text-zinc-500 w-8 shrink-0">{side}</span>
+      <div className="flex items-center gap-2.5">
+        {indicators.map((ind, i) => (
+          <IndicatorDot key={i} indicator={ind} />
+        ))}
       </div>
-      <span className="text-[10px] font-mono text-zinc-500 w-20 text-right">
-        {ready ? 'RSI ✓' : `${distance.toFixed(0)}% away`}
+      <span className={cn('text-[10px] font-mono ml-auto', countColor)}>
+        {count}/4
       </span>
     </div>
   );
@@ -156,7 +227,7 @@ export function TriggerProximity() {
   const { strategyLog } = useSupabase();
 
   const triggers = useMemo(() => {
-    // Get latest log per pair (strategyLog is ordered by created_at DESC)
+    // Get latest log per pair
     const latestByPair = new Map<string, StrategyLog>();
     for (const log of strategyLog) {
       if (log.pair) {
@@ -172,17 +243,11 @@ export function TriggerProximity() {
       results.push(computeTrigger(log));
     }
 
-    // Sort: closest to any trigger first
+    // Sort: most confirmations first, then by pair
     results.sort((a, b) => {
-      if (a.hasIndicatorData && !b.hasIndicatorData) return -1;
-      if (!a.hasIndicatorData && b.hasIndicatorData) return 1;
-      const aMin = a.isFutures
-        ? Math.min(a.longDistancePct, a.shortDistancePct)
-        : a.longDistancePct;
-      const bMin = b.isFutures
-        ? Math.min(b.longDistancePct, b.shortDistancePct)
-        : b.longDistancePct;
-      return aMin - bMin;
+      if (a.hasData && !b.hasData) return -1;
+      if (!a.hasData && b.hasData) return 1;
+      return b.bestCount - a.bestCount;
     });
 
     return results;
@@ -190,9 +255,12 @@ export function TriggerProximity() {
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-5">
-      <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
-        What Could Trigger Next
-      </h3>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
+          Entry Signals
+        </h3>
+        <span className="text-[9px] text-zinc-600 font-mono">need 2/4</span>
+      </div>
 
       {triggers.length === 0 ? (
         <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
@@ -203,8 +271,8 @@ export function TriggerProximity() {
               key={`${t.pair}-${t.exchange}`}
               className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3"
             >
-              {/* Header */}
-              <div className="flex items-center justify-between mb-2">
+              {/* Header: pair + status */}
+              <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-white">{t.pair}</span>
                   <span
@@ -217,39 +285,67 @@ export function TriggerProximity() {
                   >
                     {t.exchange === 'binance' ? 'B' : 'D'}
                   </span>
+                  {t.currentPrice != null && (
+                    <span className="text-[10px] font-mono text-zinc-500">
+                      ${t.currentPrice.toLocaleString()}
+                    </span>
+                  )}
                 </div>
-                <span className={cn('text-xs font-medium', t.statusColor)}>
+                <span className={cn('text-[11px] font-medium', t.statusColor)}>
                   {t.overallStatus}
                 </span>
               </div>
 
-              {/* RSI proximity bars */}
-              {t.rsi != null ? (
-                <div className="mb-2 space-y-1">
-                  <ProximityBar
-                    distance={t.longDistancePct}
-                    label="Long"
-                    ready={t.longReady}
-                  />
+              {t.hasData ? (
+                <div className="space-y-2">
+                  {/* Long indicators */}
+                  <IndicatorRow side="Long" indicators={t.longIndicators} count={t.longCount} />
+                  {/* Short indicators (futures only) */}
                   {t.isFutures && (
-                    <ProximityBar
-                      distance={t.shortDistancePct}
-                      label="Short"
-                      ready={t.shortReady}
-                    />
+                    <IndicatorRow side="Short" indicators={t.shortIndicators} count={t.shortCount} />
                   )}
+                  {/* Compact values row */}
+                  <div className="flex gap-3 mt-1 pt-1 border-t border-zinc-800/50">
+                    {t.rsi != null && (
+                      <span className={cn(
+                        'text-[9px] font-mono',
+                        t.rsi < RSI_LONG_THRESHOLD ? 'text-[#00c853]' :
+                        t.rsi > RSI_SHORT_THRESHOLD ? 'text-[#ff1744]' :
+                        'text-zinc-500',
+                      )}>
+                        RSI {t.rsi.toFixed(0)}
+                      </span>
+                    )}
+                    {t.volumeRatio != null && (
+                      <span className={cn(
+                        'text-[9px] font-mono',
+                        t.volumeRatio >= VOL_SPIKE_RATIO ? 'text-[#00c853]' : 'text-zinc-500',
+                      )}>
+                        Vol {t.volumeRatio.toFixed(1)}x
+                      </span>
+                    )}
+                    {t.priceChangePct != null && (
+                      <span className={cn(
+                        'text-[9px] font-mono',
+                        Math.abs(t.priceChangePct) >= MOMENTUM_MIN_PCT ? 'text-[#00c853]' : 'text-zinc-500',
+                      )}>
+                        Mom {t.priceChangePct >= 0 ? '+' : ''}{t.priceChangePct.toFixed(2)}%
+                      </span>
+                    )}
+                    {t.bbUpper != null && t.bbLower != null && t.currentPrice != null && (
+                      <span className={cn(
+                        'text-[9px] font-mono',
+                        t.currentPrice > t.bbUpper || t.currentPrice < t.bbLower
+                          ? 'text-[#00c853]' : 'text-zinc-500',
+                      )}>
+                        BB {t.currentPrice > t.bbUpper ? 'Above' : t.currentPrice < t.bbLower ? 'Below' : 'In'}
+                      </span>
+                    )}
+                  </div>
                 </div>
               ) : (
-                <p className="text-[11px] text-zinc-600 mb-2">Awaiting indicator data from bot...</p>
+                <p className="text-[11px] text-zinc-600">Awaiting indicator data from bot...</p>
               )}
-
-              {/* MACD */}
-              <div className="text-[11px] text-zinc-500 mb-1">
-                MACD: <span className="text-zinc-400">{t.macdStatus}</span>
-              </div>
-
-              {/* Trigger text */}
-              <p className="text-[10px] text-zinc-600 italic">{t.triggerText}</p>
             </div>
           ))}
         </div>

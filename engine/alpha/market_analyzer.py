@@ -38,6 +38,11 @@ class MarketAnalysis:
     minus_di: float = 0.0
     # Price snapshot
     current_price: float = 0.0
+    # Bollinger Bands (for dashboard 2-of-4 display)
+    bb_upper: float = 0.0
+    bb_lower: float = 0.0
+    # Short-term price change (% over last few candles)
+    price_change_pct: float = 0.0
 
 
 class MarketAnalyzer:
@@ -128,6 +133,10 @@ class MarketAnalyzer:
         vol_current = volume.iloc[-1]
         volume_ratio = vol_current / vol_avg if vol_avg else 1.0
 
+        # Short-term price change (last candle — approximates 60s momentum for 1m candles)
+        price_prev = float(close.iloc[-2]) if len(close) >= 2 else current_price
+        price_change_pct = ((current_price - price_prev) / price_prev * 100) if price_prev > 0 else 0.0
+
         # -- Classification logic --
         condition: MarketCondition
         reason: str
@@ -180,6 +189,9 @@ class MarketAnalyzer:
             plus_di=plus_di,
             minus_di=minus_di,
             current_price=current_price,
+            bb_upper=bb_upper,
+            bb_lower=bb_lower,
+            price_change_pct=price_change_pct,
         )
 
 
