@@ -5,7 +5,7 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { StrategyLog, Exchange } from '@/lib/types';
 
-// ── Engine thresholds (Quality Sniper v3.1) ─────────────────────────
+// ── Engine thresholds (Trend Sniper v4.0) ───────────────────────────
 const RSI_LONG_THRESHOLD = 30;
 const RSI_SHORT_THRESHOLD = 70;
 const MOMENTUM_MIN_PCT = 0.30;

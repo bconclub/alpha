@@ -170,13 +170,14 @@ class AlphaBot:
                 }
                 self._active_strategies[pair] = None
 
-        # Register scalp overlay — Delta only
+        # Register scalp overlay — Delta only (with 15m trend filter)
         if self.delta:
             for pair in self.delta_pairs:
                 self._scalp_strategies[pair] = ScalpStrategy(
                     pair, self.executor, self.risk_manager,
                     exchange=self.delta,
                     is_futures=True,
+                    market_analyzer=self.delta_analyzer,
                 )
 
         # Inject restored position state into strategy instances
@@ -1269,10 +1270,10 @@ class AlphaBot:
                 "private": config.delta.base_url,
             }
             # ── LEVERAGE SAFETY CHECK ─────────────────────────────────────
-            if config.delta.leverage < 20:
-                logger.critical(
-                    "!!! LEVERAGE IS %dx — MUST BE 20x !!! "
-                    "Set DELTA_LEVERAGE=20 in .env and restart!",
+            if config.delta.leverage > 10:
+                logger.warning(
+                    "!!! LEVERAGE IS %dx — recommended max is 10x for safety !!! "
+                    "Set DELTA_LEVERAGE=10 in .env",
                     config.delta.leverage,
                 )
             logger.info(

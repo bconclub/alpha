@@ -1,31 +1,46 @@
-"""Alpha v3.1 — QUALITY SNIPER: Fewer trades, bigger wins, beat the fees.
+"""Alpha v4.0 — TREND-ALIGNED SNIPER: Trade WITH the trend, not against it.
 
-PHILOSOPHY: Every trade must have profit potential AT LEAST 13x the fees.
-TP MUST be bigger than SL. Winners must outsize losers. R:R = 3:1.
+PHILOSOPHY: Only enter in the direction of the 15-minute trend.
+Every trade must have profit potential AT LEAST 13x the fees.
+TP > SL. Winners outsize losers. R:R = 4.3:1 (1.50% TP / 0.35% SL).
+
+CRITICAL RULE: Check 15-minute trend BEFORE entering.
+  - If 15m trend is bearish → only SHORT, never long
+  - If 15m trend is bullish → only LONG, never short
+  - If 15m trend is neutral → use 2-of-4 signals (either direction)
+  This single rule prevents most losses from counter-trend entries.
+
+Risk Management (10x leverage):
+  - Leverage: 10x (NOT 20x — 0.7% against = 7% loss, not 14%)
+  - SL: 0.35% price (3.5% capital at 10x) — tighter than before
+  - TP: 1.50% minimum (15% capital at 10x)
+  - R:R = 1.50/0.35 = 4.3:1
+  - Max contracts: ETH 2, BTC 1 (smaller positions while improving)
+  - Daily loss limit: 20% of capital → stop for the day
+  - NO pause after losses — keep hunting quality setups
 
 Delta India Fee Structure (incl 18% GST):
   - Taker: 0.05% + 18% GST = 0.059% per side
   - Maker: 0.02% + 18% GST = 0.024% per side
-  - Round trip taker: 0.118%
-  - Round trip maker: 0.048%
-  - Mixed (maker entry + taker exit): 0.083%
+  - Mixed RT (maker entry + taker exit): 0.083%
 
-Fee Math per Trade:
-  - BTC 1 contract ($69.7 notional): RT taker $0.082, RT mixed $0.058
-  - ETH 5 contracts ($104 notional): RT taker $0.123, RT mixed $0.086
-  - 1.5% price move on BTC = $1.05 profit → 13x fees ✓
-  - 1.5% price move on ETH = $1.56 profit → 13x fees ✓
+Fee Math per Trade (10x leverage):
+  - BTC 1 contract ($69.7 notional): RT mixed $0.058
+  - ETH 2 contracts ($41.6 notional): RT mixed $0.035
+  - 1.5% move on BTC 1ct = $1.05 profit → 18x fees ✓
+  - 1.5% move on ETH 2ct = $0.62 profit → 18x fees ✓
 
-Entry — WAIT FOR REAL MOMENTUM (2-of-4 confirmation):
+Entry — TREND + MOMENTUM (15m trend + 2-of-4 confirmation):
+  0. CHECK 15-MINUTE TREND FIRST (bullish/bearish/neutral)
   1. Price moved 0.3%+ in last 60 seconds (real momentum)
   2. Volume spike 2x+ above average (institutional)
   3. RSI extreme (<30 or >70) — strong directional pressure
   4. BB breakout — price outside Bollinger Bands
-  Must have AT LEAST 2 of these. Use LIMIT orders for entry (60% fee savings).
+  Must have 2+ confirmations AND align with 15m trend.
 
-Exit — TP MUST BE BIGGER THAN SL (3:1 R:R):
-  1. Stop loss — 0.50% price (cut fast, $0.35 on BTC, $0.52 on ETH)
-  2. Trailing stop — activates at +1.50%, trails 0.50% behind peak
+Exit — TP MUST BE BIGGER THAN SL (4.3:1 R:R):
+  1. Stop loss — 0.35% price (cut fast, at 10x = 3.5% capital)
+  2. Trailing stop — activates at +1.50%, trails 0.35% behind peak
   3. Signal reversal — only exit if profit >= 1.50%
   4. NEVER exit a winner early. Hold for 1.50% minimum.
   5. Timeout — 30 min max
@@ -119,21 +134,21 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Quality Sniper v3.1 — fewer trades, bigger wins, beat the fees.
+    """Trend-Aligned Sniper v4.0 — trade WITH the 15m trend, not against it.
 
-    TP > SL (3:1 R:R). Waits for REAL momentum (2-of-4 confirmation).
-    Rides winners with trailing stops. Min 1.5% TP, 0.50% SL.
-    Limit orders for entries. Fees include 18% GST.
+    TP > SL (4.3:1 R:R). Checks 15m trend before entry.
+    Waits for REAL momentum (2-of-4 confirmation) aligned with trend.
+    10x leverage, tighter SL (0.35%), smaller positions.
     """
 
     name = StrategyName.SCALP
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
-    # ── Exit thresholds — TP MUST BE BIGGER THAN SL (3:1 R:R) ────────
-    STOP_LOSS_PCT = 0.50              # 0.50% price SL (10% capital at 20x) — cut FAST
-    MIN_TP_PCT = 1.50                 # minimum 1.5% target (30% capital at 20x)
+    # ── Exit thresholds — TP MUST BE BIGGER THAN SL (4.3:1 R:R) ──────
+    STOP_LOSS_PCT = 0.35              # 0.35% price SL (3.5% capital at 10x) — cut FAST
+    MIN_TP_PCT = 1.50                 # minimum 1.5% target (15% capital at 10x)
     TRAILING_ACTIVATE_PCT = 1.50      # activate trail at +1.5% — the minimum target
-    TRAILING_DISTANCE_PCT = 0.50      # trail 0.50% behind peak — wide enough to ride
+    TRAILING_DISTANCE_PCT = 0.35      # trail 0.35% behind peak — tight trail
     MAX_HOLD_SECONDS = 30 * 60        # 30 min max — free capital if flat
     FLATLINE_SECONDS = 15 * 60        # 15 min flat = exit
     FLATLINE_MIN_MOVE_PCT = 0.10      # "flat" means < 0.10% total move
@@ -143,7 +158,7 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_SHORT = 30           # RSI < 30 while short → oversold, exit
     MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
 
-    # ── Entry thresholds — QUALITY ONLY (need 2 of 4) ──────────────────
+    # ── Entry thresholds — TREND + 2-of-4 confirmation ─────────────────
     MOMENTUM_MIN_PCT = 0.30           # 0.30%+ move in 60s = real momentum
     VOL_SPIKE_RATIO = 2.0             # volume > 2x average = institutional
     RSI_EXTREME_LONG = 30             # RSI < 30 = truly oversold → long
@@ -152,20 +167,19 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
     MIN_EXPECTED_MOVE_PCT = 0.50      # don't enter if expected move < 0.50%
-    FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.118% RT fees = 12.7x
+    FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.083% RT mixed = 18x
 
-    # ── Position sizing ───────────────────────────────────────────────────
+    # ── Position sizing (REDUCED — smaller positions while improving) ──
     CAPITAL_PCT_SPOT = 50.0
     CAPITAL_PCT_FUTURES = 80.0
-    MAX_CONTRACTS = 5
+    MAX_CONTRACTS_ETH = 2             # ETH: max 2 contracts (was 5)
+    MAX_CONTRACTS_BTC = 1             # BTC: max 1 contract (was 5)
     MAX_POSITIONS = 3
     MAX_SPREAD_PCT = 0.15
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
-    MAX_TRADES_PER_HOUR = 10          # quality over quantity — max 10/hr
-    CONSECUTIVE_LOSS_PAUSE = 3        # pause after 3 consecutive losses
-    PAUSE_DURATION_SEC = 120          # 2 min pause — think before trading
-    DAILY_LOSS_LIMIT_PCT = 5.0
+    MAX_TRADES_PER_HOUR = 10          # keep trading aggressively
+    DAILY_LOSS_LIMIT_PCT = 20.0       # stop at 20% daily drawdown
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -180,13 +194,21 @@ class ScalpStrategy(BaseStrategy):
         risk_manager: RiskManager,
         exchange: Any = None,
         is_futures: bool = False,
+        market_analyzer: Any = None,
     ) -> None:
         super().__init__(pair, executor, risk_manager)
         self.trade_exchange: ccxt.Exchange | None = exchange
         self.is_futures = is_futures
-        self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1
+        self.leverage: int = min(config.delta.leverage, 10) if is_futures else 1  # CAP at 10x
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.CAPITAL_PCT_SPOT
         self._exchange_id: str = "delta" if is_futures else "binance"
+        self._market_analyzer = market_analyzer  # for 15m trend direction
+
+        # Per-pair contract limits
+        if "BTC" in pair:
+            self._max_contracts = self.MAX_CONTRACTS_BTC
+        else:
+            self._max_contracts = self.MAX_CONTRACTS_ETH
 
         # Position state
         self.in_position = False
@@ -203,8 +225,6 @@ class ScalpStrategy(BaseStrategy):
 
         # Rate limiting
         self._hourly_trades: list[float] = []
-        self._consecutive_losses: int = 0
-        self._paused_until: float = 0.0
         self._daily_scalp_loss: float = 0.0
 
         # No more forced entries — we wait for quality setups
@@ -243,18 +263,18 @@ class ScalpStrategy(BaseStrategy):
         else:
             rt_mixed = 0.2
             rt_taker = 0.2
+        trend_source = "15m analyzer" if self._market_analyzer else "NONE (no trend filter!)"
         self.logger.info(
-            "[%s] QUALITY SNIPER v3.1 ACTIVE (%s) — tick=%ds, "
-            "TP=%.1f%% SL=%.1f%% R:R=%.0f:1 Trail=%.1f%%/%.1f%% "
-            "Entry: mom>=%.1f%% vol>=%.1fx RSI<%d/>%d BB "
-            "Fees: RT_mixed=%.3f%% RT_taker=%.3f%% MaxTrades=%d/hr%s",
+            "[%s] TREND SNIPER v4.0 ACTIVE (%s) — tick=%ds, "
+            "TP=%.1f%% SL=%.2f%% R:R=%.1f:1 Trail=%.1f%%/%.2f%% "
+            "MaxContracts=%d TrendFilter=%s "
+            "Fees: RT_mixed=%.3f%% RT_taker=%.3f%% DailyLossLimit=%.0f%%%s",
             self.pair, tag, self.check_interval_sec,
             self.MIN_TP_PCT, self.STOP_LOSS_PCT,
             self.MIN_TP_PCT / self.STOP_LOSS_PCT,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
-            self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
-            self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
-            rt_mixed, rt_taker, self.MAX_TRADES_PER_HOUR,
+            self._max_contracts, trend_source,
+            rt_mixed, rt_taker, self.DAILY_LOSS_LIMIT_PCT,
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
@@ -270,22 +290,24 @@ class ScalpStrategy(BaseStrategy):
     # MAIN CHECK LOOP
     # ======================================================================
 
+    def _get_15m_trend(self) -> str:
+        """Get 15-minute trend direction from market analyzer.
+
+        Returns 'bullish', 'bearish', or 'neutral'.
+        """
+        if not self._market_analyzer:
+            return "neutral"
+        analysis = self._market_analyzer.last_analysis_for(self.pair)
+        if analysis is None:
+            return "neutral"
+        return analysis.direction or "neutral"
+
     async def check(self) -> list[Signal]:
         """One scalping tick — fetch candles, detect QUALITY momentum, manage exits."""
         signals: list[Signal] = []
         self._tick_count += 1
         exchange = self.trade_exchange or self.executor.exchange
         now = time.monotonic()
-
-        # ── Pause check ─────────────────────────────────────────────────
-        if now < self._paused_until:
-            remaining = int(self._paused_until - now)
-            if self._tick_count % 30 == 0:
-                self.logger.info(
-                    "[%s] PAUSED (%d losses) — resuming in %ds",
-                    self.pair, self._consecutive_losses, remaining,
-                )
-            return signals
 
         # ── Daily expiry check (5:30 PM IST) ───────────────────────────
         _expiry_no_new = False
@@ -430,17 +452,21 @@ class ScalpStrategy(BaseStrategy):
         if amount is None:
             return signals
 
-        # ── Quality momentum detection (2-of-4 confirmation) ──────────
+        # ── 15-MINUTE TREND CHECK (most important filter) ──────────────
+        trend_15m = self._get_15m_trend()
+
+        # ── Quality momentum detection (trend + 2-of-4 confirmation) ──
         entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
             momentum_60s, momentum_120s,
             bb_upper, bb_lower,
+            trend_15m,
         )
 
         if entry is not None:
             side, reason, use_limit = entry
             soul_msg = _soul_check("quality entry")
-            self.logger.info("[%s] QUALITY ENTRY — %s | Soul: %s", self.pair, reason, soul_msg)
+            self.logger.info("[%s] TREND ENTRY — %s | 15m=%s | Soul: %s", self.pair, reason, trend_15m, soul_msg)
             order_type = "limit" if use_limit else "market"
             signals.append(self._build_entry_signal(side, current_price, amount, reason, order_type))
         else:
@@ -448,9 +474,9 @@ class ScalpStrategy(BaseStrategy):
             if self._tick_count % 6 == 0:
                 idle_sec = int(now - self._last_position_exit)
                 self.logger.info(
-                    "[%s] WAITING %ds | $%.2f | mom60=%+.3f%%/%.1f | RSI=%.1f/%d/%d | "
+                    "[%s] WAITING %ds | 15m=%s | $%.2f | mom60=%+.3f%%/%.1f | RSI=%.1f/%d/%d | "
                     "vol=%.1fx/%.1f | BB[%.2f-%.2f]",
-                    self.pair, idle_sec, current_price,
+                    self.pair, idle_sec, trend_15m, current_price,
                     momentum_60s, self.MOMENTUM_MIN_PCT,
                     rsi_now, self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
                     vol_ratio, self.VOL_SPIKE_RATIO,
@@ -472,8 +498,16 @@ class ScalpStrategy(BaseStrategy):
         momentum_120s: float,
         bb_upper: float,
         bb_lower: float,
+        trend_15m: str = "neutral",
     ) -> tuple[str, str, bool] | None:
-        """Detect quality momentum. Returns (side, reason, use_limit) or None.
+        """Detect quality momentum aligned with 15m trend.
+
+        Returns (side, reason, use_limit) or None.
+
+        CRITICAL: Only enter in the direction of the 15-minute trend.
+        - 15m bullish → only LONG entries allowed
+        - 15m bearish → only SHORT entries allowed
+        - 15m neutral → either direction (2-of-4 decides)
 
         Requires AT LEAST 2 of these 4 conditions:
         1. Price moved 0.3%+ in last 60s
@@ -485,7 +519,7 @@ class ScalpStrategy(BaseStrategy):
         """
         can_short = self.is_futures and config.delta.enable_shorting
 
-        # ── Count bullish signals ───────────────────────────────────────
+        # ── Count bullish and bearish signals ────────────────────────────
         bull_signals: list[str] = []
         bear_signals: list[str] = []
 
@@ -519,8 +553,13 @@ class ScalpStrategy(BaseStrategy):
         if price < bb_lower:
             bear_signals.append(f"BB:breakdown<{bb_lower:.0f}")
 
-        # ── Check 2-of-4 requirement ────────────────────────────────────
-        if len(bull_signals) >= 2:
+        # ── TREND FILTER: block entries against 15m trend ────────────────
+        # This is the #1 rule — prevents most losses
+        allow_long = trend_15m in ("bullish", "neutral")
+        allow_short = trend_15m in ("bearish", "neutral")
+
+        # ── Check 2-of-4 requirement (LONG) ──────────────────────────────
+        if len(bull_signals) >= 2 and allow_long:
             # Verify expected move is worth the fees
             if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
                 self.hourly_skipped += 1
@@ -533,12 +572,23 @@ class ScalpStrategy(BaseStrategy):
                     )
                 return None
 
-            reason = f"LONG 2-of-4: {' + '.join(bull_signals)}"
+            reason = f"LONG 2-of-4: {' + '.join(bull_signals)} [15m={trend_15m}]"
             # Use limit order if we have time (RSI signal, not breakout)
             use_limit = "MOM" not in bull_signals[0]  # limit if not urgent momentum
             return ("long", reason, use_limit)
 
-        if len(bear_signals) >= 2 and can_short:
+        elif len(bull_signals) >= 2 and not allow_long:
+            # Would have entered long but 15m trend is bearish — BLOCK
+            if self._tick_count % 10 == 0:
+                self.logger.info(
+                    "[%s] BLOCKED LONG — 15m trend=%s, signals=%s (would lose against trend)",
+                    self.pair, trend_15m, "+".join(bull_signals),
+                )
+            self.hourly_skipped += 1
+            return None
+
+        # ── Check 2-of-4 requirement (SHORT) ─────────────────────────────
+        if len(bear_signals) >= 2 and can_short and allow_short:
             if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
                 self.hourly_skipped += 1
                 if self._tick_count % 10 == 0:
@@ -550,9 +600,19 @@ class ScalpStrategy(BaseStrategy):
                     )
                 return None
 
-            reason = f"SHORT 2-of-4: {' + '.join(bear_signals)}"
+            reason = f"SHORT 2-of-4: {' + '.join(bear_signals)} [15m={trend_15m}]"
             use_limit = "MOM" not in bear_signals[0]
             return ("short", reason, use_limit)
+
+        elif len(bear_signals) >= 2 and can_short and not allow_short:
+            # Would have entered short but 15m trend is bullish — BLOCK
+            if self._tick_count % 10 == 0:
+                self.logger.info(
+                    "[%s] BLOCKED SHORT — 15m trend=%s, signals=%s (would lose against trend)",
+                    self.pair, trend_15m, "+".join(bear_signals),
+                )
+            self.hourly_skipped += 1
+            return None
 
         return None
 
@@ -564,9 +624,9 @@ class ScalpStrategy(BaseStrategy):
         """Check exit conditions.
 
         Priority:
-        1. Stop loss — 0.75% (cut losers immediately)
+        1. Stop loss — 0.35% price (3.5% capital at 10x) — cut losers fast
         2. Signal reversal — when in profit, exit at the top
-        3. Trailing stop — activates at +1.5%, trails 0.50% behind peak
+        3. Trailing stop — activates at +1.5%, trails 0.35% behind peak
         4. Timeout — 30 min, free capital
         5. Flatline — no movement for 15 min
         """
@@ -790,9 +850,9 @@ class ScalpStrategy(BaseStrategy):
             max_position_value = exchange_capital * (self.risk_manager.max_position_pct / 100)
             budget = min(available, max_position_value)
 
-            # Fit as many contracts as budget allows
+            # Fit as many contracts as budget allows (capped per pair)
             max_affordable = int(budget / one_contract_collateral)
-            contracts = max(1, min(max_affordable, self.MAX_CONTRACTS))
+            contracts = max(1, min(max_affordable, self._max_contracts))
             total_collateral = contracts * one_contract_collateral
             amount = contracts * contract_size
 
@@ -958,10 +1018,8 @@ class ScalpStrategy(BaseStrategy):
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
-            self._consecutive_losses = 0
         else:
             self.hourly_losses += 1
-            self._consecutive_losses += 1
 
         hold_sec = int(time.monotonic() - self.entry_time)
         duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s" if hold_sec >= 60 else f"{hold_sec}s"
@@ -970,18 +1028,11 @@ class ScalpStrategy(BaseStrategy):
         fee_ratio = abs(gross_pnl / est_fees) if est_fees > 0 else 0
         self.logger.info(
             "[%s] CLOSED %s %+.2f%% price (%+.1f%% capital at %dx) | "
-            "Gross=$%.4f Net=$%.4f fees=$%.4f (%.1fx) | %s | W/L=%d/%d streak=%d",
+            "Gross=$%.4f Net=$%.4f fees=$%.4f (%.1fx) | %s | W/L=%d/%d",
             self.pair, exit_type.upper(), pnl_pct, capital_pnl_pct, self.leverage,
             gross_pnl, net_pnl, est_fees, fee_ratio, duration,
-            self.hourly_wins, self.hourly_losses, self._consecutive_losses,
+            self.hourly_wins, self.hourly_losses,
         )
-
-        if self._consecutive_losses >= self.CONSECUTIVE_LOSS_PAUSE:
-            self._paused_until = time.monotonic() + self.PAUSE_DURATION_SEC
-            self.logger.warning(
-                "[%s] PAUSING %ds — %d consecutive losses, need to recalibrate",
-                self.pair, self.PAUSE_DURATION_SEC, self._consecutive_losses,
-            )
 
         self.in_position = False
         self.position_side = None
@@ -1011,5 +1062,3 @@ class ScalpStrategy(BaseStrategy):
 
     def reset_daily_stats(self) -> None:
         self._daily_scalp_loss = 0.0
-        self._consecutive_losses = 0
-        self._paused_until = 0.0

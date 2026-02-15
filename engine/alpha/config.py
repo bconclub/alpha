@@ -58,7 +58,7 @@ class DeltaConfig:
     api_key: str = field(default_factory=lambda: _env("DELTA_API_KEY"))
     secret: str = field(default_factory=lambda: _env("DELTA_SECRET"))
     testnet: bool = field(default_factory=lambda: _env_bool("DELTA_TESTNET", True))
-    leverage: int = field(default_factory=lambda: _env_int("DELTA_LEVERAGE", 20))
+    leverage: int = field(default_factory=lambda: _env_int("DELTA_LEVERAGE", 10))
     pairs: list[str] = field(default_factory=lambda: _env_list("DELTA_PAIRS"))
     enable_shorting: bool = field(default_factory=lambda: _env_bool("ENABLE_SHORTING", True))
 
@@ -120,7 +120,7 @@ class TradingConfig:
     capital_per_pair: str = field(default_factory=lambda: _env("CAPITAL_PER_PAIR", "auto"))
 
     starting_capital: float = field(default_factory=lambda: _env_float("STARTING_CAPITAL", 10.0))
-    max_loss_daily_pct: float = field(default_factory=lambda: _env_float("MAX_LOSS_DAILY_PCT", 5.0))
+    max_loss_daily_pct: float = field(default_factory=lambda: _env_float("MAX_LOSS_DAILY_PCT", 20.0))
     max_position_pct: float = field(default_factory=lambda: _env_float("MAX_POSITION_PCT", 80.0))
     max_total_exposure_pct: float = 90.0  # with $12, need most of it working
     max_concurrent_positions: int = 3     # 3 scalp positions max
