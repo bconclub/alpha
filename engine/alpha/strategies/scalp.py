@@ -1,8 +1,9 @@
-"""Alpha v5.2 — FOCUSED SIGNAL: max 2 positions, ranked by strength, with cooldowns.
+"""Alpha v5.3 — ATR-DYNAMIC SL/TP: per-asset volatility-adjusted risk management.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
 best signals. After a loss, pause and let the market settle before re-entering.
 Trust the 1-minute chart, not the lagging 15-minute trend.
+SL/TP adapt to each asset's actual volatility via 1-minute ATR.
 
 ENTRY — PURE 2-of-4 (no trend gating):
   Any 2 of these 4 signals must fire. Same thresholds for both directions.
@@ -19,13 +20,16 @@ POSITION MANAGEMENT:
   - After SL hit: 2 min cooldown before any new entry (all pairs)
   - After 3 consecutive losses: 5 min pause (all pairs)
 
-Risk Management (20x leverage):
-  - SL: 0.35% price → 7% capital → cut fast
+Risk Management (20x leverage) — ATR-DYNAMIC:
+  - SL = max(pair_floor, ATR_1m * 1.5) — avoids noise stops
+  - TP = max(pair_floor, ATR_1m * 4.0) — reward > 2.5x risk
+  - Per-pair floors: BTC/ETH 0.35%/1.5%, SOL 0.50%/2.0%, XRP 0.60%/2.0%
+  - SL cap: 1.5%, TP cap: 5.0%
   - Trailing: activates at +0.30% — protect profits EARLY
   - Max hold: 5 min — scalping is quick
 
 Exit — FAST, PROTECT PROFITS:
-  1. Stop loss — 0.35% price, cut losers fast
+  1. Stop loss — ATR-dynamic, cut losers fast
   2. Breakeven SL — if not profitable by 2 min, tighten SL to entry
   3. Trailing stop — activates at +0.30%, dynamic trail widens with profit
   4. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
@@ -122,19 +126,39 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Focused Signal v5.2 — max 2 positions, ranked by strength, with cooldowns.
+    """Focused Signal v5.3 — ATR-dynamic SL/TP per asset volatility.
 
     2-of-4 signals (momentum, volume, RSI, BB mean-reversion) with uniform
     thresholds. Max 2 positions. 2nd only if 1st is green and signal is 3/4+.
     Post-SL cooldown: 2 min. After 3 consecutive losses: 5 min pause.
+    SL/TP computed from 1m ATR: SL = max(floor, ATR*1.5), TP = max(floor, ATR*4).
+    Per-pair floors: BTC/ETH 0.35%/1.5%, SOL 0.5%/2.0%, XRP 0.6%/2.0%.
     """
 
     name = StrategyName.SCALP
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
     # ── Exit thresholds — QUICK SCALP: protect profits fast ────────────
-    STOP_LOSS_PCT = 0.35              # 0.35% price SL (7% capital at 20x) — cut FAST
-    MIN_TP_PCT = 1.50                 # minimum 1.5% target (30% capital at 20x)
+    # Default SL/TP (used if ATR not available yet — overridden by dynamic ATR-based SL/TP)
+    STOP_LOSS_PCT = 0.35              # default 0.35% price SL — overridden per-pair by ATR
+    MIN_TP_PCT = 1.50                 # default 1.5% target — overridden per-pair by ATR
+
+    # ── Per-pair SL/TP floors — wider for volatile alts, tighter for BTC ──
+    # SL = max(floor, ATR_1m * 1.5)   TP = max(floor, ATR_1m * 4.0)
+    PAIR_SL_FLOOR: dict[str, float] = {
+        "BTC": 0.35,   # BTC: low % volatility, 0.35% floor is fine
+        "ETH": 0.35,   # ETH: medium volatility, 0.35% floor
+        "SOL": 0.50,   # SOL: volatile alt, needs wider SL to avoid noise stops
+        "XRP": 0.60,   # XRP: very volatile in % terms, widest SL
+    }
+    PAIR_TP_FLOOR: dict[str, float] = {
+        "BTC": 1.50,   # BTC: 1.5% TP (30% at 20x)
+        "ETH": 1.50,   # ETH: 1.5% TP
+        "SOL": 2.00,   # SOL: wider TP to match wider SL
+        "XRP": 2.00,   # XRP: wider TP
+    }
+    ATR_SL_MULTIPLIER = 1.5          # SL = ATR_1m_pct * 1.5 (avoid noise stops)
+    ATR_TP_MULTIPLIER = 4.0          # TP = ATR_1m_pct * 4.0 (reward > 2.5x risk)
     TRAILING_ACTIVATE_PCT = 0.30      # activate trail at +0.30% — protect profits EARLY
     TRAILING_DISTANCE_PCT = 0.30      # initial trail: 0.30% behind peak
     MAX_HOLD_SECONDS = 5 * 60         # 5 min max — scalping is quick
@@ -182,16 +206,36 @@ class ScalpStrategy(BaseStrategy):
     MIN_EXPECTED_MOVE_PCT = 0.30      # lowered from 0.50% to match new momentum
     FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.083% RT mixed = 18x
 
-    # ── Position sizing (per-pair contract limits) ──────────────────────
+    # ── Position sizing — PERFORMANCE-BASED per-pair allocation ─────────
     CAPITAL_PCT_SPOT = 35.0             # 35% of Binance USDT per trade (middle of 30-40%)
-    CAPITAL_PCT_FUTURES = 40.0          # 40% per trade (2 positions × 40% = 80% max deployed)
+    CAPITAL_PCT_FUTURES = 40.0          # base 40% — modified by PAIR_ALLOC_PCT below
     MIN_NOTIONAL_SPOT = 6.00            # $6 min to avoid dust on exit (Binance $5 min + buffer)
-    PAIR_MAX_CONTRACTS: dict[str, int] = {
-        "BTC": 1,              # BTC: 1 contract (~$70 notional, ~$3.50 collateral at 20x)
-        "ETH": 4,              # ETH: 4 contracts (~$80 notional, ~$4 collateral at 20x)
-        "SOL": 1,              # SOL: 1 contract (~$86 notional, ~$4.30 collateral at 20x)
-        "XRP": 50,             # XRP: 50 contracts (~$75 notional, ~$3.75 at 20x)
+
+    # Per-pair base allocation (% of exchange capital) — tuned by performance
+    PAIR_ALLOC_PCT: dict[str, float] = {
+        "XRP": 50.0,   # best performer, highest profit factor — maximize
+        "ETH": 30.0,   # mixed but catches big moves
+        "BTC": 15.0,   # very low win rate — reduce exposure
+        "SOL":  5.0,   # worst performer — minimal allocation
     }
+    # Per-pair contract caps
+    PAIR_MAX_CONTRACTS: dict[str, int] = {
+        "BTC": 1,              # BTC: 1 contract (minimum, diversification only)
+        "ETH": 2,              # ETH: 2 contracts
+        "SOL": 1,              # SOL: 1 contract (or skip)
+        "XRP": 50,             # XRP: 50 contracts (main earner, maximize)
+    }
+    # Minimum signal strength per pair — weaker performers need stronger signals
+    PAIR_MIN_STRENGTH: dict[str, int] = {
+        "XRP": 2,    # best performer: standard 2/4 is fine
+        "ETH": 2,    # mixed: standard 2/4
+        "BTC": 3,    # low win rate: require 3/4 or 4/4 signals only
+        "SOL": 3,    # worst performer: require 3/4 or 4/4 signals only
+    }
+    # Adaptive: track last N trades per pair for win-rate-based adjustment
+    PERF_WINDOW = 5                     # look at last 5 trades per pair
+    PERF_LOW_WR_THRESHOLD = 0.20        # <20% WR in window → reduce to minimum
+    PERF_HIGH_WR_THRESHOLD = 0.60       # >60% WR in window → boost allocation
     MAX_POSITIONS = 2                   # max 2 simultaneous — focus capital
     MAX_SPREAD_PCT = 0.15
 
@@ -210,6 +254,7 @@ class ScalpStrategy(BaseStrategy):
     _consecutive_losses: int = 0                # streak of consecutive losses across all pairs
     _streak_pause_until: float = 0.0            # monotonic time until streak pause ends
     _live_pnl: dict[str, float] = {}           # pair → current unrealized P&L % (updated every tick)
+    _pair_trade_history: dict[str, list[bool]] = {}  # base_asset → list of win/loss booleans (last N)
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -237,6 +282,12 @@ class ScalpStrategy(BaseStrategy):
         # Per-pair contract limits (data-driven from PAIR_MAX_CONTRACTS dict)
         base_asset = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace(":USD", "")
         self._max_contracts = self.PAIR_MAX_CONTRACTS.get(base_asset, 1)
+        self._base_asset = base_asset  # cached for SL/TP lookup
+
+        # Dynamic ATR-based SL/TP — updated every tick from 1m candles
+        self._sl_pct: float = self.PAIR_SL_FLOOR.get(base_asset, self.STOP_LOSS_PCT)
+        self._tp_pct: float = self.PAIR_TP_FLOOR.get(base_asset, self.MIN_TP_PCT)
+        self._last_atr_pct: float = 0.0  # last computed 1m ATR as % of price
 
         # Position state
         self.in_position = False
@@ -298,13 +349,13 @@ class ScalpStrategy(BaseStrategy):
             rt_taker = 0.20
         tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
         self.logger.info(
-            "[%s] FOCUSED SIGNAL v5.2 ACTIVE (%s) — tick=%ds, "
-            "SL=%.2f%% Trail@%.1f%% [%s] MaxHold=%ds Breakeven@%ds "
+            "[%s] FOCUSED SIGNAL v5.3 ACTIVE (%s) — tick=%ds, "
+            "SL=%.2f%%(floor,ATR-dynamic) TP=%.2f%% Trail@%.1f%% [%s] MaxHold=%ds Breakeven@%ds "
             "Pullback=%.0f%%@%.1f%% Flatline=%ds/%.2f%% "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
             "15m=INFO_ONLY DailyLossLimit=%.0f%%%s",
             self.pair, tag, self.check_interval_sec,
-            self.STOP_LOSS_PCT,
+            self._sl_pct, self._tp_pct,
             self.TRAILING_ACTIVATE_PCT, tiers_str,
             self.MAX_HOLD_SECONDS, self.BREAKEVEN_AFTER_SECONDS,
             self.PROFIT_PULLBACK_PCT, self.PROFIT_PULLBACK_MIN_PEAK,
@@ -339,6 +390,42 @@ class ScalpStrategy(BaseStrategy):
         if analysis is None:
             return "neutral"
         return analysis.direction or "neutral"
+
+    def _update_dynamic_sl_tp(self, df: pd.DataFrame, current_price: float) -> None:
+        """Compute ATR-based SL/TP from 1m candles.
+
+        Formula:
+          SL = max(pair_floor, ATR_1m_pct * 1.5)
+          TP = max(pair_floor, ATR_1m_pct * 4.0)
+
+        This avoids noise stops on volatile pairs (SOL, XRP) while keeping
+        tight stops on low-vol pairs (BTC).
+        """
+        try:
+            high = df["high"]
+            low = df["low"]
+            close = df["close"]
+            if len(close) < 15:
+                return  # not enough data, keep existing values
+            atr_indicator = ta.volatility.AverageTrueRange(high, low, close, window=14)
+            atr = float(atr_indicator.average_true_range().iloc[-1])
+            atr_pct = (atr / current_price) * 100 if current_price > 0 else 0.0
+            self._last_atr_pct = atr_pct
+
+            # Per-pair floors
+            sl_floor = self.PAIR_SL_FLOOR.get(self._base_asset, self.STOP_LOSS_PCT)
+            tp_floor = self.PAIR_TP_FLOOR.get(self._base_asset, self.MIN_TP_PCT)
+
+            # Dynamic: ATR-based, but never below floor
+            self._sl_pct = max(sl_floor, atr_pct * self.ATR_SL_MULTIPLIER)
+            self._tp_pct = max(tp_floor, atr_pct * self.ATR_TP_MULTIPLIER)
+
+            # Safety cap: SL never wider than 1.5%, TP never wider than 5%
+            self._sl_pct = min(self._sl_pct, 1.50)
+            self._tp_pct = min(self._tp_pct, 5.00)
+        except Exception:
+            # Silently keep existing values if ATR calc fails
+            pass
 
     async def check(self) -> list[Signal]:
         """One scalping tick — fetch candles, detect QUALITY momentum, manage exits."""
@@ -388,6 +475,9 @@ class ScalpStrategy(BaseStrategy):
         volume = df["volume"]
         current_price = float(close.iloc[-1])
 
+        # ── Update dynamic ATR-based SL/TP ────────────────────────────
+        self._update_dynamic_sl_tp(df, current_price)
+
         # ── Compute indicators ─────────────────────────────────────────
         rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
         rsi_now = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
@@ -418,9 +508,9 @@ class ScalpStrategy(BaseStrategy):
                 pnl_now = self._calc_pnl_pct(current_price)
                 trail_tag = " [TRAILING]" if self._trailing_active else ""
                 self.logger.info(
-                    "[%s] (%s) %s @ $%.2f | %ds | PnL=%+.2f%% | RSI=%.1f | mom=%+.3f%%%s",
+                    "[%s] (%s) %s @ $%.2f | %ds | PnL=%+.2f%% | SL=%.2f%% | RSI=%.1f | ATR=%.3f%% | mom=%+.3f%%%s",
                     self.pair, tag, self.position_side, self.entry_price,
-                    int(hold_sec), pnl_now, rsi_now, momentum_60s, trail_tag,
+                    int(hold_sec), pnl_now, self._sl_pct, rsi_now, self._last_atr_pct, momentum_60s, trail_tag,
                 )
             else:
                 idle_sec = int(now - self._last_position_exit)
@@ -542,6 +632,22 @@ class ScalpStrategy(BaseStrategy):
 
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
+
+            # ── PER-PAIR STRENGTH GATE: weak pairs need stronger signals ──
+            min_strength = self.PAIR_MIN_STRENGTH.get(self._base_asset, 2)
+            if signal_strength < min_strength:
+                if self._tick_count % 12 == 0:
+                    self.logger.info(
+                        "[%s] STRENGTH GATE — %s needs %d/4+ but got %d/4, skipping",
+                        self.pair, self._base_asset, min_strength, signal_strength,
+                    )
+                self.last_signal_state = {
+                    "side": side, "reason": reason,
+                    "strength": signal_strength, "trend_15m": trend_15m,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s,
+                    "current_price": current_price, "timestamp": time.monotonic(),
+                }
+                return signals
 
             # ── 2ND POSITION: require 3/4+ signal strength ────────────
             if total_scalp == 1 and signal_strength < self.MIN_STRENGTH_FOR_2ND:
@@ -792,13 +898,13 @@ class ScalpStrategy(BaseStrategy):
         if self.position_side == "long":
             self.highest_since_entry = max(self.highest_since_entry, current_price)
 
-            # ── 1. STOP LOSS — cut losers fast ─────────────────────────
-            sl_price = self.entry_price * (1 - self.STOP_LOSS_PCT / 100)
+            # ── 1. STOP LOSS — ATR-dynamic, cut losers fast ─────────────
+            sl_price = self.entry_price * (1 - self._sl_pct / 100)
             if current_price <= sl_price:
                 soul_msg = _soul_check("loss")
                 self.logger.info(
-                    "[%s] SL HIT at %.2f%% — cutting loss | %s",
-                    self.pair, pnl_pct, soul_msg,
+                    "[%s] SL HIT at %.2f%% (SL=%.2f%% ATR=%.3f%%) — cutting loss | %s",
+                    self.pair, pnl_pct, self._sl_pct, self._last_atr_pct, soul_msg,
                 )
                 return self._do_exit(current_price, pnl_pct, "long", "SL", hold_seconds)
 
@@ -886,13 +992,13 @@ class ScalpStrategy(BaseStrategy):
         elif self.position_side == "short":
             self.lowest_since_entry = min(self.lowest_since_entry, current_price)
 
-            # ── 1. STOP LOSS ───────────────────────────────────────────
-            sl_price = self.entry_price * (1 + self.STOP_LOSS_PCT / 100)
+            # ── 1. STOP LOSS — ATR-dynamic ────────────────────────────
+            sl_price = self.entry_price * (1 + self._sl_pct / 100)
             if current_price >= sl_price:
                 soul_msg = _soul_check("loss")
                 self.logger.info(
-                    "[%s] SL HIT at %.2f%% — cutting loss | %s",
-                    self.pair, pnl_pct, soul_msg,
+                    "[%s] SL HIT at %.2f%% (SL=%.2f%% ATR=%.3f%%) — cutting loss | %s",
+                    self.pair, pnl_pct, self._sl_pct, self._last_atr_pct, soul_msg,
                 )
                 return self._do_exit(current_price, pnl_pct, "short", "SL", hold_seconds)
 
@@ -1140,34 +1246,62 @@ class ScalpStrategy(BaseStrategy):
 
         return amount
 
+    def _get_pair_win_rate(self) -> tuple[float, int]:
+        """Get win rate for this pair from recent trade history.
+
+        Returns (win_rate 0.0-1.0, total_trades).
+        """
+        history = ScalpStrategy._pair_trade_history.get(self._base_asset, [])
+        if not history:
+            return 0.5, 0  # default 50% if no data yet
+        wins = sum(1 for w in history if w)
+        return wins / len(history), len(history)
+
+    def _get_adaptive_alloc_pct(self, signal_strength: int, total_open: int) -> float:
+        """Performance-based allocation — better pairs get more capital.
+
+        Base allocation from PAIR_ALLOC_PCT (tuned by historical performance).
+        Adaptive adjustment: if last 5 trades WR < 20%, reduce to minimum.
+        If WR > 60%, boost by 20%.
+        """
+        base_alloc = self.PAIR_ALLOC_PCT.get(self._base_asset, 15.0)
+        win_rate, n_trades = self._get_pair_win_rate()
+
+        # Adaptive adjustment based on recent performance
+        if n_trades >= 3:  # need at least 3 trades for adjustment
+            if win_rate < self.PERF_LOW_WR_THRESHOLD:
+                # Very low WR: reduce to 5% minimum
+                base_alloc = max(5.0, base_alloc * 0.25)
+            elif win_rate > self.PERF_HIGH_WR_THRESHOLD:
+                # High WR: boost by 20% (capped at 70%)
+                base_alloc = min(70.0, base_alloc * 1.20)
+
+        # 2nd position gets smaller share
+        if total_open >= 1:
+            base_alloc = base_alloc * 0.6  # 60% of normal for 2nd position
+
+        return max(5.0, min(70.0, base_alloc))
+
     def _calculate_position_size_dynamic(
         self, current_price: float, available: float,
         signal_strength: int, total_open: int,
     ) -> float | None:
-        """Dynamic capital allocation based on signal strength.
+        """Performance-based capital allocation per pair.
 
-        Instead of fixed % per position, allocate proportionally:
-        - Single position: up to 70% max of exchange capital
-        - Two positions: split based on relative signal strength
-        - Min allocation: 20% (below this, not worth the fees)
-        - Max allocation: 70% (don't put everything on one trade)
+        Each pair gets a base allocation % tuned by historical performance:
+        - XRP: 50% (best performer), ETH: 30%, BTC: 15%, SOL: 5%
+        - Adaptive: if last 5 trades < 20% WR → reduce to minimum
+        - Adaptive: if last 5 trades > 60% WR → boost 20%
+        - 2nd position: 60% of normal allocation
         """
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         if exchange_capital <= 0:
             return None
 
-        MIN_ALLOC_PCT = 20.0
-        MAX_ALLOC_PCT = 70.0
+        alloc_pct = self._get_adaptive_alloc_pct(signal_strength, total_open)
+        win_rate, n_trades = self._get_pair_win_rate()
 
         if self.is_futures:
-            # For futures: allocate % of exchange capital as collateral
-            if total_open == 0:
-                # Solo position: strength determines allocation (2/4=50%, 3/4=60%, 4/4=70%)
-                alloc_pct = min(MAX_ALLOC_PCT, max(MIN_ALLOC_PCT, signal_strength * 17.5))
-            else:
-                # 2nd position: gets smaller share (remaining capital, capped)
-                alloc_pct = min(MAX_ALLOC_PCT - 30.0, max(MIN_ALLOC_PCT, signal_strength * 12.0))
-
             budget = exchange_capital * (alloc_pct / 100)
             budget = min(budget, available)
 
@@ -1195,19 +1329,14 @@ class ScalpStrategy(BaseStrategy):
             amount = contracts * contract_size
 
             self.logger.info(
-                "[%s] DynSize: %d contracts x %.4f = %.6f coin, "
-                "collateral=$%.2f (%dx), alloc=%.0f%% of $%.2f, strength=%d/4",
-                self.pair, contracts, contract_size, amount,
-                total_collateral, self.leverage, alloc_pct, exchange_capital,
-                signal_strength,
+                "[%s] Allocation: %s %.0f%% ($%.2f) based on WR=%.0f%% (%d trades) | "
+                "%d contracts, collateral=$%.2f (%dx), strength=%d/4",
+                self.pair, self._base_asset, alloc_pct,
+                total_collateral, win_rate * 100, n_trades,
+                contracts, total_collateral, self.leverage, signal_strength,
             )
         else:
-            # Spot: similar dynamic allocation
-            if total_open == 0:
-                alloc_pct = min(MAX_ALLOC_PCT, max(MIN_ALLOC_PCT, signal_strength * 17.5))
-            else:
-                alloc_pct = min(MAX_ALLOC_PCT - 30.0, max(MIN_ALLOC_PCT, signal_strength * 12.0))
-
+            # Spot: same performance-based allocation
             capital = exchange_capital * (alloc_pct / 100)
             capital = min(capital, available)
 
@@ -1220,6 +1349,11 @@ class ScalpStrategy(BaseStrategy):
                 return None
 
             amount = capital / current_price
+            self.logger.info(
+                "[%s] Allocation: %s %.0f%% ($%.2f) based on WR=%.0f%% (%d trades) | spot",
+                self.pair, self._base_asset, alloc_pct, capital,
+                win_rate * 100, n_trades,
+            )
             self.logger.info(
                 "[%s] DynSize (spot): $%.2f → %.8f %s (%.0f%% of $%.2f, strength=%d/4)",
                 self.pair, capital, amount,
@@ -1237,12 +1371,16 @@ class ScalpStrategy(BaseStrategy):
         self, side: str, price: float, amount: float, reason: str,
         order_type: str = "market",
     ) -> Signal:
-        """Build an entry signal with SL. Trail handles the TP."""
-        self.logger.info("[%s] %s -> %s entry (%s)", self.pair, reason, side.upper(), order_type)
+        """Build an entry signal with ATR-dynamic SL. Trail handles the TP."""
+        self.logger.info(
+            "[%s] %s -> %s entry (%s) SL=%.2f%% TP=%.2f%% ATR=%.3f%%",
+            self.pair, reason, side.upper(), order_type,
+            self._sl_pct, self._tp_pct, self._last_atr_pct,
+        )
 
         if side == "long":
-            sl = price * (1 - self.STOP_LOSS_PCT / 100)
-            tp = price * (1 + self.MIN_TP_PCT / 100)
+            sl = price * (1 - self._sl_pct / 100)
+            tp = price * (1 + self._tp_pct / 100)
             return Signal(
                 side="buy",
                 price=price,
@@ -1257,11 +1395,13 @@ class ScalpStrategy(BaseStrategy):
                 position_type="long" if self.is_futures else "spot",
                 exchange_id="delta" if self.is_futures else "binance",
                 metadata={"pending_side": "long", "pending_amount": amount,
-                          "tp_price": tp, "sl_price": sl},
+                          "tp_price": tp, "sl_price": sl,
+                          "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
+                          "atr_pct": self._last_atr_pct},
             )
         else:  # short
-            sl = price * (1 + self.STOP_LOSS_PCT / 100)
-            tp = price * (1 - self.MIN_TP_PCT / 100)
+            sl = price * (1 + self._sl_pct / 100)
+            tp = price * (1 - self._tp_pct / 100)
             return Signal(
                 side="sell",
                 price=price,
@@ -1276,7 +1416,9 @@ class ScalpStrategy(BaseStrategy):
                 position_type="short",
                 exchange_id="delta",
                 metadata={"pending_side": "short", "pending_amount": amount,
-                          "tp_price": tp, "sl_price": sl},
+                          "tp_price": tp, "sl_price": sl,
+                          "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
+                          "atr_pct": self._last_atr_pct},
             )
 
     def _exit_signal(self, price: float, side: str, reason: str) -> Signal:
@@ -1387,6 +1529,16 @@ class ScalpStrategy(BaseStrategy):
         self._daily_scalp_loss += net_pnl if net_pnl < 0 else 0
 
         now = time.monotonic()
+
+        # Track per-pair win/loss history (for adaptive allocation)
+        is_win = pnl_pct >= 0
+        if self._base_asset not in ScalpStrategy._pair_trade_history:
+            ScalpStrategy._pair_trade_history[self._base_asset] = []
+        ScalpStrategy._pair_trade_history[self._base_asset].append(is_win)
+        # Keep only last PERF_WINDOW trades
+        if len(ScalpStrategy._pair_trade_history[self._base_asset]) > self.PERF_WINDOW:
+            ScalpStrategy._pair_trade_history[self._base_asset] = \
+                ScalpStrategy._pair_trade_history[self._base_asset][-self.PERF_WINDOW:]
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
