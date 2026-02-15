@@ -84,17 +84,17 @@ export function PnLChart({ trades: tradesProp, strategy }: PnLChartProps) {
     : 'Cumulative P&L';
 
   return (
-    <div className="bg-card border border-zinc-800 rounded-xl p-5">
+    <div className="bg-card border border-zinc-800 rounded-xl p-3 md:p-5">
       <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
         {title}
       </h3>
 
       {data.length === 0 ? (
-        <div className="h-80 flex items-center justify-center">
+        <div className="h-56 md:h-80 flex items-center justify-center">
           <p className="text-sm text-zinc-500">No P&L data</p>
         </div>
       ) : (
-        <div className="h-80">
+        <div className="h-56 md:h-80">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={data} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
               <XAxis

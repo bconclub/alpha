@@ -126,7 +126,7 @@ export default function SettingsPage() {
   // -------------------------------------------------------------------------
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold tracking-tight text-white">
+      <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
         Settings
       </h1>
 
@@ -147,12 +147,12 @@ export default function SettingsPage() {
       {/* ----------------------------------------------------------------- */}
       {/* Section 1: Bot Configuration (read-only)                          */}
       {/* ----------------------------------------------------------------- */}
-      <div className="bg-card border border-zinc-800 rounded-xl p-6">
-        <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-6">
+      <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
+        <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4 md:mb-6">
           Bot Configuration
         </h2>
 
-        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5">
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 md:gap-x-8 gap-y-4 md:gap-y-5">
           <div>
             <dt className="text-sm text-zinc-500">Trading Pair</dt>
             <dd className="mt-1 text-base font-medium text-zinc-100">

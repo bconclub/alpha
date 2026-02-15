@@ -12,18 +12,18 @@ function ConnectionBanner() {
   const { isConnected, trades, strategyLog } = useSupabase();
 
   return (
-    <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg px-4 py-2 flex items-center gap-3 text-xs">
+    <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 md:px-4 py-2 flex flex-wrap items-center gap-2 md:gap-3 text-xs">
       <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500'}`} />
       <span className="text-zinc-400">
-        {isConnected ? 'Realtime connected' : 'Realtime disconnected'}
+        {isConnected ? 'Connected' : 'Disconnected'}
       </span>
-      <span className="text-zinc-600">|</span>
-      <span className="text-zinc-400">
-        {trades.length} trades loaded
+      <span className="text-zinc-600 hidden sm:inline">|</span>
+      <span className="text-zinc-400 hidden sm:inline">
+        {trades.length} trades
       </span>
-      <span className="text-zinc-600">|</span>
-      <span className="text-zinc-400">
-        {strategyLog.length} strategy logs
+      <span className="text-zinc-600 hidden sm:inline">|</span>
+      <span className="text-zinc-400 hidden sm:inline">
+        {strategyLog.length} logs
       </span>
     </div>
   );
@@ -31,7 +31,7 @@ function ConnectionBanner() {
 
 export default function DashboardPage() {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3 md:space-y-4">
       {/* Connection status */}
       <ConnectionBanner />
 

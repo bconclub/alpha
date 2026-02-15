@@ -54,8 +54,8 @@ export function LiveActivityFeed() {
   }, [filtered.length]);
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
+    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
+      <div className="flex items-center justify-between mb-3 md:mb-4">
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Live Activity
         </h3>
@@ -65,7 +65,7 @@ export function LiveActivityFeed() {
               key={opt.value}
               onClick={() => setFilter(opt.value)}
               className={cn(
-                'px-2.5 py-1 rounded text-[10px] font-medium transition-colors',
+                'px-3 py-1.5 md:px-2.5 md:py-1 rounded text-xs md:text-[10px] font-medium transition-colors',
                 filter === opt.value
                   ? 'bg-zinc-700 text-white'
                   : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50',

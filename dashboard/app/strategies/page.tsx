@@ -88,14 +88,14 @@ export default function StrategiesPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold tracking-tight text-white">
+      <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
         Strategy Performance
       </h1>
 
       {/* ------------------------------------------------------------------- */}
       {/* Strategy cards                                                       */}
       {/* ------------------------------------------------------------------- */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 md:gap-6">
         {STRATEGIES.map((strategy) => {
           const stats = statsMap[strategy];
           const color = getStrategyColor(strategy);
@@ -103,7 +103,7 @@ export default function StrategiesPage() {
           return (
             <div
               key={strategy}
-              className="bg-card border border-zinc-800 rounded-xl p-6"
+              className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6"
               style={{ borderLeftColor: color, borderLeftWidth: 4 }}
             >
               <h3 className="text-lg font-semibold text-white mb-4">
@@ -170,12 +170,12 @@ export default function StrategiesPage() {
       {/* Strategy Performance by Exchange (from Supabase view)                */}
       {/* ------------------------------------------------------------------- */}
       {strategyPerformance.length > 0 && (
-        <div className="bg-card border border-zinc-800 rounded-xl p-6">
+        <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
           <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
             Strategy Performance by Exchange
           </h3>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full min-w-[600px] text-sm">
               <thead>
                 <tr className="text-left text-xs text-zinc-500 border-b border-zinc-800">
                   <th className="pb-2 pr-4 font-medium">Strategy</th>
@@ -229,13 +229,13 @@ export default function StrategiesPage() {
       {/* Tabbed P&L chart per strategy                                        */}
       {/* ------------------------------------------------------------------- */}
       <div>
-        <div className="flex gap-1 mb-4">
+        <div className="flex gap-1 mb-4 overflow-x-auto">
           {STRATEGIES.map((strategy) => (
             <button
               key={strategy}
               onClick={() => setActiveTab(strategy)}
               className={cn(
-                'px-4 py-2 text-sm font-medium rounded-lg transition-colors',
+                'px-4 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap',
                 activeTab === strategy
                   ? 'bg-zinc-700 text-white'
                   : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800',
