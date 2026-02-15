@@ -36,12 +36,13 @@ function ISTClock() {
   );
 }
 
-/** Tiny SVG sparkline — no recharts dependency needed for this */
-function MiniSparkline({ data, color }: { data: number[]; color: string }) {
+/** Tiny SVG sparkline — no recharts dependency needed */
+let sparkId = 0;
+function MiniSparkline({ data, color, w = 100, h = 28 }: { data: number[]; color: string; w?: number; h?: number }) {
+  const uid = useMemo(() => `spark-${++sparkId}`, []);
+
   if (data.length < 2) return null;
 
-  const width = 100;
-  const height = 28;
   const padding = 2;
 
   const min = Math.min(...data);
@@ -49,25 +50,24 @@ function MiniSparkline({ data, color }: { data: number[]; color: string }) {
   const range = max - min || 1;
 
   const points = data.map((v, i) => {
-    const x = padding + (i / (data.length - 1)) * (width - padding * 2);
-    const y = padding + (1 - (v - min) / range) * (height - padding * 2);
+    const x = padding + (i / (data.length - 1)) * (w - padding * 2);
+    const y = padding + (1 - (v - min) / range) * (h - padding * 2);
     return `${x},${y}`;
   });
 
-  // Gradient fill area
   const firstX = padding;
-  const lastX = padding + ((data.length - 1) / (data.length - 1)) * (width - padding * 2);
-  const areaPoints = `${firstX},${height} ${points.join(' ')} ${lastX},${height}`;
+  const lastX = padding + (w - padding * 2);
+  const areaPoints = `${firstX},${h} ${points.join(' ')} ${lastX},${h}`;
 
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="shrink-0">
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0">
       <defs>
-        <linearGradient id={`spark-${color.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id={uid} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity={0.3} />
           <stop offset="100%" stopColor={color} stopOpacity={0} />
         </linearGradient>
       </defs>
-      <polygon points={areaPoints} fill={`url(#spark-${color.replace('#', '')})`} />
+      <polygon points={areaPoints} fill={`url(#${uid})`} />
       <polyline
         points={points.join(' ')}
         fill="none"
@@ -136,10 +136,27 @@ export function LiveStatusBar() {
     return { pnl, total, wins, losses: total - wins, winRate };
   }, [trades, pnlRange]);
 
-  // Build sparkline data: cumulative PnL from dailyPnL for selected range
+  // Build sparkline data for the PnL card — 24h uses trade-level, others use dailyPnL
   const sparklineData = useMemo(() => {
     const now = Date.now();
-    const days = pnlRange === '24h' ? 1 : pnlRange === '7d' ? 7 : pnlRange === '14d' ? 14 : 30;
+
+    if (pnlRange === '24h') {
+      // Intra-day resolution: use individual closed trades
+      const istOffsetMs = 5.5 * 60 * 60 * 1000;
+      const istNow = new Date(now + istOffsetMs);
+      const todayIST = istNow.toISOString().slice(0, 10);
+      const cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
+
+      const todayTrades = trades
+        .filter((t) => t.status === 'closed' && new Date(t.timestamp).getTime() >= cutoffMs)
+        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      if (todayTrades.length === 0) return [];
+      let cum = 0;
+      return [0, ...todayTrades.map((t) => { cum += t.pnl ?? 0; return cum; })];
+    }
+
+    const days = pnlRange === '7d' ? 7 : pnlRange === '14d' ? 14 : 30;
     const cutoffMs = now - days * 24 * 60 * 60 * 1000;
 
     const filtered = dailyPnL
@@ -147,13 +164,26 @@ export function LiveStatusBar() {
       .sort((a, b) => a.trade_date.localeCompare(b.trade_date));
 
     if (filtered.length === 0) return [];
-
     let cumulative = 0;
-    return filtered.map((d) => {
-      cumulative += d.daily_pnl;
-      return cumulative;
-    });
-  }, [dailyPnL, pnlRange]);
+    return filtered.map((d) => { cumulative += d.daily_pnl; return cumulative; });
+  }, [dailyPnL, trades, pnlRange]);
+
+  // Per-exchange sparklines for balance cards (last 7 days of dailyPnL)
+  const exchangeSparklines = useMemo(() => {
+    const sorted = [...dailyPnL].sort((a, b) => a.trade_date.localeCompare(b.trade_date)).slice(-7);
+    if (sorted.length < 2) return { binance: [], delta: [], total: [] };
+
+    let cumSpot = 0, cumFut = 0, cumTotal = 0;
+    const binance: number[] = [];
+    const delta: number[] = [];
+    const total: number[] = [];
+    for (const d of sorted) {
+      cumSpot += d.spot_pnl; binance.push(cumSpot);
+      cumFut += d.futures_pnl; delta.push(cumFut);
+      cumTotal += d.daily_pnl; total.push(cumTotal);
+    }
+    return { binance, delta, total };
+  }, [dailyPnL]);
 
   const derivedStrategyCount = useMemo(() => {
     if (activeStrategiesCount > 0) return activeStrategiesCount;
@@ -178,7 +208,7 @@ export function LiveStatusBar() {
         {/* Row 1 — Three balance cards */}
         <div className="grid grid-cols-3 gap-2">
           {/* Binance */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2 overflow-hidden">
             <div className="flex items-center gap-1 mb-1">
               <span className={cn(
                 'w-1.5 h-1.5 rounded-full shrink-0',
@@ -195,10 +225,13 @@ export function LiveStatusBar() {
             ) : (
               <span className="text-[10px] text-zinc-500">No data</span>
             )}
+            <div className="mt-1 -mx-1">
+              <MiniSparkline data={exchangeSparklines.binance} color="#f0b90b" w={80} h={20} />
+            </div>
           </div>
 
           {/* Delta */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2 overflow-hidden">
             <div className="flex items-center gap-1 mb-1">
               <span className={cn(
                 'w-1.5 h-1.5 rounded-full shrink-0',
@@ -215,12 +248,18 @@ export function LiveStatusBar() {
             ) : (
               <span className="text-[10px] text-zinc-500">No data</span>
             )}
+            <div className="mt-1 -mx-1">
+              <MiniSparkline data={exchangeSparklines.delta} color="#00d2ff" w={80} h={20} />
+            </div>
           </div>
 
           {/* Total Capital */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2 text-center">
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2 text-center overflow-hidden">
             <div className="text-[9px] uppercase tracking-wider text-zinc-500 mb-1">Total</div>
             <span className="font-mono text-sm font-bold text-white">{formatCurrency(totalCapital)}</span>
+            <div className="mt-1 flex justify-center">
+              <MiniSparkline data={exchangeSparklines.total} color="#ffffff" w={80} h={20} />
+            </div>
           </div>
         </div>
 
