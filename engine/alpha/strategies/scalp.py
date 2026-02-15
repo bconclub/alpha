@@ -923,6 +923,7 @@ class ScalpStrategy(BaseStrategy):
 
         if side == "long":
             sl = price * (1 - self.STOP_LOSS_PCT / 100)
+            tp = price * (1 + self.MIN_TP_PCT / 100)
             return Signal(
                 side="buy",
                 price=price,
@@ -936,10 +937,12 @@ class ScalpStrategy(BaseStrategy):
                 leverage=self.leverage if self.is_futures else 1,
                 position_type="long" if self.is_futures else "spot",
                 exchange_id="delta" if self.is_futures else "binance",
-                metadata={"pending_side": "long", "pending_amount": amount},
+                metadata={"pending_side": "long", "pending_amount": amount,
+                          "tp_price": tp, "sl_price": sl},
             )
         else:  # short
             sl = price * (1 + self.STOP_LOSS_PCT / 100)
+            tp = price * (1 - self.MIN_TP_PCT / 100)
             return Signal(
                 side="sell",
                 price=price,
@@ -953,7 +956,8 @@ class ScalpStrategy(BaseStrategy):
                 leverage=self.leverage,
                 position_type="short",
                 exchange_id="delta",
-                metadata={"pending_side": "short", "pending_amount": amount},
+                metadata={"pending_side": "short", "pending_amount": amount,
+                          "tp_price": tp, "sl_price": sl},
             )
 
     def _exit_signal(self, price: float, side: str, reason: str) -> Signal:

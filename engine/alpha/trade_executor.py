@@ -554,8 +554,11 @@ class TradeExecutor:
             # ENTRY: insert a new trade row in DB
             await self._open_trade_in_db(signal, order)
 
-        # Send Telegram alert
-        await self._notify_trade(signal, order)
+        # Send Telegram alert (different message for entry vs exit)
+        if is_exit:
+            await self._notify_trade_closed(signal, order)
+        else:
+            await self._notify_trade_opened(signal, order)
 
         return order
 
@@ -719,7 +722,8 @@ class TradeExecutor:
         except Exception:
             logger.exception("Failed to close trade in DB")
 
-    async def _notify_trade(self, signal: Signal, order: dict) -> None:
+    async def _notify_trade_opened(self, signal: Signal, order: dict) -> None:
+        """Telegram notification for a new position opened."""
         if self.alerts is None:
             return
         try:
@@ -731,9 +735,14 @@ class TradeExecutor:
                 contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
                 coin_qty = filled_amount * contract_size
             value = fill_price * coin_qty
-            await self.alerts.send_trade_alert(
-                side=signal.side,
+
+            # Get TP/SL from signal metadata (scalp strategy sets these)
+            tp_price = signal.metadata.get("tp_price")
+            sl_price = signal.metadata.get("sl_price")
+
+            await self.alerts.send_trade_opened(
                 pair=signal.pair,
+                side=signal.side,
                 price=fill_price,
                 amount=filled_amount,
                 value=value,
@@ -742,9 +751,60 @@ class TradeExecutor:
                 exchange=signal.exchange_id,
                 leverage=signal.leverage,
                 position_type=signal.position_type,
+                tp_price=tp_price,
+                sl_price=sl_price,
             )
         except Exception:
-            logger.exception("Failed to send trade alert")
+            logger.exception("Failed to send trade opened alert")
+
+    async def _notify_trade_closed(self, signal: Signal, order: dict) -> None:
+        """Telegram notification for a position closed, with P&L."""
+        if self.alerts is None:
+            return
+        try:
+            fill_price = order.get("average") or order.get("price") or signal.price
+
+            # Look up the entry from the DB to compute P&L
+            entry_price = fill_price  # fallback
+            pnl = 0.0
+            pnl_pct = 0.0
+            duration_min: float | None = None
+
+            if self.db is not None:
+                # The trade was just closed in _close_trade_in_db — fetch it
+                closed_trade = await self.db.get_latest_closed_trade(
+                    pair=signal.pair,
+                    exchange=signal.exchange_id,
+                )
+                if closed_trade:
+                    entry_price = closed_trade.get("entry_price", fill_price)
+                    pnl = closed_trade.get("pnl", 0.0) or 0.0
+                    pnl_pct = closed_trade.get("pnl_pct", 0.0) or 0.0
+                    # Duration from timestamps
+                    created = closed_trade.get("created_at") or closed_trade.get("timestamp")
+                    closed_at = closed_trade.get("closed_at")
+                    if created and closed_at:
+                        from datetime import datetime
+                        try:
+                            t_open = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                            t_close = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+                            duration_min = (t_close - t_open).total_seconds() / 60
+                        except Exception:
+                            pass
+
+            await self.alerts.send_trade_closed(
+                pair=signal.pair,
+                entry_price=entry_price,
+                exit_price=fill_price,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                duration_min=duration_min,
+                exchange=signal.exchange_id,
+                leverage=signal.leverage,
+                position_type=signal.position_type,
+            )
+        except Exception:
+            logger.exception("Failed to send trade closed alert")
 
     async def _notify_error(self, signal: Signal, error: str) -> None:
         """Send error alert to Telegram, with 5-minute dedup per pair."""

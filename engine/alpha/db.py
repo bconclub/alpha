@@ -161,6 +161,29 @@ class Database:
         )
         return result.data
 
+    async def get_latest_closed_trade(
+        self, pair: str, exchange: str,
+    ) -> dict[str, Any] | None:
+        """Get the most recently closed trade for a pair+exchange."""
+        if not self.is_connected:
+            return None
+        loop = asyncio.get_running_loop()
+
+        def _query() -> Any:
+            return (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("*")
+                .eq("pair", pair)
+                .eq("exchange", exchange)
+                .eq("status", "closed")
+                .order("closed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+        result = await loop.run_in_executor(None, _query)
+        return result.data[0] if result.data else None
+
     async def get_open_trades(self, pair: str | None = None) -> list[dict[str, Any]]:
         """Fetch all currently open trades, optionally filtered by pair."""
         if not self.is_connected:
