@@ -417,32 +417,101 @@ class AlphaBot:
             return False
 
     async def _check_liquidation_risks(self) -> None:
-        """Monitor futures positions for liquidation proximity."""
+        """Monitor futures positions for liquidation proximity.
+
+        At 20x leverage, liquidation is ~5% away. SL at 0.75% triggers long before.
+        Warning levels:
+          >3%: no warning (normal operation)
+          2-3%: INFO log only, no Telegram
+          1-2%: Telegram WARNING (once per pair, yellow)
+          <1%: Telegram CRITICAL (every 30s, red)
+
+        Skip warning entirely if the position has a SL set that would trigger
+        before reaching liquidation.
+        """
         if not self.delta:
             return
+
+        # Initialize warning state if needed
+        if not hasattr(self, "_liq_warned"):
+            self._liq_warned: dict[str, float] = {}  # pair -> last telegram time
+
         for pair in self.delta_pairs:
             try:
                 ticker = await self.delta.fetch_ticker(pair)
                 current_price = ticker["last"]
                 distance = self.risk_manager.check_liquidation_risk(pair, current_price)
-                if distance is not None and distance < 10.0:
-                    # Find position info for alert
-                    for pos in self.risk_manager.open_positions:
-                        if pos.pair == pair and pos.leverage > 1:
-                            # Calculate liq price for the alert
-                            if pos.position_type == "long":
-                                liq_price = pos.entry_price * (1 - 1 / pos.leverage)
-                            else:
-                                liq_price = pos.entry_price * (1 + 1 / pos.leverage)
-                            await self.alerts.send_liquidation_warning(
-                                pair, distance, pos.position_type, pos.leverage,
-                                current_price=current_price, liq_price=liq_price,
-                            )
-                            logger.warning(
-                                "[%s] LIQUIDATION WARNING: %.1f%% from liquidation (%s %dx)",
-                                pair, distance, pos.position_type, pos.leverage,
-                            )
-                            break
+                if distance is None:
+                    # No futures position — clear warning state
+                    self._liq_warned.pop(pair, None)
+                    continue
+
+                # >3%: normal operation, no warning needed
+                if distance > 3.0:
+                    self._liq_warned.pop(pair, None)
+                    continue
+
+                # Find position info
+                pos = None
+                for p in self.risk_manager.open_positions:
+                    if p.pair == pair and p.leverage > 1:
+                        pos = p
+                        break
+                if pos is None:
+                    continue
+
+                # Calculate liq price
+                if pos.position_type == "long":
+                    liq_price = pos.entry_price * (1 - 1 / pos.leverage)
+                else:
+                    liq_price = pos.entry_price * (1 + 1 / pos.leverage)
+
+                # Skip if SL would trigger before liquidation
+                # At 0.75% SL and 5% liquidation, SL always fires first
+                sl_distance_pct = 0.75  # our configured SL
+                if distance > sl_distance_pct:
+                    # SL will trigger before we reach liquidation — safe
+                    continue
+
+                now = time.monotonic()
+
+                # 2-3%: INFO log only (once per minute)
+                if 2.0 <= distance <= 3.0:
+                    logger.info(
+                        "[%s] Liquidation distance: %.1f%% (%s %dx) — SL should trigger first",
+                        pair, distance, pos.position_type, pos.leverage,
+                    )
+                    continue
+
+                # 1-2%: Telegram WARNING (once per pair)
+                if 1.0 <= distance < 2.0:
+                    if pair not in self._liq_warned:
+                        self._liq_warned[pair] = now
+                        await self.alerts.send_liquidation_warning(
+                            pair, distance, pos.position_type, pos.leverage,
+                            current_price=current_price, liq_price=liq_price,
+                        )
+                        logger.warning(
+                            "[%s] LIQUIDATION WARNING: %.1f%% from liquidation (%s %dx)",
+                            pair, distance, pos.position_type, pos.leverage,
+                        )
+                    continue
+
+                # <1%: CRITICAL — alert every 30 seconds
+                if distance < 1.0:
+                    last_alert = self._liq_warned.get(pair, 0)
+                    if now - last_alert >= 30:
+                        self._liq_warned[pair] = now
+                        await self.alerts.send_liquidation_warning(
+                            pair, distance, pos.position_type, pos.leverage,
+                            current_price=current_price, liq_price=liq_price,
+                        )
+                        logger.critical(
+                            "[%s] CRITICAL LIQUIDATION: %.1f%% from liquidation (%s %dx) — price=$%.2f liq=$%.2f",
+                            pair, distance, pos.position_type, pos.leverage,
+                            current_price, liq_price,
+                        )
+
             except Exception:
                 logger.debug("Could not check liquidation risk for %s", pair)
 

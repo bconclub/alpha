@@ -1,34 +1,32 @@
-"""Alpha v2.2 — MOMENTUM RIDER: Enter fast, ride the wave, trail profits.
+"""Alpha v3.0 — QUALITY SNIPER: Fewer trades, bigger wins, beat the fees.
 
-NEVER IDLE. ZERO COOLDOWN. Every tick without a position is wasted money.
-Runs every 3 seconds. ANY SINGLE condition triggers entry.
+PHILOSOPHY: Every trade must have profit potential AT LEAST 5x the trading fees.
+With ~$0.08 round-trip fees, we need $0.40+ potential profit per trade.
+1.5% price move at 20x = 30% on capital = $0.31+ per ETH contract.
 
-Entry — see ANY movement? GET IN:
-  1. 30s momentum > 0.05% → enter direction
-  2. RSI < 45 (long) or > 55 (short) → slight imbalance = opportunity
-  3. Volume > 1.2x average → enter candle direction
-  4. BB: price within 0.3% of any band → enter direction
-  5. Price acceleration > 1.2x avg → enter direction
-  If NONE trigger for 2 minutes → force entry on EMA slope
+Entry — WAIT FOR REAL MOMENTUM (2-of-4 confirmation required):
+  1. Price moved 0.3%+ in last 60 seconds (real momentum, not noise)
+  2. Volume spike 2x+ above average (institutional interest)
+  3. RSI extreme (<30 or >70) — strong directional pressure
+  4. BB breakout — price outside Bollinger Bands
+  Must have AT LEAST 2 of these. Single weak signals = SKIP.
 
-Exit — RIDE THE MOMENTUM, DON'T EXIT EARLY:
-  NO fixed TP anymore. Let winners run.
-  Exit ONLY when:
-    1. Signal reversal — momentum flips (RSI cross 70/30, momentum turns)
-    2. Trailing stop — activates at +0.30%, trails 0.20% behind peak
-    3. Stop loss — 0.50% (cut losers fast)
-    4. Timeout — 30 min max (free capital if nothing happening)
+Exit — RIDE WINNERS, CUT LOSERS:
+  1. Trailing stop — activates at +1.5%, trails 0.50% behind peak
+     Let winners run to 2%, 3%, 5% if momentum continues
+  2. Stop loss — 0.75% (2:1 R:R with 1.5% target)
+  3. Signal reversal — RSI crosses 70/30, momentum flips against us
+  4. Timeout — 30 min max
 
-Trailing Stop System:
-  - Activate after +0.30% profit
-  - Trail at 0.20% behind peak (highest for longs, lowest for shorts)
-  - Trail only moves in profitable direction, never backward
-  - Example: long entry $2080 → peak $2095 (+0.72%) → trail at $2090.81
-    → price drops to trail → exit +0.52% (rode 72% of the move)
+Fee Awareness:
+  - Round-trip taker fees ~0.10% ($0.08 on $80 notional)
+  - Use LIMIT orders for entries when possible (lower maker fee)
+  - Min profit target: 1.5% price = $0.31+ per ETH contract
+  - NEVER enter for potential < 0.5% move
 
 Soul Integration:
   - Loads SOUL.md before every trade decision
-  - Logs soul-guided reasoning on every exit check
+  - "I don't trade for the sake of trading"
 """
 
 from __future__ import annotations
@@ -73,12 +71,10 @@ def _load_soul() -> list[str]:
     soul_path = Path(__file__).resolve().parent.parent.parent / "SOUL.md"
     try:
         text = soul_path.read_text(encoding="utf-8")
-        # Extract key principles (lines starting with - or numbered)
         principles = []
         for line in text.splitlines():
             stripped = line.strip()
             if stripped.startswith("- ") or (stripped and stripped[0].isdigit() and "**" in stripped):
-                # Clean markdown
                 clean = stripped.lstrip("- ").lstrip("0123456789. ")
                 clean = clean.replace("**", "")
                 if clean:
@@ -89,9 +85,9 @@ def _load_soul() -> list[str]:
     except Exception as e:
         logger.warning("Could not load SOUL.md: %s", e)
         _SOUL_PRINCIPLES = [
-            "Ride momentum until it dies. Don't exit at a fixed number.",
+            "I don't trade for the sake of trading. Every trade must beat the fees by 5x.",
             "Let winners run and cut losers fast.",
-            "A good trade catches 60-80% of the move, not just 1%.",
+            "Quality over quantity. Fewer but better trades.",
         ]
         _SOUL_LOADED = True
     return _SOUL_PRINCIPLES
@@ -100,7 +96,6 @@ def _load_soul() -> list[str]:
 def _soul_check(context: str) -> str:
     """Get relevant soul principle for the current decision context."""
     principles = _load_soul()
-    # Match context to most relevant principle
     context_lower = context.lower()
     if "exit" in context_lower or "tp" in context_lower or "take profit" in context_lower:
         for p in principles:
@@ -110,62 +105,64 @@ def _soul_check(context: str) -> str:
         for p in principles:
             if "cut" in p.lower() or "loss" in p.lower():
                 return p
-    if "idle" in context_lower or "hunt" in context_lower:
+    if "fee" in context_lower or "quality" in context_lower or "skip" in context_lower:
         for p in principles:
-            if "idle" in p.lower() or "hunt" in p.lower():
+            if "fee" in p.lower() or "trade for the sake" in p.lower() or "quality" in p.lower():
                 return p
     if "momentum" in context_lower:
         for p in principles:
             if "momentum" in p.lower():
                 return p
-    # Default
     return principles[0] if principles else "Trade with conviction."
 
 
 class ScalpStrategy(BaseStrategy):
-    """Momentum Rider — enter fast, ride the wave, trail profits.
+    """Quality Sniper v3.0 — fewer trades, bigger wins, beat the fees.
 
-    Enters on the slightest momentum. Stays in as long as momentum continues.
-    No fixed TP. Trail profits. Cut losses fast. Read the soul.
+    Waits for REAL momentum (2-of-4 confirmation). Rides winners with
+    trailing stops. Minimum 1.5% target. Never enters for noise.
     """
 
     name = StrategyName.SCALP
-    check_interval_sec = 3  # 3 second ticks — aggressive
+    check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
-    # ── Exit thresholds — RIDE THE MOMENTUM ────────────────────────────
-    # NO FIXED TP — we trail profits instead
-    STOP_LOSS_PCT = 0.50              # 0.50% price SL (10% capital at 20x) — cut fast
-    TRAILING_ACTIVATE_PCT = 0.30      # activate trail after +0.30% profit
-    TRAILING_DISTANCE_PCT = 0.20      # trail 0.20% behind peak
+    # ── Exit thresholds — RIDE WINNERS ────────────────────────────────
+    STOP_LOSS_PCT = 0.75              # 0.75% price SL (15% capital at 20x)
+    MIN_TP_PCT = 1.50                 # minimum 1.5% target (30% capital at 20x)
+    TRAILING_ACTIVATE_PCT = 1.50      # activate trail at +1.5% — the minimum target
+    TRAILING_DISTANCE_PCT = 0.50      # trail 0.50% behind peak — wide enough to ride
     MAX_HOLD_SECONDS = 30 * 60        # 30 min max — free capital if flat
     FLATLINE_SECONDS = 15 * 60        # 15 min flat = exit
-    FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
+    FLATLINE_MIN_MOVE_PCT = 0.10      # "flat" means < 0.10% total move
 
     # ── Signal reversal thresholds ──────────────────────────────────────
     RSI_REVERSAL_LONG = 70            # RSI > 70 while long → overbought, exit
     RSI_REVERSAL_SHORT = 30           # RSI < 30 while short → oversold, exit
-    MOMENTUM_REVERSAL_PCT = -0.03     # momentum turns against position → exit
+    MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
 
-    # ── Momentum thresholds (ULTRA-AGGRESSIVE) ───────────────────────────
-    RSI_EXTREME_LONG = 45             # RSI < 45 = slight oversold → long
-    RSI_EXTREME_SHORT = 55            # RSI > 55 = slight overbought → short
-    VOL_SPIKE_RATIO = 1.2             # volume > 1.2x average = above normal
-    ACCEL_MIN_PCT = 0.02              # minimum candle move for momentum
-    ACCEL_MULTIPLIER = 1.2            # current candle 1.2x avg → momentum
-    MOMENTUM_WINDOW_PCT = 0.05        # 0.05% move in 30s = momentum
-    BB_PROXIMITY_PCT = 0.30           # enter if within 0.3% of any BB band
+    # ── Entry thresholds — QUALITY ONLY (need 2 of 4) ──────────────────
+    # These are STRICT. We only enter when there's real momentum.
+    MOMENTUM_MIN_PCT = 0.30           # 0.30%+ move in 60s = real momentum
+    VOL_SPIKE_RATIO = 2.0             # volume > 2x average = institutional
+    RSI_EXTREME_LONG = 30             # RSI < 30 = truly oversold → long
+    RSI_EXTREME_SHORT = 70            # RSI > 70 = truly overbought → short
+    BB_BREAKOUT = True                # price outside BB = breakout
+
+    # ── Fee awareness ─────────────────────────────────────────────────
+    MIN_EXPECTED_MOVE_PCT = 0.50      # don't enter if expected move < 0.50%
+    FEE_MULTIPLIER_MIN = 5.0          # profit potential must be 5x fees
 
     # ── Position sizing ───────────────────────────────────────────────────
-    CAPITAL_PCT_SPOT = 50.0           # unused in Delta-only mode
-    CAPITAL_PCT_FUTURES = 80.0        # 80% of exchange capital (aggressive)
-    MAX_CONTRACTS = 5                 # hard cap per trade
-    MAX_POSITIONS = 3                 # max 3 concurrent
-    MAX_SPREAD_PCT = 0.15             # skip if spread > 0.15%
+    CAPITAL_PCT_SPOT = 50.0
+    CAPITAL_PCT_FUTURES = 80.0
+    MAX_CONTRACTS = 5
+    MAX_POSITIONS = 3
+    MAX_SPREAD_PCT = 0.15
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
-    MAX_TRADES_PER_HOUR = 40
-    CONSECUTIVE_LOSS_PAUSE = 5        # pause after 5 consecutive losses
-    PAUSE_DURATION_SEC = 60           # 1 minute pause — get back FAST
+    MAX_TRADES_PER_HOUR = 10          # quality over quantity — max 10/hr
+    CONSECUTIVE_LOSS_PAUSE = 3        # pause after 3 consecutive losses
+    PAUSE_DURATION_SEC = 120          # 2 min pause — think before trading
     DAILY_LOSS_LIMIT_PCT = 5.0
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
@@ -197,7 +194,7 @@ class ScalpStrategy(BaseStrategy):
         self.entry_time: float = 0.0
         self.highest_since_entry: float = 0.0
         self.lowest_since_entry: float = float("inf")
-        self._trailing_active: bool = False  # trail activated
+        self._trailing_active: bool = False
 
         # Previous RSI for reversal detection
         self._prev_rsi: float = 50.0
@@ -208,14 +205,14 @@ class ScalpStrategy(BaseStrategy):
         self._paused_until: float = 0.0
         self._daily_scalp_loss: float = 0.0
 
-        # Idle tracking — force entry if idle too long
+        # No more forced entries — we wait for quality setups
         self._last_position_exit: float = 0.0
-        self.FORCE_ENTRY_AFTER_SEC = 2 * 60     # force entry after 2 min idle
 
         # Stats for hourly summary
         self.hourly_wins: int = 0
         self.hourly_losses: int = 0
         self.hourly_pnl: float = 0.0
+        self.hourly_skipped: int = 0  # track skipped low-quality signals
 
         # Tick tracking
         self._tick_count: int = 0
@@ -225,7 +222,6 @@ class ScalpStrategy(BaseStrategy):
         _load_soul()
 
     async def on_start(self) -> None:
-        # Don't reset position state — it may have been injected by _restore_strategy_state
         if not self.in_position:
             self.position_side = None
             self.entry_price = 0.0
@@ -237,26 +233,27 @@ class ScalpStrategy(BaseStrategy):
         pos_info = ""
         if self.in_position:
             pos_info = f" | RESTORED {self.position_side} @ ${self.entry_price:.2f}"
-        soul_msg = _soul_check("momentum")
+        soul_msg = _soul_check("quality")
         self.logger.info(
-            "[%s] Scalp ACTIVE (%s) — MOMENTUM RIDER v2.2, tick=%ds, "
-            "NO FIXED TP, Trail=%.2f%%/%.2f%% SL=%.2f%% "
-            "Mom=%.2f%% RSI=%d/%d Vol=%.1fx BB=%.1f%% "
-            "ForceEntry=%ds Timeout=%dm%s",
+            "[%s] QUALITY SNIPER v3.0 ACTIVE (%s) — tick=%ds, "
+            "TP=%.1f%% SL=%.1f%% Trail=%.1f%%/%.1f%% "
+            "Entry: mom>=%.1f%% vol>=%.1fx RSI<%d/>%d BB "
+            "MinMove=%.1f%% MaxTrades=%d/hr%s",
             self.pair, tag, self.check_interval_sec,
+            self.MIN_TP_PCT, self.STOP_LOSS_PCT,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
-            self.STOP_LOSS_PCT,
-            self.MOMENTUM_WINDOW_PCT, self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
-            self.VOL_SPIKE_RATIO, self.BB_PROXIMITY_PCT,
-            self.FORCE_ENTRY_AFTER_SEC, self.MAX_HOLD_SECONDS // 60,
+            self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
+            self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
+            self.MIN_EXPECTED_MOVE_PCT, self.MAX_TRADES_PER_HOUR,
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
 
     async def on_stop(self) -> None:
         self.logger.info(
-            "[%s] Scalp stopped — %dW/%dL, P&L=$%.4f",
-            self.pair, self.hourly_wins, self.hourly_losses, self.hourly_pnl,
+            "[%s] Scalp stopped — %dW/%dL, P&L=$%.4f, skipped=%d",
+            self.pair, self.hourly_wins, self.hourly_losses,
+            self.hourly_pnl, self.hourly_skipped,
         )
 
     # ======================================================================
@@ -264,16 +261,16 @@ class ScalpStrategy(BaseStrategy):
     # ======================================================================
 
     async def check(self) -> list[Signal]:
-        """One scalping tick — fetch candles, detect momentum, manage exits."""
+        """One scalping tick — fetch candles, detect QUALITY momentum, manage exits."""
         signals: list[Signal] = []
         self._tick_count += 1
         exchange = self.trade_exchange or self.executor.exchange
         now = time.monotonic()
 
-        # ── Pause check (5 consecutive losses → 1 min cooldown) ────────
+        # ── Pause check ─────────────────────────────────────────────────
         if now < self._paused_until:
             remaining = int(self._paused_until - now)
-            if self._tick_count % 60 == 0:
+            if self._tick_count % 30 == 0:
                 self.logger.info(
                     "[%s] PAUSED (%d losses) — resuming in %ds",
                     self.pair, self._consecutive_losses, remaining,
@@ -303,10 +300,15 @@ class ScalpStrategy(BaseStrategy):
                 )
             return signals
 
-        # ── Rate limit ─────────────────────────────────────────────────
+        # ── Rate limit — quality over quantity ─────────────────────────
         cutoff = time.time() - 3600
         self._hourly_trades = [t for t in self._hourly_trades if t > cutoff]
         if len(self._hourly_trades) >= self.MAX_TRADES_PER_HOUR:
+            if self._tick_count % 60 == 0:
+                self.logger.info(
+                    "[%s] Rate limit: %d/%d trades this hour — waiting",
+                    self.pair, len(self._hourly_trades), self.MAX_TRADES_PER_HOUR,
+                )
             return signals
 
         # ── Fetch 1m candles ───────────────────────────────────────────
@@ -324,36 +326,18 @@ class ScalpStrategy(BaseStrategy):
         bb_upper = float(bb.bollinger_hband().iloc[-1])
         bb_lower = float(bb.bollinger_lband().iloc[-1])
 
-        # Volume ratio
+        # Volume ratio (current vs 10-candle average)
         avg_vol = float(volume.iloc[-11:-1].mean()) if len(volume) >= 11 else float(volume.mean())
         current_vol = float(volume.iloc[-1])
         vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
 
-        # Price acceleration
-        closes = close.values
-        candle_changes: list[float] = []
-        for i in range(-4, 0):
-            if len(closes) >= abs(i) + 1:
-                prev = float(closes[i - 1])
-                cur = float(closes[i])
-                candle_changes.append(((cur - prev) / prev * 100) if prev > 0 else 0)
-        current_candle_pct = candle_changes[-1] if candle_changes else 0
-        avg_candle_pct = (
-            sum(abs(c) for c in candle_changes[:-1]) / max(len(candle_changes) - 1, 1)
-        )
+        # 60-second momentum (last 1 full candle)
+        price_1m_ago = float(close.iloc[-2]) if len(close) >= 2 else current_price
+        momentum_60s = ((current_price - price_1m_ago) / price_1m_ago * 100) if price_1m_ago > 0 else 0
 
-        # 30-second momentum
-        price_prev = float(close.iloc[-2]) if len(close) >= 2 else current_price
-        momentum_30s = ((current_price - price_prev) / price_prev * 100) if price_prev > 0 else 0
-
-        # BB proximity
-        bb_dist_upper = ((bb_upper - current_price) / current_price * 100) if current_price > 0 else 999
-        bb_dist_lower = ((current_price - bb_lower) / current_price * 100) if current_price > 0 else 999
-
-        # EMA slope for forced entry
-        ema_5 = float(close.ewm(span=5, adjust=False).mean().iloc[-1])
-        ema_5_prev = float(close.ewm(span=5, adjust=False).mean().iloc[-2]) if len(close) >= 2 else ema_5
-        ema_slope = "up" if ema_5 > ema_5_prev else "down"
+        # 2-candle momentum (120 seconds) for trend confirmation
+        price_2m_ago = float(close.iloc[-3]) if len(close) >= 3 else price_1m_ago
+        momentum_120s = ((current_price - price_2m_ago) / price_2m_ago * 100) if price_2m_ago > 0 else 0
 
         # ── Heartbeat every 60 seconds ─────────────────────────────────
         if now - self._last_heartbeat >= 60:
@@ -366,20 +350,20 @@ class ScalpStrategy(BaseStrategy):
                 self.logger.info(
                     "[%s] (%s) %s @ $%.2f | %ds | PnL=%+.2f%% | RSI=%.1f | mom=%+.3f%%%s",
                     self.pair, tag, self.position_side, self.entry_price,
-                    int(hold_sec), pnl_now, rsi_now, momentum_30s, trail_tag,
+                    int(hold_sec), pnl_now, rsi_now, momentum_60s, trail_tag,
                 )
             else:
+                idle_sec = int(now - self._last_position_exit)
                 self.logger.info(
-                    "[%s] (%s) SCANNING | $%.2f | RSI=%.1f | Vol=%.1fx | "
-                    "candle=%+.3f%% | W/L=%d/%d",
-                    self.pair, tag, current_price, rsi_now, vol_ratio,
-                    current_candle_pct,
-                    self.hourly_wins, self.hourly_losses,
+                    "[%s] (%s) SCANNING %ds | $%.2f | RSI=%.1f | Vol=%.1fx | "
+                    "mom60=%+.3f%% | W/L=%d/%d skip=%d",
+                    self.pair, tag, idle_sec, current_price, rsi_now, vol_ratio,
+                    momentum_60s,
+                    self.hourly_wins, self.hourly_losses, self.hourly_skipped,
                 )
 
-        # ── In position: check exit (SOUL-GUIDED) ─────────────────────
+        # ── In position: check exit ────────────────────────────────────
         if self.in_position:
-            # Force close before daily expiry
             if _expiry_force_close:
                 pnl_pct = self._calc_pnl_pct(current_price)
                 self.logger.warning(
@@ -390,12 +374,12 @@ class ScalpStrategy(BaseStrategy):
                     current_price, pnl_pct, self.position_side or "long",
                     "EXPIRY", time.monotonic() - self.entry_time,
                 )
-            result = self._check_exits(current_price, rsi_now, momentum_30s)
+            result = self._check_exits(current_price, rsi_now, momentum_60s)
             self._prev_rsi = rsi_now
             return result
 
-        # ── No position: detect momentum ───────────────────────────────
-        self._prev_rsi = rsi_now  # track RSI for reversal detection
+        # ── No position: look for QUALITY entry ────────────────────────
+        self._prev_rsi = rsi_now
 
         # Check position limits
         if self.risk_manager.has_position(self.pair):
@@ -436,125 +420,143 @@ class ScalpStrategy(BaseStrategy):
         if amount is None:
             return signals
 
-        # ── Detect momentum ────────────────────────────────────────────
-        idle_seconds = int(now - self._last_position_exit)
-        entry = self._detect_momentum(
+        # ── Quality momentum detection (2-of-4 confirmation) ──────────
+        entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
-            current_candle_pct, avg_candle_pct,
-            bb_upper, bb_lower, momentum_30s,
-            bb_dist_upper, bb_dist_lower,
+            momentum_60s, momentum_120s,
+            bb_upper, bb_lower,
         )
 
         if entry is not None:
-            side, reason = entry
-            soul_msg = _soul_check("entry momentum")
-            self.logger.info("[%s] Soul check: %s", self.pair, soul_msg)
-            signals.append(self._build_entry_signal(side, current_price, amount, reason))
-        elif idle_seconds >= self.FORCE_ENTRY_AFTER_SEC:
-            # IDLE TOO LONG — force entry in dominant direction
-            side = "long" if ema_slope == "up" else "short"
-            can_short = self.is_futures and config.delta.enable_shorting
-            if side == "short" and not can_short:
-                side = "long"
-            reason = (
-                f"IDLE {idle_seconds}s — forcing {side.upper()} based on "
-                f"EMA slope ({ema_slope}), momentum={momentum_30s:+.3f}%"
-            )
-            soul_msg = _soul_check("idle hunting")
-            self.logger.info("[%s] %s | Soul: %s", self.pair, reason, soul_msg)
-            signals.append(self._build_entry_signal(side, current_price, amount, reason))
+            side, reason, use_limit = entry
+            soul_msg = _soul_check("quality entry")
+            self.logger.info("[%s] QUALITY ENTRY — %s | Soul: %s", self.pair, reason, soul_msg)
+            order_type = "limit" if use_limit else "market"
+            signals.append(self._build_entry_signal(side, current_price, amount, reason, order_type))
         else:
-            # Log EVERY TICK while hunting
-            self.logger.info(
-                "[%s] HUNT %ds | $%.2f | m30s=%+.3f%%/%.2f | RSI=%.1f/%d/%d | "
-                "vol=%.1fx/%.1f | accel=%+.3f%%/%.3f×%.1f | BB↑%.2f%%/↓%.2f%%/%.1f%% | EMA=%s",
-                self.pair, idle_seconds, current_price,
-                momentum_30s, self.MOMENTUM_WINDOW_PCT,
-                rsi_now, self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
-                vol_ratio, self.VOL_SPIKE_RATIO,
-                current_candle_pct, avg_candle_pct, self.ACCEL_MULTIPLIER,
-                bb_dist_upper, bb_dist_lower, self.BB_PROXIMITY_PCT,
-                ema_slope,
-            )
+            # Log scanning status every 30 seconds (not every tick)
+            if self._tick_count % 6 == 0:
+                idle_sec = int(now - self._last_position_exit)
+                self.logger.info(
+                    "[%s] WAITING %ds | $%.2f | mom60=%+.3f%%/%.1f | RSI=%.1f/%d/%d | "
+                    "vol=%.1fx/%.1f | BB[%.2f-%.2f]",
+                    self.pair, idle_sec, current_price,
+                    momentum_60s, self.MOMENTUM_MIN_PCT,
+                    rsi_now, self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
+                    vol_ratio, self.VOL_SPIKE_RATIO,
+                    bb_lower, bb_upper,
+                )
 
         return signals
 
     # ======================================================================
-    # MOMENTUM DETECTION — one strong signal is enough
+    # QUALITY ENTRY DETECTION — 2 of 4 confirmation required
     # ======================================================================
 
-    def _detect_momentum(
+    def _detect_quality_entry(
         self,
         price: float,
         rsi_now: float,
         vol_ratio: float,
-        current_candle_pct: float,
-        avg_candle_pct: float,
+        momentum_60s: float,
+        momentum_120s: float,
         bb_upper: float,
         bb_lower: float,
-        momentum_30s: float = 0.0,
-        bb_dist_upper: float = 999.0,
-        bb_dist_lower: float = 999.0,
-    ) -> tuple[str, str] | None:
-        """Detect ANY momentum. Returns (side, reason) or None."""
+    ) -> tuple[str, str, bool] | None:
+        """Detect quality momentum. Returns (side, reason, use_limit) or None.
+
+        Requires AT LEAST 2 of these 4 conditions:
+        1. Price moved 0.3%+ in last 60s
+        2. Volume spike 2x+
+        3. RSI extreme (<30 or >70)
+        4. BB breakout (price outside bands)
+
+        Also checks that expected move >= 0.50% (fee filter).
+        """
         can_short = self.is_futures and config.delta.enable_shorting
 
-        # ── 1. 30-second momentum ─────────────────────────────────────
-        if abs(momentum_30s) >= self.MOMENTUM_WINDOW_PCT:
-            if momentum_30s > 0:
-                return ("long", f"MOM: {momentum_30s:+.3f}% in 30s → LONG")
-            elif can_short:
-                return ("short", f"MOM: {momentum_30s:+.3f}% in 30s → SHORT")
+        # ── Count bullish signals ───────────────────────────────────────
+        bull_signals: list[str] = []
+        bear_signals: list[str] = []
 
-        # ── 2. RSI imbalance ───────────────────────────────────────────
+        # 1. Momentum (60s move)
+        if momentum_60s >= self.MOMENTUM_MIN_PCT:
+            bull_signals.append(f"MOM:{momentum_60s:+.2f}%")
+        elif momentum_60s <= -self.MOMENTUM_MIN_PCT:
+            bear_signals.append(f"MOM:{momentum_60s:+.2f}%")
+
+        # 2. Volume spike
+        if vol_ratio >= self.VOL_SPIKE_RATIO:
+            # Volume confirms direction based on candle
+            if momentum_60s > 0:
+                bull_signals.append(f"VOL:{vol_ratio:.1f}x")
+            elif momentum_60s < 0:
+                bear_signals.append(f"VOL:{vol_ratio:.1f}x")
+            else:
+                # Neutral volume — add to both, will be filtered by 2-of-4
+                bull_signals.append(f"VOL:{vol_ratio:.1f}x")
+                bear_signals.append(f"VOL:{vol_ratio:.1f}x")
+
+        # 3. RSI extreme
         if rsi_now < self.RSI_EXTREME_LONG:
-            return ("long", f"RSI: {rsi_now:.1f} < {self.RSI_EXTREME_LONG} → LONG")
-        if rsi_now > self.RSI_EXTREME_SHORT and can_short:
-            return ("short", f"RSI: {rsi_now:.1f} > {self.RSI_EXTREME_SHORT} → SHORT")
+            bull_signals.append(f"RSI:{rsi_now:.0f}<{self.RSI_EXTREME_LONG}")
+        if rsi_now > self.RSI_EXTREME_SHORT:
+            bear_signals.append(f"RSI:{rsi_now:.0f}>{self.RSI_EXTREME_SHORT}")
 
-        # ── 3. Volume above average ───────────────────────────────────
-        if vol_ratio >= self.VOL_SPIKE_RATIO and abs(current_candle_pct) >= self.ACCEL_MIN_PCT:
-            if current_candle_pct > 0:
-                return ("long", f"VOL: {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → LONG")
-            elif can_short:
-                return ("short", f"VOL: {vol_ratio:.1f}x, candle {current_candle_pct:+.3f}% → SHORT")
-
-        # ── 4. BB proximity ───────────────────────────────────────────
-        if bb_dist_upper <= self.BB_PROXIMITY_PCT:
-            return ("long", f"BB: {bb_dist_upper:.2f}% from upper → breakout LONG")
-        if bb_dist_lower <= self.BB_PROXIMITY_PCT and can_short:
-            return ("short", f"BB: {bb_dist_lower:.2f}% from lower → breakdown SHORT")
+        # 4. BB breakout
         if price > bb_upper:
-            return ("long", f"BB: breakout ${price:.2f} > ${bb_upper:.2f} → LONG")
-        if price < bb_lower and can_short:
-            return ("short", f"BB: breakdown ${price:.2f} < ${bb_lower:.2f} → SHORT")
+            bull_signals.append(f"BB:breakout>{bb_upper:.0f}")
+        if price < bb_lower:
+            bear_signals.append(f"BB:breakdown<{bb_lower:.0f}")
 
-        # ── 5. Price acceleration ─────────────────────────────────────
-        if (abs(current_candle_pct) >= self.ACCEL_MIN_PCT
-                and avg_candle_pct > 0
-                and abs(current_candle_pct) >= avg_candle_pct * self.ACCEL_MULTIPLIER):
-            if current_candle_pct > 0:
-                return ("long",
-                        f"ACCEL: {current_candle_pct:+.3f}% "
-                        f"({abs(current_candle_pct)/avg_candle_pct:.1f}x avg) → LONG")
-            elif can_short:
-                return ("short",
-                        f"ACCEL: {current_candle_pct:+.3f}% "
-                        f"({abs(current_candle_pct)/avg_candle_pct:.1f}x avg) → SHORT")
+        # ── Check 2-of-4 requirement ────────────────────────────────────
+        if len(bull_signals) >= 2:
+            # Verify expected move is worth the fees
+            if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
+                self.hourly_skipped += 1
+                if self._tick_count % 10 == 0:
+                    soul_msg = _soul_check("fee skip")
+                    self.logger.info(
+                        "[%s] SKIP LONG — signals=%s but move too small (60s=%+.2f%%, 120s=%+.2f%% < %.1f%%) | %s",
+                        self.pair, "+".join(bull_signals),
+                        momentum_60s, momentum_120s, self.MIN_EXPECTED_MOVE_PCT, soul_msg,
+                    )
+                return None
+
+            reason = f"LONG 2-of-4: {' + '.join(bull_signals)}"
+            # Use limit order if we have time (RSI signal, not breakout)
+            use_limit = "MOM" not in bull_signals[0]  # limit if not urgent momentum
+            return ("long", reason, use_limit)
+
+        if len(bear_signals) >= 2 and can_short:
+            if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
+                self.hourly_skipped += 1
+                if self._tick_count % 10 == 0:
+                    soul_msg = _soul_check("fee skip")
+                    self.logger.info(
+                        "[%s] SKIP SHORT — signals=%s but move too small (60s=%+.2f%%, 120s=%+.2f%% < %.1f%%) | %s",
+                        self.pair, "+".join(bear_signals),
+                        momentum_60s, momentum_120s, self.MIN_EXPECTED_MOVE_PCT, soul_msg,
+                    )
+                return None
+
+            reason = f"SHORT 2-of-4: {' + '.join(bear_signals)}"
+            use_limit = "MOM" not in bear_signals[0]
+            return ("short", reason, use_limit)
 
         return None
 
     # ======================================================================
-    # EXIT LOGIC — RIDE MOMENTUM, TRAIL PROFITS
+    # EXIT LOGIC — RIDE WINNERS, CUT LOSERS
     # ======================================================================
 
-    def _check_exits(self, current_price: float, rsi_now: float, momentum_30s: float) -> list[Signal]:
-        """Check exit conditions. Soul-guided: ride momentum, trail profits.
+    def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
+        """Check exit conditions.
 
         Priority:
-        1. Signal reversal (RSI cross / momentum flip) — catch the top/bottom
-        2. Trailing stop — protect profits that were made
-        3. Stop loss — cut losers fast (0.50%)
+        1. Stop loss — 0.75% (cut losers immediately)
+        2. Signal reversal — when in profit, exit at the top
+        3. Trailing stop — activates at +1.5%, trails 0.50% behind peak
         4. Timeout — 30 min, free capital
         5. Flatline — no movement for 15 min
         """
@@ -565,33 +567,44 @@ class ScalpStrategy(BaseStrategy):
         if self.position_side == "long":
             self.highest_since_entry = max(self.highest_since_entry, current_price)
 
-            # ── 1. SIGNAL REVERSAL — momentum died, exit at the top ────
-            rsi_crossed_70 = rsi_now > self.RSI_REVERSAL_LONG and self._prev_rsi <= self.RSI_REVERSAL_LONG
-            momentum_reversed = momentum_30s < self.MOMENTUM_REVERSAL_PCT and pnl_pct > 0
-
-            if rsi_crossed_70 and pnl_pct > 0:
-                soul_msg = _soul_check("exit reversal")
+            # ── 1. STOP LOSS — cut losers fast ─────────────────────────
+            sl_price = self.entry_price * (1 - self.STOP_LOSS_PCT / 100)
+            if current_price <= sl_price:
+                soul_msg = _soul_check("loss")
                 self.logger.info(
-                    "[%s] Soul check: RSI %.1f crossed 70 — momentum dying, exit now | %s",
-                    self.pair, rsi_now, soul_msg,
+                    "[%s] SL HIT at %.2f%% — cutting loss | %s",
+                    self.pair, pnl_pct, soul_msg,
                 )
-                return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-RSI", hold_seconds)
+                return self._do_exit(current_price, pnl_pct, "long", "SL", hold_seconds)
 
-            if momentum_reversed:
-                soul_msg = _soul_check("exit reversal")
-                self.logger.info(
-                    "[%s] Soul check: momentum flipped %+.3f%% — exit with profit | %s",
-                    self.pair, momentum_30s, soul_msg,
-                )
-                return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-MOM", hold_seconds)
+            # ── 2. SIGNAL REVERSAL — exit at the top when in profit ────
+            if pnl_pct > 0:
+                rsi_crossed_70 = rsi_now > self.RSI_REVERSAL_LONG and self._prev_rsi <= self.RSI_REVERSAL_LONG
+                momentum_reversed = momentum_60s < self.MOMENTUM_REVERSAL_PCT
 
-            # ── 2. TRAILING STOP — protect profits ─────────────────────
+                if rsi_crossed_70 and pnl_pct >= self.MIN_TP_PCT:
+                    soul_msg = _soul_check("exit reversal")
+                    self.logger.info(
+                        "[%s] RSI %.1f crossed 70 at +%.2f%% — taking profit | %s",
+                        self.pair, rsi_now, pnl_pct, soul_msg,
+                    )
+                    return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-RSI", hold_seconds)
+
+                if momentum_reversed and pnl_pct >= self.MIN_TP_PCT:
+                    soul_msg = _soul_check("exit reversal")
+                    self.logger.info(
+                        "[%s] Momentum flipped %+.3f%% at +%.2f%% — taking profit | %s",
+                        self.pair, momentum_60s, pnl_pct, soul_msg,
+                    )
+                    return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-MOM", hold_seconds)
+
+            # ── 3. TRAILING STOP — let winners run ─────────────────────
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
                 trail_price = self.highest_since_entry * (1 - self.TRAILING_DISTANCE_PCT / 100)
                 soul_msg = _soul_check("trailing")
                 self.logger.info(
-                    "[%s] TRAIL ACTIVATED at +%.2f%% — trailing SL at $%.2f (%.2f%% behind peak $%.2f) | %s",
+                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.1f%% behind peak $%.2f) | %s",
                     self.pair, pnl_pct, trail_price, self.TRAILING_DISTANCE_PCT,
                     self.highest_since_entry, soul_msg,
                 )
@@ -601,75 +614,67 @@ class ScalpStrategy(BaseStrategy):
                 if current_price <= trail_stop:
                     soul_msg = _soul_check("exit trailing")
                     self.logger.info(
-                        "[%s] Soul check: trail stop hit at $%.2f (peak was $%.2f) | %s",
-                        self.pair, trail_stop, self.highest_since_entry, soul_msg,
+                        "[%s] TRAIL HIT at $%.2f (peak $%.2f) PnL=+%.2f%% | %s",
+                        self.pair, trail_stop, self.highest_since_entry, pnl_pct, soul_msg,
                     )
                     return self._do_exit(current_price, pnl_pct, "long", "TRAIL", hold_seconds)
-                # Log trail status on heartbeats
-                if self._tick_count % 20 == 0:
-                    dist_from_peak = ((self.highest_since_entry - current_price) / self.highest_since_entry * 100)
+                # Log trail status periodically
+                if self._tick_count % 12 == 0:
+                    dist = ((self.highest_since_entry - current_price) / self.highest_since_entry * 100)
                     self.logger.info(
-                        "[%s] Soul check: momentum still positive, holding | "
-                        "PnL=%+.2f%% peak=$%.2f trail=$%.2f dist=%.2f%%",
-                        self.pair, pnl_pct, self.highest_since_entry, trail_stop, dist_from_peak,
-                    )
-            else:
-                # Not yet trailing — check soul: should we hold or cut?
-                if pnl_pct > 0 and self._tick_count % 20 == 0:
-                    soul_msg = _soul_check("momentum")
-                    self.logger.info(
-                        "[%s] Soul check: momentum still positive +%.2f%%, riding | %s",
-                        self.pair, pnl_pct, soul_msg,
+                        "[%s] RIDING +%.2f%% | peak=$%.2f trail=$%.2f dist=%.2f%%",
+                        self.pair, pnl_pct, self.highest_since_entry, trail_stop, dist,
                     )
 
-            # ── 3. STOP LOSS — cut losers fast ─────────────────────────
-            sl_price = self.entry_price * (1 - self.STOP_LOSS_PCT / 100)
-            if current_price <= sl_price:
-                soul_msg = _soul_check("loss")
-                self.logger.info(
-                    "[%s] Soul check: loss hit %.2f%%, cutting fast | %s",
-                    self.pair, pnl_pct, soul_msg,
-                )
-                return self._do_exit(current_price, pnl_pct, "long", "SL", hold_seconds)
-
-            # ── 4. TIMEOUT — 30 min ───────────────────────────────────
+            # ── 4. TIMEOUT ──────────────────────────────────────────────
             if hold_seconds >= self.MAX_HOLD_SECONDS:
                 return self._do_exit(current_price, pnl_pct, "long", "TIMEOUT", hold_seconds)
 
-            # ── 5. FLATLINE — 15 min with < 0.05% move ────────────────
+            # ── 5. FLATLINE ─────────────────────────────────────────────
             if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
                 return self._do_exit(current_price, pnl_pct, "long", "FLAT", hold_seconds)
 
         elif self.position_side == "short":
             self.lowest_since_entry = min(self.lowest_since_entry, current_price)
 
-            # ── 1. SIGNAL REVERSAL ─────────────────────────────────────
-            rsi_crossed_30 = rsi_now < self.RSI_REVERSAL_SHORT and self._prev_rsi >= self.RSI_REVERSAL_SHORT
-            momentum_reversed = momentum_30s > abs(self.MOMENTUM_REVERSAL_PCT) and pnl_pct > 0
-
-            if rsi_crossed_30 and pnl_pct > 0:
-                soul_msg = _soul_check("exit reversal")
+            # ── 1. STOP LOSS ───────────────────────────────────────────
+            sl_price = self.entry_price * (1 + self.STOP_LOSS_PCT / 100)
+            if current_price >= sl_price:
+                soul_msg = _soul_check("loss")
                 self.logger.info(
-                    "[%s] Soul check: RSI %.1f crossed below 30 — oversold, exit short | %s",
-                    self.pair, rsi_now, soul_msg,
+                    "[%s] SL HIT at %.2f%% — cutting loss | %s",
+                    self.pair, pnl_pct, soul_msg,
                 )
-                return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-RSI", hold_seconds)
+                return self._do_exit(current_price, pnl_pct, "short", "SL", hold_seconds)
 
-            if momentum_reversed:
-                soul_msg = _soul_check("exit reversal")
-                self.logger.info(
-                    "[%s] Soul check: momentum flipped +%+.3f%% — exit short with profit | %s",
-                    self.pair, momentum_30s, soul_msg,
-                )
-                return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-MOM", hold_seconds)
+            # ── 2. SIGNAL REVERSAL ──────────────────────────────────────
+            if pnl_pct > 0:
+                rsi_crossed_30 = rsi_now < self.RSI_REVERSAL_SHORT and self._prev_rsi >= self.RSI_REVERSAL_SHORT
+                momentum_reversed = momentum_60s > abs(self.MOMENTUM_REVERSAL_PCT)
 
-            # ── 2. TRAILING STOP ───────────────────────────────────────
+                if rsi_crossed_30 and pnl_pct >= self.MIN_TP_PCT:
+                    soul_msg = _soul_check("exit reversal")
+                    self.logger.info(
+                        "[%s] RSI %.1f crossed below 30 at +%.2f%% — taking short profit | %s",
+                        self.pair, rsi_now, pnl_pct, soul_msg,
+                    )
+                    return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-RSI", hold_seconds)
+
+                if momentum_reversed and pnl_pct >= self.MIN_TP_PCT:
+                    soul_msg = _soul_check("exit reversal")
+                    self.logger.info(
+                        "[%s] Momentum flipped +%.3f%% at +%.2f%% — taking short profit | %s",
+                        self.pair, momentum_60s, pnl_pct, soul_msg,
+                    )
+                    return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-MOM", hold_seconds)
+
+            # ── 3. TRAILING STOP ────────────────────────────────────────
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
                 trail_price = self.lowest_since_entry * (1 + self.TRAILING_DISTANCE_PCT / 100)
                 soul_msg = _soul_check("trailing")
                 self.logger.info(
-                    "[%s] TRAIL ACTIVATED at +%.2f%% — trailing SL at $%.2f (%.2f%% above low $%.2f) | %s",
+                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.1f%% above low $%.2f) | %s",
                     self.pair, pnl_pct, trail_price, self.TRAILING_DISTANCE_PCT,
                     self.lowest_since_entry, soul_msg,
                 )
@@ -679,40 +684,22 @@ class ScalpStrategy(BaseStrategy):
                 if current_price >= trail_stop:
                     soul_msg = _soul_check("exit trailing")
                     self.logger.info(
-                        "[%s] Soul check: trail stop hit at $%.2f (low was $%.2f) | %s",
-                        self.pair, trail_stop, self.lowest_since_entry, soul_msg,
+                        "[%s] TRAIL HIT at $%.2f (low $%.2f) PnL=+%.2f%% | %s",
+                        self.pair, trail_stop, self.lowest_since_entry, pnl_pct, soul_msg,
                     )
                     return self._do_exit(current_price, pnl_pct, "short", "TRAIL", hold_seconds)
-                if self._tick_count % 20 == 0:
-                    dist_from_low = ((current_price - self.lowest_since_entry) / self.lowest_since_entry * 100)
+                if self._tick_count % 12 == 0:
+                    dist = ((current_price - self.lowest_since_entry) / self.lowest_since_entry * 100)
                     self.logger.info(
-                        "[%s] Soul check: momentum still negative, holding short | "
-                        "PnL=%+.2f%% low=$%.2f trail=$%.2f dist=%.2f%%",
-                        self.pair, pnl_pct, self.lowest_since_entry, trail_stop, dist_from_low,
-                    )
-            else:
-                if pnl_pct > 0 and self._tick_count % 20 == 0:
-                    soul_msg = _soul_check("momentum")
-                    self.logger.info(
-                        "[%s] Soul check: momentum still negative +%.2f%%, riding short | %s",
-                        self.pair, pnl_pct, soul_msg,
+                        "[%s] RIDING SHORT +%.2f%% | low=$%.2f trail=$%.2f dist=%.2f%%",
+                        self.pair, pnl_pct, self.lowest_since_entry, trail_stop, dist,
                     )
 
-            # ── 3. STOP LOSS ───────────────────────────────────────────
-            sl_price = self.entry_price * (1 + self.STOP_LOSS_PCT / 100)
-            if current_price >= sl_price:
-                soul_msg = _soul_check("loss")
-                self.logger.info(
-                    "[%s] Soul check: loss hit %.2f%%, cutting fast | %s",
-                    self.pair, pnl_pct, soul_msg,
-                )
-                return self._do_exit(current_price, pnl_pct, "short", "SL", hold_seconds)
-
-            # ── 4. TIMEOUT ─────────────────────────────────────────────
+            # ── 4. TIMEOUT ──────────────────────────────────────────────
             if hold_seconds >= self.MAX_HOLD_SECONDS:
                 return self._do_exit(current_price, pnl_pct, "short", "TIMEOUT", hold_seconds)
 
-            # ── 5. FLATLINE ────────────────────────────────────────────
+            # ── 5. FLATLINE ─────────────────────────────────────────────
             if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
                 return self._do_exit(current_price, pnl_pct, "short", "FLAT", hold_seconds)
 
@@ -800,7 +787,7 @@ class ScalpStrategy(BaseStrategy):
             amount = contracts * contract_size
 
             self.logger.info(
-                "[%s] Sizing: %d contracts × %.4f = %.6f coin, "
+                "[%s] Sizing: %d contracts x %.4f = %.6f coin, "
                 "collateral=$%.2f (%dx), budget=$%.2f (avail=$%.2f, max=%.0f%%)",
                 self.pair, contracts, contract_size, amount,
                 total_collateral, self.leverage, budget, available,
@@ -812,7 +799,7 @@ class ScalpStrategy(BaseStrategy):
             capital = min(capital, available)
             amount = capital / current_price
             self.logger.debug(
-                "[%s] Sizing (spot): $%.2f → %.8f",
+                "[%s] Sizing (spot): $%.2f -> %.8f",
                 self.pair, capital, amount,
             )
 
@@ -822,9 +809,12 @@ class ScalpStrategy(BaseStrategy):
     # SIGNAL BUILDERS
     # ======================================================================
 
-    def _build_entry_signal(self, side: str, price: float, amount: float, reason: str) -> Signal:
-        """Build an entry signal — NO fixed TP, only SL. Trail does the rest."""
-        self.logger.info("[%s] %s → %s entry", self.pair, reason, side.upper())
+    def _build_entry_signal(
+        self, side: str, price: float, amount: float, reason: str,
+        order_type: str = "market",
+    ) -> Signal:
+        """Build an entry signal with SL. Trail handles the TP."""
+        self.logger.info("[%s] %s -> %s entry (%s)", self.pair, reason, side.upper(), order_type)
 
         if side == "long":
             sl = price * (1 - self.STOP_LOSS_PCT / 100)
@@ -832,12 +822,12 @@ class ScalpStrategy(BaseStrategy):
                 side="buy",
                 price=price,
                 amount=amount,
-                order_type="market",
+                order_type=order_type,
                 reason=reason,
                 strategy=self.name,
                 pair=self.pair,
                 stop_loss=sl,
-                take_profit=None,  # NO FIXED TP — we trail profits
+                take_profit=None,  # trailing stop handles exit
                 leverage=self.leverage if self.is_futures else 1,
                 position_type="long" if self.is_futures else "spot",
                 exchange_id="delta" if self.is_futures else "binance",
@@ -849,12 +839,12 @@ class ScalpStrategy(BaseStrategy):
                 side="sell",
                 price=price,
                 amount=amount,
-                order_type="market",
+                order_type=order_type,
                 reason=reason,
                 strategy=self.name,
                 pair=self.pair,
                 stop_loss=sl,
-                take_profit=None,  # NO FIXED TP — we trail profits
+                take_profit=None,  # trailing stop handles exit
                 leverage=self.leverage,
                 position_type="short",
                 exchange_id="delta",
@@ -959,18 +949,20 @@ class ScalpStrategy(BaseStrategy):
         hold_sec = int(time.monotonic() - self.entry_time)
         duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s" if hold_sec >= 60 else f"{hold_sec}s"
 
+        # Log with fee breakdown for visibility
+        fee_ratio = abs(gross_pnl / est_fees) if est_fees > 0 else 0
         self.logger.info(
             "[%s] CLOSED %s %+.2f%% price (%+.1f%% capital at %dx) | "
-            "Gross=$%.4f Net=$%.4f fees=$%.4f | %s | W/L=%d/%d streak=%d",
+            "Gross=$%.4f Net=$%.4f fees=$%.4f (%.1fx) | %s | W/L=%d/%d streak=%d",
             self.pair, exit_type.upper(), pnl_pct, capital_pnl_pct, self.leverage,
-            gross_pnl, net_pnl, est_fees, duration,
+            gross_pnl, net_pnl, est_fees, fee_ratio, duration,
             self.hourly_wins, self.hourly_losses, self._consecutive_losses,
         )
 
         if self._consecutive_losses >= self.CONSECUTIVE_LOSS_PAUSE:
             self._paused_until = time.monotonic() + self.PAUSE_DURATION_SEC
             self.logger.warning(
-                "[%s] PAUSING %ds — %d consecutive losses",
+                "[%s] PAUSING %ds — %d consecutive losses, need to recalibrate",
                 self.pair, self.PAUSE_DURATION_SEC, self._consecutive_losses,
             )
 
@@ -992,10 +984,12 @@ class ScalpStrategy(BaseStrategy):
             "losses": self.hourly_losses,
             "pnl": self.hourly_pnl,
             "trades": self.hourly_wins + self.hourly_losses,
+            "skipped": self.hourly_skipped,
         }
         self.hourly_wins = 0
         self.hourly_losses = 0
         self.hourly_pnl = 0.0
+        self.hourly_skipped = 0
         return stats
 
     def reset_daily_stats(self) -> None:
