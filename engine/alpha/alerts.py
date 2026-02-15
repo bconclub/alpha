@@ -13,6 +13,7 @@ Message types:
 
 from __future__ import annotations
 
+from html import escape as html_escape
 from typing import Any
 
 from telegram import Bot
@@ -262,13 +263,15 @@ class AlertManager:
         cap_pct = f" ({value / capital * 100:.0f}% capital)" if capital > 0 else ""
         lev_line = f"\n\u2696\ufe0f Leverage: <code>{leverage}x</code>" if leverage > 1 else ""
 
+        # HTML-escape reason text — it contains < > from RSI/BB signals
+        safe_reason = html_escape(reason)
         lines = [
             header,
             f"\U0001f4b1 Pair: <code>{pair}</code> | Exchange: <code>{exchange.capitalize()}</code>",
             f"\U0001f4cd Entry: <code>${price:,.2f}</code>",
             f"\U0001f4b5 Size: <code>{format_usd(value)}</code>{cap_pct}{lev_line}",
             f"\U0001f3af Strategy: <code>{strategy}</code>",
-            f"\U0001f4ac Reason: <i>{reason}</i>",
+            f"\U0001f4ac Reason: <i>{safe_reason}</i>",
         ]
 
         if tp_price is not None:
@@ -527,7 +530,7 @@ class AlertManager:
         await self._send("\n".join(lines))
 
     async def send_error_alert(self, message: str) -> None:
-        msg = f"\u274c <b>ERROR</b>\n<code>{message}</code>"
+        msg = f"\u274c <b>ERROR</b>\n<code>{html_escape(message)}</code>"
         await self._send(msg)
 
     # ── 8. COMMAND CONFIRMATIONS ──────────────────────────────────────────

@@ -319,6 +319,7 @@ class TradeExecutor:
                 pair=signal.pair,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
+                metadata=signal.metadata,
                 leverage=signal.leverage,
                 position_type=signal.position_type,
                 reduce_only=signal.reduce_only,
@@ -367,13 +368,14 @@ class TradeExecutor:
                     pair=signal.pair,
                     stop_loss=signal.stop_loss,
                     take_profit=signal.take_profit,
+                    metadata=signal.metadata,
                     leverage=signal.leverage,
                     position_type=signal.position_type,
                     reduce_only=signal.reduce_only,
                     exchange_id=signal.exchange_id,
                 )
 
-        # Enforce Binance $5.01 minimum notional for ENTRY orders only
+        # Enforce Binance $6.01 minimum notional for ENTRY orders only
         if not is_exit:
             signal = self._enforce_binance_min(signal)
 
@@ -388,6 +390,7 @@ class TradeExecutor:
                 order_type=signal.order_type, reason=signal.reason,
                 strategy=signal.strategy, pair=signal.pair,
                 stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                metadata=signal.metadata,
                 leverage=signal.leverage, position_type=signal.position_type,
                 reduce_only=signal.reduce_only, exchange_id=signal.exchange_id,
             )
