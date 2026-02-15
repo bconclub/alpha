@@ -23,7 +23,6 @@ from alpha.risk_manager import RiskManager
 from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
-from alpha.strategy_selector import StrategySelector
 from alpha.trade_executor import TradeExecutor, DELTA_CONTRACT_SIZE
 from alpha.utils import iso_now, setup_logger
 
@@ -45,7 +44,7 @@ class AlphaBot:
         self.executor: TradeExecutor | None = None
         self.analyzer: MarketAnalyzer | None = None
         self.delta_analyzer: MarketAnalyzer | None = None
-        self.selector: StrategySelector | None = None
+        # strategy_selector DISABLED — all pairs use scalp only
 
         # Multi-pair: Binance spot
         self.pairs: list[str] = config.trading.pairs
@@ -144,11 +143,7 @@ class AlphaBot:
             self.delta_analyzer = MarketAnalyzer(
                 self.delta, pair=self.delta_pairs[0] if self.delta_pairs else None,
             )
-        self.selector = StrategySelector(
-            db=self.db,
-            arb_enabled=False,
-            futures_pairs=set(self.delta_pairs) if self.delta else None,
-        )
+        # strategy_selector DISABLED — scalp-only, no dynamic strategy switching
 
         # Load market limits for both exchanges
         await self.executor.load_market_limits(
@@ -380,19 +375,48 @@ class AlphaBot:
                 ", ".join(f"{a.pair}={a.signal_strength:.0f}" for a in analyses),
             )
 
-            # 4. Log strategy selection per pair (for DB/dashboard) — no primary strategies
+            # 4. Log analysis per pair — ALL pairs use SCALP only (no strategy switching)
             all_analysis_dicts: list[dict[str, Any]] = []
 
             for analysis in analyses:
                 pair = analysis.pair
 
-                # Check for arb opportunity on Binance pairs only
-                arb_opportunity = False
-                if self.kucoin and pair in self.pairs:
-                    arb_opportunity = await self._check_arb_opportunity(pair)
-
-                # selector.select() logs to strategy_log DB table (dashboard reads this)
-                await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
+                # Log to strategy_log DB table (dashboard reads this) — always "scalp"
+                try:
+                    exchange = "delta" if pair in self.delta_pairs else "binance"
+                    if analysis.rsi >= 50:
+                        entry_distance_pct = analysis.rsi - 55.0
+                    else:
+                        entry_distance_pct = 45.0 - analysis.rsi
+                    await self.db.log_strategy_selection({
+                        "timestamp": iso_now(),
+                        "pair": pair,
+                        "exchange": exchange,
+                        "market_condition": analysis.condition.value,
+                        "adx": analysis.adx,
+                        "atr": analysis.atr,
+                        "bb_width": analysis.bb_width,
+                        "bb_upper": analysis.bb_upper,
+                        "bb_lower": analysis.bb_lower,
+                        "rsi": analysis.rsi,
+                        "volume_ratio": analysis.volume_ratio,
+                        "signal_strength": analysis.signal_strength,
+                        "macd_value": analysis.macd_value,
+                        "macd_signal": analysis.macd_signal,
+                        "macd_histogram": analysis.macd_histogram,
+                        "current_price": analysis.current_price,
+                        "price_change_15m": analysis.price_change_pct,
+                        "price_change_1h": analysis.price_change_1h,
+                        "price_change_24h": analysis.price_change_24h,
+                        "entry_distance_pct": entry_distance_pct,
+                        "plus_di": analysis.plus_di,
+                        "minus_di": analysis.minus_di,
+                        "direction": analysis.direction,
+                        "strategy_selected": "scalp",
+                        "reason": f"[{pair}] Scalp-only mode — all pairs use scalp strategy",
+                    })
+                except Exception:
+                    logger.debug("Failed to log strategy selection for %s", pair)
 
                 # Collect analysis data for market update (ALL pairs)
                 all_analysis_dicts.append({
@@ -916,13 +940,36 @@ class AlphaBot:
                 held_value = held * entry_price if entry_price > 0 else 0
                 if held_value < 5.0 and held_value > 0:
                     trade_id = trade.get("id")
+                    order_id = trade.get("order_id", "")
                     if trade_id:
-                        await self.db.update_trade(trade_id, {
-                            "status": "closed",
-                            "closed_at": iso_now(),
-                            "reason": "dust_unsellable",
-                        })
+                        # Calculate P&L from entry — dust is a small loss
+                        try:
+                            ticker = await self.binance.fetch_ticker(pair)  # type: ignore[union-attr]
+                            current_price = float(ticker.get("last", 0) or 0)
+                        except Exception:
+                            current_price = entry_price  # fallback: 0 P&L
+                        if entry_price > 0 and current_price > 0:
+                            pnl = (current_price - entry_price) * held
+                            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                        else:
+                            pnl = 0.0
+                            pnl_pct = 0.0
+                        if order_id:
+                            await self.db.close_trade(order_id, current_price, pnl, pnl_pct)
+                        else:
+                            await self.db.update_trade(trade_id, {
+                                "status": "closed",
+                                "closed_at": iso_now(),
+                                "exit_price": current_price,
+                                "pnl": round(pnl, 6),
+                                "pnl_pct": round(pnl_pct, 4),
+                                "reason": "dust_unsellable",
+                            })
                         dust_count += 1
+                        logger.info(
+                            "Dust trade %s: exit=$%.2f pnl=$%.4f (%.2f%%)",
+                            pair, current_price, pnl, pnl_pct,
+                        )
             if dust_count:
                 logger.info("Closed %d Binance dust trades (< $5)", dust_count)
         except Exception:
@@ -1108,17 +1155,73 @@ class AlphaBot:
                     position_type, side, pair, amount, entry_price, exchange_id, strategy,
                 )
             else:
-                # Position no longer on exchange — mark closed in DB
-                if trade_id:
+                # Position no longer on exchange — find actual exit price
+                exit_price = 0.0
+                pnl = 0.0
+                pnl_pct = 0.0
+
+                # Try to get real exit price from recent trade history
+                try:
+                    exchange = self.delta if exchange_id == "delta" else self.binance
+                    if exchange:
+                        # fetch_my_trades returns recent fills for this pair
+                        recent_trades = await exchange.fetch_my_trades(pair, limit=20)
+                        if recent_trades:
+                            # Find the most recent closing trade (opposite side)
+                            close_side = "sell" if position_type in ("long", "spot") else "buy"
+                            closing_fills = [
+                                t for t in recent_trades
+                                if t.get("side") == close_side
+                            ]
+                            if closing_fills:
+                                last_fill = closing_fills[-1]  # most recent
+                                exit_price = float(last_fill.get("price", 0) or 0)
+                                logger.info(
+                                    "Found exit fill for %s: $%.2f (from trade history)",
+                                    pair, exit_price,
+                                )
+                        # Fallback: use current ticker price
+                        if exit_price <= 0:
+                            ticker = await exchange.fetch_ticker(pair)
+                            exit_price = float(ticker.get("last", 0) or 0)
+                            logger.info(
+                                "No exit fill found for %s, using current price: $%.2f",
+                                pair, exit_price,
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "Could not fetch exit price for %s: %s — using entry as fallback",
+                        pair, e,
+                    )
+                    exit_price = entry_price  # worst case: 0 P&L
+
+                # Calculate P&L
+                if entry_price > 0 and exit_price > 0:
+                    if position_type in ("long", "spot"):
+                        pnl = (exit_price - entry_price) * amount
+                        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                    else:  # short
+                        pnl = (entry_price - exit_price) * amount
+                        pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+
+                # Close in DB with real data
+                order_id = trade.get("order_id", "")
+                if order_id:
+                    await self.db.close_trade(order_id, exit_price, pnl, pnl_pct)
+                elif trade_id:
                     await self.db.update_trade(trade_id, {
                         "status": "closed",
                         "closed_at": iso_now(),
+                        "exit_price": exit_price,
+                        "pnl": round(pnl, 6),
+                        "pnl_pct": round(pnl_pct, 4),
                         "reason": "position_not_found_on_restart",
                     })
+
                 closed += 1
                 logger.info(
-                    "Position %s no longer on %s — marked closed (trade_id=%s)",
-                    pair, exchange_id, trade_id,
+                    "Position %s no longer on %s — closed (exit=$%.2f, pnl=$%.4f, %.2f%%, trade_id=%s)",
+                    pair, exchange_id, exit_price, pnl, pnl_pct, trade_id,
                 )
 
         # Also check for Delta positions NOT in DB (opened manually or DB out of sync)
@@ -1329,10 +1432,34 @@ class AlphaBot:
 
             except Exception:
                 logger.exception("Failed to close orphaned position %s", pair)
-                # Try to at least mark it in DB so it doesn't block forever
+                # Try to at least mark it in DB — use current price if possible
                 try:
                     if order_id:
-                        await self.db.close_trade(order_id, entry_price, 0.0, 0.0)
+                        # Try to get current price for accurate P&L
+                        fallback_exit = entry_price
+                        fallback_pnl = 0.0
+                        fallback_pnl_pct = 0.0
+                        try:
+                            exchange = self.delta if exchange_id == "delta" else self.binance
+                            if exchange:
+                                ticker = await exchange.fetch_ticker(pair)
+                                fallback_exit = float(ticker.get("last", 0) or 0) or entry_price
+                                if entry_price > 0 and fallback_exit > 0:
+                                    if position_type == "long":
+                                        fallback_pnl = (fallback_exit - entry_price) * amount
+                                        fallback_pnl_pct = ((fallback_exit - entry_price) / entry_price) * 100
+                                    else:
+                                        fallback_pnl = (entry_price - fallback_exit) * amount
+                                        fallback_pnl_pct = ((entry_price - fallback_exit) / entry_price) * 100
+                        except Exception:
+                            pass  # keep fallback_exit = entry_price, pnl = 0
+                        await self.db.close_trade(
+                            order_id, fallback_exit, fallback_pnl, fallback_pnl_pct,
+                        )
+                        logger.info(
+                            "Orphan fallback close %s: exit=$%.2f pnl=$%.4f (%.2f%%)",
+                            pair, fallback_exit, fallback_pnl, fallback_pnl_pct,
+                        )
                 except Exception:
                     pass
 
