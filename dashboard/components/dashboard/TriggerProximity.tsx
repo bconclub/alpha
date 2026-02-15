@@ -6,16 +6,14 @@ import { cn } from '@/lib/utils';
 import type { StrategyLog, Exchange } from '@/lib/types';
 
 // ── Engine thresholds (Quality Sniper v3.1) ─────────────────────────
-// Entry requires 2-of-4 confirmations. These match engine/alpha/strategies/scalp.py
-const RSI_LONG_THRESHOLD = 30;      // RSI < 30 = oversold → long
-const RSI_SHORT_THRESHOLD = 70;     // RSI > 70 = overbought → short
-const MOMENTUM_MIN_PCT = 0.30;      // 0.30%+ move = real momentum
-const VOL_SPIKE_RATIO = 2.0;        // volume > 2x avg = institutional
+const RSI_LONG_THRESHOLD = 30;
+const RSI_SHORT_THRESHOLD = 70;
+const MOMENTUM_MIN_PCT = 0.30;
+const VOL_SPIKE_RATIO = 2.0;
 
 interface IndicatorStatus {
   active: boolean;
   label: string;
-  value: string;
 }
 
 interface TriggerInfo {
@@ -23,21 +21,23 @@ interface TriggerInfo {
   exchange: Exchange;
   isFutures: boolean;
   hasData: boolean;
-  // Raw values
   rsi: number | null;
   volumeRatio: number | null;
   priceChangePct: number | null;
   currentPrice: number | null;
   bbUpper: number | null;
   bbLower: number | null;
-  // 4 indicators for long
+  // Proximity (RSI distance)
+  longDistancePct: number;
+  shortDistancePct: number;
+  longReady: boolean;
+  shortReady: boolean;
+  // 4 indicators
   longIndicators: IndicatorStatus[];
   longCount: number;
-  // 4 indicators for short
   shortIndicators: IndicatorStatus[];
   shortCount: number;
   // Overall
-  bestSide: 'long' | 'short' | 'none';
   bestCount: number;
   overallStatus: string;
   statusColor: string;
@@ -54,152 +54,152 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const currentPrice = log.current_price ?? null;
   const bbUpper = log.bb_upper ?? null;
   const bbLower = log.bb_lower ?? null;
-
   const hasData = rsi != null;
 
-  // ── Build 4 indicators for LONG ──────────────────────────────────
+  // ── RSI proximity (for bars) ───────────────────────────────────────
+  let longDistancePct = 100;
+  let shortDistancePct = 100;
+  let longReady = false;
+  let shortReady = false;
+
+  if (rsi != null) {
+    if (rsi <= RSI_LONG_THRESHOLD) {
+      longDistancePct = 0;
+      longReady = true;
+    } else {
+      longDistancePct = ((rsi - RSI_LONG_THRESHOLD) / RSI_LONG_THRESHOLD) * 100;
+    }
+    if (rsi >= RSI_SHORT_THRESHOLD) {
+      shortDistancePct = 0;
+      shortReady = true;
+    } else {
+      shortDistancePct = ((RSI_SHORT_THRESHOLD - rsi) / (100 - RSI_SHORT_THRESHOLD)) * 100;
+    }
+  }
+
+  // ── Build 4 indicators for LONG ────────────────────────────────────
   const longIndicators: IndicatorStatus[] = [];
   let longCount = 0;
 
-  // 1. Momentum (bullish = positive price change)
   const momBull = priceChangePct != null && priceChangePct >= MOMENTUM_MIN_PCT;
-  longIndicators.push({
-    active: momBull,
-    label: 'MOM',
-    value: priceChangePct != null ? `${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(2)}%` : '—',
-  });
+  longIndicators.push({ active: momBull, label: 'MOM' });
   if (momBull) longCount++;
 
-  // 2. Volume spike
   const volHigh = volumeRatio != null && volumeRatio >= VOL_SPIKE_RATIO;
-  longIndicators.push({
-    active: volHigh && (priceChangePct == null || priceChangePct >= 0),
-    label: 'VOL',
-    value: volumeRatio != null ? `${volumeRatio.toFixed(1)}x` : '—',
-  });
-  if (volHigh && (priceChangePct == null || priceChangePct >= 0)) longCount++;
+  const volBull = volHigh && (priceChangePct == null || priceChangePct >= 0);
+  longIndicators.push({ active: volBull, label: 'VOL' });
+  if (volBull) longCount++;
 
-  // 3. RSI extreme (oversold → long)
   const rsiLong = rsi != null && rsi < RSI_LONG_THRESHOLD;
-  longIndicators.push({
-    active: rsiLong,
-    label: 'RSI',
-    value: rsi != null ? rsi.toFixed(0) : '—',
-  });
+  longIndicators.push({ active: rsiLong, label: 'RSI' });
   if (rsiLong) longCount++;
 
-  // 4. BB breakout (price above upper band → bullish breakout)
   const bbBreakLong = currentPrice != null && bbUpper != null && currentPrice > bbUpper;
-  longIndicators.push({
-    active: bbBreakLong,
-    label: 'BB',
-    value: bbBreakLong ? 'Break' : (bbUpper != null ? 'In' : '—'),
-  });
+  longIndicators.push({ active: bbBreakLong, label: 'BB' });
   if (bbBreakLong) longCount++;
 
-  // ── Build 4 indicators for SHORT ─────────────────────────────────
+  // ── Build 4 indicators for SHORT ───────────────────────────────────
   const shortIndicators: IndicatorStatus[] = [];
   let shortCount = 0;
 
-  // 1. Momentum (bearish = negative price change)
   const momBear = priceChangePct != null && priceChangePct <= -MOMENTUM_MIN_PCT;
-  shortIndicators.push({
-    active: momBear,
-    label: 'MOM',
-    value: priceChangePct != null ? `${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(2)}%` : '—',
-  });
+  shortIndicators.push({ active: momBear, label: 'MOM' });
   if (momBear) shortCount++;
 
-  // 2. Volume spike (with bearish direction)
-  shortIndicators.push({
-    active: volHigh && (priceChangePct == null || priceChangePct <= 0),
-    label: 'VOL',
-    value: volumeRatio != null ? `${volumeRatio.toFixed(1)}x` : '—',
-  });
-  if (volHigh && (priceChangePct == null || priceChangePct <= 0)) shortCount++;
+  const volBear = volHigh && (priceChangePct == null || priceChangePct <= 0);
+  shortIndicators.push({ active: volBear, label: 'VOL' });
+  if (volBear) shortCount++;
 
-  // 3. RSI extreme (overbought → short)
   const rsiShort = rsi != null && rsi > RSI_SHORT_THRESHOLD;
-  shortIndicators.push({
-    active: rsiShort,
-    label: 'RSI',
-    value: rsi != null ? rsi.toFixed(0) : '—',
-  });
+  shortIndicators.push({ active: rsiShort, label: 'RSI' });
   if (rsiShort) shortCount++;
 
-  // 4. BB breakdown (price below lower band → bearish breakdown)
   const bbBreakShort = currentPrice != null && bbLower != null && currentPrice < bbLower;
-  shortIndicators.push({
-    active: bbBreakShort,
-    label: 'BB',
-    value: bbBreakShort ? 'Break' : (bbLower != null ? 'In' : '—'),
-  });
+  shortIndicators.push({ active: bbBreakShort, label: 'BB' });
   if (bbBreakShort) shortCount++;
 
-  // ── Overall status ───────────────────────────────────────────────
+  // ── Overall status ─────────────────────────────────────────────────
   const bestCount = isFutures ? Math.max(longCount, shortCount) : longCount;
-  const bestSide: 'long' | 'short' | 'none' =
-    bestCount === 0 ? 'none' :
-    longCount >= shortCount ? 'long' : 'short';
 
   let overallStatus: string;
   let statusColor: string;
 
-  if (bestCount >= 2) {
+  if (!hasData) {
+    overallStatus = 'Awaiting data...';
+    statusColor = 'text-zinc-600';
+  } else if (bestCount >= 2) {
     overallStatus = `${bestCount}/4 — TRADE READY`;
     statusColor = 'text-[#00c853]';
   } else if (bestCount === 1) {
-    overallStatus = `1/4 — Needs 1 more`;
+    overallStatus = '1/4 — Needs 1 more';
     statusColor = 'text-[#ffd600]';
   } else {
     overallStatus = '0/4 — Scanning';
     statusColor = 'text-zinc-500';
   }
 
-  if (!hasData) {
-    overallStatus = 'Awaiting data...';
-    statusColor = 'text-zinc-600';
-  }
-
   return {
     pair, exchange, isFutures, hasData,
     rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
+    longDistancePct, shortDistancePct, longReady, shortReady,
     longIndicators, longCount,
     shortIndicators, shortCount,
-    bestSide, bestCount,
-    overallStatus, statusColor,
+    bestCount, overallStatus, statusColor,
   };
 }
 
-// ── Indicator dot: green=active, dark=inactive ───────────────────────
-function IndicatorDot({ indicator }: { indicator: IndicatorStatus }) {
+// ── Proximity bar (Long/Short fill showing RSI distance) ─────────────
+function ProximityBar({ distance, ready }: { distance: number; ready: boolean }) {
+  const filled = ready ? 100 : Math.max(0, Math.min(100, 100 - distance));
+  const color = ready
+    ? '#00c853'
+    : distance < 25
+      ? '#ffd600'
+      : '#71717a'; // zinc-500
+
+  return (
+    <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+      <div
+        className="h-full rounded-full transition-all duration-700"
+        style={{ width: `${filled}%`, backgroundColor: color }}
+      />
+    </div>
+  );
+}
+
+// ── Single indicator dot ─────────────────────────────────────────────
+function Dot({ active, label }: { active: boolean; label: string }) {
   return (
     <div className="flex flex-col items-center gap-0.5">
       <div
         className={cn(
-          'w-3 h-3 rounded-full border transition-all duration-500',
-          indicator.active
+          'w-2.5 h-2.5 rounded-full border transition-all duration-500',
+          active
             ? 'bg-[#00c853] border-[#00c853] shadow-[0_0_6px_rgba(0,200,83,0.5)]'
             : 'bg-zinc-800 border-zinc-700',
         )}
       />
       <span className={cn(
-        'text-[9px] font-mono',
-        indicator.active ? 'text-[#00c853]' : 'text-zinc-600',
+        'text-[8px] font-mono leading-none',
+        active ? 'text-[#00c853]' : 'text-zinc-600',
       )}>
-        {indicator.label}
+        {label}
       </span>
     </div>
   );
 }
 
-// ── Row of 4 dots with side label ────────────────────────────────────
-function IndicatorRow({
+// ── Side row: bar + dots underneath ──────────────────────────────────
+function SideRow({
   side,
+  distance,
+  ready,
   indicators,
   count,
 }: {
   side: 'Long' | 'Short';
+  distance: number;
+  ready: boolean;
   indicators: IndicatorStatus[];
   count: number;
 }) {
@@ -209,16 +209,26 @@ function IndicatorRow({
     'text-zinc-600';
 
   return (
-    <div className="flex items-center gap-3">
-      <span className="text-[10px] text-zinc-500 w-8 shrink-0">{side}</span>
-      <div className="flex items-center gap-2.5">
-        {indicators.map((ind, i) => (
-          <IndicatorDot key={i} indicator={ind} />
-        ))}
+    <div className="space-y-1">
+      {/* Bar row */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-zinc-500 w-8 shrink-0">{side}</span>
+        <ProximityBar distance={distance} ready={ready} />
+        <span className="text-[10px] font-mono text-zinc-500 w-16 text-right">
+          {ready ? 'RSI ✓' : `${distance.toFixed(0)}% away`}
+        </span>
       </div>
-      <span className={cn('text-[10px] font-mono ml-auto', countColor)}>
-        {count}/4
-      </span>
+      {/* Dots row (aligned under the bar) */}
+      <div className="flex items-center gap-2 ml-10">
+        <div className="flex items-center gap-2">
+          {indicators.map((ind, i) => (
+            <Dot key={i} active={ind.active} label={ind.label} />
+          ))}
+        </div>
+        <span className={cn('text-[9px] font-mono ml-auto mr-0', countColor)}>
+          {count}/4
+        </span>
+      </div>
     </div>
   );
 }
@@ -227,7 +237,6 @@ export function TriggerProximity() {
   const { strategyLog } = useSupabase();
 
   const triggers = useMemo(() => {
-    // Get latest log per pair
     const latestByPair = new Map<string, StrategyLog>();
     for (const log of strategyLog) {
       if (log.pair) {
@@ -243,7 +252,6 @@ export function TriggerProximity() {
       results.push(computeTrigger(log));
     }
 
-    // Sort: most confirmations first, then by pair
     results.sort((a, b) => {
       if (a.hasData && !b.hasData) return -1;
       if (!a.hasData && b.hasData) return 1;
@@ -271,7 +279,7 @@ export function TriggerProximity() {
               key={`${t.pair}-${t.exchange}`}
               className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3"
             >
-              {/* Header: pair + status */}
+              {/* Header */}
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-white">{t.pair}</span>
@@ -297,15 +305,27 @@ export function TriggerProximity() {
               </div>
 
               {t.hasData ? (
-                <div className="space-y-2">
-                  {/* Long indicators */}
-                  <IndicatorRow side="Long" indicators={t.longIndicators} count={t.longCount} />
-                  {/* Short indicators (futures only) */}
+                <div className="space-y-2.5">
+                  {/* Long: bar + dots */}
+                  <SideRow
+                    side="Long"
+                    distance={t.longDistancePct}
+                    ready={t.longReady}
+                    indicators={t.longIndicators}
+                    count={t.longCount}
+                  />
+                  {/* Short: bar + dots (futures only) */}
                   {t.isFutures && (
-                    <IndicatorRow side="Short" indicators={t.shortIndicators} count={t.shortCount} />
+                    <SideRow
+                      side="Short"
+                      distance={t.shortDistancePct}
+                      ready={t.shortReady}
+                      indicators={t.shortIndicators}
+                      count={t.shortCount}
+                    />
                   )}
-                  {/* Compact values row */}
-                  <div className="flex gap-3 mt-1 pt-1 border-t border-zinc-800/50">
+                  {/* Compact values */}
+                  <div className="flex gap-3 pt-1 border-t border-zinc-800/50">
                     {t.rsi != null && (
                       <span className={cn(
                         'text-[9px] font-mono',
