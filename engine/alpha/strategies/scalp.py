@@ -37,8 +37,11 @@ Adaptive Widening (idle 30+ min):
   Resets to normal after trade closes.
 
 Exit — TP MUST BE BIGGER THAN SL (4.3:1 R:R):
-  1. Stop loss — 0.35% price (cut fast, at 10x = 3.5% capital)
-  2. Trailing stop — activates at +1.50%, trails 0.35% behind peak
+  1. Stop loss — 0.35% price (cut fast, at 20x = 7% capital)
+  2. Trailing stop — activates at +0.50%, DYNAMIC distance widens with profit:
+     +0.5-1%: 0.30% trail | +1-2%: 0.50% | +2-3%: 0.70% | +3%+: 1.00%
+     Trail distance ONLY increases, never tightens once widened.
+     At +3% with 1% trail = locks +2% min (40% capital at 20x).
   3. Signal reversal — only exit if profit >= 1.50%
   4. NEVER exit a winner early. Hold for 1.50% minimum.
   5. Timeout — 30 min max
@@ -146,11 +149,22 @@ class ScalpStrategy(BaseStrategy):
     # ── Exit thresholds — TP MUST BE BIGGER THAN SL (4.3:1 R:R) ──────
     STOP_LOSS_PCT = 0.35              # 0.35% price SL (7% capital at 20x) — cut FAST
     MIN_TP_PCT = 1.50                 # minimum 1.5% target (30% capital at 20x)
-    TRAILING_ACTIVATE_PCT = 1.50      # activate trail at +1.5% — the minimum target
-    TRAILING_DISTANCE_PCT = 0.35      # trail 0.35% behind peak — tight trail
+    TRAILING_ACTIVATE_PCT = 0.50      # activate trail at +0.50% — start protecting early
+    TRAILING_DISTANCE_PCT = 0.30      # initial trail: 0.30% behind peak
     MAX_HOLD_SECONDS = 30 * 60        # 30 min max — free capital if flat
     FLATLINE_SECONDS = 15 * 60        # 15 min flat = exit
     FLATLINE_MIN_MOVE_PCT = 0.10      # "flat" means < 0.10% total move
+
+    # ── Dynamic trailing tiers — widen as profit grows ──────────────
+    # (min_profit_pct, trail_distance_pct)
+    # Trail distance ONLY increases, never tightens once widened.
+    # At 20x leverage: +3% price = +60% capital, trailing 1% = locks +2% min (40% capital)
+    TRAIL_TIERS: list[tuple[float, float]] = [
+        (0.50, 0.30),   # +0.5% to +1%: tight 0.30% trail
+        (1.00, 0.50),   # +1% to +2%: give room to run
+        (2.00, 0.70),   # +2% to +3%: widen further
+        (3.00, 1.00),   # +3%+: max breathing room, locks +2% min
+    ]
 
     # ── Signal reversal thresholds ──────────────────────────────────────
     RSI_REVERSAL_LONG = 70            # RSI > 70 while long → overbought, exit
@@ -231,6 +245,7 @@ class ScalpStrategy(BaseStrategy):
         self.highest_since_entry: float = 0.0
         self.lowest_since_entry: float = float("inf")
         self._trailing_active: bool = False
+        self._trail_distance_pct: float = self.TRAILING_DISTANCE_PCT  # dynamic, only widens
 
         # Previous RSI for reversal detection
         self._prev_rsi: float = 50.0
@@ -279,16 +294,17 @@ class ScalpStrategy(BaseStrategy):
             rt_mixed = 0.2
             rt_taker = 0.2
         trend_source = "15m analyzer" if self._market_analyzer else "NONE (no trend filter!)"
+        tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
         self.logger.info(
-            "[%s] TREND SNIPER v4.1 ACTIVE (%s) — tick=%ds, "
-            "TP=%.1f%% SL=%.2f%% R:R=%.1f:1 Trail=%.1f%%/%.2f%% "
+            "[%s] TREND SNIPER v4.2 ACTIVE (%s) — tick=%ds, "
+            "TP=%.1f%% SL=%.2f%% R:R=%.1f:1 Trail@%.1f%% [%s] "
             "Entry: mom>=%.2f%% vol>=%.1fx RSI<%d/>%d "
             "MaxContracts=%d TrendFilter=%s IdleWiden=%dmin "
             "DailyLossLimit=%.0f%%%s",
             self.pair, tag, self.check_interval_sec,
             self.MIN_TP_PCT, self.STOP_LOSS_PCT,
             self.MIN_TP_PCT / self.STOP_LOSS_PCT,
-            self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
+            self.TRAILING_ACTIVATE_PCT, tiers_str,
             self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
             self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
             self._max_contracts, trend_source,
@@ -747,13 +763,35 @@ class ScalpStrategy(BaseStrategy):
     # EXIT LOGIC — RIDE WINNERS, CUT LOSERS
     # ======================================================================
 
+    def _update_trail_distance(self, pnl_pct: float) -> float:
+        """Update dynamic trail distance based on current profit level.
+
+        Trail distance ONLY increases (never tightens once widened).
+        Returns the current trail distance percentage.
+        """
+        # Walk through tiers from highest to lowest
+        for min_profit, distance in reversed(self.TRAIL_TIERS):
+            if pnl_pct >= min_profit and distance > self._trail_distance_pct:
+                old = self._trail_distance_pct
+                self._trail_distance_pct = distance
+                locked_min = pnl_pct - distance
+                cap_locked = locked_min * self.leverage
+                self.logger.info(
+                    "[%s] TRAIL WIDENED %.2f%% → %.2f%% at +%.2f%% profit "
+                    "(locks +%.2f%% min = +%.0f%% capital at %dx)",
+                    self.pair, old, distance, pnl_pct,
+                    locked_min, cap_locked, self.leverage,
+                )
+                break
+        return self._trail_distance_pct
+
     def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
         """Check exit conditions.
 
         Priority:
         1. Stop loss — 0.35% price (3.5% capital at 10x) — cut losers fast
         2. Signal reversal — when in profit, exit at the top
-        3. Trailing stop — activates at +1.5%, trails 0.35% behind peak
+        3. Trailing stop — activates at +0.50%, dynamic trail distance widens with profit
         4. Timeout — 30 min, free capital
         5. Flatline — no movement for 15 min
         """
@@ -795,32 +833,37 @@ class ScalpStrategy(BaseStrategy):
                     )
                     return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-MOM", hold_seconds)
 
-            # ── 3. TRAILING STOP — let winners run ─────────────────────
+            # ── 3. TRAILING STOP — let winners run (dynamic distance) ──
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
-                trail_price = self.highest_since_entry * (1 - self.TRAILING_DISTANCE_PCT / 100)
+                self._update_trail_distance(pnl_pct)
+                trail_price = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
                 soul_msg = _soul_check("trailing")
                 self.logger.info(
-                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.1f%% behind peak $%.2f) | %s",
-                    self.pair, pnl_pct, trail_price, self.TRAILING_DISTANCE_PCT,
+                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.2f%% behind peak $%.2f) | %s",
+                    self.pair, pnl_pct, trail_price, self._trail_distance_pct,
                     self.highest_since_entry, soul_msg,
                 )
 
             if self._trailing_active:
-                trail_stop = self.highest_since_entry * (1 - self.TRAILING_DISTANCE_PCT / 100)
+                # Widen trail distance as profit grows (never tightens)
+                self._update_trail_distance(pnl_pct)
+                trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
                 if current_price <= trail_stop:
                     soul_msg = _soul_check("exit trailing")
                     self.logger.info(
-                        "[%s] TRAIL HIT at $%.2f (peak $%.2f) PnL=+%.2f%% | %s",
-                        self.pair, trail_stop, self.highest_since_entry, pnl_pct, soul_msg,
+                        "[%s] TRAIL HIT at $%.2f (peak $%.2f, trail=%.2f%%) PnL=+%.2f%% | %s",
+                        self.pair, trail_stop, self.highest_since_entry,
+                        self._trail_distance_pct, pnl_pct, soul_msg,
                     )
                     return self._do_exit(current_price, pnl_pct, "long", "TRAIL", hold_seconds)
                 # Log trail status periodically
                 if self._tick_count % 12 == 0:
                     dist = ((self.highest_since_entry - current_price) / self.highest_since_entry * 100)
                     self.logger.info(
-                        "[%s] RIDING +%.2f%% | peak=$%.2f trail=$%.2f dist=%.2f%%",
-                        self.pair, pnl_pct, self.highest_since_entry, trail_stop, dist,
+                        "[%s] RIDING +%.2f%% | peak=$%.2f trail=$%.2f (%.2f%%) dist=%.2f%%",
+                        self.pair, pnl_pct, self.highest_since_entry, trail_stop,
+                        self._trail_distance_pct, dist,
                     )
 
             # ── 4. TIMEOUT ──────────────────────────────────────────────
@@ -865,31 +908,36 @@ class ScalpStrategy(BaseStrategy):
                     )
                     return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-MOM", hold_seconds)
 
-            # ── 3. TRAILING STOP ────────────────────────────────────────
+            # ── 3. TRAILING STOP (dynamic distance) ──────────────────────
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
-                trail_price = self.lowest_since_entry * (1 + self.TRAILING_DISTANCE_PCT / 100)
+                self._update_trail_distance(pnl_pct)
+                trail_price = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
                 soul_msg = _soul_check("trailing")
                 self.logger.info(
-                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.1f%% above low $%.2f) | %s",
-                    self.pair, pnl_pct, trail_price, self.TRAILING_DISTANCE_PCT,
+                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.2f%% above low $%.2f) | %s",
+                    self.pair, pnl_pct, trail_price, self._trail_distance_pct,
                     self.lowest_since_entry, soul_msg,
                 )
 
             if self._trailing_active:
-                trail_stop = self.lowest_since_entry * (1 + self.TRAILING_DISTANCE_PCT / 100)
+                # Widen trail distance as profit grows (never tightens)
+                self._update_trail_distance(pnl_pct)
+                trail_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
                 if current_price >= trail_stop:
                     soul_msg = _soul_check("exit trailing")
                     self.logger.info(
-                        "[%s] TRAIL HIT at $%.2f (low $%.2f) PnL=+%.2f%% | %s",
-                        self.pair, trail_stop, self.lowest_since_entry, pnl_pct, soul_msg,
+                        "[%s] TRAIL HIT at $%.2f (low $%.2f, trail=%.2f%%) PnL=+%.2f%% | %s",
+                        self.pair, trail_stop, self.lowest_since_entry,
+                        self._trail_distance_pct, pnl_pct, soul_msg,
                     )
                     return self._do_exit(current_price, pnl_pct, "short", "TRAIL", hold_seconds)
                 if self._tick_count % 12 == 0:
                     dist = ((current_price - self.lowest_since_entry) / self.lowest_since_entry * 100)
                     self.logger.info(
-                        "[%s] RIDING SHORT +%.2f%% | low=$%.2f trail=$%.2f dist=%.2f%%",
-                        self.pair, pnl_pct, self.lowest_since_entry, trail_stop, dist,
+                        "[%s] RIDING SHORT +%.2f%% | low=$%.2f trail=$%.2f (%.2f%%) dist=%.2f%%",
+                        self.pair, pnl_pct, self.lowest_since_entry, trail_stop,
+                        self._trail_distance_pct, dist,
                     )
 
             # ── 4. TIMEOUT ──────────────────────────────────────────────
@@ -1118,6 +1166,7 @@ class ScalpStrategy(BaseStrategy):
         self.highest_since_entry = price
         self.lowest_since_entry = price
         self._trailing_active = False
+        self._trail_distance_pct = self.TRAILING_DISTANCE_PCT  # reset to initial tier
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
@@ -1170,6 +1219,7 @@ class ScalpStrategy(BaseStrategy):
         self.entry_price = 0.0
         self.entry_amount = 0.0
         self._trailing_active = False
+        self._trail_distance_pct = self.TRAILING_DISTANCE_PCT
         self._last_position_exit = time.monotonic()
 
     # ======================================================================
