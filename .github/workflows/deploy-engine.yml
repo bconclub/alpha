@@ -3,11 +3,11 @@ name: Deploy Engine
 on:
   push:
     branches: [main]
-    paths:
-      - 'engine/**'
 
 jobs:
   deploy:
+    # Skip version-only commits from pre-commit hook
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: Deploy to VPS
     runs-on: ubuntu-latest
 
@@ -29,7 +29,12 @@ jobs:
 
             echo ">>> Pulling latest code..."
             cd /root/alpha
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo ">>> Version on VPS:"
+            cat engine/VERSION
+            echo ""
 
             echo ">>> Installing dependencies..."
             cd engine
