@@ -5,11 +5,11 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { StrategyLog, Exchange } from '@/lib/types';
 
-// ── Engine thresholds (Trend Sniper v4.0) ───────────────────────────
-const RSI_LONG_THRESHOLD = 30;
-const RSI_SHORT_THRESHOLD = 70;
-const MOMENTUM_MIN_PCT = 0.30;
-const VOL_SPIKE_RATIO = 2.0;
+// ── Engine thresholds (Trend Sniper v4.1 — loosened) ────────────────
+const RSI_LONG_THRESHOLD = 40;
+const RSI_SHORT_THRESHOLD = 60;
+const MOMENTUM_MIN_PCT = 0.15;
+const VOL_SPIKE_RATIO = 1.2;
 
 interface IndicatorStatus {
   active: boolean;

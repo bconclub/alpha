@@ -1,13 +1,13 @@
-"""Alpha v4.0 — TREND-ALIGNED SNIPER: Trade WITH the trend, not against it.
+"""Alpha v4.1 — TREND-ALIGNED SNIPER: Trade WITH the trend, looser entries.
 
 PHILOSOPHY: Only enter in the direction of the 15-minute trend.
-Every trade must have profit potential AT LEAST 13x the fees.
-TP > SL. Winners outsize losers. R:R = 4.3:1 (1.50% TP / 0.35% SL).
+Lower entry thresholds so the bot actually trades.
+Adaptive widening: if idle 30+ min, thresholds loosen 20% more.
 
 CRITICAL RULE: Check 15-minute trend BEFORE entering.
   - If 15m trend is bearish → only SHORT, never long
   - If 15m trend is bullish → only LONG, never short
-  - If 15m trend is neutral → use 2-of-4 signals (either direction)
+  - If 15m trend is neutral → either direction (2-of-4 decides)
   This single rule prevents most losses from counter-trend entries.
 
 Risk Management (10x leverage):
@@ -17,26 +17,21 @@ Risk Management (10x leverage):
   - R:R = 1.50/0.35 = 4.3:1
   - Max contracts: ETH 2, BTC 1 (smaller positions while improving)
   - Daily loss limit: 20% of capital → stop for the day
-  - NO pause after losses — keep hunting quality setups
 
-Delta India Fee Structure (incl 18% GST):
-  - Taker: 0.05% + 18% GST = 0.059% per side
-  - Maker: 0.02% + 18% GST = 0.024% per side
-  - Mixed RT (maker entry + taker exit): 0.083%
-
-Fee Math per Trade (10x leverage):
-  - BTC 1 contract ($69.7 notional): RT mixed $0.058
-  - ETH 2 contracts ($41.6 notional): RT mixed $0.035
-  - 1.5% move on BTC 1ct = $1.05 profit → 18x fees ✓
-  - 1.5% move on ETH 2ct = $0.62 profit → 18x fees ✓
-
-Entry — TREND + MOMENTUM (15m trend + 2-of-4 confirmation):
+Entry — TREND + 2-of-4 (loosened thresholds):
   0. CHECK 15-MINUTE TREND FIRST (bullish/bearish/neutral)
-  1. Price moved 0.3%+ in last 60 seconds (real momentum)
-  2. Volume spike 2x+ above average (institutional)
-  3. RSI extreme (<30 or >70) — strong directional pressure
-  4. BB breakout — price outside Bollinger Bands
-  Must have 2+ confirmations AND align with 15m trend.
+  1. Momentum: 0.15%+ in 60s (was 0.30%) — easier to trigger
+  2. Volume: 1.2x+ average (was 2.0x) — more volume signals fire
+  3. RSI: <40 for long, >60 for short (was <30/>70) — wider zone
+  4. BB breakout — price outside Bollinger Bands (unchanged)
+  Must have 2+ AND align with 15m trend.
+
+Adaptive Widening (idle 30+ min):
+  After 30 min with no entry, thresholds loosen 20%:
+  - Momentum: 0.15% → 0.12%
+  - Volume: 1.2x → ~1.0x
+  - RSI: <44 for long, >56 for short
+  Resets to normal after trade closes.
 
 Exit — TP MUST BE BIGGER THAN SL (4.3:1 R:R):
   1. Stop loss — 0.35% price (cut fast, at 10x = 3.5% capital)
@@ -134,10 +129,11 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Trend-Aligned Sniper v4.0 — trade WITH the 15m trend, not against it.
+    """Trend-Aligned Sniper v4.1 — trade WITH the 15m trend, looser entries.
 
     TP > SL (4.3:1 R:R). Checks 15m trend before entry.
-    Waits for REAL momentum (2-of-4 confirmation) aligned with trend.
+    Lowered entry thresholds so the bot actually trades.
+    Adaptive widening: if idle 30+ min, thresholds loosen 20%.
     10x leverage, tighter SL (0.35%), smaller positions.
     """
 
@@ -159,14 +155,19 @@ class ScalpStrategy(BaseStrategy):
     MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
 
     # ── Entry thresholds — TREND + 2-of-4 confirmation ─────────────────
-    MOMENTUM_MIN_PCT = 0.30           # 0.30%+ move in 60s = real momentum
-    VOL_SPIKE_RATIO = 2.0             # volume > 2x average = institutional
-    RSI_EXTREME_LONG = 30             # RSI < 30 = truly oversold → long
-    RSI_EXTREME_SHORT = 70            # RSI > 70 = truly overbought → short
+    # Loosened so the bot actually fires (was 0.30/2.0/30/70)
+    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s (was 0.30%)
+    VOL_SPIKE_RATIO = 1.2             # volume > 1.2x average (was 2.0x)
+    RSI_EXTREME_LONG = 40             # RSI < 40 = oversold zone → long (was 30)
+    RSI_EXTREME_SHORT = 60            # RSI > 60 = overbought zone → short (was 70)
     BB_BREAKOUT = True                # price outside BB = breakout
 
+    # ── Adaptive widening (if idle too long, loosen by 20%) ──────────
+    IDLE_WIDEN_SECONDS = 30 * 60      # after 30 min idle, widen thresholds
+    IDLE_WIDEN_FACTOR = 0.80          # multiply thresholds by 0.80 (20% looser)
+
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
-    MIN_EXPECTED_MOVE_PCT = 0.50      # don't enter if expected move < 0.50%
+    MIN_EXPECTED_MOVE_PCT = 0.30      # lowered from 0.50% to match new momentum
     FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.083% RT mixed = 18x
 
     # ── Position sizing (REDUCED — smaller positions while improving) ──
@@ -265,16 +266,20 @@ class ScalpStrategy(BaseStrategy):
             rt_taker = 0.2
         trend_source = "15m analyzer" if self._market_analyzer else "NONE (no trend filter!)"
         self.logger.info(
-            "[%s] TREND SNIPER v4.0 ACTIVE (%s) — tick=%ds, "
+            "[%s] TREND SNIPER v4.1 ACTIVE (%s) — tick=%ds, "
             "TP=%.1f%% SL=%.2f%% R:R=%.1f:1 Trail=%.1f%%/%.2f%% "
-            "MaxContracts=%d TrendFilter=%s "
-            "Fees: RT_mixed=%.3f%% RT_taker=%.3f%% DailyLossLimit=%.0f%%%s",
+            "Entry: mom>=%.2f%% vol>=%.1fx RSI<%d/>%d "
+            "MaxContracts=%d TrendFilter=%s IdleWiden=%dmin "
+            "DailyLossLimit=%.0f%%%s",
             self.pair, tag, self.check_interval_sec,
             self.MIN_TP_PCT, self.STOP_LOSS_PCT,
             self.MIN_TP_PCT / self.STOP_LOSS_PCT,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
+            self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
+            self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
             self._max_contracts, trend_source,
-            rt_mixed, rt_taker, self.DAILY_LOSS_LIMIT_PCT,
+            self.IDLE_WIDEN_SECONDS // 60,
+            self.DAILY_LOSS_LIMIT_PCT,
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
@@ -455,12 +460,17 @@ class ScalpStrategy(BaseStrategy):
         # ── 15-MINUTE TREND CHECK (most important filter) ──────────────
         trend_15m = self._get_15m_trend()
 
+        # ── Adaptive widening: if idle 30+ min, loosen thresholds 20% ─
+        idle_seconds = now - self._last_position_exit
+        is_widened = idle_seconds >= self.IDLE_WIDEN_SECONDS
+
         # ── Quality momentum detection (trend + 2-of-4 confirmation) ──
         entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
             momentum_60s, momentum_120s,
             bb_upper, bb_lower,
             trend_15m,
+            widened=is_widened,
         )
 
         if entry is not None:
@@ -472,14 +482,17 @@ class ScalpStrategy(BaseStrategy):
         else:
             # Log scanning status every 30 seconds (not every tick)
             if self._tick_count % 6 == 0:
-                idle_sec = int(now - self._last_position_exit)
+                idle_sec = int(idle_seconds)
+                widen_tag = " [WIDENED]" if is_widened else ""
+                # Show effective thresholds
+                eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(is_widened)
                 self.logger.info(
-                    "[%s] WAITING %ds | 15m=%s | $%.2f | mom60=%+.3f%%/%.1f | RSI=%.1f/%d/%d | "
+                    "[%s] WAITING %ds%s | 15m=%s | $%.2f | mom60=%+.3f%%/%.2f | RSI=%.1f/%d/%d | "
                     "vol=%.1fx/%.1f | BB[%.2f-%.2f]",
-                    self.pair, idle_sec, trend_15m, current_price,
-                    momentum_60s, self.MOMENTUM_MIN_PCT,
-                    rsi_now, self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
-                    vol_ratio, self.VOL_SPIKE_RATIO,
+                    self.pair, idle_sec, widen_tag, trend_15m, current_price,
+                    momentum_60s, eff_mom,
+                    rsi_now, eff_rsi_l, eff_rsi_s,
+                    vol_ratio, eff_vol,
                     bb_lower, bb_upper,
                 )
 
@@ -488,6 +501,23 @@ class ScalpStrategy(BaseStrategy):
     # ======================================================================
     # QUALITY ENTRY DETECTION — 2 of 4 confirmation required
     # ======================================================================
+
+    def _effective_thresholds(self, widened: bool = False) -> tuple[float, float, float, float]:
+        """Return (momentum, vol_ratio, rsi_long, rsi_short) with optional widening.
+
+        When widened=True (idle 30+ min), thresholds loosen by 20%:
+        - Momentum: 0.15% → 0.12%
+        - Volume: 1.2x → 0.96x (~1.0x, essentially any volume)
+        - RSI long: 40 → 44 (wider range triggers)
+        - RSI short: 60 → 56 (wider range triggers)
+        """
+        f = self.IDLE_WIDEN_FACTOR if widened else 1.0
+        mom = self.MOMENTUM_MIN_PCT * f
+        vol = self.VOL_SPIKE_RATIO * f
+        # RSI: widen the zone — move long threshold UP, short threshold DOWN
+        rsi_l = self.RSI_EXTREME_LONG + (50 - self.RSI_EXTREME_LONG) * (1 - f)
+        rsi_s = self.RSI_EXTREME_SHORT - (self.RSI_EXTREME_SHORT - 50) * (1 - f)
+        return mom, vol, rsi_l, rsi_s
 
     def _detect_quality_entry(
         self,
@@ -499,6 +529,7 @@ class ScalpStrategy(BaseStrategy):
         bb_upper: float,
         bb_lower: float,
         trend_15m: str = "neutral",
+        widened: bool = False,
     ) -> tuple[str, str, bool] | None:
         """Detect quality momentum aligned with 15m trend.
 
@@ -510,27 +541,31 @@ class ScalpStrategy(BaseStrategy):
         - 15m neutral → either direction (2-of-4 decides)
 
         Requires AT LEAST 2 of these 4 conditions:
-        1. Price moved 0.3%+ in last 60s
-        2. Volume spike 2x+
-        3. RSI extreme (<30 or >70)
+        1. Price moved 0.15%+ in last 60s (widened: 0.12%)
+        2. Volume spike 1.2x+ (widened: ~1.0x)
+        3. RSI < 40 or > 60 (widened: < 44 or > 56)
         4. BB breakout (price outside bands)
 
-        Also checks that expected move >= 0.50% (fee filter).
+        If idle 30+ min, thresholds loosen 20% (adaptive widening).
         """
         can_short = self.is_futures and config.delta.enable_shorting
+
+        # ── Get effective thresholds (may be widened) ────────────────────
+        eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
+        widen_tag = " WIDE" if widened else ""
 
         # ── Count bullish and bearish signals ────────────────────────────
         bull_signals: list[str] = []
         bear_signals: list[str] = []
 
         # 1. Momentum (60s move)
-        if momentum_60s >= self.MOMENTUM_MIN_PCT:
+        if momentum_60s >= eff_mom:
             bull_signals.append(f"MOM:{momentum_60s:+.2f}%")
-        elif momentum_60s <= -self.MOMENTUM_MIN_PCT:
+        elif momentum_60s <= -eff_mom:
             bear_signals.append(f"MOM:{momentum_60s:+.2f}%")
 
         # 2. Volume spike
-        if vol_ratio >= self.VOL_SPIKE_RATIO:
+        if vol_ratio >= eff_vol:
             # Volume confirms direction based on candle
             if momentum_60s > 0:
                 bull_signals.append(f"VOL:{vol_ratio:.1f}x")
@@ -541,11 +576,11 @@ class ScalpStrategy(BaseStrategy):
                 bull_signals.append(f"VOL:{vol_ratio:.1f}x")
                 bear_signals.append(f"VOL:{vol_ratio:.1f}x")
 
-        # 3. RSI extreme
-        if rsi_now < self.RSI_EXTREME_LONG:
-            bull_signals.append(f"RSI:{rsi_now:.0f}<{self.RSI_EXTREME_LONG}")
-        if rsi_now > self.RSI_EXTREME_SHORT:
-            bear_signals.append(f"RSI:{rsi_now:.0f}>{self.RSI_EXTREME_SHORT}")
+        # 3. RSI extreme (using effective thresholds)
+        if rsi_now < eff_rsi_l:
+            bull_signals.append(f"RSI:{rsi_now:.0f}<{eff_rsi_l:.0f}")
+        if rsi_now > eff_rsi_s:
+            bear_signals.append(f"RSI:{rsi_now:.0f}>{eff_rsi_s:.0f}")
 
         # 4. BB breakout
         if price > bb_upper:
@@ -572,7 +607,7 @@ class ScalpStrategy(BaseStrategy):
                     )
                 return None
 
-            reason = f"LONG 2-of-4: {' + '.join(bull_signals)} [15m={trend_15m}]"
+            reason = f"LONG 2-of-4: {' + '.join(bull_signals)} [15m={trend_15m}]{widen_tag}"
             # Use limit order if we have time (RSI signal, not breakout)
             use_limit = "MOM" not in bull_signals[0]  # limit if not urgent momentum
             return ("long", reason, use_limit)
@@ -600,7 +635,7 @@ class ScalpStrategy(BaseStrategy):
                     )
                 return None
 
-            reason = f"SHORT 2-of-4: {' + '.join(bear_signals)} [15m={trend_15m}]"
+            reason = f"SHORT 2-of-4: {' + '.join(bear_signals)} [15m={trend_15m}]{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
             return ("short", reason, use_limit)
 
