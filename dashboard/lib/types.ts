@@ -7,6 +7,7 @@ export type Strategy = string;
 export interface Trade {
   id: string;
   timestamp: string;        // normalized from opened_at
+  closed_at?: string | null; // when the trade was closed
   pair: string;
   side: 'buy' | 'sell';
   price: number;            // normalized from entry_price

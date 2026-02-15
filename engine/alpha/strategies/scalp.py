@@ -1,52 +1,37 @@
-"""Alpha v4.3 — MEAN-REVERSION SCALPER: 15m trend as SOFT reversion bias.
+"""Alpha v5.2 — FOCUSED SIGNAL: max 2 positions, ranked by strength, with cooldowns.
 
-PHILOSOPHY: The 15m trend provides a MEAN-REVERSION bias — not direction guidance.
-When 15m is bearish, price has already fallen → favor LONGs (expect bounce).
-When 15m is bullish, price has already risen → favor SHORTs (expect pullback).
-The 2-of-4 signal system on 1m data makes ALL entry decisions.
-15m trend is a soft bias only — never blocks entries.
-Adaptive widening: if idle 30+ min, thresholds loosen 20% more.
+PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
+best signals. After a loss, pause and let the market settle before re-entering.
+Trust the 1-minute chart, not the lagging 15-minute trend.
 
-MEAN-REVERSION ENTRY (v4.3):
-  - If 15m bearish → soft LONG bias: RSI < 45 (loosened), any +momentum counts
-  - If 15m bullish → soft SHORT bias: RSI > 55 (loosened), any -momentum counts
-  - If 15m neutral → either direction, standard 2-of-4 decides
-  - CONFLUENCE: 15m bearish + price near BB lower → strong LONG (bounce play)
-  - CONFLUENCE: 15m bullish + price near BB upper → strong SHORT (pullback play)
-  No entries are blocked — both directions always allowed.
+ENTRY — PURE 2-of-4 (no trend gating):
+  Any 2 of these 4 signals must fire. Same thresholds for both directions.
+  1. Momentum: 0.15%+ move in 60s
+  2. Volume: 1.2x average spike
+  3. RSI: < 40 (oversold → long) or > 60 (overbought → short)
+  4. BB mean-reversion: price near lower BB → long, price near upper BB → short
+  15m trend is logged for analysis but NEVER blocks or loosens entries.
+  Signals are RANKED by strength score — only the strongest get entered.
+
+POSITION MANAGEMENT:
+  - Max 2 simultaneous positions (focused capital)
+  - 2nd position only if 1st is breakeven or profitable AND signal is 3/4+
+  - After SL hit: 2 min cooldown before any new entry (all pairs)
+  - After 3 consecutive losses: 5 min pause (all pairs)
 
 Risk Management (20x leverage):
-  - Leverage: 20x — 0.35% against = 7% loss
-  - SL: 0.35% price (7% capital at 20x) — cut fast
-  - TP: 1.50% minimum (30% capital at 20x)
-  - R:R = 1.50/0.35 = 4.3:1
-  - Max contracts: ETH 2, BTC 1 (smaller positions while improving)
-  - Daily loss limit: 20% of capital → stop for the day
+  - SL: 0.35% price → 7% capital → cut fast
+  - Trailing: activates at +0.30% — protect profits EARLY
+  - Max hold: 5 min — scalping is quick
 
-Entry — MEAN-REVERSION BIAS + 2-of-4:
-  0. GET 15-MINUTE TREND (bullish/bearish/neutral)
-  1. Momentum: 0.15%+ in 60s (reversion-biased: loosened toward bounce)
-  2. Volume: 1.2x+ average
-  3. RSI: <40 for long, >60 for short (reversion-biased: <45/>55)
-  4. BB breakout — price outside Bollinger Bands
-  Must have 2+ signals. Both directions always open.
-
-Adaptive Widening (idle 30+ min):
-  After 30 min with no entry, thresholds loosen 20%:
-  - Momentum: 0.15% → 0.12%
-  - Volume: 1.2x → ~1.0x
-  - RSI: <44 for long, >56 for short
-  Resets to normal after trade closes.
-
-Exit — TP MUST BE BIGGER THAN SL (4.3:1 R:R):
-  1. Stop loss — 0.35% price (cut fast, at 20x = 7% capital)
-  2. Trailing stop — activates at +0.50%, DYNAMIC distance widens with profit:
-     +0.5-1%: 0.30% trail | +1-2%: 0.50% | +2-3%: 0.70% | +3%+: 1.00%
-     Trail distance ONLY increases, never tightens once widened.
-     At +3% with 1% trail = locks +2% min (40% capital at 20x).
-  3. Signal reversal — only exit if profit >= 1.50%
-  4. NEVER exit a winner early. Hold for 1.50% minimum.
-  5. Timeout — 30 min max
+Exit — FAST, PROTECT PROFITS:
+  1. Stop loss — 0.35% price, cut losers fast
+  2. Breakeven SL — if not profitable by 2 min, tighten SL to entry
+  3. Trailing stop — activates at +0.30%, dynamic trail widens with profit
+  4. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
+  5. Signal reversal — exit at +0.30% profit if RSI/momentum reverses
+  6. Timeout — 5 min max (only if not trailing)
+  7. Flatline — 2 min with < 0.05% move = dead momentum, exit
 """
 
 from __future__ import annotations
@@ -137,25 +122,32 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Trend-Aligned Sniper v4.1 — trade WITH the 15m trend, looser entries.
+    """Focused Signal v5.2 — max 2 positions, ranked by strength, with cooldowns.
 
-    TP > SL (4.3:1 R:R). Checks 15m trend before entry.
-    Lowered entry thresholds so the bot actually trades.
-    Adaptive widening: if idle 30+ min, thresholds loosen 20%.
-    20x leverage, tighter SL (0.35%), smaller positions.
+    2-of-4 signals (momentum, volume, RSI, BB mean-reversion) with uniform
+    thresholds. Max 2 positions. 2nd only if 1st is green and signal is 3/4+.
+    Post-SL cooldown: 2 min. After 3 consecutive losses: 5 min pause.
     """
 
     name = StrategyName.SCALP
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
-    # ── Exit thresholds — TP MUST BE BIGGER THAN SL (4.3:1 R:R) ──────
+    # ── Exit thresholds — QUICK SCALP: protect profits fast ────────────
     STOP_LOSS_PCT = 0.35              # 0.35% price SL (7% capital at 20x) — cut FAST
     MIN_TP_PCT = 1.50                 # minimum 1.5% target (30% capital at 20x)
-    TRAILING_ACTIVATE_PCT = 0.50      # activate trail at +0.50% — start protecting early
+    TRAILING_ACTIVATE_PCT = 0.30      # activate trail at +0.30% — protect profits EARLY
     TRAILING_DISTANCE_PCT = 0.30      # initial trail: 0.30% behind peak
-    MAX_HOLD_SECONDS = 30 * 60        # 30 min max — free capital if flat
-    FLATLINE_SECONDS = 15 * 60        # 15 min flat = exit
-    FLATLINE_MIN_MOVE_PCT = 0.10      # "flat" means < 0.10% total move
+    MAX_HOLD_SECONDS = 5 * 60         # 5 min max — scalping is quick
+    FLATLINE_SECONDS = 2 * 60         # 2 min flat = dead momentum, exit
+    FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
+
+    # ── Breakeven & profit protection ─────────────────────────────────
+    BREAKEVEN_AFTER_SECONDS = 2 * 60  # tighten SL to breakeven after 2 min if not profitable
+    PROFIT_PULLBACK_MIN_PEAK = 0.50   # peak must be > 0.50% to trigger pullback exit
+    PROFIT_PULLBACK_PCT = 40.0        # exit if profit drops 40% from peak
+
+    # ── Signal reversal — exit earlier in quick scalp mode ───────────
+    REVERSAL_MIN_PROFIT_PCT = 0.30    # exit on reversal at just +0.30% (was 1.50%)
 
     # ── Dynamic trailing tiers — widen as profit grows ──────────────
     # (min_profit_pct, trail_distance_pct)
@@ -173,19 +165,14 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_SHORT = 30           # RSI < 30 while short → oversold, exit
     MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
 
-    # ── Entry thresholds — TREND-GUIDED + 2-of-4 confirmation ──────────
-    # Standard thresholds (loosened further when trend aligns):
-    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s (trend-aligned: any direction)
-    VOL_SPIKE_RATIO = 1.2             # volume > 1.2x average (was 2.0x)
-    RSI_EXTREME_LONG = 40             # RSI < 40 = oversold → long (trend-guided: < 45)
-    RSI_EXTREME_SHORT = 60            # RSI > 60 = overbought → short (trend-guided: > 55)
-    BB_BREAKOUT = True                # price outside BB = breakout
-    # Trend-guided RSI thresholds (looser when 15m trend aligns):
-    RSI_TREND_LONG = 45               # RSI < 45 when 15m is bullish
-    RSI_TREND_SHORT = 55              # RSI > 55 when 15m is bearish
-    # Trend+BB confluence threshold:
-    BB_TREND_UPPER_PCT = 0.85         # price in top 15% of BB + bearish → short
-    BB_TREND_LOWER_PCT = 0.15         # price in bottom 15% of BB + bullish → long
+    # ── Entry thresholds — PURE 2-of-4 (same for both directions) ──────
+    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s
+    VOL_SPIKE_RATIO = 1.2             # volume > 1.2x average
+    RSI_EXTREME_LONG = 40             # RSI < 40 = oversold → long
+    RSI_EXTREME_SHORT = 60            # RSI > 60 = overbought → short
+    # BB mean-reversion thresholds (upper = short, lower = long):
+    BB_MEAN_REVERT_UPPER = 0.85      # price in top 15% of BB → short signal
+    BB_MEAN_REVERT_LOWER = 0.15      # price in bottom 15% of BB → long signal
 
     # ── Adaptive widening (if idle too long, loosen by 20%) ──────────
     IDLE_WIDEN_SECONDS = 30 * 60      # after 30 min idle, widen thresholds
@@ -197,20 +184,32 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Position sizing (per-pair contract limits) ──────────────────────
     CAPITAL_PCT_SPOT = 35.0             # 35% of Binance USDT per trade (middle of 30-40%)
-    CAPITAL_PCT_FUTURES = 80.0
+    CAPITAL_PCT_FUTURES = 40.0          # 40% per trade (2 positions × 40% = 80% max deployed)
     MIN_NOTIONAL_SPOT = 6.00            # $6 min to avoid dust on exit (Binance $5 min + buffer)
     PAIR_MAX_CONTRACTS: dict[str, int] = {
         "BTC": 1,              # BTC: 1 contract (~$70 notional, ~$3.50 collateral at 20x)
-        "ETH": 2,              # ETH: 2 contracts (~$40 notional, ~$2 collateral at 20x)
-        "SOL": 1,              # SOL: 1 contract (~$140 notional, ~$7 collateral at 20x)
-        "XRP": 50,             # XRP: 50 contracts (~$27.50 notional, ~$1.38 at 20x)
+        "ETH": 4,              # ETH: 4 contracts (~$80 notional, ~$4 collateral at 20x)
+        "SOL": 1,              # SOL: 1 contract (~$86 notional, ~$4.30 collateral at 20x)
+        "XRP": 50,             # XRP: 50 contracts (~$75 notional, ~$3.75 at 20x)
     }
-    MAX_POSITIONS = 3
+    MAX_POSITIONS = 2                   # max 2 simultaneous — focus capital
     MAX_SPREAD_PCT = 0.15
+
+    # ── Cooldown / loss protection (class-level, shared across all pairs) ─
+    SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after any SL hit
+    CONSECUTIVE_LOSS_LIMIT = 3          # after 3 consecutive losses...
+    STREAK_PAUSE_SECONDS = 5 * 60      # ...pause for 5 min
+    MIN_STRENGTH_FOR_2ND = 3            # 2nd position needs 3/4+ signal strength
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
     MAX_TRADES_PER_HOUR = 10          # keep trading aggressively
     DAILY_LOSS_LIMIT_PCT = 20.0       # stop at 20% daily drawdown
+
+    # ── Class-level shared state (all pair instances share these) ────────
+    _last_sl_time: float = 0.0                 # monotonic time of last SL hit (any pair)
+    _consecutive_losses: int = 0                # streak of consecutive losses across all pairs
+    _streak_pause_until: float = 0.0            # monotonic time until streak pause ends
+    _live_pnl: dict[str, float] = {}           # pair → current unrealized P&L % (updated every tick)
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -297,22 +296,22 @@ class ScalpStrategy(BaseStrategy):
             # Binance spot: 0.1% per side (check for BNB discount)
             rt_mixed = 0.20  # 0.1% × 2 = 0.2% round trip
             rt_taker = 0.20
-        trend_source = "15m analyzer" if self._market_analyzer else "NONE (no trend filter!)"
         tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
         self.logger.info(
-            "[%s] TREND SNIPER v4.2 ACTIVE (%s) — tick=%ds, "
-            "TP=%.1f%% SL=%.2f%% R:R=%.1f:1 Trail@%.1f%% [%s] "
-            "Entry: mom>=%.2f%% vol>=%.1fx RSI<%d/>%d "
-            "MaxContracts=%d TrendFilter=%s IdleWiden=%dmin "
-            "DailyLossLimit=%.0f%%%s",
+            "[%s] FOCUSED SIGNAL v5.2 ACTIVE (%s) — tick=%ds, "
+            "SL=%.2f%% Trail@%.1f%% [%s] MaxHold=%ds Breakeven@%ds "
+            "Pullback=%.0f%%@%.1f%% Flatline=%ds/%.2f%% "
+            "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
+            "15m=INFO_ONLY DailyLossLimit=%.0f%%%s",
             self.pair, tag, self.check_interval_sec,
-            self.MIN_TP_PCT, self.STOP_LOSS_PCT,
-            self.MIN_TP_PCT / self.STOP_LOSS_PCT,
+            self.STOP_LOSS_PCT,
             self.TRAILING_ACTIVATE_PCT, tiers_str,
-            self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
-            self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
-            self._max_contracts, trend_source,
-            self.IDLE_WIDEN_SECONDS // 60,
+            self.MAX_HOLD_SECONDS, self.BREAKEVEN_AFTER_SECONDS,
+            self.PROFIT_PULLBACK_PCT, self.PROFIT_PULLBACK_MIN_PEAK,
+            self.FLATLINE_SECONDS, self.FLATLINE_MIN_MOVE_PCT,
+            self.MAX_POSITIONS, self._max_contracts,
+            self.SL_COOLDOWN_SECONDS, self.CONSECUTIVE_LOSS_LIMIT,
+            self.STREAK_PAUSE_SECONDS,
             self.DAILY_LOSS_LIMIT_PCT,
             pos_info,
         )
@@ -435,6 +434,9 @@ class ScalpStrategy(BaseStrategy):
 
         # ── In position: check exit ────────────────────────────────────
         if self.in_position:
+            # Update class-level live P&L (shared, so 2nd position gate can check)
+            ScalpStrategy._live_pnl[self.pair] = self._calc_pnl_pct(current_price)
+
             # Write live position state to DB every 10s (dashboard reads this)
             if self._tick_count % 2 == 0:
                 await self._update_position_state_in_db(current_price)
@@ -453,7 +455,7 @@ class ScalpStrategy(BaseStrategy):
             self._prev_rsi = rsi_now
             return result
 
-        # ── No position: look for QUALITY entry ────────────────────────
+        # ── No position: look for PURE 2-of-4 signal entry ────────────
         self._prev_rsi = rsi_now
 
         # Check position limits
@@ -466,6 +468,38 @@ class ScalpStrategy(BaseStrategy):
         )
         if total_scalp >= self.MAX_POSITIONS:
             return signals
+
+        # ── COOLDOWN: pause after SL hit (shared across all pairs) ────
+        sl_cooldown_remaining = ScalpStrategy._last_sl_time + self.SL_COOLDOWN_SECONDS - now
+        if sl_cooldown_remaining > 0:
+            if self._tick_count % 12 == 0:
+                self.logger.info(
+                    "[%s] SL COOLDOWN — %.0fs remaining before new entries",
+                    self.pair, sl_cooldown_remaining,
+                )
+            return signals
+
+        # ── STREAK PAUSE: after N consecutive losses, pause longer ────
+        if now < ScalpStrategy._streak_pause_until:
+            remaining = ScalpStrategy._streak_pause_until - now
+            if self._tick_count % 12 == 0:
+                self.logger.info(
+                    "[%s] STREAK PAUSE — %d consecutive losses, %.0fs remaining",
+                    self.pair, ScalpStrategy._consecutive_losses, remaining,
+                )
+            return signals
+
+        # ── 2ND POSITION GATE: only if 1st is breakeven+ and signal 3/4+ ─
+        if total_scalp == 1:
+            # Check if any existing scalp position is losing via class-level tracker
+            first_losing = self._is_any_scalp_losing()
+            if first_losing:
+                if self._tick_count % 12 == 0:
+                    self.logger.info(
+                        "[%s] 2ND POS BLOCKED — 1st position is losing, wait for green",
+                        self.pair,
+                    )
+                return signals
 
         # Spread check
         try:
@@ -490,19 +524,14 @@ class ScalpStrategy(BaseStrategy):
                 )
             return signals
 
-        # Size the position
-        amount = self._calculate_position_size(current_price, available)
-        if amount is None:
-            return signals
-
-        # ── 15-MINUTE TREND CHECK (most important filter) ──────────────
+        # ── 15m trend (INFO ONLY — logged but never gates entries) ─────
         trend_15m = self._get_15m_trend()
 
         # ── Adaptive widening: if idle 30+ min, loosen thresholds 20% ─
         idle_seconds = now - self._last_position_exit
         is_widened = idle_seconds >= self.IDLE_WIDEN_SECONDS
 
-        # ── Quality momentum detection (trend + 2-of-4 confirmation) ──
+        # ── Quality momentum detection (pure 2-of-4 from 1m data) ──────
         entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
             momentum_60s, momentum_120s,
@@ -513,6 +542,30 @@ class ScalpStrategy(BaseStrategy):
 
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
+
+            # ── 2ND POSITION: require 3/4+ signal strength ────────────
+            if total_scalp == 1 and signal_strength < self.MIN_STRENGTH_FOR_2ND:
+                if self._tick_count % 12 == 0:
+                    self.logger.info(
+                        "[%s] 2ND POS SKIPPED — strength %d/4 < %d required",
+                        self.pair, signal_strength, self.MIN_STRENGTH_FOR_2ND,
+                    )
+                # Still update signal state for options
+                self.last_signal_state = {
+                    "side": side, "reason": reason,
+                    "strength": signal_strength, "trend_15m": trend_15m,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s,
+                    "current_price": current_price, "timestamp": time.monotonic(),
+                }
+                return signals
+
+            # ── Dynamic capital allocation based on signal strength ────
+            amount = self._calculate_position_size_dynamic(
+                current_price, available, signal_strength, total_scalp,
+            )
+            if amount is None:
+                return signals
+
             # Share signal state with options strategy
             self.last_signal_state = {
                 "side": side,
@@ -525,7 +578,10 @@ class ScalpStrategy(BaseStrategy):
                 "timestamp": time.monotonic(),
             }
             soul_msg = _soul_check("quality entry")
-            self.logger.info("[%s] TREND ENTRY — %s | 15m=%s | Soul: %s", self.pair, reason, trend_15m, soul_msg)
+            self.logger.info(
+                "[%s] SIGNAL ENTRY — %s | strength=%d/4 | Soul: %s",
+                self.pair, reason, signal_strength, soul_msg,
+            )
             order_type = "limit" if use_limit else "market"
             signals.append(self._build_entry_signal(side, current_price, amount, reason, order_type))
         else:
@@ -544,22 +600,25 @@ class ScalpStrategy(BaseStrategy):
             if self._tick_count % 6 == 0:
                 idle_sec = int(idle_seconds)
                 widen_tag = " [WIDENED]" if is_widened else ""
-                # Show effective thresholds
                 eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(is_widened)
+                cooldown_tag = ""
+                if ScalpStrategy._consecutive_losses > 0:
+                    cooldown_tag = f" streak={ScalpStrategy._consecutive_losses}"
                 self.logger.info(
                     "[%s] WAITING %ds%s | 15m=%s | $%.2f | mom60=%+.3f%%/%.2f | RSI=%.1f/%d/%d | "
-                    "vol=%.1fx/%.1f | BB[%.2f-%.2f]",
+                    "vol=%.1fx/%.1f | BB[%.2f-%.2f]%s",
                     self.pair, idle_sec, widen_tag, trend_15m, current_price,
                     momentum_60s, eff_mom,
                     rsi_now, eff_rsi_l, eff_rsi_s,
                     vol_ratio, eff_vol,
                     bb_lower, bb_upper,
+                    cooldown_tag,
                 )
 
         return signals
 
     # ======================================================================
-    # QUALITY ENTRY DETECTION — 2 of 4 confirmation required
+    # PURE SIGNAL ENTRY — 2-of-4 from 1m data, no trend gating
     # ======================================================================
 
     def _effective_thresholds(self, widened: bool = False) -> tuple[float, float, float, float]:
@@ -590,128 +649,69 @@ class ScalpStrategy(BaseStrategy):
         bb_lower: float,
         trend_15m: str = "neutral",
         widened: bool = False,
-    ) -> tuple[str, str, bool] | None:
-        """Detect quality momentum GUIDED by 15m trend.
+    ) -> tuple[str, str, bool, int] | None:
+        """Detect quality momentum using PURE 2-of-4 signals.
 
         Returns (side, reason, use_limit, signal_count) or None.
 
-        The 15m trend GUIDES direction — it doesn't block trades entirely.
-        - 15m bullish → look for LONGs with LOOSENED thresholds (RSI<45, any +mom)
-        - 15m bearish → look for SHORTs with LOOSENED thresholds (RSI>55, any -mom)
-        - 15m neutral → either direction, standard 2-of-4 decides
-        - 15m bearish + price near BB upper → strong SHORT setup, enter immediately
-        - 15m bullish + price near BB lower → strong LONG setup, enter immediately
+        15m trend is logged for analysis but NEVER gates entries or loosens
+        thresholds. All decisions come from 1m data — what's happening NOW.
 
-        Requires AT LEAST 2 of these 4 conditions (thresholds loosened with trend):
-        1. Price moved 0.15%+ in last 60s (widened: 0.12%)
-        2. Volume spike 1.2x+ (widened: ~1.0x)
-        3. RSI < 40 or > 60 (trend-guided: < 45 or > 55)
-        4. BB breakout (price outside bands)
+        Requires AT LEAST 2 of these 4 conditions (same thresholds for all):
+        1. Momentum: 0.15%+ move in 60s (widened: 0.12%)
+        2. Volume: 1.2x+ spike (widened: ~1.0x)
+        3. RSI: < 40 oversold (long) or > 60 overbought (short)
+        4. BB mean-reversion: price in bottom 15% of BB → long, top 15% → short
 
         If idle 30+ min, thresholds loosen 20% (adaptive widening).
         """
         can_short = self.is_futures and config.delta.enable_shorting
 
-        # ── Get effective thresholds (may be widened) ────────────────────
+        # ── Get effective thresholds (may be widened, but SAME for both dirs) ─
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
         widen_tag = " WIDE" if widened else ""
 
-        # ── MEAN-REVERSION threshold adjustments ─────────────────────────
-        # When 15m trend is clear, loosen thresholds in the REVERSION direction.
-        # Bearish trend → price has fallen → loosen LONG (expect bounce).
-        # Bullish trend → price has risen → loosen SHORT (expect pullback).
-        if trend_15m == "bearish":
-            trend_rsi_l = self.RSI_TREND_LONG   # RSI < 45 = long (loosened — bounce play)
-            trend_rsi_s = eff_rsi_s             # standard for trend-continuation
-            trend_mom_l = 0.0                   # any positive momentum = bounce starting
-            trend_mom_s = eff_mom               # standard for trend-continuation
-        elif trend_15m == "bullish":
-            trend_rsi_l = eff_rsi_l             # standard for trend-continuation
-            trend_rsi_s = self.RSI_TREND_SHORT  # RSI > 55 = short (loosened — pullback play)
-            trend_mom_l = eff_mom               # standard for trend-continuation
-            trend_mom_s = 0.0                   # any negative momentum = pullback starting
-        else:  # neutral
-            trend_rsi_l = eff_rsi_l
-            trend_rsi_s = eff_rsi_s
-            trend_mom_l = eff_mom
-            trend_mom_s = eff_mom
-
-        # ── Count bullish and bearish signals ────────────────────────────
+        # ── Count bullish and bearish signals (pure 1m data) ─────────────
         bull_signals: list[str] = []
         bear_signals: list[str] = []
 
-        # 1. Momentum (60s move) — loosened in mean-reversion direction
-        # Long: standard needs 0.15%+, but if 15m is bearish, any +mom = bounce
-        if momentum_60s > 0 and (momentum_60s >= eff_mom or trend_mom_l == 0.0):
+        # 1. Momentum (60s move) — same threshold for both directions
+        if momentum_60s >= eff_mom:
             bull_signals.append(f"MOM:{momentum_60s:+.2f}%")
-        elif momentum_60s >= eff_mom:
-            bull_signals.append(f"MOM:{momentum_60s:+.2f}%")
-        # Short: standard needs -0.15%, but if 15m is bullish, any -mom = pullback
-        if momentum_60s < 0 and (abs(momentum_60s) >= eff_mom or trend_mom_s == 0.0):
-            bear_signals.append(f"MOM:{momentum_60s:+.2f}%")
-        elif momentum_60s <= -eff_mom:
+        if momentum_60s <= -eff_mom:
             bear_signals.append(f"MOM:{momentum_60s:+.2f}%")
 
-        # 2. Volume spike
+        # 2. Volume spike — direction from candle
         if vol_ratio >= eff_vol:
-            # Volume confirms direction based on candle
             if momentum_60s > 0:
                 bull_signals.append(f"VOL:{vol_ratio:.1f}x")
             elif momentum_60s < 0:
                 bear_signals.append(f"VOL:{vol_ratio:.1f}x")
             else:
-                # Neutral volume — add to both, will be filtered by 2-of-4
+                # Flat candle with volume — add to both, 2-of-4 decides
                 bull_signals.append(f"VOL:{vol_ratio:.1f}x")
                 bear_signals.append(f"VOL:{vol_ratio:.1f}x")
 
-        # 3. RSI extreme — loosened in mean-reversion direction
-        if rsi_now < trend_rsi_l:
-            bull_signals.append(f"RSI:{rsi_now:.0f}<{trend_rsi_l:.0f}")
-        if rsi_now > trend_rsi_s:
-            bear_signals.append(f"RSI:{rsi_now:.0f}>{trend_rsi_s:.0f}")
+        # 3. RSI extreme — same thresholds always
+        if rsi_now < eff_rsi_l:
+            bull_signals.append(f"RSI:{rsi_now:.0f}<{eff_rsi_l:.0f}")
+        if rsi_now > eff_rsi_s:
+            bear_signals.append(f"RSI:{rsi_now:.0f}>{eff_rsi_s:.0f}")
 
-        # 4. BB breakout
-        if price > bb_upper:
-            bull_signals.append(f"BB:breakout>{bb_upper:.0f}")
-        if price < bb_lower:
-            bear_signals.append(f"BB:breakdown<{bb_lower:.0f}")
-
-        # ── MEAN-REVERSION + BB CONFLUENCE: strong setups enter immediately
-        # 15m bearish + price near BB lower = oversold bounce → strong LONG
-        # 15m bullish + price near BB upper = overbought pullback → strong SHORT
+        # 4. BB mean-reversion (ONE interpretation only):
+        #    Price near lower BB → long (oversold, expect bounce)
+        #    Price near upper BB → short (overbought, expect fade)
         bb_range = bb_upper - bb_lower if bb_upper > bb_lower else 1.0
         bb_position = (price - bb_lower) / bb_range  # 0.0 = lower, 1.0 = upper
 
-        if trend_15m == "bearish" and bb_position < self.BB_TREND_LOWER_PCT:
-            # Price is near bottom of BB band in a bearish trend — bounce play
-            if len(bull_signals) < 2:
-                bull_signals.append(f"REVERT+BB:bounce@{bb_position:.0%}")
-            if len(bull_signals) >= 2:
-                reason = (
-                    f"LONG REVERT+BB: {' + '.join(bull_signals)} "
-                    f"[15m=bearish, BB@{bb_position:.0%}]{widen_tag}"
-                )
-                return ("long", reason, False, len(bull_signals))  # market order — urgent
-
-        if trend_15m == "bullish" and can_short and bb_position > self.BB_TREND_UPPER_PCT:
-            # Price is near top of BB band in a bullish trend — pullback play
-            if len(bear_signals) < 2:
-                bear_signals.append(f"REVERT+BB:pullback@{bb_position:.0%}")
-            if len(bear_signals) >= 2:
-                reason = (
-                    f"SHORT REVERT+BB: {' + '.join(bear_signals)} "
-                    f"[15m=bullish, BB@{bb_position:.0%}]{widen_tag}"
-                )
-                return ("short", reason, False, len(bear_signals))  # market order — urgent
-
-        # ── NO HARD BLOCKING: both directions always open ─────────────
-        # Mean-reversion bias is applied via loosened thresholds above,
-        # but we never block a direction. The 2-of-4 signals decide.
-        allow_long = True
-        allow_short = True
+        if bb_position <= self.BB_MEAN_REVERT_LOWER:
+            bull_signals.append(f"BB:low@{bb_position:.0%}")
+        if bb_position >= self.BB_MEAN_REVERT_UPPER and can_short:
+            bear_signals.append(f"BB:high@{bb_position:.0%}")
 
         # ── Check 2-of-4 requirement (LONG) ──────────────────────────────
-        if len(bull_signals) >= 2 and allow_long:
+        # No trend blocking — both directions always allowed
+        if len(bull_signals) >= 2:
             # Verify expected move is worth the fees
             if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
                 self.hourly_skipped += 1
@@ -724,23 +724,12 @@ class ScalpStrategy(BaseStrategy):
                     )
                 return None
 
-            reason = f"LONG 2-of-4: {' + '.join(bull_signals)} [15m={trend_15m}]{widen_tag}"
-            # Use limit order if we have time (RSI signal, not breakout)
-            use_limit = "MOM" not in bull_signals[0]  # limit if not urgent momentum
+            reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{widen_tag}"
+            use_limit = "MOM" not in bull_signals[0]
             return ("long", reason, use_limit, len(bull_signals))
 
-        elif len(bull_signals) >= 2 and not allow_long:
-            # Safety fallback — should not trigger with mean-reversion (allow_long=True)
-            if self._tick_count % 10 == 0:
-                self.logger.info(
-                    "[%s] BLOCKED LONG — 15m trend=%s, signals=%s",
-                    self.pair, trend_15m, "+".join(bull_signals),
-                )
-            self.hourly_skipped += 1
-            return None
-
         # ── Check 2-of-4 requirement (SHORT) ─────────────────────────────
-        if len(bear_signals) >= 2 and can_short and allow_short:
+        if len(bear_signals) >= 2 and can_short:
             if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
                 self.hourly_skipped += 1
                 if self._tick_count % 10 == 0:
@@ -752,19 +741,9 @@ class ScalpStrategy(BaseStrategy):
                     )
                 return None
 
-            reason = f"SHORT 2-of-4: {' + '.join(bear_signals)} [15m={trend_15m}]{widen_tag}"
+            reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
             return ("short", reason, use_limit, len(bear_signals))
-
-        elif len(bear_signals) >= 2 and can_short and not allow_short:
-            # Safety fallback — should not trigger with mean-reversion (allow_short=True)
-            if self._tick_count % 10 == 0:
-                self.logger.info(
-                    "[%s] BLOCKED SHORT — 15m trend=%s, signals=%s",
-                    self.pair, trend_15m, "+".join(bear_signals),
-                )
-            self.hourly_skipped += 1
-            return None
 
         return None
 
@@ -795,14 +774,16 @@ class ScalpStrategy(BaseStrategy):
         return self._trail_distance_pct
 
     def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
-        """Check exit conditions.
+        """Check exit conditions — QUICK SCALP style.
 
         Priority:
-        1. Stop loss — 0.35% price (3.5% capital at 10x) — cut losers fast
-        2. Signal reversal — when in profit, exit at the top
-        3. Trailing stop — activates at +0.50%, dynamic trail distance widens with profit
-        4. Timeout — 30 min, free capital
-        5. Flatline — no movement for 15 min
+        1. Stop loss — 0.35% price, cut losers fast
+        2. Breakeven SL — tighten to entry if not profitable by 2 min
+        3. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
+        4. Signal reversal — exit at +0.30% profit if reversal detected
+        5. Trailing stop — activates at +0.30%, dynamic trail widens with profit
+        6. Timeout — 5 min max (only if not trailing)
+        7. Flatline — 2 min with < 0.05% move = dead momentum
         """
         signals: list[Signal] = []
         hold_seconds = time.monotonic() - self.entry_time
@@ -821,12 +802,32 @@ class ScalpStrategy(BaseStrategy):
                 )
                 return self._do_exit(current_price, pnl_pct, "long", "SL", hold_seconds)
 
-            # ── 2. SIGNAL REVERSAL — exit at the top when in profit ────
-            if pnl_pct > 0:
+            # ── 2. BREAKEVEN SL — tighten after 2 min if not profitable ─
+            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct <= 0 and not self._trailing_active:
+                self.logger.info(
+                    "[%s] BREAKEVEN EXIT — %ds in, PnL=%.2f%% not profitable",
+                    self.pair, int(hold_seconds), pnl_pct,
+                )
+                return self._do_exit(current_price, pnl_pct, "long", "BREAKEVEN", hold_seconds)
+
+            # ── 3. PROFIT PULLBACK — protect gains if fading ────────────
+            # If we peaked above 0.50% and current drops 40% from peak → exit
+            peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
+                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
+                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
+                    self.logger.info(
+                        "[%s] PROFIT PULLBACK — peak=+%.2f%% now=+%.2f%% (%.0f%% pullback)",
+                        self.pair, peak_pnl, pnl_pct, pullback_pct,
+                    )
+                    return self._do_exit(current_price, pnl_pct, "long", "PULLBACK", hold_seconds)
+
+            # ── 4. SIGNAL REVERSAL — exit early when in profit ─────────
+            if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
                 rsi_crossed_70 = rsi_now > self.RSI_REVERSAL_LONG and self._prev_rsi <= self.RSI_REVERSAL_LONG
                 momentum_reversed = momentum_60s < self.MOMENTUM_REVERSAL_PCT
 
-                if rsi_crossed_70 and pnl_pct >= self.MIN_TP_PCT:
+                if rsi_crossed_70:
                     soul_msg = _soul_check("exit reversal")
                     self.logger.info(
                         "[%s] RSI %.1f crossed 70 at +%.2f%% — taking profit | %s",
@@ -834,7 +835,7 @@ class ScalpStrategy(BaseStrategy):
                     )
                     return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-RSI", hold_seconds)
 
-                if momentum_reversed and pnl_pct >= self.MIN_TP_PCT:
+                if momentum_reversed:
                     soul_msg = _soul_check("exit reversal")
                     self.logger.info(
                         "[%s] Momentum flipped %+.3f%% at +%.2f%% — taking profit | %s",
@@ -842,7 +843,6 @@ class ScalpStrategy(BaseStrategy):
                     )
                     return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-MOM", hold_seconds)
 
-            # ── 3. TRAILING STOP — let winners run (dynamic distance) ──
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
                 self._update_trail_distance(pnl_pct)
@@ -875,15 +875,11 @@ class ScalpStrategy(BaseStrategy):
                         self._trail_distance_pct, dist,
                     )
 
-            # ── 4. TIMEOUT ──────────────────────────────────────────────
-            # Never kill a winning trade with a clock.
-            # If trailing is active, the trail IS the exit — no timeout.
+            # ── 6. TIMEOUT — 5 min max (skip if trailing) ───────────────
             if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
                 return self._do_exit(current_price, pnl_pct, "long", "TIMEOUT", hold_seconds)
 
-            # ── 5. FLATLINE ─────────────────────────────────────────────
-            # Flatline still applies even to trailing trades — if price
-            # hasn't moved 0.10% in 15 min, momentum is dead.
+            # ── 7. FLATLINE — 2 min flat = momentum dead ────────────────
             if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
                 return self._do_exit(current_price, pnl_pct, "long", "FLAT", hold_seconds)
 
@@ -900,12 +896,31 @@ class ScalpStrategy(BaseStrategy):
                 )
                 return self._do_exit(current_price, pnl_pct, "short", "SL", hold_seconds)
 
-            # ── 2. SIGNAL REVERSAL ──────────────────────────────────────
-            if pnl_pct > 0:
+            # ── 2. BREAKEVEN SL — tighten after 2 min if not profitable ─
+            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct <= 0 and not self._trailing_active:
+                self.logger.info(
+                    "[%s] BREAKEVEN EXIT — %ds in, PnL=%.2f%% not profitable",
+                    self.pair, int(hold_seconds), pnl_pct,
+                )
+                return self._do_exit(current_price, pnl_pct, "short", "BREAKEVEN", hold_seconds)
+
+            # ── 3. PROFIT PULLBACK — protect gains if fading ────────────
+            peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
+                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
+                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
+                    self.logger.info(
+                        "[%s] PROFIT PULLBACK — peak=+%.2f%% now=+%.2f%% (%.0f%% pullback)",
+                        self.pair, peak_pnl, pnl_pct, pullback_pct,
+                    )
+                    return self._do_exit(current_price, pnl_pct, "short", "PULLBACK", hold_seconds)
+
+            # ── 4. SIGNAL REVERSAL — exit early when in profit ─────────
+            if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
                 rsi_crossed_30 = rsi_now < self.RSI_REVERSAL_SHORT and self._prev_rsi >= self.RSI_REVERSAL_SHORT
                 momentum_reversed = momentum_60s > abs(self.MOMENTUM_REVERSAL_PCT)
 
-                if rsi_crossed_30 and pnl_pct >= self.MIN_TP_PCT:
+                if rsi_crossed_30:
                     soul_msg = _soul_check("exit reversal")
                     self.logger.info(
                         "[%s] RSI %.1f crossed below 30 at +%.2f%% — taking short profit | %s",
@@ -913,7 +928,7 @@ class ScalpStrategy(BaseStrategy):
                     )
                     return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-RSI", hold_seconds)
 
-                if momentum_reversed and pnl_pct >= self.MIN_TP_PCT:
+                if momentum_reversed:
                     soul_msg = _soul_check("exit reversal")
                     self.logger.info(
                         "[%s] Momentum flipped +%.3f%% at +%.2f%% — taking short profit | %s",
@@ -921,7 +936,7 @@ class ScalpStrategy(BaseStrategy):
                     )
                     return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-MOM", hold_seconds)
 
-            # ── 3. TRAILING STOP (dynamic distance) ──────────────────────
+            # ── 5. TRAILING STOP (dynamic distance) ──────────────────────
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
                 self._update_trail_distance(pnl_pct)
@@ -953,15 +968,11 @@ class ScalpStrategy(BaseStrategy):
                         self._trail_distance_pct, dist,
                     )
 
-            # ── 4. TIMEOUT ──────────────────────────────────────────────
-            # Never kill a winning trade with a clock.
-            # If trailing is active, the trail IS the exit — no timeout.
+            # ── 6. TIMEOUT — 5 min max (skip if trailing) ───────────────
             if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
                 return self._do_exit(current_price, pnl_pct, "short", "TIMEOUT", hold_seconds)
 
-            # ── 5. FLATLINE ─────────────────────────────────────────────
-            # Flatline still applies even to trailing trades — if price
-            # hasn't moved 0.10% in 15 min, momentum is dead.
+            # ── 7. FLATLINE — 2 min flat = momentum dead ────────────────
             if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
                 return self._do_exit(current_price, pnl_pct, "short", "FLAT", hold_seconds)
 
@@ -1129,6 +1140,95 @@ class ScalpStrategy(BaseStrategy):
 
         return amount
 
+    def _calculate_position_size_dynamic(
+        self, current_price: float, available: float,
+        signal_strength: int, total_open: int,
+    ) -> float | None:
+        """Dynamic capital allocation based on signal strength.
+
+        Instead of fixed % per position, allocate proportionally:
+        - Single position: up to 70% max of exchange capital
+        - Two positions: split based on relative signal strength
+        - Min allocation: 20% (below this, not worth the fees)
+        - Max allocation: 70% (don't put everything on one trade)
+        """
+        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+        if exchange_capital <= 0:
+            return None
+
+        MIN_ALLOC_PCT = 20.0
+        MAX_ALLOC_PCT = 70.0
+
+        if self.is_futures:
+            # For futures: allocate % of exchange capital as collateral
+            if total_open == 0:
+                # Solo position: strength determines allocation (2/4=50%, 3/4=60%, 4/4=70%)
+                alloc_pct = min(MAX_ALLOC_PCT, max(MIN_ALLOC_PCT, signal_strength * 17.5))
+            else:
+                # 2nd position: gets smaller share (remaining capital, capped)
+                alloc_pct = min(MAX_ALLOC_PCT - 30.0, max(MIN_ALLOC_PCT, signal_strength * 12.0))
+
+            budget = exchange_capital * (alloc_pct / 100)
+            budget = min(budget, available)
+
+            from alpha.trade_executor import DELTA_CONTRACT_SIZE
+            contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0)
+            if contract_size <= 0:
+                return None
+
+            one_contract_collateral = (contract_size * current_price) / self.leverage
+            if one_contract_collateral > budget:
+                if self._tick_count % 60 == 0:
+                    self.logger.info(
+                        "[%s] 1 contract needs $%.2f > $%.2f budget (%.0f%% alloc) — skipping",
+                        self.pair, one_contract_collateral, budget, alloc_pct,
+                    )
+                return None
+
+            # Cap at risk manager's max_position_pct
+            max_position_value = exchange_capital * (self.risk_manager.max_position_pct / 100)
+            budget = min(budget, max_position_value)
+
+            max_affordable = int(budget / one_contract_collateral)
+            contracts = max(1, min(max_affordable, self._max_contracts))
+            total_collateral = contracts * one_contract_collateral
+            amount = contracts * contract_size
+
+            self.logger.info(
+                "[%s] DynSize: %d contracts x %.4f = %.6f coin, "
+                "collateral=$%.2f (%dx), alloc=%.0f%% of $%.2f, strength=%d/4",
+                self.pair, contracts, contract_size, amount,
+                total_collateral, self.leverage, alloc_pct, exchange_capital,
+                signal_strength,
+            )
+        else:
+            # Spot: similar dynamic allocation
+            if total_open == 0:
+                alloc_pct = min(MAX_ALLOC_PCT, max(MIN_ALLOC_PCT, signal_strength * 17.5))
+            else:
+                alloc_pct = min(MAX_ALLOC_PCT - 30.0, max(MIN_ALLOC_PCT, signal_strength * 12.0))
+
+            capital = exchange_capital * (alloc_pct / 100)
+            capital = min(capital, available)
+
+            if capital < self.MIN_NOTIONAL_SPOT:
+                if self._tick_count % 60 == 0:
+                    self.logger.info(
+                        "[%s] Spot $%.2f < $%.2f min (%.0f%% alloc) — skipping",
+                        self.pair, capital, self.MIN_NOTIONAL_SPOT, alloc_pct,
+                    )
+                return None
+
+            amount = capital / current_price
+            self.logger.info(
+                "[%s] DynSize (spot): $%.2f → %.8f %s (%.0f%% of $%.2f, strength=%d/4)",
+                self.pair, capital, amount,
+                self.pair.split("/")[0] if "/" in self.pair else self.pair,
+                alloc_pct, exchange_capital, signal_strength,
+            )
+
+        return amount
+
     # ======================================================================
     # SIGNAL BUILDERS
     # ======================================================================
@@ -1236,6 +1336,17 @@ class ScalpStrategy(BaseStrategy):
     # POSITION MANAGEMENT
     # ======================================================================
 
+    def _is_any_scalp_losing(self) -> bool:
+        """Check if any open scalp position is currently in the red.
+
+        Uses the class-level _live_pnl dict which is updated every tick
+        by whichever scalp instance is managing that position.
+        """
+        for pair, pnl in ScalpStrategy._live_pnl.items():
+            if pair != self.pair and pnl < 0:
+                return True
+        return False
+
     def _open_position(self, side: str, price: float, amount: float = 0.0) -> None:
         self.in_position = True
         self.position_side = side
@@ -1275,22 +1386,45 @@ class ScalpStrategy(BaseStrategy):
         self.hourly_pnl += net_pnl
         self._daily_scalp_loss += net_pnl if net_pnl < 0 else 0
 
+        now = time.monotonic()
+
         if pnl_pct >= 0:
             self.hourly_wins += 1
+            # Win resets consecutive loss streak
+            ScalpStrategy._consecutive_losses = 0
         else:
             self.hourly_losses += 1
+            # Track consecutive losses (shared across all pairs)
+            ScalpStrategy._consecutive_losses += 1
 
-        hold_sec = int(time.monotonic() - self.entry_time)
+            # SL cooldown: pause all entries for 2 min after any SL
+            if exit_type.lower() == "sl":
+                ScalpStrategy._last_sl_time = now
+                self.logger.info(
+                    "[%s] SL COOLDOWN SET — no new entries for %ds (all pairs)",
+                    self.pair, self.SL_COOLDOWN_SECONDS,
+                )
+
+            # Streak pause: after N consecutive losses, longer pause
+            if ScalpStrategy._consecutive_losses >= self.CONSECUTIVE_LOSS_LIMIT:
+                ScalpStrategy._streak_pause_until = now + self.STREAK_PAUSE_SECONDS
+                self.logger.warning(
+                    "[%s] STREAK PAUSE — %d consecutive losses! Pausing %ds (all pairs)",
+                    self.pair, ScalpStrategy._consecutive_losses, self.STREAK_PAUSE_SECONDS,
+                )
+
+        hold_sec = int(now - self.entry_time)
         duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s" if hold_sec >= 60 else f"{hold_sec}s"
 
         # Log with fee breakdown for visibility
         fee_ratio = abs(gross_pnl / est_fees) if est_fees > 0 else 0
+        streak_tag = f" streak={ScalpStrategy._consecutive_losses}" if ScalpStrategy._consecutive_losses > 0 else ""
         self.logger.info(
             "[%s] CLOSED %s %+.2f%% price (%+.1f%% capital at %dx) | "
-            "Gross=$%.4f Net=$%.4f fees=$%.4f (%.1fx) | %s | W/L=%d/%d",
+            "Gross=$%.4f Net=$%.4f fees=$%.4f (%.1fx) | %s | W/L=%d/%d%s",
             self.pair, exit_type.upper(), pnl_pct, capital_pnl_pct, self.leverage,
             gross_pnl, net_pnl, est_fees, fee_ratio, duration,
-            self.hourly_wins, self.hourly_losses,
+            self.hourly_wins, self.hourly_losses, streak_tag,
         )
 
         self.in_position = False
@@ -1299,7 +1433,8 @@ class ScalpStrategy(BaseStrategy):
         self.entry_amount = 0.0
         self._trailing_active = False
         self._trail_distance_pct = self.TRAILING_DISTANCE_PCT
-        self._last_position_exit = time.monotonic()
+        self._last_position_exit = now
+        ScalpStrategy._live_pnl.pop(self.pair, None)  # clean up live P&L tracker
 
     # ======================================================================
     # STATS

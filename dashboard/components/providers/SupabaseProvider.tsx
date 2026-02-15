@@ -53,6 +53,7 @@ function normalizeTrade(raw: any): Trade {
   return {
     id: String(raw.id),
     timestamp: raw.opened_at ?? raw.timestamp ?? raw.created_at ?? '',
+    closed_at: raw.closed_at ?? null,
     pair: raw.pair ?? '',
     side: raw.side ?? 'buy',
     price: raw.entry_price ?? raw.price ?? 0,

@@ -58,6 +58,15 @@ const navItems = [
     ),
   },
   {
+    name: 'Top Trades',
+    href: '/leaderboard',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 2L12.09 7.26L18 8.27L14 12.14L14.81 18.02L10 15.77L5.19 18.02L6 12.14L2 8.27L7.91 7.26L10 2Z" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
     name: 'Analytics',
     href: '/analytics',
     icon: (
@@ -90,8 +99,8 @@ const navItems = [
 const bottomNavItems = [
   { name: 'Dashboard', href: '/', icon: navItems[0].icon },
   { name: 'Trades', href: '/trades', icon: navItems[1].icon },
-  { name: 'Strategies', href: '/strategies', icon: navItems[2].icon },
-  { name: 'Settings', href: '/settings', icon: navItems[4].icon },
+  { name: 'Top Trades', href: '/leaderboard', icon: navItems[3].icon },
+  { name: 'Settings', href: '/settings', icon: navItems[5].icon },
 ];
 
 export function Sidebar() {
