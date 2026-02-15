@@ -388,6 +388,19 @@ class AlphaBot:
                         entry_distance_pct = analysis.rsi - 55.0
                     else:
                         entry_distance_pct = 45.0 - analysis.rsi
+
+                    # Grab live signal state from the scalp strategy (1m data)
+                    scalp = self._scalp_strategies.get(pair)
+                    sig = scalp.last_signal_state if scalp else None
+                    sig_count = sig.get("strength", 0) if sig else 0
+                    sig_side = sig.get("side") if sig else None  # "long", "short", or None
+                    sig_reason = sig.get("reason") or ""
+                    # Parse individual signals from reason string like "LONG 3/4: MOM:+0.18% + VOL:1.5x + RSI:35<40"
+                    sig_mom = "MOM:" in sig_reason
+                    sig_vol = "VOL:" in sig_reason
+                    sig_rsi = "RSI:" in sig_reason
+                    sig_bb = "BB:" in sig_reason
+
                     await self.db.log_strategy_selection({
                         "timestamp": iso_now(),
                         "pair": pair,
@@ -414,6 +427,13 @@ class AlphaBot:
                         "direction": analysis.direction,
                         "strategy_selected": "scalp",
                         "reason": f"[{pair}] Scalp-only mode — all pairs use scalp strategy",
+                        # Signal state from 1m scalp strategy (dashboard reads these)
+                        "signal_count": sig_count,
+                        "signal_side": sig_side,
+                        "signal_mom": sig_mom,
+                        "signal_vol": sig_vol,
+                        "signal_rsi": sig_rsi,
+                        "signal_bb": sig_bb,
                     })
                 except Exception:
                     logger.debug("Failed to log strategy selection for %s", pair)

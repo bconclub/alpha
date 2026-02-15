@@ -61,11 +61,13 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
     : 'text-amber-400'
     : 'text-zinc-600';
 
-  const trendArrow = card.direction === 'bullish' ? '↑'
-    : card.direction === 'bearish' ? '↓'
+  // Arrow follows the 1h price change (not the 15m trend direction)
+  const h1 = card.priceChange1h;
+  const trendArrow = h1 != null && h1 > 0.05 ? '↑'
+    : h1 != null && h1 < -0.05 ? '↓'
     : '→';
-  const trendColor = card.direction === 'bullish' ? 'text-[#00c853]'
-    : card.direction === 'bearish' ? 'text-[#ff1744]'
+  const trendColor = h1 != null && h1 > 0.05 ? 'text-[#00c853]'
+    : h1 != null && h1 < -0.05 ? 'text-[#ff1744]'
     : 'text-zinc-400';
 
   const pos = card.activePosition;

@@ -5,15 +5,14 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { StrategyLog, Exchange, OpenPosition } from '@/lib/types';
 
-// ── Engine thresholds (Trend-Guided Sniper v4.2) ────────────────────
-const RSI_LONG_THRESHOLD = 40;        // standard (trend-guided: 45)
-const RSI_SHORT_THRESHOLD = 60;       // standard (trend-guided: 55)
-const RSI_TREND_LONG = 45;            // loosened when 15m is bullish
-const RSI_TREND_SHORT = 55;           // loosened when 15m is bearish
+// ── Engine thresholds (Focused Signal v5.4) ─────────────────────────
+// Used ONLY as fallback when DB doesn't have signal_count/signal_* fields
+const RSI_LONG_THRESHOLD = 40;
+const RSI_SHORT_THRESHOLD = 60;
 const MOMENTUM_MIN_PCT = 0.15;
 const VOL_SPIKE_RATIO = 1.2;
-const BB_TREND_UPPER = 0.85;          // top 15% of BB + bearish = short
-const BB_TREND_LOWER = 0.15;          // bottom 15% of BB + bullish = long
+const BB_TREND_UPPER = 0.85;
+const BB_TREND_LOWER = 0.15;
 
 interface IndicatorStatus {
   active: boolean;
@@ -31,17 +30,13 @@ interface TriggerInfo {
   currentPrice: number | null;
   bbUpper: number | null;
   bbLower: number | null;
-  // 15m trend direction (from engine)
+  // 15m trend direction (from engine, info only)
   trend: 'bullish' | 'bearish' | 'neutral';
-  // 4 indicators per side
-  longIndicators: IndicatorStatus[];
-  longCount: number;
-  longBlocked: boolean;
-  shortIndicators: IndicatorStatus[];
-  shortCount: number;
-  shortBlocked: boolean;
+  // Signal state from bot (or fallback calc)
+  signalSide: 'long' | 'short' | null;
+  indicators: IndicatorStatus[];   // 4 indicators for the active side
+  signalCount: number;
   // Overall
-  bestCount: number;
   overallStatus: string;
   statusColor: string;
   // Active position on this pair (if any)
@@ -50,11 +45,9 @@ interface TriggerInfo {
 
 /** Derive 15m trend direction — use DB field if present, else compute from DI/ADX. */
 function deriveTrend(log: StrategyLog): 'bullish' | 'bearish' | 'neutral' {
-  // Prefer the direction field written by the engine (after migration)
   if (log.direction === 'bullish' || log.direction === 'bearish' || log.direction === 'neutral') {
     return log.direction;
   }
-  // Fallback: replicate engine logic from plus_di / minus_di / adx
   const adx = log.adx ?? 0;
   const plusDi = log.plus_di ?? 0;
   const minusDi = log.minus_di ?? 0;
@@ -67,6 +60,11 @@ function deriveTrend(log: StrategyLog): 'bullish' | 'bearish' | 'neutral' {
   return 'neutral';
 }
 
+/**
+ * Build trigger info from strategy_log entry.
+ * Primary: reads signal_count/signal_* fields written by the bot (exact match).
+ * Fallback: recalculates from indicator values if fields are missing (old log entries).
+ */
 function computeTrigger(log: StrategyLog): TriggerInfo {
   const pair = log.pair;
   const exchange: Exchange = log.exchange ?? 'binance';
@@ -79,26 +77,54 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const bbUpper = log.bb_upper ?? null;
   const bbLower = log.bb_lower ?? null;
   const hasData = rsi != null;
-
-  // ── 15m trend direction ────────────────────────────────────────────
   const trend = deriveTrend(log);
-  const allowLong = trend === 'bullish' || trend === 'neutral';
-  const allowShort = trend === 'bearish' || trend === 'neutral';
 
-  // ── Trend-guided thresholds (v4.2) ─────────────────────────────────
-  // When 15m trend aligns, use looser RSI and momentum thresholds
-  const effRsiLong = trend === 'bullish' ? RSI_TREND_LONG : RSI_LONG_THRESHOLD;
-  const effRsiShort = trend === 'bearish' ? RSI_TREND_SHORT : RSI_SHORT_THRESHOLD;
+  // ── PRIMARY: use bot-written signal state if available ──────────────
+  const hasBotSignals = log.signal_count != null;
 
-  // ── Build 4 indicators for LONG ────────────────────────────────────
+  if (hasBotSignals) {
+    const signalCount = log.signal_count ?? 0;
+    const signalSide = (log.signal_side === 'long' || log.signal_side === 'short')
+      ? log.signal_side : null;
+
+    const indicators: IndicatorStatus[] = [
+      { active: log.signal_mom === true, label: 'MOM' },
+      { active: log.signal_vol === true, label: 'VOL' },
+      { active: log.signal_rsi === true, label: 'RSI' },
+      { active: log.signal_bb === true,  label: 'BB' },
+    ];
+
+    let overallStatus: string;
+    let statusColor: string;
+
+    if (!hasData) {
+      overallStatus = 'Awaiting data...';
+      statusColor = 'text-zinc-600';
+    } else if (signalCount >= 2) {
+      overallStatus = `${signalCount}/4 — TRADE READY`;
+      statusColor = 'text-[#00c853]';
+    } else if (signalCount === 1) {
+      overallStatus = '1/4 — Needs 1 more';
+      statusColor = 'text-[#ffd600]';
+    } else {
+      overallStatus = '0/4 — Scanning';
+      statusColor = 'text-zinc-500';
+    }
+
+    return {
+      pair, exchange, isFutures, hasData,
+      rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
+      trend, signalSide, indicators, signalCount,
+      overallStatus, statusColor,
+      activePosition: null,
+    };
+  }
+
+  // ── FALLBACK: recalculate from indicator values (old log entries) ────
   const longIndicators: IndicatorStatus[] = [];
   let longCount = 0;
 
-  // Momentum: any positive mom counts when 15m is bullish
-  const momBull = priceChangePct != null && (
-    priceChangePct >= MOMENTUM_MIN_PCT ||
-    (trend === 'bullish' && priceChangePct > 0)
-  );
+  const momBull = priceChangePct != null && priceChangePct >= MOMENTUM_MIN_PCT;
   longIndicators.push({ active: momBull, label: 'MOM' });
   if (momBull) longCount++;
 
@@ -107,32 +133,21 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   longIndicators.push({ active: volBull, label: 'VOL' });
   if (volBull) longCount++;
 
-  const rsiLong = rsi != null && rsi < effRsiLong;
+  const rsiLong = rsi != null && rsi < RSI_LONG_THRESHOLD;
   longIndicators.push({ active: rsiLong, label: 'RSI' });
   if (rsiLong) longCount++;
 
-  // BB: includes trend+BB confluence (bullish + price near BB lower)
   const bbRange = (bbUpper ?? 0) - (bbLower ?? 0);
   const bbPos = bbRange > 0 && currentPrice != null && bbLower != null
     ? (currentPrice - bbLower) / bbRange : 0.5;
-  const bbBreakLong = currentPrice != null && (
-    (bbUpper != null && currentPrice > bbUpper) ||
-    (trend === 'bullish' && bbPos < BB_TREND_LOWER)
-  );
-  longIndicators.push({ active: bbBreakLong, label: 'BB' });
-  if (bbBreakLong) longCount++;
+  const bbLongActive = bbPos <= BB_TREND_LOWER;
+  longIndicators.push({ active: bbLongActive, label: 'BB' });
+  if (bbLongActive) longCount++;
 
-  const longBlocked = longCount >= 2 && !allowLong;
-
-  // ── Build 4 indicators for SHORT ───────────────────────────────────
   const shortIndicators: IndicatorStatus[] = [];
   let shortCount = 0;
 
-  // Momentum: any negative mom counts when 15m is bearish
-  const momBear = priceChangePct != null && (
-    priceChangePct <= -MOMENTUM_MIN_PCT ||
-    (trend === 'bearish' && priceChangePct < 0)
-  );
+  const momBear = priceChangePct != null && priceChangePct <= -MOMENTUM_MIN_PCT;
   shortIndicators.push({ active: momBear, label: 'MOM' });
   if (momBear) shortCount++;
 
@@ -140,27 +155,22 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   shortIndicators.push({ active: volBear, label: 'VOL' });
   if (volBear) shortCount++;
 
-  const rsiShort = rsi != null && rsi > effRsiShort;
+  const rsiShort = rsi != null && rsi > RSI_SHORT_THRESHOLD;
   shortIndicators.push({ active: rsiShort, label: 'RSI' });
   if (rsiShort) shortCount++;
 
-  // BB: includes trend+BB confluence (bearish + price near BB upper)
-  const bbBreakShort = currentPrice != null && (
-    (bbLower != null && currentPrice < bbLower) ||
-    (trend === 'bearish' && bbPos > BB_TREND_UPPER)
-  );
-  shortIndicators.push({ active: bbBreakShort, label: 'BB' });
-  if (bbBreakShort) shortCount++;
+  const bbShortActive = isFutures && bbPos >= BB_TREND_UPPER;
+  shortIndicators.push({ active: bbShortActive, label: 'BB' });
+  if (bbShortActive) shortCount++;
 
-  const shortBlocked = shortCount >= 2 && !allowShort;
-
-  // ── Overall status (accounts for trend guidance) ───────────────────
-  const bestCount = isFutures ? Math.max(longCount, shortCount) : longCount;
-
-  // Effective count: the best side that is NOT blocked by trend
-  const effectiveLong = allowLong ? longCount : 0;
-  const effectiveShort = isFutures ? (allowShort ? shortCount : 0) : 0;
-  const effectiveBest = Math.max(effectiveLong, effectiveShort);
+  // Pick the stronger side
+  const bestLong = longCount;
+  const bestShort = isFutures ? shortCount : 0;
+  const signalCount = Math.max(bestLong, bestShort);
+  const signalSide = bestLong >= bestShort
+    ? (bestLong > 0 ? 'long' as const : null)
+    : (bestShort > 0 ? 'short' as const : null);
+  const indicators = bestLong >= bestShort ? longIndicators : shortIndicators;
 
   let overallStatus: string;
   let statusColor: string;
@@ -168,14 +178,10 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   if (!hasData) {
     overallStatus = 'Awaiting data...';
     statusColor = 'text-zinc-600';
-  } else if (bestCount >= 2 && effectiveBest < 2) {
-    // Signals ready but counter-trend — still blocked
-    overallStatus = `${bestCount}/4 — COUNTER-TREND`;
-    statusColor = 'text-[#ff9100]';
-  } else if (effectiveBest >= 2) {
-    overallStatus = `${effectiveBest}/4 — TRADE READY`;
+  } else if (signalCount >= 2) {
+    overallStatus = `${signalCount}/4 — TRADE READY`;
     statusColor = 'text-[#00c853]';
-  } else if (bestCount === 1) {
+  } else if (signalCount === 1) {
     overallStatus = '1/4 — Needs 1 more';
     statusColor = 'text-[#ffd600]';
   } else {
@@ -186,21 +192,19 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   return {
     pair, exchange, isFutures, hasData,
     rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
-    trend,
-    longIndicators, longCount, longBlocked,
-    shortIndicators, shortCount, shortBlocked,
-    bestCount, overallStatus, statusColor,
-    activePosition: null,  // populated later in component
+    trend, signalSide, indicators, signalCount,
+    overallStatus, statusColor,
+    activePosition: null,
   };
 }
 
-// ── Signal bar (fills based on signal count, not RSI) ─────────────────
+// ── Signal bar (fills based on signal count) ────────────────────────────
 function SignalBar({ count }: { count: number }) {
   const filled = (count / 4) * 100;
   const color =
-    count >= 2 ? '#00c853' :   // green — trade ready
-    count === 1 ? '#ffd600' :  // yellow — 1 signal
-    '#71717a';                 // gray — nothing
+    count >= 2 ? '#00c853' :
+    count === 1 ? '#ffd600' :
+    '#71717a';
 
   return (
     <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
@@ -237,9 +241,9 @@ function Dot({ active, label }: { active: boolean; label: string }) {
 // ── Trend badge ─────────────────────────────────────────────────────
 function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | 'neutral' }) {
   const cfg = {
-    bullish:  { icon: '↑', label: '15m Bull', color: 'text-[#00c853]', bg: 'bg-[#00c853]/10' },
-    bearish:  { icon: '↓', label: '15m Bear', color: 'text-[#ff1744]', bg: 'bg-[#ff1744]/10' },
-    neutral:  { icon: '→', label: '15m Flat', color: 'text-zinc-400',  bg: 'bg-zinc-700/30' },
+    bullish:  { icon: '\u2191', label: '15m Bull', color: 'text-[#00c853]', bg: 'bg-[#00c853]/10' },
+    bearish:  { icon: '\u2193', label: '15m Bear', color: 'text-[#ff1744]', bg: 'bg-[#ff1744]/10' },
+    neutral:  { icon: '\u2192', label: '15m Flat', color: 'text-zinc-400',  bg: 'bg-zinc-700/30' },
   }[trend];
 
   return (
@@ -252,37 +256,33 @@ function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | 'neutral' }) {
   );
 }
 
-// ── Side row: bar + dots underneath ──────────────────────────────────
-function SideRow({
+// ── Signal row: side label + bar + dots ──────────────────────────────
+function SignalRow({
   side,
   indicators,
   count,
-  blocked,
 }: {
-  side: 'Long' | 'Short';
+  side: string;
   indicators: IndicatorStatus[];
   count: number;
-  blocked: boolean;
 }) {
-  const countColor = blocked
-    ? 'text-[#ff9100]'
-    : count >= 2 ? 'text-[#00c853]'
+  const countColor = count >= 2 ? 'text-[#00c853]'
     : count === 1 ? 'text-[#ffd600]'
     : 'text-zinc-600';
 
-  const suffix = blocked ? `${count}/4 ✕` : count >= 2 ? `${count}/4 ✓` : `${count}/4`;
+  const suffix = count >= 2 ? `${count}/4 \u2713` : `${count}/4`;
 
   return (
-    <div className={cn('space-y-1', blocked && 'opacity-50')}>
-      {/* Bar row — fills based on signal count */}
+    <div className="space-y-1">
+      {/* Bar row */}
       <div className="flex items-center gap-2">
         <span className="text-[10px] text-zinc-500 w-8 shrink-0">{side}</span>
-        <SignalBar count={blocked ? 0 : count} />
+        <SignalBar count={count} />
         <span className={cn('text-[10px] font-mono w-16 text-right', countColor)}>
           {suffix}
         </span>
       </div>
-      {/* Dots row (aligned under the bar) */}
+      {/* Dots row */}
       <div className="flex items-center gap-2 ml-10">
         <div className="flex items-center gap-2">
           {indicators.map((ind, i) => (
@@ -324,7 +324,6 @@ export function TriggerProximity() {
     const results: TriggerInfo[] = [];
     for (const log of Array.from(latestByPair.values())) {
       const trigger = computeTrigger(log);
-      // Attach active position if one exists for this pair+exchange
       const asset = extractBaseAsset(trigger.pair);
       const posKey = `${asset}-${trigger.exchange}`;
       trigger.activePosition = positionMap.get(posKey) ?? null;
@@ -334,7 +333,7 @@ export function TriggerProximity() {
     results.sort((a, b) => {
       if (a.hasData && !b.hasData) return -1;
       if (!a.hasData && b.hasData) return 1;
-      return b.bestCount - a.bestCount;
+      return b.signalCount - a.signalCount;
     });
 
     return results;
@@ -358,6 +357,11 @@ export function TriggerProximity() {
             const posState = t.activePosition?.position_state;
             const posPnl = t.activePosition?.current_pnl;
             const isTrailing = posState === 'trailing';
+
+            // Side label for the signal row
+            const sideLabel = t.signalSide === 'long' ? 'Long'
+              : t.signalSide === 'short' ? 'Short'
+              : 'Scan';
 
             return (
             <div
@@ -412,22 +416,12 @@ export function TriggerProximity() {
 
               {t.hasData ? (
                 <div className={cn('space-y-2.5', hasActivePos && 'opacity-40')}>
-                  {/* Long: bar + dots */}
-                  <SideRow
-                    side="Long"
-                    indicators={t.longIndicators}
-                    count={t.longCount}
-                    blocked={t.longBlocked}
+                  {/* Signal row: shows the active side's signals */}
+                  <SignalRow
+                    side={sideLabel}
+                    indicators={t.indicators}
+                    count={t.signalCount}
                   />
-                  {/* Short: bar + dots (futures only) */}
-                  {t.isFutures && (
-                    <SideRow
-                      side="Short"
-                      indicators={t.shortIndicators}
-                      count={t.shortCount}
-                      blocked={t.shortBlocked}
-                    />
-                  )}
                   {/* Compact values */}
                   <div className="flex gap-3 pt-1 border-t border-zinc-800/50">
                     {t.rsi != null && (
