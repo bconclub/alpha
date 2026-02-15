@@ -21,9 +21,13 @@ interface TriggerInfo {
   hasIndicatorData: boolean;
 }
 
-// Thresholds matching engine: momentum buy < 35, short > 65
-const RSI_BUY_THRESHOLD = 35;
-const RSI_SHORT_THRESHOLD = 65;
+// Thresholds matching engine's Quality Sniper v3.1 (2-of-4 confirmation):
+//   Engine entry requires RSI < 30 (long) or RSI > 70 (short)
+//   PLUS a second confirmation (momentum 0.3%+, volume 2x+, or BB breakout).
+//   Dashboard shows proximity to the RSI threshold only — the second signal
+//   is checked by the engine at trade time.
+const RSI_BUY_THRESHOLD = 30;
+const RSI_SHORT_THRESHOLD = 70;
 
 function computeTrigger(log: StrategyLog): TriggerInfo {
   const pair = log.pair;
@@ -67,17 +71,18 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     }
   }
 
-  // Build trigger text: "RSI=72 → need <35 for long (far) | need >65 for short (READY ⚡)"
+  // Build trigger text: "RSI=72 → need <30 for long (far) | need >70 for short (READY — needs 2nd signal)"
   let triggerText = 'Awaiting indicator data...';
   let overallStatus = 'Watching';
   let statusColor = 'text-zinc-400';
 
   if (rsi != null) {
+    // "READY" means RSI threshold met, but engine still needs a 2nd confirmation
     const longLabel = longReady
-      ? 'READY ⚡'
+      ? 'RSI ✓ (needs 2nd)'
       : longDistancePct < 25 ? 'close' : 'far';
     const shortLabel = shortReady
-      ? 'READY ⚡'
+      ? 'RSI ✓ (needs 2nd)'
       : shortDistancePct < 25 ? 'close' : 'far';
 
     const parts: string[] = [];
@@ -93,8 +98,9 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
       : longDistancePct;
 
     if (longReady || shortReady) {
-      overallStatus = 'Signal Ready ⚡';
-      statusColor = 'text-[#00c853]';
+      // RSI threshold met but engine needs 2-of-4 confirmation
+      overallStatus = 'RSI Ready — needs 2nd signal';
+      statusColor = 'text-[#ffd600]';  // yellow — not guaranteed trade
     } else if (closestDist < 25) {
       overallStatus = 'Getting Close';
       statusColor = 'text-[#ffd600]';
@@ -123,8 +129,9 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
 
 function ProximityBar({ distance, label, ready }: { distance: number; label: string; ready: boolean }) {
   const filled = ready ? 100 : Math.max(0, Math.min(100, 100 - distance));
+  // Yellow when RSI ready (still needs 2nd confirmation), not green
   const color = ready
-    ? '#00c853'
+    ? '#ffd600'
     : distance < 25
       ? '#ffd600'
       : '#ff1744';
@@ -138,8 +145,8 @@ function ProximityBar({ distance, label, ready }: { distance: number; label: str
           style={{ width: `${filled}%`, backgroundColor: color }}
         />
       </div>
-      <span className="text-[10px] font-mono text-zinc-500 w-16 text-right">
-        {ready ? 'READY ⚡' : `${distance.toFixed(0)}% away`}
+      <span className="text-[10px] font-mono text-zinc-500 w-20 text-right">
+        {ready ? 'RSI ✓' : `${distance.toFixed(0)}% away`}
       </span>
     </div>
   );

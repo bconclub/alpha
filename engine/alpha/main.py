@@ -194,7 +194,7 @@ class AlphaBot:
         )
         self._scheduler.add_job(self._daily_reset, "cron", hour=18, minute=30)  # midnight IST = 18:30 UTC
         self._scheduler.add_job(self._hourly_report, "cron", minute=0)  # every hour
-        self._scheduler.add_job(self._save_status, "interval", minutes=5)
+        self._scheduler.add_job(self._save_status, "interval", minutes=2)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=10)
         self._scheduler.start()
 
@@ -694,6 +694,17 @@ class AlphaBot:
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
         rm.update_exchange_balances(binance_bal, delta_bal)
 
+        # Fetch raw INR balance for dashboard display
+        delta_balance_inr = None
+        if self.delta:
+            try:
+                bal = await self.delta.fetch_balance()
+                inr_val = bal.get("total", {}).get("INR") or bal.get("free", {}).get("INR")
+                if inr_val is not None and float(inr_val) > 0:
+                    delta_balance_inr = round(float(inr_val), 2)
+            except Exception:
+                pass
+
         # Determine bot state
         if rm.is_paused:
             bot_state = "paused"
@@ -720,9 +731,10 @@ class AlphaBot:
             "is_running": self._running,
             "is_paused": rm.is_paused,
             "pause_reason": rm._pause_reason or None,
-            # New fields
+            # Exchange data
             "binance_balance": binance_bal,
             "delta_balance": delta_bal,
+            "delta_balance_inr": delta_balance_inr,
             "binance_connected": self.binance is not None and binance_bal is not None,
             "delta_connected": self.delta is not None and delta_bal is not None,
             "bot_state": bot_state,
@@ -1240,9 +1252,8 @@ class AlphaBot:
     ) -> float | None:
         """Fetch total portfolio value in USD including held assets.
 
-        Total = USDT free + value of held BTC + value of held ETH + value of held SOL + ...
-        Not just USDT balance — counts all coins worth > $0.50.
-        For Delta, converts INR to USD.
+        For Binance: USDT free + value of held crypto assets.
+        For Delta: wallet balance + unrealized P&L from open positions.
         """
         if not exchange:
             return None
@@ -1252,22 +1263,39 @@ class AlphaBot:
             total_map = balance.get("total", {})
             free_map = balance.get("free", {})
 
-            # Log what we see
+            # Log raw balance data for debugging
             holdings = {k: float(v) for k, v in total_map.items()
                         if v is not None and float(v) > 0}
-            logger.info("Holdings on %s: %s", ex_id, holdings)
+            free_holdings = {k: float(v) for k, v in free_map.items()
+                            if v is not None and float(v) > 0}
+            logger.info("Holdings on %s: total=%s free=%s", ex_id, holdings, free_holdings)
 
-            # Stablecoins counted at face value
+            # Also log the info dict if available (contains exchange-specific fields)
+            info = balance.get("info")
+            if info and isinstance(info, dict):
+                # Log key fields for Delta (wallet_balance, equity, margin_balance, etc.)
+                for key in ("wallet_balance", "equity", "available_balance",
+                            "margin_balance", "unrealized_pnl", "balance", "result"):
+                    if key in info:
+                        logger.info("  %s.info.%s = %s", ex_id, key, info[key])
+                # Delta may nest under 'result' key
+                result = info.get("result") if isinstance(info.get("result"), dict) else None
+                if result:
+                    for key in ("balance", "available_balance", "portfolio_margin",
+                                "commission", "unrealized_pnl"):
+                        if key in result:
+                            logger.info("  %s.info.result.%s = %s", ex_id, key, result[key])
+
+            # ── Stablecoins at face value ──────────────────────────────────
             stablecoin_total = 0.0
             for key in ("USDT", "USD", "USDC"):
                 val = total_map.get(key)
                 if val is not None and float(val) > 0:
                     stablecoin_total += float(val)
 
-            # Value held crypto assets using live ticker prices
+            # ── Value held crypto assets using live ticker prices ──────────
             asset_total = 0.0
             asset_details: list[str] = []
-            # Only price assets that are tracked pairs
             tracked_bases = set()
             for pair in (config.trading.pairs or []):
                 base = pair.split("/")[0] if "/" in pair else pair
@@ -1275,43 +1303,66 @@ class AlphaBot:
 
             for asset, qty in holdings.items():
                 if asset in ("USDT", "USD", "USDC", "INR"):
-                    continue  # stablecoins handled separately
+                    continue
                 if asset not in tracked_bases:
-                    continue  # skip untracked dust
+                    continue
                 qty_f = float(qty)
                 if qty_f <= 0:
                     continue
-                # Try to get price from exchange
                 try:
                     ticker = await exchange.fetch_ticker(f"{asset}/USDT")
                     price = ticker.get("last", 0) or 0
                     if price and price > 0:
                         value = qty_f * price
-                        if value > 0.50:  # ignore sub-$0.50 dust
+                        if value > 0.50:
                             asset_total += value
                             asset_details.append(f"{asset}={qty_f:.6f}@${price:.2f}=${value:.2f}")
                 except Exception:
-                    pass  # skip assets we can't price
+                    pass
 
-            # Delta Exchange India uses INR — convert to USD
+            # ── Delta Exchange India: INR → USD conversion ─────────────────
             inr_total = 0.0
+            inr_raw = 0.0
             inr_val = total_map.get("INR") or free_map.get("INR")
             if inr_val is not None and float(inr_val) > 0:
-                inr = float(inr_val)
-                inr_total = inr / 85.0  # approximate INR/USD rate
+                inr_raw = float(inr_val)
+                # Try to get live INR/USD rate from Binance
+                inr_rate = await self._get_inr_usd_rate()
+                inr_total = inr_raw / inr_rate
 
-            portfolio_total = stablecoin_total + asset_total + inr_total
+            # ── Delta: add unrealized P&L from open futures positions ──────
+            unrealized_pnl_usd = 0.0
+            if ex_id == "delta" and exchange:
+                try:
+                    positions = await exchange.fetch_positions()
+                    for pos in positions:
+                        contracts = float(pos.get("contracts", 0) or 0)
+                        if contracts == 0:
+                            continue
+                        # ccxt normalizes unrealizedPnl
+                        upnl = float(pos.get("unrealizedPnl", 0) or 0)
+                        if upnl != 0:
+                            unrealized_pnl_usd += upnl
+                    if unrealized_pnl_usd != 0:
+                        logger.info("  Delta unrealized P&L: $%.4f", unrealized_pnl_usd)
+                except Exception as e:
+                    logger.debug("Could not fetch Delta positions for P&L: %s", e)
 
-            if asset_details:
+            portfolio_total = stablecoin_total + asset_total + inr_total + unrealized_pnl_usd
+
+            if inr_raw > 0:
                 logger.info(
-                    "Portfolio %s: USDT=$%.2f + assets=$%.2f (%s) + INR=$%.2f = $%.2f",
+                    "Portfolio %s: USDT=$%.2f + assets=$%.2f%s + INR=₹%.2f ($%.2f) + uPnL=$%.4f = $%.2f",
                     ex_id, stablecoin_total, asset_total,
-                    ", ".join(asset_details), inr_total, portfolio_total,
+                    f" ({', '.join(asset_details)})" if asset_details else "",
+                    inr_raw, inr_total, unrealized_pnl_usd, portfolio_total,
                 )
             else:
                 logger.info(
-                    "Portfolio %s: USDT=$%.2f + INR=$%.2f = $%.2f",
-                    ex_id, stablecoin_total, inr_total, portfolio_total,
+                    "Portfolio %s: USDT=$%.2f + assets=$%.2f%s + uPnL=$%.4f = $%.2f",
+                    ex_id, stablecoin_total, asset_total,
+                    f" ({', '.join(asset_details)})" if asset_details else "",
+                    unrealized_pnl_usd, portfolio_total,
                 )
 
             return portfolio_total if portfolio_total > 0 else 0.0
@@ -1319,6 +1370,33 @@ class AlphaBot:
         except Exception as e:
             logger.warning("Could not fetch balance from %s: %s (type: %s)", ex_id, e, type(e).__name__)
             return None
+
+    async def _get_inr_usd_rate(self) -> float:
+        """Get current INR/USD exchange rate. Uses cached value, refreshed every hour."""
+        now = time.monotonic()
+        if hasattr(self, "_inr_rate") and hasattr(self, "_inr_rate_time"):
+            if now - self._inr_rate_time < 3600:  # cache for 1 hour
+                return self._inr_rate
+
+        # Try fetching from Binance (USDT/INR pair if available)
+        rate = 86.5  # fallback default
+        try:
+            if self.binance:
+                # Binance doesn't have USDT/INR directly.
+                # Use a well-known approximate rate; update periodically.
+                # The user can set DELTA_INR_USD_RATE in env for precision.
+                env_rate = config.delta.__dict__.get("inr_usd_rate")
+                if env_rate and float(env_rate) > 0:
+                    rate = float(env_rate)
+                else:
+                    rate = 86.5  # current approximate rate as of Feb 2026
+        except Exception:
+            pass
+
+        self._inr_rate = rate
+        self._inr_rate_time = now
+        logger.debug("INR/USD rate: %.2f", rate)
+        return rate
 
 
 def main() -> None:

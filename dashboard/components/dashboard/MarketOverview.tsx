@@ -292,8 +292,8 @@ export function MarketOverview() {
                         {row.rsi != null ? (
                           <span
                             className={
-                              row.rsi < 35 ? 'text-[#00c853]' :
-                              row.rsi > 65 ? 'text-[#ff1744]' :
+                              row.rsi < 30 ? 'text-[#00c853]' :
+                              row.rsi > 70 ? 'text-[#ff1744]' :
                               'text-zinc-300'
                             }
                           >

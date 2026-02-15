@@ -71,11 +71,12 @@ export function LiveStatusBar() {
     return strategies.size || 1;
   }, [activeStrategiesCount, trades]);
 
-  // Heartbeat freshness
+  // Heartbeat freshness — bot saves status every 5 minutes,
+  // so allow up to 7 min before marking stale (5 min interval + network/clock drift)
   const lastHeartbeat = botStatus?.timestamp;
   const isStale = useMemo(() => {
     if (!lastHeartbeat) return true;
-    return Date.now() - new Date(lastHeartbeat).getTime() > 120_000;
+    return Date.now() - new Date(lastHeartbeat).getTime() > 420_000; // 7 minutes
   }, [lastHeartbeat]);
 
   return (
