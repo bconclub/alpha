@@ -517,24 +517,40 @@ class AlphaBot:
     # -- Scheduled jobs --------------------------------------------------------
 
     async def _daily_reset(self) -> None:
-        """Midnight reset: send daily summary, reset daily P&L."""
+        """Midnight reset: send daily summary, reset daily P&L.
+
+        Trade stats are queried from the DATABASE, not in-memory counters.
+        This survives bot restarts and is the single source of truth.
+        """
         logger.info("Daily reset triggered")
         rm = self.risk_manager
 
-        # Count today's wins and losses
-        total = len(rm.trade_results)
-        wins = sum(1 for w in rm.trade_results if w)
-        losses = total - wins
-
-        # Find best and worst trades from daily pnl by pair
-        pnl_map = dict(rm.daily_pnl_by_pair)
-        best_trade = None
-        worst_trade = None
-        if pnl_map:
-            best_pair = max(pnl_map, key=pnl_map.get)  # type: ignore[arg-type]
-            worst_pair = min(pnl_map, key=pnl_map.get)  # type: ignore[arg-type]
-            best_trade = {"pair": best_pair, "pnl": pnl_map[best_pair]}
-            worst_trade = {"pair": worst_pair, "pnl": pnl_map[worst_pair]}
+        # Query today's trade stats from DB (survives restarts)
+        if self.db is not None:
+            today_stats = await self.db.get_today_trade_stats()
+            total = today_stats["total_trades"]
+            wins = today_stats["wins"]
+            losses = today_stats["losses"]
+            daily_pnl = today_stats["daily_pnl"]
+            win_rate = today_stats["win_rate"]
+            pnl_map = today_stats["pnl_by_pair"]
+            best_trade = today_stats["best_trade"]
+            worst_trade = today_stats["worst_trade"]
+        else:
+            # Fallback to in-memory (should never happen)
+            total = len(rm.trade_results)
+            wins = sum(1 for w in rm.trade_results if w)
+            losses = total - wins
+            daily_pnl = rm.daily_pnl
+            win_rate = rm.win_rate
+            pnl_map = dict(rm.daily_pnl_by_pair)
+            best_trade = None
+            worst_trade = None
+            if pnl_map:
+                best_pair = max(pnl_map, key=pnl_map.get)  # type: ignore[arg-type]
+                worst_pair = min(pnl_map, key=pnl_map.get)  # type: ignore[arg-type]
+                best_trade = {"pair": best_pair, "pnl": pnl_map[best_pair]}
+                worst_trade = {"pair": worst_pair, "pnl": pnl_map[worst_pair]}
 
         # Fetch live exchange balances
         binance_bal = await self._fetch_portfolio_usd(self.binance)
@@ -547,8 +563,8 @@ class AlphaBot:
             total_trades=total,
             wins=wins,
             losses=losses,
-            win_rate=rm.win_rate,
-            daily_pnl=rm.daily_pnl,
+            win_rate=win_rate,
+            daily_pnl=daily_pnl,
             capital=total_capital,
             pnl_by_pair=pnl_map,
             best_trade=best_trade,

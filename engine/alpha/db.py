@@ -338,6 +338,76 @@ class Database:
             "total_trades": total_trades,
         }
 
+    async def get_today_trade_stats(self) -> dict[str, Any]:
+        """Query today's closed trade stats (IST timezone).
+
+        Returns dict with total_trades, wins, losses, daily_pnl, pnl_by_pair,
+        best_trade, worst_trade. This survives bot restarts — reads from DB.
+        """
+        if not self.is_connected:
+            return {
+                "total_trades": 0, "wins": 0, "losses": 0,
+                "daily_pnl": 0.0, "pnl_by_pair": {},
+                "best_trade": None, "worst_trade": None,
+            }
+
+        loop = asyncio.get_running_loop()
+
+        # Get start of today in IST (UTC+5:30)
+        from datetime import datetime, timezone, timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now_ist = datetime.now(ist)
+        today_start_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = today_start_ist.astimezone(timezone.utc).isoformat()
+
+        result = await loop.run_in_executor(
+            None,
+            lambda: (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("pair, pnl")
+                .eq("status", "closed")
+                .gte("closed_at", today_start_utc)
+                .execute()
+            ),
+        )
+        rows = result.data or []
+
+        total_trades = len(rows)
+        daily_pnl = 0.0
+        wins = 0
+        losses = 0
+        pnl_by_pair: dict[str, float] = {}
+
+        for r in rows:
+            pnl_val = float(r.get("pnl", 0) or 0)
+            pair = r.get("pair", "unknown")
+            daily_pnl += pnl_val
+            pnl_by_pair[pair] = pnl_by_pair.get(pair, 0.0) + pnl_val
+            if pnl_val >= 0:
+                wins += 1
+            else:
+                losses += 1
+
+        win_rate = round((wins / total_trades * 100), 2) if total_trades > 0 else -1.0
+        best_trade = None
+        worst_trade = None
+        if pnl_by_pair:
+            best_pair = max(pnl_by_pair, key=pnl_by_pair.get)  # type: ignore[arg-type]
+            worst_pair = min(pnl_by_pair, key=pnl_by_pair.get)  # type: ignore[arg-type]
+            best_trade = {"pair": best_pair, "pnl": pnl_by_pair[best_pair]}
+            worst_trade = {"pair": worst_pair, "pnl": pnl_by_pair[worst_pair]}
+
+        return {
+            "total_trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "daily_pnl": daily_pnl,
+            "win_rate": win_rate,
+            "pnl_by_pair": pnl_by_pair,
+            "best_trade": best_trade,
+            "worst_trade": worst_trade,
+        }
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     async def _insert(self, table: str, data: dict[str, Any]) -> None:
