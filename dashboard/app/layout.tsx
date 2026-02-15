@@ -18,14 +18,14 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className="bg-[#0d1117] text-white antialiased overflow-x-hidden">
+      <body className="bg-[#0d1117] text-white antialiased">
         <SupabaseProvider>
-          <div className="min-h-screen flex overflow-x-hidden">
+          <div className="min-h-screen">
             {/* Left sidebar */}
             <Sidebar />
 
             {/* Main content — offset by sidebar width on desktop */}
-            <main className="flex-1 ml-0 md:ml-56 min-h-screen pt-14 md:pt-0 pb-16 md:pb-0">
+            <main className="ml-0 md:ml-56 min-h-screen pt-14 md:pt-0 pb-16 md:pb-0 w-auto">
               <div className="max-w-[1920px] mx-auto px-3 py-3 md:px-5 md:py-4">
                 {children}
               </div>
