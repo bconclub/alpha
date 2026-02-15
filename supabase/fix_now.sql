@@ -103,11 +103,27 @@ do $$ begin
 exception when duplicate_object then null;
 end $$;
 
--- ── 9. Verify: check what pairs exist in strategy_log ──
+-- ── 9. Close ghost/orphaned open trades ──
+-- Any trade open for 2+ hours is stuck — the bot max hold is 30 min.
+-- Mark them as cancelled so they stop showing as active positions.
+update public.trades
+set    status = 'cancelled',
+       reason = coalesce(reason, '') || ' [auto-closed: orphaned]',
+       closed_at = now()
+where  status = 'open'
+  and  opened_at < now() - interval '2 hours';
+
+-- ── 10. Verify: check what pairs exist in strategy_log ──
 select pair, exchange, count(*) as rows, max(created_at) as latest
 from public.strategy_log
 group by pair, exchange
 order by pair;
+
+-- ── 11. Verify: check remaining open trades (should only be real active ones) ──
+select id, pair, side, entry_price, strategy, exchange, position_type, opened_at
+from public.trades
+where status = 'open'
+order by opened_at desc;
 
 -- Done! If SOL/XRP rows appear above, the dashboard will show them.
 -- If only BTC/ETH appear, the engine isn't logging SOL/XRP (check VPS logs).

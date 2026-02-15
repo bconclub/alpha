@@ -48,12 +48,16 @@ export function LiveStatusBar() {
   const binancePnl = pnlByExchange.find((e) => e.exchange === 'binance');
   const deltaPnl = pnlByExchange.find((e) => e.exchange === 'delta');
 
-  const binanceBalance = botStatus?.binance_balance || 0;
-  const deltaBalance = botStatus?.delta_balance || 0;
+  const binanceBalance = Number(botStatus?.binance_balance ?? 0);
+  const deltaBalance = Number(botStatus?.delta_balance ?? 0);
   const deltaBalanceInr = botStatus?.delta_balance_inr;
 
-  // Total capital: sum of actual exchange balances (capital field is just initial config)
-  const totalCapital = (binanceBalance + deltaBalance) || botStatus?.capital || 0;
+  // Total capital: sum of actual exchange balances (fall back to config 'capital' field)
+  const hasFreshBalance = binanceBalance > 0 || deltaBalance > 0;
+  const totalCapital = hasFreshBalance ? (binanceBalance + deltaBalance) : (botStatus?.capital || 0);
+
+  // Open positions count for display
+  const openPositionCount = botStatus?.open_positions ?? 0;
 
   const shortingEnabled = botStatus?.shorting_enabled ?? false;
   const leverageLevel = botStatus?.leverage ?? botStatus?.leverage_level ?? 1;
@@ -169,6 +173,14 @@ export function LiveStatusBar() {
           <span className="font-mono text-base md:text-xl font-bold text-white truncate max-w-full">
             {formatCurrency(totalCapital)}
           </span>
+          {hasFreshBalance && (
+            <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-400">
+              <span>Available: {formatCurrency(deltaBalance)}</span>
+              {openPositionCount > 0 && (
+                <span className="text-amber-400">{openPositionCount} pos</span>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-3 mt-1">
             <span
               className={cn(

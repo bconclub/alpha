@@ -134,11 +134,15 @@ export function MarketOverview() {
   const { strategyLog, openPositions } = useSupabase();
 
   const assetCards = useMemo(() => {
+    // Only show our 4 active trading pairs (filter out stale BNB/DOGE/etc.)
+    const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
+
     // Group latest strategy_log by base asset, prefer Delta exchange
     const latestByAsset = new Map<string, StrategyLog>();
     for (const log of strategyLog) {
       if (!log.pair) continue;
       const asset = extractBaseAsset(log.pair);
+      if (!ACTIVE_ASSETS.has(asset)) continue;
       const existing = latestByAsset.get(asset);
       if (!existing) {
         latestByAsset.set(asset, log);
