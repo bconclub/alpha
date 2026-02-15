@@ -68,32 +68,39 @@ export function LiveStatusBar() {
   const totalPnL = botStatus?.total_pnl ?? 0;
   const winRate = botStatus?.win_rate ?? 0;
 
-  // Today's P&L — sum of closed trades from today (IST timezone)
-  const todayPnl = useMemo(() => {
-    const now = new Date();
-    // Get start of today in IST (UTC+5:30) then convert to UTC for comparison
-    const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    const istNow = new Date(now.getTime() + istOffsetMs);
-    const todayIST = istNow.toISOString().slice(0, 10); // YYYY-MM-DD in IST
-    // Midnight IST in UTC = midnight IST - 5:30 = previous day 18:30 UTC
-    const todayStartUtc = new Date(todayIST + 'T00:00:00+05:30').getTime();
+  // P&L stats by time range — 24h, 7D, 14D, 30D
+  const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
 
-    let dayPnl = 0;
-    let dayTrades = 0;
-    let dayWins = 0;
+  const pnlStats = useMemo(() => {
+    const now = Date.now();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+
+    // For 24h: start of today IST. For 7/14/30D: N days ago from now.
+    let cutoffMs: number;
+    if (pnlRange === '24h') {
+      const istNow = new Date(now + istOffsetMs);
+      const todayIST = istNow.toISOString().slice(0, 10);
+      cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
+    } else {
+      const days = pnlRange === '7d' ? 7 : pnlRange === '14d' ? 14 : 30;
+      cutoffMs = now - days * 24 * 60 * 60 * 1000;
+    }
+
+    let pnl = 0;
+    let total = 0;
+    let wins = 0;
     for (const t of trades) {
       if (t.status !== 'closed') continue;
-      // Use timestamp (normalized from opened_at) — closed trades
-      // have timestamps, we check if it falls within today IST
       const tradeTime = new Date(t.timestamp).getTime();
-      if (tradeTime >= todayStartUtc) {
-        dayPnl += t.pnl ?? 0;
-        dayTrades++;
-        if ((t.pnl ?? 0) > 0) dayWins++;
+      if (tradeTime >= cutoffMs) {
+        pnl += t.pnl ?? 0;
+        total++;
+        if ((t.pnl ?? 0) > 0) wins++;
       }
     }
-    return { pnl: dayPnl, trades: dayTrades, wins: dayWins };
-  }, [trades]);
+    const winRate = total > 0 ? (wins / total) * 100 : 0;
+    return { pnl, total, wins, losses: total - wins, winRate };
+  }, [trades, pnlRange]);
 
   // Count active strategies from trades if not provided
   const derivedStrategyCount = useMemo(() => {
@@ -174,30 +181,40 @@ export function LiveStatusBar() {
             )}
           </div>
 
-          {/* Today's P&L Card */}
+          {/* P&L Summary Card — switchable time range */}
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-sm font-semibold text-zinc-300">TODAY</span>
-              {todayPnl.trades > 0 && (
-                <span className="text-[10px] text-zinc-500">{todayPnl.trades} trades</span>
-              )}
+            <div className="flex items-center gap-1.5 mb-1">
+              {(['24h', '7d', '14d', '30d'] as const).map((range) => (
+                <button
+                  key={range}
+                  onClick={() => setPnlRange(range)}
+                  className={cn(
+                    'px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors',
+                    pnlRange === range
+                      ? 'bg-zinc-700 text-white'
+                      : 'text-zinc-500 hover:text-zinc-300',
+                  )}
+                >
+                  {range.toUpperCase()}
+                </button>
+              ))}
             </div>
-            {todayPnl.trades > 0 ? (
+            {pnlStats.total > 0 ? (
               <>
                 <div className="flex items-baseline gap-2">
                   <span className={cn(
                     'font-mono text-base md:text-lg font-bold',
-                    todayPnl.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                    pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
                   )}>
-                    {todayPnl.pnl >= 0 ? '+' : ''}{formatCurrency(todayPnl.pnl)}
+                    {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
                   </span>
                 </div>
                 <div className="text-[10px] text-zinc-500 font-mono">
-                  {todayPnl.wins}W / {todayPnl.trades - todayPnl.wins}L
+                  {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
                 </div>
               </>
             ) : (
-              <span className="text-xs text-zinc-500">No trades yet</span>
+              <span className="text-xs text-zinc-500">No trades</span>
             )}
           </div>
         </div>
@@ -236,11 +253,6 @@ export function LiveStatusBar() {
               <span className="text-[10px] text-zinc-500">{formatUptime(uptimeSeconds)}</span>
             )}
           </div>
-          {totalPnL !== 0 && (
-            <span className={cn('text-xs font-mono mt-1', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-              {formatPnL(totalPnL)} | {winRate.toFixed(1)}% WR
-            </span>
-          )}
         </div>
 
         {/* Right: Indicators + Clock */}
