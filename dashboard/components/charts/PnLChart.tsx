@@ -58,8 +58,11 @@ export function PnLChart({ trades: tradesProp, strategy }: PnLChartProps) {
       filtered = trades.filter((t) => t.strategy === strategy);
     }
 
+    // Only include closed trades with actual P&L
+    const closed = filtered.filter((t) => t.status === 'closed' && t.pnl !== 0);
+
     // Sort by timestamp ascending for cumulative calculation
-    const sorted = [...filtered].sort(
+    const sorted = [...closed].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
 
