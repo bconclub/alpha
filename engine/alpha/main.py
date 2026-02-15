@@ -577,11 +577,19 @@ class AlphaBot:
         try:
             rm = self.risk_manager
 
-            # Build active strategies map
+            # Build active strategies map (include scalp overlay)
             active_map: dict[str, str | None] = {}
             for pair in self.all_pairs:
-                strat = self._active_strategies.get(pair)
-                active_map[pair] = strat.name.value if strat else None
+                # Check scalp overlay first — it's the one actually trading
+                scalp = self._scalp_strategies.get(pair)
+                if scalp and scalp.in_position:
+                    side = scalp.position_side or "long"
+                    active_map[pair] = f"scalp_{side}"
+                elif scalp:
+                    active_map[pair] = "scalp"
+                else:
+                    strat = self._active_strategies.get(pair)
+                    active_map[pair] = strat.name.value if strat else None
 
             # Fetch live exchange balances (includes held assets)
             binance_bal = await self._fetch_portfolio_usd(self.binance)
@@ -592,6 +600,24 @@ class AlphaBot:
 
             # Cross-check positions against exchange: verify we actually hold coins
             verified_positions = await self._verify_positions_against_exchange()
+
+            # Compute unrealized P&L for open positions from scalp strategies
+            unrealized_pnl = 0.0
+            for pair, scalp in self._scalp_strategies.items():
+                if scalp.in_position and scalp.entry_price > 0:
+                    # Get latest price from analysis cache
+                    analysis = self._latest_analyses.get(pair) if self._latest_analyses else None
+                    if analysis and analysis.current_price and analysis.current_price > 0:
+                        if scalp.position_side == "short":
+                            pnl_pct = (scalp.entry_price - analysis.current_price) / scalp.entry_price * 100
+                        else:
+                            pnl_pct = (analysis.current_price - scalp.entry_price) / scalp.entry_price * 100
+                        # Estimate position value from risk manager
+                        for pos in rm.open_positions:
+                            if pos.pair == pair:
+                                notional = pos.entry_price * pos.amount
+                                unrealized_pnl += notional * (pnl_pct / 100)
+                                break
 
             # Send hourly market update (all pairs grouped by exchange)
             if self._latest_analyses:
@@ -613,6 +639,7 @@ class AlphaBot:
                 win_rate_24h=rm.win_rate,
                 binance_balance=binance_bal,
                 delta_balance=delta_bal,
+                unrealized_pnl=unrealized_pnl,
             )
 
             # Reset hourly counters
@@ -677,14 +704,23 @@ class AlphaBot:
         """Persist bot state to Supabase for crash recovery + dashboard display."""
         rm = self.risk_manager
 
-        # Build per-pair info
+        # Build per-pair info (include scalp overlay)
         active_map: dict[str, str | None] = {}
         active_count = 0
         for pair in self.all_pairs:
-            strat = self._active_strategies.get(pair)
-            active_map[pair] = strat.name.value if strat else None
-            if strat is not None:
+            scalp = self._scalp_strategies.get(pair)
+            if scalp and scalp.in_position:
+                side = scalp.position_side or "long"
+                active_map[pair] = f"scalp_{side}"
                 active_count += 1
+            elif scalp:
+                active_map[pair] = "scalp"
+                active_count += 1
+            else:
+                strat = self._active_strategies.get(pair)
+                active_map[pair] = strat.name.value if strat else None
+                if strat is not None:
+                    active_count += 1
 
         # Use primary pair's analysis for condition
         last = self.analyzer.last_analysis if self.analyzer else None

@@ -118,9 +118,14 @@ class RiskManager:
     @property
     def win_rate(self) -> float:
         if not self.trade_results:
-            return 100.0  # no trades yet -- allow trading
+            return -1.0  # sentinel: no trades yet (display as "N/A")
         recent = self.trade_results[-20:]
         return (sum(recent) / len(recent)) * 100
+
+    @property
+    def has_trades(self) -> bool:
+        """True when at least one trade result has been recorded."""
+        return len(self.trade_results) > 0
 
     @property
     def daily_loss_pct(self) -> float:

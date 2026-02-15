@@ -349,6 +349,7 @@ class AlertManager:
         win_rate_24h: float,
         binance_balance: float | None = None,
         delta_balance: float | None = None,
+        unrealized_pnl: float = 0.0,
     ) -> None:
         """Hourly report with real exchange-verified positions and full portfolio value."""
         if open_positions:
@@ -370,19 +371,35 @@ class AlertManager:
         else:
             pos_str = "<code>0</code>"
 
-        # Active strategies grouped
+        # Active strategies grouped (with position info for scalp)
         strat_groups: dict[str, list[str]] = {}
         for pair, strat in active_strategies.items():
-            name = strat or "paused"
+            if strat and strat.startswith("scalp_"):
+                # e.g. "scalp_long" → "Scalp 🟢 LONG"
+                side = strat.split("_", 1)[1].upper()
+                side_icon = "\U0001f7e2" if side == "LONG" else "\U0001f534"
+                name = f"Scalp {side_icon}{side}"
+            elif strat == "scalp":
+                name = "Scalp (scanning)"
+            else:
+                name = (strat or "paused").capitalize()
             strat_groups.setdefault(name, []).append(_pair_short(pair))
         strat_line = ", ".join(
-            f"{name.capitalize()} ({', '.join(pairs)})"
+            f"{name} ({', '.join(pairs)})"
             for name, pairs in strat_groups.items()
         )
 
         hourly_trades = hourly_wins + hourly_losses
         h_sign = "+" if hourly_pnl >= 0 else ""
         d_sign = "+" if daily_pnl >= 0 else ""
+
+        # Unrealized P&L line (only show when positions are open)
+        u_sign = "+" if unrealized_pnl >= 0 else ""
+        unreal_line = (
+            f"\U0001f4ad Unrealized P&L: <code>{u_sign}{format_usd(unrealized_pnl)}</code>"
+            if open_positions and unrealized_pnl != 0
+            else None
+        )
 
         lines = [
             "\u23f1 <b>HOURLY REPORT</b>",
@@ -391,11 +408,15 @@ class AlertManager:
             f"\U0001f4ca Trades this hour: <code>{hourly_trades}</code> ({hourly_wins}W / {hourly_losses}L)",
             f"\U0001f4b0 Hourly P&amp;L: <code>{h_sign}{format_usd(hourly_pnl)}</code>",
             f"\U0001f4c8 Daily P&amp;L: <code>{d_sign}{format_usd(daily_pnl)}</code>",
+        ]
+        if unreal_line:
+            lines.append(unreal_line)
+        lines += [
             f"\U0001f4b5 Capital: <code>{format_usd(capital)}</code> (USDT + assets)",
             f"   \U0001f7e1 Binance: <code>{_bal(binance_balance)}</code>",
             f"   \U0001f7e0 Delta: <code>{_bal(delta_balance)}</code>",
             f"\U0001f3af Strategies: <code>{strat_line}</code>",
-            f"\U0001f3c6 Win rate (24h): <code>{win_rate_24h:.0f}%</code>",
+            f"\U0001f3c6 Win rate (24h): <code>{'N/A' if win_rate_24h < 0 else f'{win_rate_24h:.0f}%'}</code>",
         ]
         await self._send("\n".join(lines))
 
@@ -434,7 +455,7 @@ class AlertManager:
             "",
             f"\U0001f4ca Total trades: <code>{total_trades}</code>",
             f"\u2705 Wins: <code>{wins}</code> | \u274c Losses: <code>{losses}</code>",
-            f"\U0001f3c6 Win rate: <code>{win_rate:.1f}%</code>",
+            f"\U0001f3c6 Win rate: <code>{'N/A' if win_rate < 0 else f'{win_rate:.1f}%'}</code>",
             f"{pnl_emoji} Daily P&amp;L: <code>{d_sign}{format_usd(daily_pnl)}</code>",
         ]
 
