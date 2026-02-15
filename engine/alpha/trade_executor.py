@@ -56,9 +56,10 @@ class TradeExecutor:
         self._ERROR_DEDUP_SECONDS = 300  # 5 minutes
         # EXIT FAILED alerts: only send ONCE per pair (permanent suppression)
         self._exit_failure_alerted: set[str] = set()
-        # Fee rates fetched from exchange on startup (taker rate per side)
-        self._delta_taker_fee: float = 0.0005  # default 0.05% — overridden by API
-        self._delta_maker_fee: float = 0.0002  # default 0.02% — overridden by API
+        # Fee rates (per side, INCLUDING GST for Delta India)
+        # Delta: taker 0.05% + 18% GST = 0.059%, maker 0.02% + 18% GST = 0.024%
+        self._delta_taker_fee: float = config.delta.taker_fee_with_gst  # 0.059% per side
+        self._delta_maker_fee: float = config.delta.maker_fee_with_gst  # 0.024% per side
         self._binance_taker_fee: float = 0.001  # default 0.1%
 
     def _get_exchange(self, signal: Signal) -> ccxt.Exchange:
@@ -183,12 +184,14 @@ class TradeExecutor:
                         self._min_notional[pair] = cost_limits.get("min", 0) or 0
                         self._min_amount[pair] = amount_limits.get("min", 0) or 0
                         # Extract fee rates from market info (ccxt provides these)
+                        # API returns BASE rates — we add 18% GST for India
                         taker = market.get("taker")
                         maker = market.get("maker")
+                        gst_mult = 1 + config.delta.gst_rate  # 1.18
                         if taker is not None:
-                            self._delta_taker_fee = float(taker)
+                            self._delta_taker_fee = float(taker) * gst_mult
                         if maker is not None:
-                            self._delta_maker_fee = float(maker)
+                            self._delta_maker_fee = float(maker) * gst_mult
                         logger.debug(
                             "[%s] Delta min notional=$%.2f, min amount=%.8f",
                             pair, self._min_notional[pair], self._min_amount[pair],
@@ -196,9 +199,13 @@ class TradeExecutor:
                     else:
                         logger.warning("Market info not found for %s on Delta", pair)
                 logger.info(
-                    "Delta fee rates from API: taker=%.6f (%.4f%%), maker=%.6f (%.4f%%)",
+                    "Delta fee rates (incl GST %.0f%%): taker=%.6f (%.4f%%), maker=%.6f (%.4f%%), "
+                    "RT taker=%.4f%%, RT maker=%.4f%%, RT mixed=%.4f%%",
+                    config.delta.gst_rate * 100,
                     self._delta_taker_fee, self._delta_taker_fee * 100,
                     self._delta_maker_fee, self._delta_maker_fee * 100,
+                    self._delta_taker_fee * 200, self._delta_maker_fee * 200,
+                    (self._delta_maker_fee + self._delta_taker_fee) * 100,
                 )
             except Exception:
                 logger.exception("Failed to load Delta market limits")
@@ -656,16 +663,22 @@ class TradeExecutor:
             else:  # short
                 gross_pnl = (entry_price - fill_price) * coin_amount
 
-            # Calculate round-trip trading fees
+            # Calculate round-trip trading fees (including GST for Delta India)
+            # Entry: maker fee if limit order, taker if market
+            # Exit: always taker (market orders for speed)
             entry_notional = entry_price * coin_amount
             exit_notional = fill_price * coin_amount
             if exchange_id == "delta":
-                fee_rate = self._delta_taker_fee  # fetched from API
+                entry_order_type = open_trade.get("order_type", "market")
+                entry_fee_rate = self._delta_maker_fee if entry_order_type == "limit" else self._delta_taker_fee
+                exit_fee_rate = self._delta_taker_fee  # exits always market
             else:
-                fee_rate = self._binance_taker_fee
-            entry_fee = entry_notional * fee_rate
-            exit_fee = exit_notional * fee_rate
+                entry_fee_rate = self._binance_taker_fee
+                exit_fee_rate = self._binance_taker_fee
+            entry_fee = entry_notional * entry_fee_rate
+            exit_fee = exit_notional * exit_fee_rate
             total_fees = entry_fee + exit_fee
+            fee_rate = total_fees / (entry_notional + exit_notional) if (entry_notional + exit_notional) > 0 else 0
 
             # Net P&L = gross - fees
             pnl = gross_pnl - total_fees

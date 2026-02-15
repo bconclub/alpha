@@ -62,6 +62,36 @@ class DeltaConfig:
     pairs: list[str] = field(default_factory=lambda: _env_list("DELTA_PAIRS"))
     enable_shorting: bool = field(default_factory=lambda: _env_bool("ENABLE_SHORTING", True))
 
+    # Delta India fee structure (base rates BEFORE GST)
+    taker_fee: float = field(default_factory=lambda: _env_float("DELTA_TAKER_FEE", 0.0005))   # 0.05% per side
+    maker_fee: float = field(default_factory=lambda: _env_float("DELTA_MAKER_FEE", 0.0002))   # 0.02% per side
+    gst_rate: float = field(default_factory=lambda: _env_float("DELTA_GST_RATE", 0.18))       # 18% GST on fees
+
+    @property
+    def taker_fee_with_gst(self) -> float:
+        """Taker fee per side including 18% GST: 0.05% * 1.18 = 0.059%."""
+        return self.taker_fee * (1 + self.gst_rate)
+
+    @property
+    def maker_fee_with_gst(self) -> float:
+        """Maker fee per side including 18% GST: 0.02% * 1.18 = 0.024%."""
+        return self.maker_fee * (1 + self.gst_rate)
+
+    @property
+    def taker_round_trip(self) -> float:
+        """Round-trip taker fee (both sides): 0.059% * 2 = 0.118%."""
+        return self.taker_fee_with_gst * 2
+
+    @property
+    def maker_round_trip(self) -> float:
+        """Round-trip maker fee (both sides): 0.024% * 2 = 0.048%."""
+        return self.maker_fee_with_gst * 2
+
+    @property
+    def mixed_round_trip(self) -> float:
+        """Mixed round-trip: maker entry + taker exit = 0.024% + 0.059% = 0.083%."""
+        return self.maker_fee_with_gst + self.taker_fee_with_gst
+
     @property
     def base_url(self) -> str:
         if self.testnet:

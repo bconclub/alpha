@@ -1,32 +1,34 @@
-"""Alpha v3.0 — QUALITY SNIPER: Fewer trades, bigger wins, beat the fees.
+"""Alpha v3.1 — QUALITY SNIPER: Fewer trades, bigger wins, beat the fees.
 
-PHILOSOPHY: Every trade must have profit potential AT LEAST 5x the trading fees.
-With ~$0.08 round-trip fees, we need $0.40+ potential profit per trade.
-1.5% price move at 20x = 30% on capital = $0.31+ per ETH contract.
+PHILOSOPHY: Every trade must have profit potential AT LEAST 13x the fees.
+TP MUST be bigger than SL. Winners must outsize losers. R:R = 3:1.
 
-Entry — WAIT FOR REAL MOMENTUM (2-of-4 confirmation required):
-  1. Price moved 0.3%+ in last 60 seconds (real momentum, not noise)
-  2. Volume spike 2x+ above average (institutional interest)
+Delta India Fee Structure (incl 18% GST):
+  - Taker: 0.05% + 18% GST = 0.059% per side
+  - Maker: 0.02% + 18% GST = 0.024% per side
+  - Round trip taker: 0.118%
+  - Round trip maker: 0.048%
+  - Mixed (maker entry + taker exit): 0.083%
+
+Fee Math per Trade:
+  - BTC 1 contract ($69.7 notional): RT taker $0.082, RT mixed $0.058
+  - ETH 5 contracts ($104 notional): RT taker $0.123, RT mixed $0.086
+  - 1.5% price move on BTC = $1.05 profit → 13x fees ✓
+  - 1.5% price move on ETH = $1.56 profit → 13x fees ✓
+
+Entry — WAIT FOR REAL MOMENTUM (2-of-4 confirmation):
+  1. Price moved 0.3%+ in last 60 seconds (real momentum)
+  2. Volume spike 2x+ above average (institutional)
   3. RSI extreme (<30 or >70) — strong directional pressure
   4. BB breakout — price outside Bollinger Bands
-  Must have AT LEAST 2 of these. Single weak signals = SKIP.
+  Must have AT LEAST 2 of these. Use LIMIT orders for entry (60% fee savings).
 
-Exit — RIDE WINNERS, CUT LOSERS:
-  1. Trailing stop — activates at +1.5%, trails 0.50% behind peak
-     Let winners run to 2%, 3%, 5% if momentum continues
-  2. Stop loss — 0.75% (2:1 R:R with 1.5% target)
-  3. Signal reversal — RSI crosses 70/30, momentum flips against us
-  4. Timeout — 30 min max
-
-Fee Awareness:
-  - Round-trip taker fees ~0.10% ($0.08 on $80 notional)
-  - Use LIMIT orders for entries when possible (lower maker fee)
-  - Min profit target: 1.5% price = $0.31+ per ETH contract
-  - NEVER enter for potential < 0.5% move
-
-Soul Integration:
-  - Loads SOUL.md before every trade decision
-  - "I don't trade for the sake of trading"
+Exit — TP MUST BE BIGGER THAN SL (3:1 R:R):
+  1. Stop loss — 0.50% price (cut fast, $0.35 on BTC, $0.52 on ETH)
+  2. Trailing stop — activates at +1.50%, trails 0.50% behind peak
+  3. Signal reversal — only exit if profit >= 1.50%
+  4. NEVER exit a winner early. Hold for 1.50% minimum.
+  5. Timeout — 30 min max
 """
 
 from __future__ import annotations
@@ -117,17 +119,18 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Quality Sniper v3.0 — fewer trades, bigger wins, beat the fees.
+    """Quality Sniper v3.1 — fewer trades, bigger wins, beat the fees.
 
-    Waits for REAL momentum (2-of-4 confirmation). Rides winners with
-    trailing stops. Minimum 1.5% target. Never enters for noise.
+    TP > SL (3:1 R:R). Waits for REAL momentum (2-of-4 confirmation).
+    Rides winners with trailing stops. Min 1.5% TP, 0.50% SL.
+    Limit orders for entries. Fees include 18% GST.
     """
 
     name = StrategyName.SCALP
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
-    # ── Exit thresholds — RIDE WINNERS ────────────────────────────────
-    STOP_LOSS_PCT = 0.75              # 0.75% price SL (15% capital at 20x)
+    # ── Exit thresholds — TP MUST BE BIGGER THAN SL (3:1 R:R) ────────
+    STOP_LOSS_PCT = 0.50              # 0.50% price SL (10% capital at 20x) — cut FAST
     MIN_TP_PCT = 1.50                 # minimum 1.5% target (30% capital at 20x)
     TRAILING_ACTIVATE_PCT = 1.50      # activate trail at +1.5% — the minimum target
     TRAILING_DISTANCE_PCT = 0.50      # trail 0.50% behind peak — wide enough to ride
@@ -141,16 +144,15 @@ class ScalpStrategy(BaseStrategy):
     MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
 
     # ── Entry thresholds — QUALITY ONLY (need 2 of 4) ──────────────────
-    # These are STRICT. We only enter when there's real momentum.
     MOMENTUM_MIN_PCT = 0.30           # 0.30%+ move in 60s = real momentum
     VOL_SPIKE_RATIO = 2.0             # volume > 2x average = institutional
     RSI_EXTREME_LONG = 30             # RSI < 30 = truly oversold → long
     RSI_EXTREME_SHORT = 70            # RSI > 70 = truly overbought → short
     BB_BREAKOUT = True                # price outside BB = breakout
 
-    # ── Fee awareness ─────────────────────────────────────────────────
+    # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
     MIN_EXPECTED_MOVE_PCT = 0.50      # don't enter if expected move < 0.50%
-    FEE_MULTIPLIER_MIN = 5.0          # profit potential must be 5x fees
+    FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.118% RT fees = 12.7x
 
     # ── Position sizing ───────────────────────────────────────────────────
     CAPITAL_PCT_SPOT = 50.0
@@ -234,17 +236,25 @@ class ScalpStrategy(BaseStrategy):
         if self.in_position:
             pos_info = f" | RESTORED {self.position_side} @ ${self.entry_price:.2f}"
         soul_msg = _soul_check("quality")
+        # Log fee structure on startup
+        if self._exchange_id == "delta":
+            rt_mixed = config.delta.mixed_round_trip * 100
+            rt_taker = config.delta.taker_round_trip * 100
+        else:
+            rt_mixed = 0.2
+            rt_taker = 0.2
         self.logger.info(
-            "[%s] QUALITY SNIPER v3.0 ACTIVE (%s) — tick=%ds, "
-            "TP=%.1f%% SL=%.1f%% Trail=%.1f%%/%.1f%% "
+            "[%s] QUALITY SNIPER v3.1 ACTIVE (%s) — tick=%ds, "
+            "TP=%.1f%% SL=%.1f%% R:R=%.0f:1 Trail=%.1f%%/%.1f%% "
             "Entry: mom>=%.1f%% vol>=%.1fx RSI<%d/>%d BB "
-            "MinMove=%.1f%% MaxTrades=%d/hr%s",
+            "Fees: RT_mixed=%.3f%% RT_taker=%.3f%% MaxTrades=%d/hr%s",
             self.pair, tag, self.check_interval_sec,
             self.MIN_TP_PCT, self.STOP_LOSS_PCT,
+            self.MIN_TP_PCT / self.STOP_LOSS_PCT,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
             self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
             self.RSI_EXTREME_LONG, self.RSI_EXTREME_SHORT,
-            self.MIN_EXPECTED_MOVE_PCT, self.MAX_TRADES_PER_HOUR,
+            rt_mixed, rt_taker, self.MAX_TRADES_PER_HOUR,
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
@@ -930,8 +940,15 @@ class ScalpStrategy(BaseStrategy):
         notional = self.entry_price * coin_amount
         gross_pnl = notional * (pnl_pct / 100)
 
-        fee_rate = getattr(self.executor, "_delta_taker_fee", 0.0005) if self._exchange_id == "delta" else getattr(self.executor, "_binance_taker_fee", 0.001)
-        est_fees = notional * fee_rate * 2
+        # Fee estimation: maker entry + taker exit (mixed round-trip)
+        # Delta India fees include 18% GST
+        if self._exchange_id == "delta":
+            entry_fee_rate = config.delta.maker_fee_with_gst   # 0.024% (limit entry)
+            exit_fee_rate = config.delta.taker_fee_with_gst    # 0.059% (market exit)
+        else:
+            entry_fee_rate = getattr(self.executor, "_binance_taker_fee", 0.001)
+            exit_fee_rate = entry_fee_rate
+        est_fees = notional * (entry_fee_rate + exit_fee_rate)
         net_pnl = gross_pnl - est_fees
 
         capital_pnl_pct = pnl_pct * self.leverage

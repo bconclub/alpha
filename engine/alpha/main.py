@@ -467,8 +467,8 @@ class AlphaBot:
                     liq_price = pos.entry_price * (1 + 1 / pos.leverage)
 
                 # Skip if SL would trigger before liquidation
-                # At 0.75% SL and 5% liquidation, SL always fires first
-                sl_distance_pct = 0.75  # our configured SL
+                # At 0.50% SL and 5% liquidation, SL always fires first
+                sl_distance_pct = 0.50  # our configured SL
                 if distance > sl_distance_pct:
                     # SL will trigger before we reach liquidation — safe
                     continue
