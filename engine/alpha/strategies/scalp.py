@@ -961,15 +961,21 @@ class ScalpStrategy(BaseStrategy):
     # EXIT LOGIC — RIDE WINNERS, CUT LOSERS
     # ======================================================================
 
-    def _update_trail_distance(self, pnl_pct: float) -> float:
-        """Update dynamic trail distance based on current profit level.
+    def _update_trail_distance(self, pnl_pct: float | None = None) -> float:
+        """Update dynamic trail distance based on PEAK profit level.
+
+        Uses _peak_unrealized_pnl (highest PnL ever seen) for tier selection,
+        NOT current pnl_pct. This ensures tiers widen based on the best the
+        trade has been, not where it is right now.
 
         Trail distance ONLY increases (never tightens once widened).
         Returns the current trail distance percentage.
         """
+        # Use peak PnL for tier selection — captures spikes between ticks
+        peak = self._peak_unrealized_pnl
         # Walk through tiers from highest to lowest
         for min_profit, distance in reversed(self.TRAIL_TIERS):
-            if pnl_pct >= min_profit and distance > self._trail_distance_pct:
+            if peak >= min_profit and distance > self._trail_distance_pct:
                 old = self._trail_distance_pct
                 self._trail_distance_pct = distance
                 locked_min = pnl_pct - distance
@@ -1051,17 +1057,19 @@ class ScalpStrategy(BaseStrategy):
                     )
                     return self._do_exit(current_price, pnl_pct, side, "BREAKEVEN", hold_seconds)
 
-            # Trail at +0.5%
-            if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
+            # Trail at +0.5% — use PEAK PnL (not current) for activation
+            # This catches spikes: if price hit +3% between ticks, peak is +3%
+            if self._peak_unrealized_pnl >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
-                self._update_trail_distance(pnl_pct)
+                self._update_trail_distance()
                 self.logger.info(
-                    "[%s] TRAIL ON +%.2f%% — %.2f%% dist | %ds in",
-                    self.pair, pnl_pct, self._trail_distance_pct, int(hold_seconds),
+                    "[%s] TRAIL ON — peak +%.2f%%, current +%.2f%%, dist %.2f%% | %ds in",
+                    self.pair, self._peak_unrealized_pnl, pnl_pct,
+                    self._trail_distance_pct, int(hold_seconds),
                 )
 
             if self._trailing_active:
-                self._update_trail_distance(pnl_pct)
+                self._update_trail_distance()
                 if side == "long":
                     trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
                     if current_price <= trail_stop:
@@ -1102,13 +1110,13 @@ class ScalpStrategy(BaseStrategy):
         # PHASE 3 (10-30 min): TRAIL OR CUT
         # ══════════════════════════════════════════════════════════════
 
-        # Trailing
-        if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
+        # Trailing — use PEAK PnL for activation (catches inter-tick spikes)
+        if self._peak_unrealized_pnl >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
             self._trailing_active = True
-            self._update_trail_distance(pnl_pct)
+            self._update_trail_distance()
 
         if self._trailing_active:
-            self._update_trail_distance(pnl_pct)
+            self._update_trail_distance()
             if side == "long":
                 trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
                 if current_price <= trail_stop:
@@ -1194,14 +1202,14 @@ class ScalpStrategy(BaseStrategy):
                 if at_entry:
                     exit_type = "BREAKEVEN"
 
-        # ── PHASE 2+: trailing ───────────────────────────────────────
+        # ── PHASE 2+: trailing (activate from PEAK, not current) ─────
         if not exit_type and hold_seconds >= self.PHASE1_SECONDS:
-            if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
+            if self._peak_unrealized_pnl >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
-                self._update_trail_distance(pnl_pct)
+                self._update_trail_distance()
 
             if self._trailing_active:
-                self._update_trail_distance(pnl_pct)
+                self._update_trail_distance()
                 if side == "long":
                     trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
                     if current_price <= trail_stop:

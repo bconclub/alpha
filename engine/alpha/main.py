@@ -1449,7 +1449,7 @@ class AlphaBot:
                         # Activate trailing if already profitable enough
                         if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
                             scalp._trailing_active = True
-                            scalp._update_trail_distance(current_pnl)
+                            scalp._update_trail_distance()
                             logger.info(
                                 "[%s] RESTORE: already at +%.2f%% — trailing activated",
                                 pair, current_pnl,
@@ -1656,7 +1656,7 @@ class AlphaBot:
                             # Activate trailing if already profitable enough
                             if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
                                 scalp._trailing_active = True
-                                scalp._update_trail_distance(current_pnl)
+                                scalp._update_trail_distance()
                                 logger.info(
                                     "RESTORE: %s already at +%.2f%% — trailing activated",
                                     pair, current_pnl,
