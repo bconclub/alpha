@@ -1,12 +1,21 @@
-"""Alpha v5.8 — TRAIL TIER TIGHTENING.
+"""Alpha v5.9 — AGGRESSIVE PROFIT LOCK.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
 best signals. After a loss, pause THAT PAIR. Use 15m trend as soft bias.
 SL/TP adapt per-pair. SOL DISABLED (0% win rate).
 
-CHANGES FROM v5.7:
-  - Trail tier split: +3% tier tightened 1.00% → 0.75%, new +5% tier at 1.00%
-  - A +4.99% trade now exits at ~+4.24% instead of ~+3.99%
+CHANGES FROM v5.8:
+  - Trail activates at +0.15% (was 0.35%) — any green trade gets trailed
+  - Initial trail distance: 0.15% (was 0.20%) — tighter scalp lock
+  - Phase 1 skip at +0.5% peak (was 1.0%) — graduate faster
+  - Move SL to entry at +0.20% (was 0.30%) — breakeven protection earlier
+  - Pullback exit at 30% retracement (was 40%) — don't give back profits
+  - ALL trail tiers tightened: +2%=0.40, +3%=0.50, +5%=0.75 (were 0.50/0.75/1.00)
+  - New +0.15% tier for instant green protection
+  - Trade #146 analysis: +9% peak → breakeven exit unacceptable
+
+CHANGES FROM v5.7 (in v5.8):
+  - Trail tier split: +3% tier tightened, new +5% tier
 
 CHANGES FROM v5.6 (in v5.7):
   - Momentum threshold: 0.15% → 0.08% (catch moves earlier)
@@ -26,17 +35,18 @@ ENTRY — 2-of-4 with 15m SOFT WEIGHT:
   6. Trend continuation: new 15-candle extreme + volume
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
 
-EXIT — 3-PHASE SYSTEM:
+EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
   PHASE 1 (0-30s): HANDS OFF
     - ONLY exit on hard SL (-0.35% for ETH, -0.40% for XRP, -0.30% for BTC)
-    - EXCEPTION: if peak PnL >= +1.0%, skip to Phase 2 immediately
+    - EXCEPTION: if peak PnL >= +0.5%, skip to Phase 2 immediately
     - 30s is enough for fill bounce to settle, SL still protects us
-  PHASE 2 (30s-10 min): WATCH
-    - If PnL > +0.3% → move SL to entry (real breakeven)
-    - If PnL > +0.35% → activate trailing (0.20% distance)
-    - If still losing but above SL → keep holding
+  PHASE 2 (30s-10 min): WATCH + TRAIL
+    - If PnL > +0.20% → move SL to entry (breakeven protection)
+    - If PnL > +0.15% → activate trailing (0.15% tight distance)
+    - Trail tiers tightened: +2%=0.40%, +3%=0.50%, +5%=0.75%
+    - Pullback exit at 30% retracement from peak
   PHASE 3 (10-30 min): TRAIL OR CUT
-    - Trailing active → let it trail, tighten at +1%
+    - Trailing active → let it trail with tight distance
     - Still negative after 10 min → FLAT exit
     - Hard timeout at 30 min
 """
@@ -130,7 +140,7 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v5.8 — Trail tier tightening, loosened entries, spot-aware config.
+    """Phase-based v5.9 — Aggressive profit lock, instant trailing, tighter tiers.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
@@ -159,22 +169,22 @@ class ScalpStrategy(BaseStrategy):
 
     # ── 3-PHASE EXIT TIMING ──────────────────────────────────────────
     PHASE1_SECONDS = 30               # 0-30s: HANDS OFF — only hard SL (was 60s, fill bounce settles by 30s)
-    PHASE1_SKIP_AT_PEAK_PCT = 1.0     # if peak PnL >= +1.0% during Phase 1, skip to Phase 2 immediately
+    PHASE1_SKIP_AT_PEAK_PCT = 0.5     # if peak PnL >= +0.5% during Phase 1, skip to Phase 2 immediately
     PHASE2_SECONDS = 10 * 60          # 30s-10 min: WATCH — move SL up if profitable
     MAX_HOLD_SECONDS = 30 * 60        # 30 min hard timeout
     FLATLINE_SECONDS = 10 * 60        # 10 min flat = dead momentum (phase 3 only)
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
 
     # ── Phase 2: move SL to entry when profitable ─────────────────────
-    MOVE_SL_TO_ENTRY_PCT = 0.30       # move SL to entry at +0.30% profit
+    MOVE_SL_TO_ENTRY_PCT = 0.20       # move SL to entry at +0.20% profit (was 0.30)
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
-    TRAILING_ACTIVATE_PCT = 0.35      # activate at +0.35% — ensures fee coverage after pullback
-    TRAILING_DISTANCE_PCT = 0.20      # initial trail: 0.20% behind peak (exits at +0.15% min)
+    TRAILING_ACTIVATE_PCT = 0.15      # activate at +0.15% — any green = trail it (was 0.35)
+    TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak — tight scalp lock (was 0.20)
 
     # ── Profit protection ─────────────────────────────────────────────
     PROFIT_PULLBACK_MIN_PEAK = 0.50
-    PROFIT_PULLBACK_PCT = 40.0
+    PROFIT_PULLBACK_PCT = 30.0        # exit if 30% of peak profit lost (was 40%)
     PROFIT_DECAY_PEAK_MIN = 0.30
     PROFIT_DECAY_EXIT_AT = 0.10
 
@@ -183,12 +193,13 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Dynamic trailing tiers — widen as profit grows ──────────────
     TRAIL_TIERS: list[tuple[float, float]] = [
-        (0.35, 0.20),   # +0.35% to +0.5%: tight — exits at +0.15% (covers fees)
+        (0.15, 0.15),   # +0.15% to +0.35%: instant trail — any green locks profit
+        (0.35, 0.20),   # +0.35% to +0.5%: tight scalp lock
         (0.50, 0.25),   # +0.5% to +1%: standard trail
         (1.00, 0.30),   # +1% to +2%: moderate trail
-        (2.00, 0.50),   # +2% to +3%: widen, let it run
-        (3.00, 0.75),   # +3% to +5%: tighter lock (was 1.00)
-        (5.00, 1.00),   # +5%+: max breathing room for big runners
+        (2.00, 0.40),   # +2% to +3%: tighter (was 0.50)
+        (3.00, 0.50),   # +3% to +5%: lock hard (was 0.75)
+        (5.00, 0.75),   # +5%+: still tight for scalping (was 1.00)
     ]
 
     # ── Signal reversal thresholds ──────────────────────────────────────
@@ -402,7 +413,7 @@ class ScalpStrategy(BaseStrategy):
         disabled_tag = f" DISABLED={','.join(self.DISABLED_PAIRS)}" if self.DISABLED_PAIRS else ""
         max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
         self.logger.info(
-            "[%s] PHASE-BASED v5.8 ACTIVE (%s) — tick=1s/5s(dynamic), "
+            "[%s] PHASE-BASED v5.9 ACTIVE (%s) — tick=1s/5s(dynamic), "
             "SL=%.2f%% TP=%.2f%% Phase1=%ds(skip@+%.1f%%) Phase2=%ds MaxHold=%ds "
             "Trail@+%.1f%%(%.2f%%) MoveToEntry@+%.1f%% Flat=%ds "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
