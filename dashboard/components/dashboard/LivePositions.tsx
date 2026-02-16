@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 import Link from 'next/link';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
+import { useLivePrices } from '@/hooks/useLivePrices';
 import { formatNumber, formatCurrency, cn } from '@/lib/utils';
 
 // Delta contract sizes (must match engine)
@@ -41,9 +42,10 @@ interface PositionDisplay {
 
 export function LivePositions() {
   const { openPositions, strategyLog } = useSupabase();
+  const livePrices = useLivePrices(openPositions.length > 0);
 
-  // Build current prices from latest strategy_log entries
-  const currentPrices = useMemo(() => {
+  // Build fallback prices from latest strategy_log entries (every ~5min)
+  const fallbackPrices = useMemo(() => {
     const prices = new Map<string, number>();
     for (const log of strategyLog) {
       if (log.current_price && log.pair) {
@@ -62,8 +64,12 @@ export function LivePositions() {
 
     return openPositions.map((pos) => {
       const asset = extractBaseAsset(pos.pair);
-      // Prefer bot's live price (updated every ~10s) over strategy_log price (every ~5min)
-      const currentPrice = pos.current_price ?? currentPrices.get(asset) ?? null;
+      // Priority: live API price (3s) → bot DB price (~10s) → strategy_log (~5min)
+      const currentPrice =
+        livePrices.prices[pos.pair]       // exact pair match from API (e.g. "BTC/USD:USD")
+        ?? pos.current_price              // bot writes to DB every ~10s
+        ?? fallbackPrices.get(asset)      // strategy_log price (every ~5min)
+        ?? null;
       const leverage = pos.leverage > 1 ? pos.leverage : 1;
 
       // Calculate P&L
@@ -141,7 +147,7 @@ export function LivePositions() {
         exchange: pos.exchange,
       };
     });
-  }, [openPositions, currentPrices]);
+  }, [openPositions, livePrices.prices, fallbackPrices]);
 
   if (positions.length === 0) return null;
 
@@ -151,8 +157,14 @@ export function LivePositions() {
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Live Positions
         </h3>
-        <span className="text-[10px] text-zinc-500 font-mono">
+        <span className="text-[10px] text-zinc-500 font-mono flex items-center gap-1.5">
           {positions.length} active
+          {livePrices.lastUpdated > 0 && (
+            <span className="inline-flex items-center gap-1 text-[9px]">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
+              LIVE
+            </span>
+          )}
         </span>
       </div>
 

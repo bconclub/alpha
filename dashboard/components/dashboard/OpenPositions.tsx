@@ -1,6 +1,7 @@
 'use client';
 
 import { useSupabase } from '@/components/providers/SupabaseProvider';
+import { useLivePrices } from '@/hooks/useLivePrices';
 import { Badge } from '@/components/ui/Badge';
 import {
   formatCurrency,
@@ -71,6 +72,7 @@ function durationSince(timestamp: string): string {
 
 export function OpenPositions() {
   const { openPositions } = useSupabase();
+  const livePrices = useLivePrices(openPositions.length > 0);
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
@@ -84,7 +86,8 @@ export function OpenPositions() {
         <div className="space-y-3 max-h-none md:max-h-[500px] overflow-y-auto overflow-x-hidden pr-1">
           {openPositions.map((pos) => {
             const entryPrice = pos.entry_price;
-            const currentPrice = pos.current_price ?? entryPrice;
+            // Priority: live API price (3s) → bot DB price (~10s) → entry price fallback
+            const currentPrice = livePrices.prices[pos.pair] ?? pos.current_price ?? entryPrice;
             const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
             const adjustedPnlPct = pos.position_type === 'short' ? -pnlPct : pnlPct;
             const isProfit = adjustedPnlPct >= 0;
