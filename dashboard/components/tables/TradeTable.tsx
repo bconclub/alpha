@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import type { Trade, Strategy, Exchange, PositionType } from '@/lib/types';
 import {
   formatCurrency,
   formatPnL,
   formatPercentage,
   formatDate,
+  formatDuration,
   cn,
   getPnLColor,
   tradesToCSV,
@@ -72,6 +73,7 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
 type ColumnDef = { key: string; label: string; align?: 'right' };
 
 const COLUMNS: ColumnDef[] = [
+  { key: 'id', label: 'ID' },
   { key: 'timestamp', label: 'Date' },
   { key: 'pair', label: 'Pair' },
   { key: 'exchange', label: 'Exchange' },
@@ -83,6 +85,8 @@ const COLUMNS: ColumnDef[] = [
   { key: 'strategy', label: 'Strategy' },
   { key: 'pnl', label: 'P&L', align: 'right' },
   { key: 'pnl_pct', label: 'P&L %', align: 'right' },
+  { key: 'hold_time', label: 'Hold Time', align: 'right' },
+  { key: 'exit_reason', label: 'Exit' },
   { key: 'status', label: 'Status' },
 ];
 
@@ -116,6 +120,63 @@ function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): num
   if (aVal < bVal) return dir === 'asc' ? -1 : 1;
   if (aVal > bVal) return dir === 'asc' ? 1 : -1;
   return 0;
+}
+
+/** Get color for exit reason */
+function getExitReasonColor(reason: string): string {
+  const upper = reason.toUpperCase();
+  if (upper === 'TRAIL' || upper === 'TP') return 'text-emerald-400';
+  if (upper === 'SL') return 'text-red-400';
+  return 'text-zinc-500';
+}
+
+/** Parse exit reason from trade reason field */
+function parseExitReason(reason?: string | null): string | null {
+  if (!reason) return null;
+  // The reason field may contain values like "TRAIL", "SL", "TP", "FLAT", etc.
+  // Extract the first recognizable keyword
+  const upper = reason.toUpperCase().trim();
+  const keywords = ['TRAIL', 'TP', 'SL', 'FLAT', 'MANUAL', 'TIMEOUT', 'LIQUIDATION'];
+  for (const kw of keywords) {
+    if (upper.includes(kw)) return kw;
+  }
+  // If it's short enough, just show it as-is
+  if (reason.length <= 10) return reason.toUpperCase();
+  return null;
+}
+
+/** Calculate hold time in seconds for a trade */
+function calcHoldSeconds(trade: Trade, now: number): number {
+  const openedMs = new Date(trade.timestamp).getTime();
+  if (trade.status !== 'open' && trade.closed_at) {
+    const closedMs = new Date(trade.closed_at).getTime();
+    return Math.max(0, (closedMs - openedMs) / 1000);
+  }
+  // Open trade: use current time
+  return Math.max(0, (now - openedMs) / 1000);
+}
+
+/** Live hold-time cell for open trades — ticks via shared `now` timestamp */
+function HoldTimeCell({ trade, now }: { trade: Trade; now: number }) {
+  if (trade.status !== 'open') {
+    // Closed trade: static duration
+    if (trade.closed_at) {
+      return (
+        <span className="font-mono text-zinc-400 text-xs">
+          {formatDuration(calcHoldSeconds(trade, now))}
+        </span>
+      );
+    }
+    return <span className="text-zinc-600">&mdash;</span>;
+  }
+  // Open trade: live counter
+  const seconds = calcHoldSeconds(trade, now);
+  return (
+    <span className="font-mono text-xs text-zinc-200">
+      <span className="text-red-500 mr-1">&#x1F534;</span>
+      {formatDuration(seconds)}
+    </span>
+  );
 }
 
 /** Extract base asset from a pair string, e.g. "SOL/USD:USD" → "SOL" */
@@ -174,6 +235,15 @@ function calcUnrealizedPnL(
 
 export default function TradeTable({ trades }: TradeTableProps) {
   const { strategyLog } = useSupabase();
+
+  // -- Live timer for open trade hold times --------------------------------
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const hasOpen = trades.some((t) => t.status === 'open');
+    if (!hasOpen) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [trades]);
 
   // -- Filter state ---------------------------------------------------------
   const [strategyFilter, setStrategyFilter] = useState<Strategy | 'All'>('All');
@@ -272,7 +342,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -546,6 +616,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     {/* Top row: Pair + Type + P&L */}
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono text-zinc-500">
+                          #{typeof trade.id === 'string' && trade.id.length > 6
+                            ? trade.id.slice(-6)
+                            : trade.id}
+                        </span>
                         <span className="text-sm font-semibold text-white">{displayPair(trade.pair)}</span>
                         <span className={cn('text-[10px] font-medium', getPositionTypeColor(trade.position_type))}>
                           {getPositionTypeLabel(trade.position_type)}
@@ -598,6 +673,15 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           {display.isUnrealized ? ' (unr)' : ''}
                         </span>
                       )}
+                      <HoldTimeCell trade={trade} now={now} />
+                      {trade.status !== 'open' && (() => {
+                        const reason = parseExitReason(trade.reason);
+                        return reason ? (
+                          <span className={cn('font-semibold', getExitReasonColor(reason))}>
+                            {reason}
+                          </span>
+                        ) : null;
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -640,7 +724,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {/* ----------------------------------------------------------------- */}
       <div className="hidden md:block bg-card overflow-hidden rounded-xl border border-zinc-800">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1200px] text-sm">
+          <table className="w-full min-w-[1400px] text-sm">
             {/* Header */}
             <thead>
               <tr className="bg-zinc-900/50">
@@ -703,6 +787,13 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           trade.status === 'open' && 'bg-zinc-900/30',
                         )}
                       >
+                        {/* ID */}
+                        <td className="whitespace-nowrap px-4 py-3 text-xs font-mono text-zinc-500">
+                          #{typeof trade.id === 'string' && trade.id.length > 6
+                            ? trade.id.slice(-6)
+                            : trade.id}
+                        </td>
+
                         {/* Date */}
                         <td className="whitespace-nowrap px-4 py-3 text-zinc-300">
                           {formatDate(trade.timestamp)}
@@ -812,6 +903,27 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               </>
                             )
                             : trade.status === 'closed' ? '+0.00%' : '—'}
+                        </td>
+
+                        {/* Hold Time */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right">
+                          <HoldTimeCell trade={trade} now={now} />
+                        </td>
+
+                        {/* Exit Reason */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          {trade.status === 'open' ? (
+                            <span className="text-zinc-600">&mdash;</span>
+                          ) : (() => {
+                            const reason = parseExitReason(trade.reason);
+                            return reason ? (
+                              <span className={cn('text-xs font-semibold', getExitReasonColor(reason))}>
+                                {reason}
+                              </span>
+                            ) : (
+                              <span className="text-zinc-600">&mdash;</span>
+                            );
+                          })()}
                         </td>
 
                         {/* Status */}

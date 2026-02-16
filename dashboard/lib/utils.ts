@@ -40,6 +40,17 @@ export function formatTimeAgo(timestamp: string): string {
   return formatDistanceToNow(new Date(timestamp), { addSuffix: true });
 }
 
+/** Format a duration in seconds to human-readable: "2m 15s", "1h 2m", etc. */
+export function formatDuration(seconds: number): string {
+  if (seconds < 0) seconds = 0;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 export function formatNumber(value: number, decimals = 2): string {
   return value.toLocaleString('en-US', {
     minimumFractionDigits: decimals,

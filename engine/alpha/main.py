@@ -100,9 +100,11 @@ class AlphaBot:
 
         logger.info("=" * 60)
         logger.info("  ALPHA v%s — Multi-Exchange Scalping Agent", version)
-        logger.info("  BINANCE (spot): %s", ", ".join(self.pairs))
+        logger.info("  BINANCE (spot): %s (1x, long-only, SL=2%%, TP=3%%, Trail@1.5%%/0.8%%)",
+                     ", ".join(self.pairs))
         logger.info("  DELTA (futures): %s, %dx leverage",
                      ", ".join(self.delta_pairs), config.delta.leverage)
+        logger.info("  Entry: Mom>=0.08%% Vol>=0.8x Gate=2/4 RSI-Override=30/70")
         logger.info("  Soul: Momentum is everything. Speed wins. Never idle.")
         logger.info("=" * 60)
 

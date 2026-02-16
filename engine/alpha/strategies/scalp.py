@@ -1,24 +1,33 @@
-"""Alpha v5.6 — PHASE-BASED EXITS: let trades breathe, then manage.
+"""Alpha v5.7 — LOOSENED ENTRIES + SIGNAL DIAGNOSTICS.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
 best signals. After a loss, pause THAT PAIR. Use 15m trend as soft bias.
 SL/TP adapt per-pair. SOL DISABLED (0% win rate).
 
+CHANGES FROM v5.6:
+  - Momentum threshold: 0.15% → 0.08% (catch moves earlier)
+  - Volume threshold: 1.2x → 0.8x (most vol is <1x)
+  - BTC strength gate: 3/4 → 2/4 (same as all pairs)
+  - RSI EXTREME OVERRIDE: RSI <30 or >70 = enter regardless of other signals
+  - Signal scan logging: every tick shows pass/fail per condition
+  - Binance spot: custom SL/TP/trail (wider for no-leverage spot)
+
 ENTRY — 2-of-4 with 15m SOFT WEIGHT:
   Signals (up to 6, counted against N/4 threshold):
-  1. Momentum 60s: 0.15%+ move
-  2. Volume: 1.2x average spike
+  1. Momentum 60s: 0.08%+ move
+  2. Volume: 0.8x average spike
   3. RSI: < 40 (long) or > 60 (short)
   4. BB mean-reversion: price near band edge
   5. Momentum 5m: 0.30%+ slow bleed
   6. Trend continuation: new 15-candle extreme + volume
+  OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
 
-EXIT — 3-PHASE SYSTEM (the core change from v5.5):
-  PHASE 1 (0-1 min): HANDS OFF
+EXIT — 3-PHASE SYSTEM:
+  PHASE 1 (0-30s): HANDS OFF
     - ONLY exit on hard SL (-0.35% for ETH, -0.40% for XRP, -0.30% for BTC)
-    - NO breakeven, NO trailing, NO reversal, NO timeout
-    - 60s is enough for entry to settle, SL still protects us
-  PHASE 2 (1-10 min): WATCH
+    - EXCEPTION: if peak PnL >= +1.0%, skip to Phase 2 immediately
+    - 30s is enough for fill bounce to settle, SL still protects us
+  PHASE 2 (30s-10 min): WATCH
     - If PnL > +0.3% → move SL to entry (real breakeven)
     - If PnL > +0.35% → activate trailing (0.20% distance)
     - If still losing but above SL → keep holding
@@ -117,10 +126,12 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v5.6 — Fixed SL on entry, hands-off 1 min, then manage.
+    """Phase-based v5.7 — Loosened entries, signal diagnostics, spot-aware config.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
+    Binance spot uses wider SL/TP/trail (no leverage, needs room).
+    RSI extreme override: <30 or >70 enters regardless of other signals.
     """
 
     name = StrategyName.SCALP
@@ -143,8 +154,9 @@ class ScalpStrategy(BaseStrategy):
     ATR_TP_MULTIPLIER = 4.0
 
     # ── 3-PHASE EXIT TIMING ──────────────────────────────────────────
-    PHASE1_SECONDS = 60               # 0-1 min: HANDS OFF — only hard SL (was 3 min)
-    PHASE2_SECONDS = 10 * 60          # 3-10 min: WATCH — move SL up if profitable
+    PHASE1_SECONDS = 30               # 0-30s: HANDS OFF — only hard SL (was 60s, fill bounce settles by 30s)
+    PHASE1_SKIP_AT_PEAK_PCT = 1.0     # if peak PnL >= +1.0% during Phase 1, skip to Phase 2 immediately
+    PHASE2_SECONDS = 10 * 60          # 30s-10 min: WATCH — move SL up if profitable
     MAX_HOLD_SECONDS = 30 * 60        # 30 min hard timeout
     FLATLINE_SECONDS = 10 * 60        # 10 min flat = dead momentum (phase 3 only)
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
@@ -183,8 +195,8 @@ class ScalpStrategy(BaseStrategy):
     DISABLED_PAIRS: set[str] = {"SOL"}  # 0% win rate, remove from trading
 
     # ── Entry thresholds — 2-of-4 with 15m trend soft weight ────────────
-    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s
-    VOL_SPIKE_RATIO = 1.2             # volume > 1.2x average
+    MOMENTUM_MIN_PCT = 0.08           # 0.08%+ move in 60s (was 0.15 — catches moves earlier)
+    VOL_SPIKE_RATIO = 0.8             # volume > 0.8x average (was 1.2 — most vol is under 1x)
     RSI_EXTREME_LONG = 40             # RSI < 40 = oversold → long
     RSI_EXTREME_SHORT = 60            # RSI > 60 = overbought → short
     # BB mean-reversion thresholds (upper = short, lower = long):
@@ -195,6 +207,18 @@ class ScalpStrategy(BaseStrategy):
     # Trend continuation: new 15-candle low/high + volume confirms trend
     TREND_CONT_CANDLES = 15           # look back 15 candles for new low/high
     TREND_CONT_VOL_RATIO = 1.0       # volume must be above average (1.0x+)
+
+    # ── RSI EXTREME OVERRIDE — enter regardless of other signals ─────
+    RSI_OVERRIDE_LONG = 30            # RSI < 30 = strong oversold → long immediately
+    RSI_OVERRIDE_SHORT = 70           # RSI > 70 = strong overbought → short immediately
+
+    # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
+    SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
+    SPOT_TP_PCT = 3.0                 # 3% TP for spot
+    SPOT_TRAIL_ACTIVATE_PCT = 1.50    # trail activates at +1.5%
+    SPOT_TRAIL_DISTANCE_PCT = 0.80    # 0.8% trail distance
+    SPOT_CAPITAL_PCT = 50.0           # use 50% of Binance balance (target ~$5)
+    SPOT_MAX_POSITIONS = 1            # max 1 spot position (capital too small)
 
     # ── Adaptive widening (if idle too long, loosen by 20%) ──────────
     IDLE_WIDEN_SECONDS = 30 * 60      # after 30 min idle, widen thresholds
@@ -223,11 +247,11 @@ class ScalpStrategy(BaseStrategy):
         "ETH": 2,
         "XRP": 50,
     }
-    # Minimum signal strength per pair
+    # Minimum signal strength per pair (ALL at 2/4 — let the signal system decide)
     PAIR_MIN_STRENGTH: dict[str, int] = {
         "XRP": 2,    # best performer: 2/4
         "ETH": 2,    # mixed: 2/4
-        "BTC": 3,    # low win rate: 3/4 only
+        "BTC": 2,    # was 3/4, loosened to 2/4 (same gate for all pairs)
     }
     # Adaptive: track last N trades per pair for win-rate-based adjustment
     PERF_WINDOW = 5                     # look at last 5 trades per pair
@@ -279,7 +303,7 @@ class ScalpStrategy(BaseStrategy):
         self.trade_exchange: ccxt.Exchange | None = exchange
         self.is_futures = is_futures
         self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1  # CAP at 20x
-        self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.CAPITAL_PCT_SPOT
+        self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.SPOT_CAPITAL_PCT
         self._exchange_id: str = "delta" if is_futures else "binance"
         self._market_analyzer = market_analyzer  # for 15m trend direction
 
@@ -289,8 +313,13 @@ class ScalpStrategy(BaseStrategy):
         self._base_asset = base_asset  # cached for SL/TP lookup
 
         # Dynamic ATR-based SL/TP — updated every tick from 1m candles
-        self._sl_pct: float = self.PAIR_SL_FLOOR.get(base_asset, self.STOP_LOSS_PCT)
-        self._tp_pct: float = self.PAIR_TP_FLOOR.get(base_asset, self.MIN_TP_PCT)
+        # Spot uses wider SL/TP (no leverage, needs more room)
+        if not is_futures:
+            self._sl_pct: float = self.SPOT_SL_PCT
+            self._tp_pct: float = self.SPOT_TP_PCT
+        else:
+            self._sl_pct = self.PAIR_SL_FLOOR.get(base_asset, self.STOP_LOSS_PCT)
+            self._tp_pct = self.PAIR_TP_FLOOR.get(base_asset, self.MIN_TP_PCT)
         self._last_atr_pct: float = 0.0  # last computed 1m ATR as % of price
 
         # Position state
@@ -302,7 +331,12 @@ class ScalpStrategy(BaseStrategy):
         self.highest_since_entry: float = 0.0
         self.lowest_since_entry: float = float("inf")
         self._trailing_active: bool = False
-        self._trail_distance_pct: float = self.TRAILING_DISTANCE_PCT  # dynamic, only widens
+        # Spot uses wider trail distance and activation (no leverage, needs room)
+        if not is_futures:
+            self.TRAILING_ACTIVATE_PCT = self.SPOT_TRAIL_ACTIVATE_PCT  # override for spot
+            self.TRAILING_DISTANCE_PCT = self.SPOT_TRAIL_DISTANCE_PCT
+        _init_trail_dist = self.TRAILING_DISTANCE_PCT
+        self._trail_distance_pct: float = _init_trail_dist  # dynamic, only widens
         self._peak_unrealized_pnl: float = 0.0  # track peak P&L for decay exit
         self._in_position_tick: int = 0  # counts 1s ticks while in position (for OHLCV refresh)
 
@@ -361,20 +395,25 @@ class ScalpStrategy(BaseStrategy):
             rt_taker = 0.20
         tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
         disabled_tag = f" DISABLED={','.join(self.DISABLED_PAIRS)}" if self.DISABLED_PAIRS else ""
+        max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
         self.logger.info(
-            "[%s] PHASE-BASED v5.6 ACTIVE (%s) — tick=1s/5s(dynamic), "
-            "SL=%.2f%% TP=%.2f%% Phase1=%ds Phase2=%ds MaxHold=%ds "
+            "[%s] PHASE-BASED v5.7 ACTIVE (%s) — tick=1s/5s(dynamic), "
+            "SL=%.2f%% TP=%.2f%% Phase1=%ds(skip@+%.1f%%) Phase2=%ds MaxHold=%ds "
             "Trail@+%.1f%%(%.2f%%) MoveToEntry@+%.1f%% Flat=%ds "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
+            "Mom=%.2f%% Vol=%.1fx RSI-Override=%d/%d "
             "DailyLoss=%.0f%%%s%s",
             self.pair, tag,
             self._sl_pct, self._tp_pct,
-            self.PHASE1_SECONDS, self.PHASE2_SECONDS, self.MAX_HOLD_SECONDS,
+            self.PHASE1_SECONDS, self.PHASE1_SKIP_AT_PEAK_PCT,
+            self.PHASE2_SECONDS, self.MAX_HOLD_SECONDS,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
             self.MOVE_SL_TO_ENTRY_PCT, self.FLATLINE_SECONDS,
-            self.MAX_POSITIONS, self._max_contracts,
+            max_pos, self._max_contracts,
             self.SL_COOLDOWN_SECONDS, self.CONSECUTIVE_LOSS_LIMIT,
             self.STREAK_PAUSE_SECONDS,
+            self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
+            self.RSI_OVERRIDE_LONG, self.RSI_OVERRIDE_SHORT,
             self.DAILY_LOSS_LIMIT_PCT, disabled_tag,
             pos_info,
         )
@@ -428,17 +467,23 @@ class ScalpStrategy(BaseStrategy):
             atr_pct = (atr / current_price) * 100 if current_price > 0 else 0.0
             self._last_atr_pct = atr_pct
 
-            # Per-pair floors
-            sl_floor = self.PAIR_SL_FLOOR.get(self._base_asset, self.STOP_LOSS_PCT)
-            tp_floor = self.PAIR_TP_FLOOR.get(self._base_asset, self.MIN_TP_PCT)
+            # Per-pair floors — spot uses wider floors (no leverage)
+            if not self.is_futures:
+                sl_floor = self.SPOT_SL_PCT
+                tp_floor = self.SPOT_TP_PCT
+            else:
+                sl_floor = self.PAIR_SL_FLOOR.get(self._base_asset, self.STOP_LOSS_PCT)
+                tp_floor = self.PAIR_TP_FLOOR.get(self._base_asset, self.MIN_TP_PCT)
 
             # Dynamic: ATR-based, but never below floor
             self._sl_pct = max(sl_floor, atr_pct * self.ATR_SL_MULTIPLIER)
             self._tp_pct = max(tp_floor, atr_pct * self.ATR_TP_MULTIPLIER)
 
-            # Safety cap: SL never wider than 1.5%, TP never wider than 5%
-            self._sl_pct = min(self._sl_pct, 1.50)
-            self._tp_pct = min(self._tp_pct, 5.00)
+            # Safety cap: spot allows wider SL/TP (no leverage risk)
+            sl_cap = 3.00 if not self.is_futures else 1.50
+            tp_cap = 6.00 if not self.is_futures else 5.00
+            self._sl_pct = min(self._sl_pct, sl_cap)
+            self._tp_pct = min(self._tp_pct, tp_cap)
         except Exception:
             # Silently keep existing values if ATR calc fails
             pass
@@ -612,7 +657,8 @@ class ScalpStrategy(BaseStrategy):
             1 for p in self.risk_manager.open_positions
             if p.strategy == "scalp"
         )
-        if total_scalp >= self.MAX_POSITIONS:
+        max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
+        if total_scalp >= max_pos:
             return signals
 
         # ── COOLDOWN: pause after SL hit (PER PAIR) ────────────────
@@ -774,24 +820,46 @@ class ScalpStrategy(BaseStrategy):
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
             }
-            # Log scanning status every 30 seconds (not every tick)
+            # Log scanning status every 30 seconds with pass/fail per condition
             if self._tick_count % 6 == 0:
-                idle_sec = int(idle_seconds)
-                widen_tag = " [WIDENED]" if is_widened else ""
                 eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(is_widened)
-                cooldown_tag = ""
-                pair_losses = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
-                if pair_losses > 0:
-                    cooldown_tag = f" streak={pair_losses}"
+
+                # Build pass/fail indicators for each condition
+                # RSI check (long direction for display; show both extremes)
+                rsi_long_pass = rsi_now < eff_rsi_l
+                rsi_short_pass = rsi_now > eff_rsi_s
+                rsi_override = rsi_now < self.RSI_OVERRIDE_LONG or rsi_now > self.RSI_OVERRIDE_SHORT
+                if rsi_long_pass or rsi_short_pass:
+                    rsi_tag = f"RSI={rsi_now:.0f} \u2713"
+                elif rsi_override:
+                    rsi_tag = f"RSI={rsi_now:.0f} \u2713\u2713(OVERRIDE)"
+                else:
+                    rsi_tag = f"RSI={rsi_now:.0f} \u2717({eff_rsi_l:.0f}/{eff_rsi_s:.0f})"
+
+                # Volume check
+                vol_pass = vol_ratio >= eff_vol
+                vol_tag = f"Vol={vol_ratio:.1f}x \u2713" if vol_pass else f"Vol={vol_ratio:.1f}x \u2717({eff_vol:.1f})"
+
+                # Momentum check
+                mom_pass = abs(momentum_60s) >= eff_mom
+                mom_tag = f"Mom={momentum_60s:+.2f}% \u2713" if mom_pass else f"Mom={momentum_60s:+.2f}% \u2717({eff_mom:.2f})"
+
+                # BB check
+                bb_range = bb_upper - bb_lower if bb_upper > bb_lower else 1.0
+                bb_pos = (current_price - bb_lower) / bb_range if bb_range > 0 else 0.5
+                bb_pass = bb_pos <= self.BB_MEAN_REVERT_LOWER or bb_pos >= self.BB_MEAN_REVERT_UPPER
+                bb_label = "low" if bb_pos < 0.3 else ("high" if bb_pos > 0.7 else "mid")
+                bb_tag = f"BB={bb_label} \u2713" if bb_pass else f"BB={bb_label} \u2717"
+
+                # Count passing signals
+                pass_count = sum([rsi_long_pass or rsi_short_pass, vol_pass, mom_pass, bb_pass])
+                # Determine outcome
+                action = "ENTER" if pass_count >= 2 or rsi_override else "SKIP"
+
                 self.logger.info(
-                    "[%s] WAITING %ds%s | 15m=%s | $%.2f | mom60=%+.3f%%/%.2f | RSI=%.1f/%d/%d | "
-                    "vol=%.1fx/%.1f | BB[%.2f-%.2f]%s",
-                    self.pair, idle_sec, widen_tag, trend_15m, current_price,
-                    momentum_60s, eff_mom,
-                    rsi_now, eff_rsi_l, eff_rsi_s,
-                    vol_ratio, eff_vol,
-                    bb_lower, bb_upper,
-                    cooldown_tag,
+                    "SCAN %s: %s | %s | %s | %s \u2192 %d/4 %s",
+                    self.pair, rsi_tag, vol_tag, mom_tag, bb_tag,
+                    pass_count, action,
                 )
 
         return signals
@@ -804,8 +872,8 @@ class ScalpStrategy(BaseStrategy):
         """Return (momentum, vol_ratio, rsi_long, rsi_short) with optional widening.
 
         When widened=True (idle 30+ min), thresholds loosen by 20%:
-        - Momentum: 0.15% → 0.12%
-        - Volume: 1.2x → 0.96x (~1.0x, essentially any volume)
+        - Momentum: 0.08% → 0.064%
+        - Volume: 0.8x → 0.64x
         - RSI long: 40 → 44 (wider range triggers)
         - RSI short: 60 → 56 (wider range triggers)
         """
@@ -835,14 +903,17 @@ class ScalpStrategy(BaseStrategy):
 
         Returns (side, reason, use_limit, signal_count) or None.
 
+        RSI EXTREME OVERRIDE: RSI < 30 or > 70 enters immediately
+        regardless of other signal counts.
+
         SOFT TREND WEIGHT (15m):
         - Trend-aligned: 2/4 signals required (standard)
         - Counter-trend: 3/4 signals required (harder to go against trend)
         - Neutral: 2/4 for both directions
 
         Signals (up to 6, but counted as max 4 for threshold):
-        1. Momentum 60s: 0.15%+ move in 60s
-        2. Volume: 1.2x+ spike
+        1. Momentum 60s: 0.08%+ move in 60s
+        2. Volume: 0.8x+ spike
         3. RSI: < 40 oversold (long) or > 60 overbought (short)
         4. BB mean-reversion: price in bottom 15% of BB → long, top 15% → short
         5. Momentum 5m: 0.30%+ move over 5 candles (slow bleed detection)
@@ -940,6 +1011,23 @@ class ScalpStrategy(BaseStrategy):
             if current_close > float(lookback.max()) and current_vol >= avg_vol * self.TREND_CONT_VOL_RATIO:
                 bull_signals.append(f"TCONT:newHigh+vol{current_vol/avg_vol:.1f}x")
 
+        # ── RSI EXTREME OVERRIDE: RSI <30 or >70 → enter immediately ─────
+        # Strong oversold/overbought overrides all other conditions.
+        if rsi_now < self.RSI_OVERRIDE_LONG:
+            reason = f"LONG RSI-OVERRIDE: RSI={rsi_now:.1f}<{self.RSI_OVERRIDE_LONG} [15m={trend_15m}]{widen_tag}"
+            # Add any existing bull signals for context
+            if bull_signals:
+                reason += f" +{'+'.join(bull_signals)}"
+            strength = max(len(bull_signals), 2)  # at least 2/4 equivalent
+            return ("long", reason, True, strength)
+
+        if rsi_now > self.RSI_OVERRIDE_SHORT and can_short:
+            reason = f"SHORT RSI-OVERRIDE: RSI={rsi_now:.1f}>{self.RSI_OVERRIDE_SHORT} [15m={trend_15m}]{widen_tag}"
+            if bear_signals:
+                reason += f" +{'+'.join(bear_signals)}"
+            strength = max(len(bear_signals), 2)
+            return ("short", reason, True, strength)
+
         # ── Check required signals (LONG) — trend-weighted ────────────────
         # NO fee filter — if 2/4 signals fire, ENTER. The signal system IS the filter.
         # RSI + VOL is a valid entry even when momentum is flat (price about to move).
@@ -993,8 +1081,9 @@ class ScalpStrategy(BaseStrategy):
     def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
         """3-PHASE EXIT SYSTEM — let trades breathe, then manage.
 
-        PHASE 1 (0-1 min): Only hard SL. Nothing else. Let trade settle.
-        PHASE 2 (1-10 min): Move SL to entry at +0.3%. Trail at +0.35%. Reversals.
+        PHASE 1 (0-30s): Only hard SL. Let trade settle.
+          Exception: if peak >= +1.0%, skip to Phase 2 immediately.
+        PHASE 2 (30s-10 min): Move SL to entry at +0.3%. Trail at +0.35%. Reversals.
         PHASE 3 (10-30 min): Trail or cut. Flatline exit. Hard timeout.
         """
         signals: list[Signal] = []
@@ -1030,16 +1119,29 @@ class ScalpStrategy(BaseStrategy):
                 return self._do_exit(current_price, pnl_pct, side, "SL", hold_seconds)
 
         # ══════════════════════════════════════════════════════════════
-        # PHASE 1 (0-3 min): HANDS OFF — only SL above
+        # PHASE 1 (0-30s): HANDS OFF — only SL above
+        # EXCEPTION: if peak PnL >= +1.0%, skip to Phase 2 immediately
+        #   (real profit appeared — don't let it evaporate)
         # ══════════════════════════════════════════════════════════════
         if hold_seconds < self.PHASE1_SECONDS:
-            if self._tick_count % 30 == 0:
+            # Peak-aware skip: if we've seen real profit, graduate early
+            if self._peak_unrealized_pnl >= self.PHASE1_SKIP_AT_PEAK_PCT:
                 self.logger.info(
-                    "[%s] PHASE1 %ds/%ds | %s $%.2f | PnL=%+.2f%%",
-                    self.pair, int(hold_seconds), self.PHASE1_SECONDS,
-                    side, current_price, pnl_pct,
+                    "[%s] PHASE1 SKIP — peak +%.2f%% >= +%.1f%% threshold, "
+                    "entering Phase 2 at %ds (current PnL=%+.2f%%)",
+                    self.pair, self._peak_unrealized_pnl,
+                    self.PHASE1_SKIP_AT_PEAK_PCT,
+                    int(hold_seconds), pnl_pct,
                 )
-            return signals
+                # Fall through to Phase 2 below
+            else:
+                if self._tick_count % 30 == 0:
+                    self.logger.info(
+                        "[%s] PHASE1 %ds/%ds | %s $%.2f | PnL=%+.2f%% | peak=%+.2f%%",
+                        self.pair, int(hold_seconds), self.PHASE1_SECONDS,
+                        side, current_price, pnl_pct, self._peak_unrealized_pnl,
+                    )
+                return signals
 
         # ══════════════════════════════════════════════════════════════
         # PHASE 2 (3-10 min): WATCH — move SL to entry, trail, reversals
@@ -1190,11 +1292,16 @@ class ScalpStrategy(BaseStrategy):
                 exit_type = "SL"
 
         # ── PHASE 1: only SL fires, skip everything else ────────────
-        if not exit_type and hold_seconds < self.PHASE1_SECONDS:
-            return  # hands off — no WS exits except SL
+        # EXCEPTION: peak-aware skip — if peak >= +1.0%, allow Phase 2 checks
+        _in_phase2_plus = hold_seconds >= self.PHASE1_SECONDS
+        if not exit_type and not _in_phase2_plus:
+            if self._peak_unrealized_pnl >= self.PHASE1_SKIP_AT_PEAK_PCT:
+                _in_phase2_plus = True  # graduate early — real profit to protect
+            else:
+                return  # hands off — no WS exits except SL
 
         # ── PHASE 2+: breakeven (SL moved to entry after peak > +0.3%) ──
-        if not exit_type and hold_seconds >= self.PHASE1_SECONDS:
+        if not exit_type and _in_phase2_plus:
             if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT and not self._trailing_active:
                 at_entry = (
                     (side == "long" and current_price <= self.entry_price) or
@@ -1204,7 +1311,7 @@ class ScalpStrategy(BaseStrategy):
                     exit_type = "BREAKEVEN"
 
         # ── PHASE 2+: trailing (activate from PEAK, not current) ─────
-        if not exit_type and hold_seconds >= self.PHASE1_SECONDS:
+        if not exit_type and _in_phase2_plus:
             if self._peak_unrealized_pnl >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
                 self._update_trail_distance()
@@ -1221,7 +1328,7 @@ class ScalpStrategy(BaseStrategy):
                         exit_type = "TRAIL"
 
         # ── PHASE 2+: profit pullback ────────────────────────────────
-        if not exit_type and hold_seconds >= self.PHASE1_SECONDS and pnl_pct > 0:
+        if not exit_type and _in_phase2_plus and pnl_pct > 0:
             if side == "long":
                 peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
             else:
@@ -1232,7 +1339,7 @@ class ScalpStrategy(BaseStrategy):
                     exit_type = "PULLBACK"
 
         # ── PHASE 2+: profit decay ──────────────────────────────────
-        if not exit_type and hold_seconds >= self.PHASE1_SECONDS:
+        if not exit_type and _in_phase2_plus:
             if self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
                 exit_type = "DECAY"
 
