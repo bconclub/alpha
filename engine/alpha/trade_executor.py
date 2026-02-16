@@ -38,6 +38,57 @@ DELTA_CONTRACT_SIZE: dict[str, float] = {
 }
 
 
+def calc_pnl(
+    entry_price: float,
+    exit_price: float,
+    amount: float,
+    position_type: str,
+    leverage: int | float,
+    exchange_id: str,
+    pair: str,
+    *,
+    entry_fee_rate: float = 0.0,
+    exit_fee_rate: float = 0.0,
+) -> tuple[float, float]:
+    """Single source of truth for P&L calculation across ALL close paths.
+
+    Used by trade_executor._close_trade_in_db (normal exits) AND
+    main.py reconciliation (orphan, restart, dust, manual close detection).
+
+    Returns (net_pnl_dollars, pnl_pct_on_collateral).
+
+    amount = contracts for Delta, coins for Binance spot.
+    Fee rates are per-side (e.g. 0.0005 = 0.05%).  Pass 0.0 to skip fees.
+    """
+    if entry_price <= 0 or exit_price <= 0:
+        return 0.0, 0.0
+
+    # Convert contracts to coins for Delta
+    coin_amount = float(amount)
+    if exchange_id == "delta":
+        contract_size = DELTA_CONTRACT_SIZE.get(pair, 0.01)
+        coin_amount = float(amount) * contract_size
+
+    # Gross P&L
+    if position_type in ("long", "spot"):
+        gross_pnl = (exit_price - entry_price) * coin_amount
+    else:  # short
+        gross_pnl = (entry_price - exit_price) * coin_amount
+
+    # Fees
+    entry_notional = entry_price * coin_amount
+    exit_notional = exit_price * coin_amount
+    total_fees = (entry_notional * entry_fee_rate) + (exit_notional * exit_fee_rate)
+    net_pnl = gross_pnl - total_fees
+
+    # P&L % against collateral (not notional)
+    lev = max(int(leverage or 1), 1)
+    collateral = entry_notional / lev if lev > 1 else entry_notional
+    pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
+
+    return round(net_pnl, 8), round(pnl_pct, 4)
+
+
 class TradeExecutor:
     """Unified order execution layer on top of ccxt."""
 
@@ -835,36 +886,14 @@ class TradeExecutor:
                 })
                 return None
 
-            # Calculate P&L from the original entry
+            # Calculate P&L using shared function (single source of truth)
             entry_price = open_trade.get("entry_price", fill_price)
             entry_amount = open_trade.get("amount", filled_amount)
             position_type = open_trade.get("position_type", signal.position_type)
             trade_leverage = open_trade.get("leverage", signal.leverage) or 1
-
-            # PnL calculation:
-            # LONG/spot buy-then-sell: (exit - entry) * coin_amount
-            # SHORT sell-then-buy: (entry - exit) * coin_amount
-            #
-            # IMPORTANT: For Delta futures, entry_amount is in CONTRACTS (e.g. 50),
-            # not coin amount (e.g. 50 XRP). Must convert using contract_size.
-            #
-            # Fees are deducted: round-trip fee = (entry_notional + exit_notional) * taker_rate
-            coin_amount = entry_amount
             exchange_id = open_trade.get("exchange", signal.exchange_id)
-            if exchange_id == "delta":
-                contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
-                coin_amount = entry_amount * contract_size  # 50 contracts × 1.0 = 50 XRP
 
-            if position_type in ("long", "spot"):
-                gross_pnl = (fill_price - entry_price) * coin_amount
-            else:  # short
-                gross_pnl = (entry_price - fill_price) * coin_amount
-
-            # Calculate round-trip trading fees (including GST for Delta India)
-            # Entry: maker fee if limit order, taker if market
-            # Exit: always taker (market orders for speed)
-            entry_notional = entry_price * coin_amount
-            exit_notional = fill_price * coin_amount
+            # Determine fee rates for this trade
             if exchange_id == "delta":
                 entry_order_type = open_trade.get("order_type", "market")
                 entry_fee_rate = self._delta_maker_fee if entry_order_type == "limit" else self._delta_taker_fee
@@ -872,22 +901,14 @@ class TradeExecutor:
             else:
                 entry_fee_rate = self._binance_taker_fee
                 exit_fee_rate = self._binance_taker_fee
-            entry_fee = entry_notional * entry_fee_rate
-            exit_fee = exit_notional * exit_fee_rate
-            total_fees = entry_fee + exit_fee
-            fee_rate = total_fees / (entry_notional + exit_notional) if (entry_notional + exit_notional) > 0 else 0
 
-            # Net P&L = gross - fees
-            pnl = gross_pnl - total_fees
-
-            # P&L percentage is against COLLATERAL (actual capital at risk)
-            # For futures: collateral = notional / leverage
-            notional_cost = entry_notional
-            if trade_leverage > 1:
-                collateral = notional_cost / trade_leverage
-            else:
-                collateral = notional_cost
-            pnl_pct = (pnl / collateral * 100) if collateral > 0 else 0.0
+            pnl, pnl_pct = calc_pnl(
+                entry_price, fill_price, entry_amount,
+                position_type, trade_leverage,
+                exchange_id, signal.pair,
+                entry_fee_rate=entry_fee_rate,
+                exit_fee_rate=exit_fee_rate,
+            )
 
             trade_id = open_trade["id"]
 
@@ -902,11 +923,10 @@ class TradeExecutor:
 
             logger.info(
                 "Trade closed in DB: id=%s %s %s entry=$%.2f exit=$%.2f "
-                "gross=$%.6f fees=$%.6f net=$%.6f (%.2f%%) [%s] fee_rate=%.4f%%",
+                "net=$%.6f (%.2f%%) [%s]",
                 trade_id, position_type, signal.pair,
                 entry_price, fill_price,
-                gross_pnl, total_fees, pnl, pnl_pct, signal.exchange_id,
-                fee_rate * 100,
+                pnl, pnl_pct, signal.exchange_id,
             )
 
             # Record P&L in the risk manager

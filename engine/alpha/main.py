@@ -24,51 +24,10 @@ from alpha.risk_manager import RiskManager
 from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
-from alpha.trade_executor import TradeExecutor, DELTA_CONTRACT_SIZE
+from alpha.trade_executor import TradeExecutor, DELTA_CONTRACT_SIZE, calc_pnl
 from alpha.utils import iso_now, setup_logger
 
 logger = setup_logger("main")
-
-
-def _calc_pnl(
-    entry_price: float,
-    exit_price: float,
-    amount: float,
-    position_type: str,
-    leverage: int | float,
-    exchange_id: str,
-    pair: str,
-) -> tuple[float, float]:
-    """Calculate correct P&L for any close path (reconciliation, orphan, dust, etc.).
-
-    Returns (pnl_dollars, pnl_pct_on_collateral).
-
-    For futures: pnl_pct is against COLLATERAL (notional / leverage).
-    For spot: pnl_pct is against notional (leverage = 1).
-    Amount is in contracts for Delta, coins for Binance.
-    """
-    if entry_price <= 0 or exit_price <= 0:
-        return 0.0, 0.0
-
-    # Convert contracts to coins for Delta
-    coin_amount = amount
-    if exchange_id == "delta":
-        contract_size = DELTA_CONTRACT_SIZE.get(pair, 0.01)
-        coin_amount = amount * contract_size
-
-    # Gross P&L in dollars
-    if position_type in ("long", "spot"):
-        pnl = (exit_price - entry_price) * coin_amount
-    else:  # short
-        pnl = (entry_price - exit_price) * coin_amount
-
-    # P&L % against collateral (not notional)
-    notional = entry_price * coin_amount
-    lev = max(leverage or 1, 1)
-    collateral = notional / lev if lev > 1 else notional
-    pnl_pct = (pnl / collateral * 100) if collateral > 0 else 0.0
-
-    return round(pnl, 8), round(pnl_pct, 4)
 
 
 class AlphaBot:
@@ -1050,7 +1009,7 @@ class AlphaBot:
                             current_price = float(ticker.get("last", 0) or 0)
                         except Exception:
                             current_price = entry_price  # fallback: 0 P&L
-                        pnl, pnl_pct = _calc_pnl(
+                        pnl, pnl_pct = calc_pnl(
                             entry_price, current_price, held,
                             trade.get("position_type", "spot"),
                             trade.get("leverage", 1) or 1,
@@ -1307,7 +1266,7 @@ class AlphaBot:
                     exit_price = entry_price  # worst case: 0 P&L
 
                 # Calculate P&L (leveraged, contract-aware)
-                pnl, pnl_pct = _calc_pnl(
+                pnl, pnl_pct = calc_pnl(
                     entry_price, exit_price, amount,
                     position_type, leverage,
                     exchange_id, pair,
@@ -1759,7 +1718,7 @@ class AlphaBot:
                                 except Exception:
                                     exit_price = entry_px
                                 trade_lev = open_trade.get("leverage", config.delta.leverage) or 1
-                                pnl, pnl_pct = _calc_pnl(
+                                pnl, pnl_pct = calc_pnl(
                                     entry_px, exit_price, contracts,
                                     side, trade_lev,
                                     "delta", pair,
@@ -1991,7 +1950,7 @@ class AlphaBot:
 
                 # Calculate P&L (leveraged, contract-aware)
                 trade_lev = trade.get("leverage", 1) or 1
-                pnl, pnl_pct = _calc_pnl(
+                pnl, pnl_pct = calc_pnl(
                     entry_price, current_price, amount,
                     position_type, trade_lev,
                     exchange_id, pair,
@@ -2023,7 +1982,7 @@ class AlphaBot:
                                 fallback_exit = float(ticker.get("last", 0) or 0) or entry_price
                         except Exception:
                             pass  # keep fallback_exit = entry_price, pnl = 0
-                        fallback_pnl, fallback_pnl_pct = _calc_pnl(
+                        fallback_pnl, fallback_pnl_pct = calc_pnl(
                             entry_price, fallback_exit, amount,
                             position_type, trade_lev,
                             exchange_id, pair,
