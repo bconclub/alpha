@@ -619,6 +619,7 @@ class TradeExecutor:
             and signal.exchange_id == "delta"
             and signal.order_type == "market"  # only override market exits
         )
+        limit_order_id: str | None = None  # track limit order for recovery in market retry
 
         if _use_limit_exit:
             try:
@@ -630,16 +631,16 @@ class TradeExecutor:
                     price=signal.price,
                     params=params,
                 )
-                order_id = limit_order.get("id")
+                limit_order_id = limit_order.get("id")
                 logger.info(
                     "[%s] Limit exit placed: %s %.0f @ $%.2f (order=%s) — waiting 5s for fill",
-                    signal.pair, signal.side, order_amount, signal.price, order_id,
+                    signal.pair, signal.side, order_amount, signal.price, limit_order_id,
                 )
                 await asyncio.sleep(5)
 
                 # Check if filled
                 try:
-                    updated = await exchange.fetch_order(order_id, signal.pair)
+                    updated = await exchange.fetch_order(limit_order_id, signal.pair)
                     status = updated.get("status", "")
                     filled = float(updated.get("filled", 0) or 0)
                 except Exception:
@@ -650,16 +651,55 @@ class TradeExecutor:
                     logger.info("[%s] Limit exit FILLED (maker fee)", signal.pair)
                     order = updated
                 else:
-                    # Cancel and fall through to market
-                    logger.info(
-                        "[%s] Limit exit NOT filled (status=%s, filled=%.0f/%.0f) — cancelling, using market",
-                        signal.pair, status, filled, order_amount,
-                    )
-                    try:
-                        await exchange.cancel_order(order_id, signal.pair)
-                    except Exception:
-                        pass  # may already be cancelled/filled
-                    # Fall through to market order below
+                    # Before cancelling, verify position still exists on exchange.
+                    # The limit order may have filled between our fetch_order and now,
+                    # or the order status might be stale.
+                    pos_check = await self._get_delta_position_size(signal)
+                    if pos_check is None:
+                        # Position is GONE — the limit order DID fill (or was liquidated).
+                        # Re-fetch the order to get actual fill price.
+                        logger.info(
+                            "[%s] Position gone after limit exit — order likely filled. Re-checking order.",
+                            signal.pair,
+                        )
+                        try:
+                            updated = await exchange.fetch_order(limit_order_id, signal.pair)
+                            status = updated.get("status", "")
+                            filled = float(updated.get("filled", 0) or 0)
+                        except Exception:
+                            pass  # keep previous values
+
+                        if status == "closed" or filled > 0:
+                            logger.info(
+                                "[%s] Limit exit confirmed FILLED on re-check (status=%s, filled=%.0f)",
+                                signal.pair, status, filled,
+                            )
+                            order = updated
+                        else:
+                            # Position gone but order shows unfilled — closed externally
+                            # (liquidation, manual close, etc.). Mark position_gone.
+                            logger.warning(
+                                "[%s] Position gone but limit order unfilled — closed externally",
+                                signal.pair,
+                            )
+                            try:
+                                await exchange.cancel_order(limit_order_id, signal.pair)
+                            except Exception:
+                                pass
+                            await self._mark_position_gone(signal)
+                            return None
+                    else:
+                        # Position still exists — limit genuinely didn't fill. Cancel and retry market.
+                        logger.info(
+                            "[%s] Limit exit NOT filled (status=%s, filled=%.0f/%.0f), "
+                            "position still open (%.0f contracts) — cancelling, using market",
+                            signal.pair, status, filled, order_amount, pos_check,
+                        )
+                        try:
+                            await exchange.cancel_order(limit_order_id, signal.pair)
+                        except Exception:
+                            pass  # may already be cancelled/filled
+                        # Fall through to market order below
             except Exception as e:
                 logger.warning("[%s] Limit exit failed: %s — falling back to market", signal.pair, e)
                 # Fall through to market order below
@@ -742,8 +782,25 @@ class TradeExecutor:
                             "[%s] Position already closed on exchange: %s",
                             signal.pair, e,
                         )
-                        await self._mark_position_gone(signal)
-                        return None
+                        # Try to find actual fill price from the limit order (if we used one)
+                        if _use_limit_exit and limit_order_id:
+                            try:
+                                final_order = await exchange.fetch_order(limit_order_id, signal.pair)
+                                final_fill = float(final_order.get("filled", 0) or 0)
+                                final_price = final_order.get("average") or final_order.get("price")
+                                if final_fill > 0 and final_price:
+                                    logger.info(
+                                        "[%s] Limit order %s actually filled: %.0f @ $%.2f — using as exit",
+                                        signal.pair, limit_order_id, final_fill, float(final_price),
+                                    )
+                                    order = final_order
+                                    break  # exit retry loop — proceed to normal DB write
+                            except Exception:
+                                pass  # fall through to _mark_position_gone
+                        # If we couldn't recover the fill, mark as position_gone
+                        if order is None:
+                            await self._mark_position_gone(signal)
+                            return None
                     elif is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
                         # Binance rejected exit for min notional — switch to quoteOrderQty
                         logger.warning(
