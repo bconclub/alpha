@@ -235,7 +235,11 @@ export default function BrainPage() {
     return Array.from(new Set(trades.map((t) => shortPair(t.pair)))).filter(Boolean).sort();
   }, [trades]);
 
-  const signals = useMemo(() => pairs.map((p) => buildPairSignal(trades, p)), [trades, pairs]);
+  const signals = useMemo(() => {
+    const built = pairs.map((p) => buildPairSignal(trades, p));
+    built.sort((a, b) => b.winRate - a.winRate);
+    return built;
+  }, [trades, pairs]);
 
   // Summary
   const totalPnl = useMemo(() => trades.reduce((s, t) => s + t.pnl, 0), [trades]);
