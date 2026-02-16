@@ -21,6 +21,7 @@ import {
 } from '@/lib/utils';
 import { Badge } from '@/components/ui/Badge';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
+import { useLivePrices } from '@/hooks/useLivePrices';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -235,6 +236,8 @@ function calcUnrealizedPnL(
 
 export default function TradeTable({ trades }: TradeTableProps) {
   const { strategyLog } = useSupabase();
+  const hasOpenTrades = trades.some((t) => t.status === 'open');
+  const livePrices = useLivePrices(hasOpenTrades);
 
   // -- Live timer for open trade hold times --------------------------------
   const [now, setNow] = useState(Date.now());
@@ -421,7 +424,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
     if (trade.status === 'open') {
       const asset = extractBaseAsset(trade.pair);
-      const currentPrice = currentPrices.get(asset) ?? null;
+      // Priority: live API price (3s) → strategy_log price (~5min)
+      const currentPrice = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
       const unrealized = calcUnrealizedPnL(trade, currentPrice);
       if (unrealized) {
         return {
