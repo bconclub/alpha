@@ -181,7 +181,7 @@ class ScalpStrategy(BaseStrategy):
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
 
     # ── Breakeven & profit protection ─────────────────────────────────
-    BREAKEVEN_AFTER_SECONDS = 60      # 60s — tighten SL to breakeven FAST
+    BREAKEVEN_AFTER_SECONDS = 5 * 60  # 5 min — give trades time; fees already paid
     PROFIT_PULLBACK_MIN_PEAK = 0.50   # peak must be > 0.50% to trigger pullback exit
     PROFIT_PULLBACK_PCT = 40.0        # exit if profit drops 40% from peak
 
@@ -475,13 +475,21 @@ class ScalpStrategy(BaseStrategy):
         exchange = self.trade_exchange or self.executor.exchange
         now = time.monotonic()
 
-        # ── Daily expiry check (5:30 PM IST) — force-close only, never block entries ──
+        # ── Daily expiry check (5:30 PM IST) — ONLY for dated contracts ──
+        # Perpetual futures (BTC/USD:USD, ETH/USD:USD etc.) never expire.
+        # Only dated contracts (symbol contains date like -260216-) have expiry.
+        _expiry_no_new = False
         _expiry_force_close = False
         _mins_to_expiry = 999.0
-        if self.is_futures:
-            _no_new, _expiry_force_close, _mins_to_expiry = self._is_near_expiry()
-            # NOTE: we do NOT block new entries near expiry — scalp trades independently.
-            # Only force-close existing positions in the final minutes before settlement.
+        _is_perpetual = self.is_futures and "-" not in self.pair.split(":")[-1]
+        if self.is_futures and not _is_perpetual:
+            _expiry_no_new, _expiry_force_close, _mins_to_expiry = self._is_near_expiry()
+            if _expiry_no_new and not self.in_position:
+                if self._tick_count % 20 == 0:
+                    self.logger.info(
+                        "[%s] EXPIRY in %.0f min — no new entries", self.pair, _mins_to_expiry,
+                    )
+                return signals
 
         # ── Daily loss limit ───────────────────────────────────────────
         exchange_cap = self.risk_manager.get_exchange_capital(self._exchange_id)
@@ -1049,7 +1057,7 @@ class ScalpStrategy(BaseStrategy):
                 return self._do_exit(current_price, pnl_pct, "long", "SL", hold_seconds)
 
             # ── 2. BREAKEVEN SL — tighten after 2 min if not profitable ─
-            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct <= 0 and not self._trailing_active:
+            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct < -1.0 and not self._trailing_active:
                 self.logger.info(
                     "[%s] BREAKEVEN EXIT — %ds in, PnL=%.2f%% not profitable",
                     self.pair, int(hold_seconds), pnl_pct,
@@ -1152,7 +1160,7 @@ class ScalpStrategy(BaseStrategy):
                 return self._do_exit(current_price, pnl_pct, "short", "SL", hold_seconds)
 
             # ── 2. BREAKEVEN SL — tighten after 2 min if not profitable ─
-            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct <= 0 and not self._trailing_active:
+            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct < -1.0 and not self._trailing_active:
                 self.logger.info(
                     "[%s] BREAKEVEN EXIT — %ds in, PnL=%.2f%% not profitable",
                     self.pair, int(hold_seconds), pnl_pct,
@@ -1283,7 +1291,7 @@ class ScalpStrategy(BaseStrategy):
                 exit_type = "SL"
 
         # ── 2. BREAKEVEN ──────────────────────────────────────────────
-        if not exit_type and hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct <= 0 and not self._trailing_active:
+        if not exit_type and hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct < -1.0 and not self._trailing_active:
             exit_type = "BREAKEVEN"
 
         # ── 3. PROFIT PULLBACK ────────────────────────────────────────

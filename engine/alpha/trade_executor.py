@@ -441,106 +441,162 @@ class TradeExecutor:
         order: dict | None = None
         last_error: Exception | None = None
 
-        for attempt in range(1, MAX_RETRIES + 1):
+        # ── LIMIT EXIT OPTIMIZATION: Delta futures exits use limit-then-market ──
+        # Saves ~60% on exit fees (maker 0.024% vs taker 0.059%)
+        # Place limit at current price, wait 5s, cancel & market if unfilled
+        _use_limit_exit = (
+            is_exit
+            and is_futures
+            and signal.exchange_id == "delta"
+            and signal.order_type == "market"  # only override market exits
+        )
+
+        if _use_limit_exit:
             try:
-                if use_quote_fallback and is_exit:
-                    # Sell by USDT value — for small balances below MIN_NOTIONAL
-                    # Must NOT pass amount when using quoteOrderQty on Binance
-                    quote_value = round(signal.amount * signal.price, 2)
-                    logger.info(
-                        "[%s] Placing quoteOrderQty sell: $%.2f (amount=%.8f too small for normal sell)",
-                        signal.pair, quote_value, signal.amount,
-                    )
-                    order = await exchange.create_order(
-                        symbol=signal.pair,
-                        type="market",
-                        side="sell",
-                        amount=None,
-                        params={**params, "quoteOrderQty": quote_value},
-                    )
-                elif signal.order_type == "market":
-                    # Log exact params sent to exchange (critical for debugging)
-                    logger.debug(
-                        "[%s] create_order(symbol=%s, type=market, side=%s, amount=%s, params=%s)",
-                        signal.pair, signal.pair, signal.side, order_amount, params,
-                    )
-                    order = await exchange.create_order(
-                        symbol=signal.pair,
-                        type="market",
-                        side=signal.side,
-                        amount=order_amount,
-                        params=params,
-                    )
-                else:
-                    logger.debug(
-                        "[%s] create_order(symbol=%s, type=limit, side=%s, amount=%s, price=%.2f, params=%s)",
-                        signal.pair, signal.pair, signal.side, order_amount, signal.price, params,
-                    )
-                    order = await exchange.create_order(
-                        symbol=signal.pair,
-                        type="limit",
-                        side=signal.side,
-                        amount=order_amount,
-                        price=signal.price,
-                        params=params,
-                    )
-                break
-            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
-                last_error = e
-                delay = BASE_DELAY * (2 ** (attempt - 1))
-                logger.warning(
-                    "Order attempt %d/%d failed (retryable): %s -- retrying in %.1fs",
-                    attempt, MAX_RETRIES, e, delay,
+                limit_order = await exchange.create_order(
+                    symbol=signal.pair,
+                    type="limit",
+                    side=signal.side,
+                    amount=order_amount,
+                    price=signal.price,
+                    params=params,
                 )
-                await asyncio.sleep(delay)
-            except ccxt.InsufficientFunds as e:
-                last_error = e
-                if is_exit:
-                    # Exit: retry — balance may have updated
-                    logger.warning(
-                        "Exit attempt %d/%d insufficient funds: %s -- retrying in 2s",
-                        attempt, MAX_RETRIES, e,
-                    )
-                    await asyncio.sleep(2)
+                order_id = limit_order.get("id")
+                logger.info(
+                    "[%s] Limit exit placed: %s %.0f @ $%.2f (order=%s) — waiting 5s for fill",
+                    signal.pair, signal.side, order_amount, signal.price, order_id,
+                )
+                await asyncio.sleep(5)
+
+                # Check if filled
+                try:
+                    updated = await exchange.fetch_order(order_id, signal.pair)
+                    status = updated.get("status", "")
+                    filled = float(updated.get("filled", 0) or 0)
+                except Exception:
+                    status = "unknown"
+                    filled = 0
+
+                if status == "closed" or filled >= order_amount:
+                    logger.info("[%s] Limit exit FILLED (maker fee)", signal.pair)
+                    order = updated
                 else:
-                    logger.error("Insufficient funds for order: %s", e)
-                    await self._notify_error(signal, str(e))
-                    return None
-            except ccxt.InvalidOrder as e:
-                last_error = e
-                if is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
-                    # Binance rejected exit for min notional — switch to quoteOrderQty
-                    logger.warning(
-                        "[%s] Exit rejected for MIN_NOTIONAL — switching to quoteOrderQty mode",
-                        signal.pair,
+                    # Cancel and fall through to market
+                    logger.info(
+                        "[%s] Limit exit NOT filled (status=%s, filled=%.0f/%.0f) — cancelling, using market",
+                        signal.pair, status, filled, order_amount,
                     )
-                    use_quote_fallback = True
-                    # Don't sleep — immediately retry with quoteOrderQty on next iteration
-                    continue
-                elif is_exit:
-                    # Exit: retry all errors
-                    logger.warning(
-                        "Exit attempt %d/%d invalid order: %s -- retrying in 2s",
-                        attempt, MAX_RETRIES, e,
-                    )
-                    await asyncio.sleep(2)
-                else:
-                    logger.error("Invalid order: %s", e)
-                    await self._notify_error(signal, str(e))
-                    return None
+                    try:
+                        await exchange.cancel_order(order_id, signal.pair)
+                    except Exception:
+                        pass  # may already be cancelled/filled
+                    # Fall through to market order below
             except Exception as e:
-                last_error = e
-                if is_exit:
-                    # Exit: retry ALL errors — never give up silently
+                logger.warning("[%s] Limit exit failed: %s — falling back to market", signal.pair, e)
+                # Fall through to market order below
+
+        # If limit exit already succeeded, skip the market retry loop
+        if order is None:
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    if use_quote_fallback and is_exit:
+                        # Sell by USDT value — for small balances below MIN_NOTIONAL
+                        # Must NOT pass amount when using quoteOrderQty on Binance
+                        quote_value = round(signal.amount * signal.price, 2)
+                        logger.info(
+                            "[%s] Placing quoteOrderQty sell: $%.2f (amount=%.8f too small for normal sell)",
+                            signal.pair, quote_value, signal.amount,
+                        )
+                        order = await exchange.create_order(
+                            symbol=signal.pair,
+                            type="market",
+                            side="sell",
+                            amount=None,
+                            params={**params, "quoteOrderQty": quote_value},
+                        )
+                    elif signal.order_type == "market":
+                        # Log exact params sent to exchange (critical for debugging)
+                        logger.debug(
+                            "[%s] create_order(symbol=%s, type=market, side=%s, amount=%s, params=%s)",
+                            signal.pair, signal.pair, signal.side, order_amount, params,
+                        )
+                        order = await exchange.create_order(
+                            symbol=signal.pair,
+                            type="market",
+                            side=signal.side,
+                            amount=order_amount,
+                            params=params,
+                        )
+                    else:
+                        logger.debug(
+                            "[%s] create_order(symbol=%s, type=limit, side=%s, amount=%s, price=%.2f, params=%s)",
+                            signal.pair, signal.pair, signal.side, order_amount, signal.price, params,
+                        )
+                        order = await exchange.create_order(
+                            symbol=signal.pair,
+                            type="limit",
+                            side=signal.side,
+                            amount=order_amount,
+                            price=signal.price,
+                            params=params,
+                        )
+                    break
+                except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
+                    last_error = e
+                    delay = BASE_DELAY * (2 ** (attempt - 1))
                     logger.warning(
-                        "Exit attempt %d/%d error: %s -- retrying in 2s",
-                        attempt, MAX_RETRIES, e,
+                        "Order attempt %d/%d failed (retryable): %s -- retrying in %.1fs",
+                        attempt, MAX_RETRIES, e, delay,
                     )
-                    await asyncio.sleep(2)
-                else:
-                    logger.exception("Unexpected error placing order")
-                    await self._notify_error(signal, str(e))
-                    return None
+                    await asyncio.sleep(delay)
+                except ccxt.InsufficientFunds as e:
+                    last_error = e
+                    if is_exit:
+                        # Exit: retry — balance may have updated
+                        logger.warning(
+                            "Exit attempt %d/%d insufficient funds: %s -- retrying in 2s",
+                            attempt, MAX_RETRIES, e,
+                        )
+                        await asyncio.sleep(2)
+                    else:
+                        logger.error("Insufficient funds for order: %s", e)
+                        await self._notify_error(signal, str(e))
+                        return None
+                except ccxt.InvalidOrder as e:
+                    last_error = e
+                    if is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
+                        # Binance rejected exit for min notional — switch to quoteOrderQty
+                        logger.warning(
+                            "[%s] Exit rejected for MIN_NOTIONAL — switching to quoteOrderQty mode",
+                            signal.pair,
+                        )
+                        use_quote_fallback = True
+                        # Don't sleep — immediately retry with quoteOrderQty on next iteration
+                        continue
+                    elif is_exit:
+                        # Exit: retry all errors
+                        logger.warning(
+                            "Exit attempt %d/%d invalid order: %s -- retrying in 2s",
+                            attempt, MAX_RETRIES, e,
+                        )
+                        await asyncio.sleep(2)
+                    else:
+                        logger.error("Invalid order: %s", e)
+                        await self._notify_error(signal, str(e))
+                        return None
+                except Exception as e:
+                    last_error = e
+                    if is_exit:
+                        # Exit: retry ALL errors — never give up silently
+                        logger.warning(
+                            "Exit attempt %d/%d error: %s -- retrying in 2s",
+                            attempt, MAX_RETRIES, e,
+                        )
+                        await asyncio.sleep(2)
+                    else:
+                        logger.exception("Unexpected error placing order")
+                        await self._notify_error(signal, str(e))
+                        return None
 
         if order is None:
             if is_exit:
