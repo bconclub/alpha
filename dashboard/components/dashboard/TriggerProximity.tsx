@@ -100,11 +100,11 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     if (!hasData) {
       overallStatus = 'Awaiting data...';
       statusColor = 'text-zinc-600';
-    } else if (signalCount >= 2) {
+    } else if (signalCount >= 3) {
       overallStatus = `${signalCount}/4 — TRADE READY`;
       statusColor = 'text-[#00c853]';
-    } else if (signalCount === 1) {
-      overallStatus = '1/4 — Needs 1 more';
+    } else if (signalCount >= 1) {
+      overallStatus = `${signalCount}/4 — Needs ${3 - signalCount} more`;
       statusColor = 'text-[#ffd600]';
     } else {
       overallStatus = '0/4 — Scanning';
@@ -202,8 +202,8 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
 function SignalBar({ count }: { count: number }) {
   const filled = (count / 4) * 100;
   const color =
-    count >= 2 ? '#00c853' :
-    count === 1 ? '#ffd600' :
+    count >= 3 ? '#00c853' :
+    count >= 1 ? '#ffd600' :
     '#71717a';
 
   return (
@@ -266,11 +266,11 @@ function SignalRow({
   indicators: IndicatorStatus[];
   count: number;
 }) {
-  const countColor = count >= 2 ? 'text-[#00c853]'
-    : count === 1 ? 'text-[#ffd600]'
+  const countColor = count >= 3 ? 'text-[#00c853]'
+    : count >= 1 ? 'text-[#ffd600]'
     : 'text-zinc-600';
 
-  const suffix = count >= 2 ? `${count}/4 \u2713` : `${count}/4`;
+  const suffix = count >= 3 ? `${count}/4 \u2713` : `${count}/4`;
 
   return (
     <div className="space-y-1">
@@ -350,7 +350,7 @@ export function TriggerProximity() {
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Entry Signals
         </h3>
-        <span className="text-[9px] text-zinc-600 font-mono">need 2/4</span>
+        <span className="text-[9px] text-zinc-600 font-mono">need 3/4</span>
       </div>
 
       {triggers.length === 0 ? (
