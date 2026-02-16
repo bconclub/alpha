@@ -1096,7 +1096,10 @@ class AlphaBot:
                             "binance", pair,
                         )
                         if order_id:
-                            await self.db.close_trade(order_id, current_price, pnl, pnl_pct)
+                            await self.db.close_trade(
+                                order_id, current_price, pnl, pnl_pct,
+                                reason="dust_unsellable",
+                            )
                         else:
                             await self.db.update_trade(trade_id, {
                                 "status": "closed",
@@ -1355,7 +1358,10 @@ class AlphaBot:
                 # Close in DB with real data
                 order_id = trade.get("order_id", "")
                 if order_id:
-                    await self.db.close_trade(order_id, exit_price, pnl, pnl_pct)
+                    await self.db.close_trade(
+                        order_id, exit_price, pnl, pnl_pct,
+                        reason="position_not_found_on_restart",
+                    )
                 elif trade_id:
                     await self.db.update_trade(trade_id, {
                         "status": "closed",
@@ -1805,7 +1811,10 @@ class AlphaBot:
                                 )
                                 order_id = open_trade.get("order_id", "")
                                 if order_id:
-                                    await self.db.close_trade(order_id, exit_price, pnl, pnl_pct)
+                                    await self.db.close_trade(
+                                        order_id, exit_price, pnl, pnl_pct,
+                                        reason="orphan_closed",
+                                    )
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
                     except Exception:
@@ -1884,8 +1893,27 @@ class AlphaBot:
                         order_id = open_trade.get("order_id", "")
                         if order_id:
                             entry_px = float(open_trade.get("entry_price", 0) or 0)
-                            await self.db.close_trade(order_id, entry_px, 0.0, 0.0)
-                            logger.info("Phantom trade %s marked closed in DB", pair)
+                            # Get current price for real P&L instead of 0.0
+                            try:
+                                ticker = await self.delta.fetch_ticker(pair)
+                                phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
+                            except Exception:
+                                phantom_exit = entry_px
+                            trade_lev = open_trade.get("leverage", config.delta.leverage) or 1
+                            pos_type = open_trade.get("position_type", "long")
+                            phantom_amount = open_trade.get("amount", 0)
+                            phantom_pnl, phantom_pnl_pct = calc_pnl(
+                                entry_px, phantom_exit, phantom_amount,
+                                pos_type, trade_lev, "delta", pair,
+                            )
+                            await self.db.close_trade(
+                                order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                                reason="phantom_cleared",
+                            )
+                            logger.info(
+                                "Phantom trade %s marked closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
+                                pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                            )
 
                 # Remove from risk manager
                 self.risk_manager.record_close(pair, 0.0)
@@ -1951,7 +1979,26 @@ class AlphaBot:
                     if open_trade:
                         order_id = open_trade.get("order_id", "")
                         if order_id:
-                            await self.db.close_trade(order_id, 0.0, 0.0, 0.0)
+                            entry_px = float(open_trade.get("entry_price", 0) or 0)
+                            # Get current price for real P&L
+                            try:
+                                ticker = await self.binance.fetch_ticker(pair)
+                                phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
+                            except Exception:
+                                phantom_exit = entry_px
+                            phantom_amount = open_trade.get("amount", 0)
+                            phantom_pnl, phantom_pnl_pct = calc_pnl(
+                                entry_px, phantom_exit, phantom_amount,
+                                "spot", 1, "binance", pair,
+                            )
+                            await self.db.close_trade(
+                                order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                                reason="phantom_cleared",
+                            )
+                            logger.info(
+                                "Phantom Binance trade %s marked closed: exit=$%.2f pnl=$%.4f",
+                                pair, phantom_exit, phantom_pnl,
+                            )
                 self.risk_manager.record_close(pair, 0.0)
 
     async def _close_orphaned_positions(self) -> None:
@@ -2038,7 +2085,10 @@ class AlphaBot:
 
                 # Close in DB
                 if order_id:
-                    await self.db.close_trade(order_id, current_price, pnl, pnl_pct)
+                    await self.db.close_trade(
+                        order_id, current_price, pnl, pnl_pct,
+                        reason="orphan_strategy_removed",
+                    )
 
                 # Send alert
                 await self.alerts.send_text(
@@ -2069,6 +2119,7 @@ class AlphaBot:
                         )
                         await self.db.close_trade(
                             order_id, fallback_exit, fallback_pnl, fallback_pnl_pct,
+                            reason="orphan_strategy_removed",
                         )
                         logger.info(
                             "Orphan fallback close %s: exit=$%.2f pnl=$%.4f (%.2f%%)",

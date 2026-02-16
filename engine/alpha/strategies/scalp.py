@@ -369,6 +369,8 @@ class ScalpStrategy(BaseStrategy):
         self._phantom_cooldown_until: float = 0.0
         # Rate limit rejection logs
         self._last_reject_log: float = 0.0
+        # Periodic SL check logging (every 10s while in position)
+        self._last_ws_sl_log: float = 0.0
 
         # Stats for hourly summary
         self.hourly_wins: int = 0
@@ -1306,6 +1308,26 @@ class ScalpStrategy(BaseStrategy):
             sl_price = self.entry_price * (1 + self._sl_pct / 100)
             if current_price >= sl_price:
                 exit_type = "SL"
+
+        # Periodic SL check logging (every 10s) for visibility
+        now_mono = time.monotonic()
+        if now_mono - self._last_ws_sl_log >= 10:
+            self._last_ws_sl_log = now_mono
+            trail_info = ""
+            if self._trailing_active:
+                if side == "long":
+                    t_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
+                else:
+                    t_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
+                trail_info = f" Trail={self._trail_distance_pct:.2f}%@${t_stop:.2f}"
+            self.logger.info(
+                "[%s] WS TICK: %s @ $%.2f PnL=%+.2f%% peak=%+.2f%% SL=$%.2f(%.2f%%) hold=%ds%s%s",
+                self.pair, side, current_price, pnl_pct,
+                self._peak_unrealized_pnl, sl_price, self._sl_pct,
+                int(hold_seconds),
+                trail_info,
+                " → SL HIT!" if exit_type == "SL" else "",
+            )
 
         # ── PHASE 1: only SL fires, skip everything else ────────────
         # EXCEPTION: peak-aware skip — if peak >= +1.0%, allow Phase 2 checks

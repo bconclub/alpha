@@ -75,28 +75,32 @@ class Database:
             return None
 
     async def close_trade(
-        self, order_id: str, exit_price: float, pnl: float, pnl_pct: float
+        self, order_id: str, exit_price: float, pnl: float, pnl_pct: float,
+        reason: str = "",
     ) -> None:
         """Mark a trade as closed with exit price and realised P&L."""
         if not self.is_connected:
             return
         loop = asyncio.get_running_loop()
+        data: dict[str, Any] = {
+            "exit_price": exit_price,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "status": "closed",
+            "closed_at": iso_now(),
+        }
+        if reason:
+            data["reason"] = reason
         await loop.run_in_executor(
             None,
             lambda: (
                 self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
-                .update({
-                    "exit_price": exit_price,
-                    "pnl": pnl,
-                    "pnl_pct": pnl_pct,
-                    "status": "closed",
-                    "closed_at": iso_now(),
-                })
+                .update(data)
                 .eq("order_id", order_id)
                 .execute()
             ),
         )
-        logger.debug("Trade closed: order_id=%s pnl=%.8f", order_id, pnl)
+        logger.debug("Trade closed: order_id=%s pnl=%.8f reason=%s", order_id, pnl, reason)
 
     async def update_trade(self, trade_id: int, data: dict[str, Any]) -> None:
         """Update an existing trade row by its Supabase row ID."""

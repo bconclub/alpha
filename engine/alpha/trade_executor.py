@@ -248,6 +248,7 @@ class TradeExecutor:
     async def _mark_position_gone(self, signal: Signal) -> None:
         """Mark a trade as closed in DB when the position no longer exists on exchange.
 
+        Calculates real P&L using entry price from DB and signal price as exit.
         Sends a clean info alert instead of an error.
         """
         if self.db is not None:
@@ -258,17 +259,32 @@ class TradeExecutor:
                     strategy=signal.strategy.value,
                 )
                 if open_trade:
+                    entry_price = float(open_trade.get("entry_price", 0) or 0)
+                    exit_price = signal.price
+                    amount = open_trade.get("amount", signal.amount)
+                    position_type = open_trade.get("position_type", signal.position_type)
+                    trade_leverage = open_trade.get("leverage", signal.leverage) or 1
+
+                    # Calculate real P&L (not 0.0!)
+                    pnl, pnl_pct = calc_pnl(
+                        entry_price, exit_price, amount,
+                        position_type, trade_leverage,
+                        signal.exchange_id, signal.pair,
+                    )
+
                     await self.db.update_trade(open_trade["id"], {
                         "status": "closed",
-                        "exit_price": signal.price,
+                        "exit_price": exit_price,
                         "closed_at": iso_now(),
-                        "pnl": 0.0,
-                        "pnl_pct": 0.0,
+                        "pnl": round(pnl, 8),
+                        "pnl_pct": round(pnl_pct, 4),
                         "reason": "position_gone",
                     })
                     logger.info(
-                        "[%s] Trade %s marked closed (position_gone)",
+                        "[%s] Trade %s marked closed (position_gone) "
+                        "entry=$%.2f exit=$%.2f pnl=$%.4f (%.2f%%)",
                         signal.pair, open_trade["id"],
+                        entry_price, exit_price, pnl, pnl_pct,
                     )
             except Exception:
                 logger.exception("[%s] Failed to mark trade as position_gone", signal.pair)
