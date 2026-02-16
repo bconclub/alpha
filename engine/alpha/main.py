@@ -1200,6 +1200,8 @@ class AlphaBot:
                     "position_type": position_type,
                     "leverage": leverage,
                     "strategy": strategy,
+                    "opened_at": trade.get("opened_at"),
+                    "peak_pnl": trade.get("peak_pnl"),
                 })
                 restored += 1
                 logger.info(
@@ -1310,6 +1312,8 @@ class AlphaBot:
                         "position_type": dpos["side"],
                         "leverage": config.delta.leverage,
                         "strategy": "scalp",
+                        "opened_at": None,  # just discovered, treat as fresh
+                        "peak_pnl": None,
                     })
                     # Also register with risk manager
                     from alpha.strategies.base import Signal, StrategyName
@@ -1339,8 +1343,11 @@ class AlphaBot:
         Called AFTER strategies are created but BEFORE they start ticking.
         This tells scalp strategies about positions that were open before
         the restart, so they manage exits instead of opening duplicates.
-        Only scalp positions are restored — non-scalp orphans are closed
-        separately by _close_orphaned_positions().
+
+        CRITICAL: entry_time is computed from the real opened_at timestamp
+        (not time.monotonic()), so timeout/breakeven exits work correctly
+        across bot restarts. Without this, timers reset to 0 on every deploy
+        and positions can get stuck indefinitely.
         """
         if not hasattr(self, "_restored_trades") or not self._restored_trades:
             return
@@ -1361,10 +1368,47 @@ class AlphaBot:
                 scalp.position_side = position_type if position_type in ("long", "short") else "long"
                 scalp.entry_price = entry_price
                 scalp.entry_amount = amount
-                scalp.entry_time = time.monotonic()  # treat as just entered (for timeout)
+
+                # ── CRITICAL: use real opened_at time, not monotonic now ──
+                # This ensures timeout (5min) and breakeven (60s) count from
+                # ORIGINAL entry, not from restart. Without this, positions
+                # survive forever across deploys because timers keep resetting.
+                opened_at_str = trade.get("opened_at")
+                if opened_at_str:
+                    try:
+                        from datetime import datetime, timezone
+                        if isinstance(opened_at_str, str):
+                            # Parse ISO timestamp: "2026-02-16T04:58:07.123Z"
+                            opened_at_str = opened_at_str.replace("Z", "+00:00")
+                            opened_dt = datetime.fromisoformat(opened_at_str)
+                        else:
+                            opened_dt = opened_at_str  # already datetime
+                        # Convert to monotonic: how many seconds ago was it opened?
+                        seconds_ago = (datetime.now(timezone.utc) - opened_dt).total_seconds()
+                        seconds_ago = max(0, seconds_ago)  # don't go negative
+                        scalp.entry_time = time.monotonic() - seconds_ago
+                        logger.info(
+                            "Restored %s entry_time: opened %ds ago (timeout/breakeven preserved)",
+                            pair, int(seconds_ago),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Could not parse opened_at '%s' for %s: %s — using now",
+                            opened_at_str, pair, e,
+                        )
+                        scalp.entry_time = time.monotonic()
+                else:
+                    scalp.entry_time = time.monotonic()
+
                 scalp.highest_since_entry = entry_price
                 scalp.lowest_since_entry = entry_price
-                scalp._positions_on_pair = 1
+
+                # Restore peak P&L if available (for decay exit)
+                peak_pnl = trade.get("peak_pnl")
+                if peak_pnl is not None and peak_pnl > 0:
+                    scalp._peak_unrealized_pnl = float(peak_pnl)
+                    logger.info("Restored %s peak_pnl: %.2f%%", pair, float(peak_pnl))
+
                 logger.info(
                     "Injected restored position into ScalpStrategy: "
                     "%s %s %.6f @ $%.2f on %s",

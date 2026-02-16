@@ -1039,6 +1039,20 @@ class ScalpStrategy(BaseStrategy):
         # Track peak unrealized P&L (for decay exit)
         self._peak_unrealized_pnl = max(self._peak_unrealized_pnl, pnl_pct)
 
+        # ── 0. HARD SAFETY EXIT — catch stuck positions ─────────────────
+        # If position is past timeout AND losing, force close regardless of SL width.
+        # This prevents positions from surviving forever across restarts when
+        # SL is ATR-widened but the trade is clearly dead.
+        if hold_seconds >= self.MAX_HOLD_SECONDS and pnl_pct < 0:
+            self.logger.warning(
+                "[%s] SAFETY EXIT — %ds past timeout AND losing %.2f%% — force closing",
+                self.pair, int(hold_seconds), pnl_pct,
+            )
+            return self._do_exit(
+                current_price, pnl_pct, self.position_side or "long",
+                "SAFETY", hold_seconds,
+            )
+
         if self.position_side == "long":
             self.highest_since_entry = max(self.highest_since_entry, current_price)
 
@@ -1272,12 +1286,16 @@ class ScalpStrategy(BaseStrategy):
 
         exit_type: str | None = None
 
+        # ── 0. HARD SAFETY EXIT — catch stuck positions ─────────────
+        if hold_seconds >= self.MAX_HOLD_SECONDS and pnl_pct < 0:
+            exit_type = "SAFETY"
+
         # ── 1. STOP LOSS ──────────────────────────────────────────────
-        if side == "long":
+        if not exit_type and side == "long":
             sl_price = self.entry_price * (1 - self._sl_pct / 100)
             if current_price <= sl_price:
                 exit_type = "SL"
-        else:
+        elif not exit_type and side == "short":
             sl_price = self.entry_price * (1 + self._sl_pct / 100)
             if current_price >= sl_price:
                 exit_type = "SL"
