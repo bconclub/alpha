@@ -1,53 +1,31 @@
-"""Alpha v5.5 — SMART TREND: soft 15m weight, per-pair streaks, multi-TF momentum.
+"""Alpha v5.6 — PHASE-BASED EXITS: let trades breathe, then manage.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
-best signals. After a loss, pause THAT PAIR and let it settle — don't punish
-all pairs for one pair's bad luck. Use the 15m trend as a soft bias, not a wall.
-SL/TP adapt to each asset's actual volatility via 1-minute ATR.
+best signals. After a loss, pause THAT PAIR. Use 15m trend as soft bias.
+SL/TP adapt per-pair. SOL DISABLED (0% win rate).
 
 ENTRY — 2-of-4 with 15m SOFT WEIGHT:
   Signals (up to 6, counted against N/4 threshold):
-  1. Momentum 60s: 0.15%+ move in 60s
+  1. Momentum 60s: 0.15%+ move
   2. Volume: 1.2x average spike
-  3. RSI: < 40 (oversold → long) or > 60 (overbought → short)
-  4. BB mean-reversion: price near lower BB → long, upper → short
-  5. Momentum 5m: 0.30%+ move over 5 candles (slow bleed detection)
-  6. Trend continuation: new 15-candle low/high + volume > average
+  3. RSI: < 40 (long) or > 60 (short)
+  4. BB mean-reversion: price near band edge
+  5. Momentum 5m: 0.30%+ slow bleed
+  6. Trend continuation: new 15-candle extreme + volume
 
-  15m TREND SOFT WEIGHT (not a blocker):
-  - Bearish 15m: SHORT needs 2/4, LONG needs 3/4 (counter-trend harder)
-  - Bullish 15m: LONG needs 2/4, SHORT needs 3/4 (counter-trend harder)
-  - Neutral: both need 2/4
-
-POSITION MANAGEMENT:
-  - Max 2 simultaneous positions (focused capital)
-  - 2nd position only if 1st is breakeven or profitable AND signal is 3/4+
-  - After SL hit: 2 min cooldown (PER PAIR — BTC SL doesn't pause XRP)
-  - After 3 consecutive losses on SAME pair: 5 min pause (that pair only)
-  - First trade after streak pause: requires 3/4 signals (re-entry gate)
-
-Risk Management (20x leverage) — ATR-DYNAMIC:
-  - SL = max(pair_floor, ATR_1m * 1.5) — avoids noise stops
-  - TP = max(pair_floor, ATR_1m * 4.0) — reward > 2.5x risk
-  - Per-pair floors: BTC/ETH 0.35%/1.5%, SOL 0.50%/2.0%, XRP 0.60%/2.0%
-  - SL cap: 1.5%, TP cap: 5.0%
-  - Trailing: activates at +0.20% — protect profits EARLY
-  - Max hold: 5 min — scalping is quick
-
-TICK SPEED — DYNAMIC:
-  - 1s ticks when in position (fetch_ticker for speed)
-  - 5s ticks when scanning (full OHLCV for indicators)
-  - Full OHLCV refresh every 5th in-position tick (ATR/RSI update)
-
-Exit — FAST, PROTECT PROFITS:
-  1. Stop loss — ATR-dynamic, cut losers fast
-  2. Breakeven SL — if not profitable by 60s, tighten SL to entry
-  3. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
-  3.5. Profit decay — if peak was > 0.30% and drops to < 0.10%, EXIT
-  4. Signal reversal — exit at +0.30% profit if RSI/momentum reverses
-  5. Trailing stop — activates at +0.20%, dynamic trail widens with profit
-  6. Timeout — 5 min max (only if not trailing)
-  7. Flatline — 2 min with < 0.05% move = dead momentum, exit
+EXIT — 3-PHASE SYSTEM (the core change from v5.5):
+  PHASE 1 (0-3 min): HANDS OFF
+    - ONLY exit on hard SL (-0.35% for ETH, -0.40% for XRP, -0.30% for BTC)
+    - NO breakeven, NO trailing, NO reversal, NO timeout
+    - Let the trade settle after fill bounce
+  PHASE 2 (3-10 min): WATCH
+    - If PnL > +0.3% → move SL to entry (real breakeven)
+    - If PnL > +0.5% → activate trailing (0.25% distance)
+    - If still losing but above SL → keep holding
+  PHASE 3 (10-30 min): TRAIL OR CUT
+    - Trailing active → let it trail, tighten at +1%
+    - Still negative after 10 min → FLAT exit
+    - Hard timeout at 30 min
 """
 
 from __future__ import annotations
@@ -139,75 +117,69 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Smart Trend v5.5 — Soft 15m weight, per-pair streaks, multi-TF momentum.
+    """Phase-based v5.6 — Fixed SL on entry, hands-off 3 min, then manage.
 
-    2-of-4 signals with 15m trend soft weight (counter-trend needs 3/4).
-    6 signal types: MOM60s, VOL, RSI, BB, MOM5m, TrendContinuation.
-    Per-pair streak tracking: BTC losses don't pause XRP.
-    Post-streak re-entry gate: first trade back needs 3/4 on that pair.
-    SL/TP computed from 1m ATR: SL = max(floor, ATR*1.5), TP = max(floor, ATR*4).
-    Dynamic ticks: 1s in position (ticker), 5s scanning (full OHLCV).
-    Trail at +0.20%. Profit decay exit if peak > 0.30% drops to < 0.10%.
+    3-phase exit system prevents instant exits after fill bounce.
+    SOL disabled (0% win rate). Per-pair SL distances.
     """
 
     name = StrategyName.SCALP
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
-    # ── Exit thresholds — QUICK SCALP: protect profits fast ────────────
-    # Default SL/TP (used if ATR not available yet — overridden by dynamic ATR-based SL/TP)
-    STOP_LOSS_PCT = 0.35              # default 0.35% price SL — overridden per-pair by ATR
-    MIN_TP_PCT = 1.50                 # default 1.5% target — overridden per-pair by ATR
-
-    # ── Per-pair SL/TP floors — wider for volatile alts, tighter for BTC ──
-    # SL = max(floor, ATR_1m * 1.5)   TP = max(floor, ATR_1m * 4.0)
+    # ── Per-pair SL distances — FIXED on entry, locked for 3 min ─────
+    STOP_LOSS_PCT = 0.35              # default fallback
+    MIN_TP_PCT = 1.50                 # default TP
     PAIR_SL_FLOOR: dict[str, float] = {
-        "BTC": 0.35,   # BTC: low % volatility, 0.35% floor is fine
-        "ETH": 0.35,   # ETH: medium volatility, 0.35% floor
-        "SOL": 0.50,   # SOL: volatile alt, needs wider SL to avoid noise stops
-        "XRP": 0.60,   # XRP: very volatile in % terms, widest SL
+        "BTC": 0.30,   # BTC: tight, low % vol
+        "ETH": 0.35,   # ETH: medium vol
+        "XRP": 0.40,   # XRP: more volatile, needs room
     }
     PAIR_TP_FLOOR: dict[str, float] = {
-        "BTC": 1.50,   # BTC: 1.5% TP (30% at 20x)
-        "ETH": 1.50,   # ETH: 1.5% TP
-        "SOL": 2.00,   # SOL: wider TP to match wider SL
-        "XRP": 2.00,   # XRP: wider TP
+        "BTC": 1.50,
+        "ETH": 1.50,
+        "XRP": 2.00,
     }
-    ATR_SL_MULTIPLIER = 1.5          # SL = ATR_1m_pct * 1.5 (avoid noise stops)
-    ATR_TP_MULTIPLIER = 4.0          # TP = ATR_1m_pct * 4.0 (reward > 2.5x risk)
-    TRAILING_ACTIVATE_PCT = 0.20      # activate trail at +0.20% — lock profits FAST
-    TRAILING_DISTANCE_PCT = 0.15      # initial trail: tight 0.15% behind peak
-    MAX_HOLD_SECONDS = 5 * 60         # 5 min max — scalping is quick
-    FLATLINE_SECONDS = 2 * 60         # 2 min flat = dead momentum, exit
+    ATR_SL_MULTIPLIER = 1.5
+    ATR_TP_MULTIPLIER = 4.0
+
+    # ── 3-PHASE EXIT TIMING ──────────────────────────────────────────
+    PHASE1_SECONDS = 3 * 60           # 0-3 min: HANDS OFF — only hard SL
+    PHASE2_SECONDS = 10 * 60          # 3-10 min: WATCH — move SL up if profitable
+    MAX_HOLD_SECONDS = 30 * 60        # 30 min hard timeout
+    FLATLINE_SECONDS = 10 * 60        # 10 min flat = dead momentum (phase 3 only)
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
 
-    # ── Breakeven & profit protection ─────────────────────────────────
-    BREAKEVEN_AFTER_SECONDS = 5 * 60  # 5 min — give trades time; fees already paid
-    PROFIT_PULLBACK_MIN_PEAK = 0.50   # peak must be > 0.50% to trigger pullback exit
-    PROFIT_PULLBACK_PCT = 40.0        # exit if profit drops 40% from peak
+    # ── Phase 2: move SL to entry when profitable ─────────────────────
+    MOVE_SL_TO_ENTRY_PCT = 0.30       # move SL to entry at +0.30% profit
 
-    # ── Profit decay — don't let green trades go to zero ────────────
-    PROFIT_DECAY_PEAK_MIN = 0.30      # peak must have been > 0.30%
-    PROFIT_DECAY_EXIT_AT = 0.10       # exit if decays to < 0.10%
+    # ── Trailing (activates in phase 2+) ──────────────────────────────
+    TRAILING_ACTIVATE_PCT = 0.50      # activate trail at +0.50%
+    TRAILING_DISTANCE_PCT = 0.25      # initial trail: 0.25% behind peak
 
-    # ── Signal reversal — exit earlier in quick scalp mode ───────────
-    REVERSAL_MIN_PROFIT_PCT = 0.30    # exit on reversal at just +0.30% (was 1.50%)
+    # ── Profit protection ─────────────────────────────────────────────
+    PROFIT_PULLBACK_MIN_PEAK = 0.50
+    PROFIT_PULLBACK_PCT = 40.0
+    PROFIT_DECAY_PEAK_MIN = 0.30
+    PROFIT_DECAY_EXIT_AT = 0.10
+
+    # ── Signal reversal (phase 2+ only) ────────────────────────────────
+    REVERSAL_MIN_PROFIT_PCT = 0.30
 
     # ── Dynamic trailing tiers — widen as profit grows ──────────────
-    # (min_profit_pct, trail_distance_pct)
-    # Trail distance ONLY increases, never tightens once widened.
-    # At 20x leverage: +3% price = +60% capital, trailing 1% = locks +2% min (40% capital)
     TRAIL_TIERS: list[tuple[float, float]] = [
-        (0.20, 0.15),   # +0.2% to +0.5%: very tight, lock it in
-        (0.50, 0.25),   # +0.5% to +1%: slightly wider
-        (1.00, 0.50),   # +1% to +2%: give room to run
-        (2.00, 0.70),   # +2% to +3%: widen further
-        (3.00, 1.00),   # +3%+: max breathing room, locks +2% min
+        (0.50, 0.25),   # +0.5% to +1%: standard trail
+        (1.00, 0.15),   # +1% to +2%: tighten to lock more profit
+        (2.00, 0.50),   # +2% to +3%: widen, let it run
+        (3.00, 1.00),   # +3%+: max breathing room
     ]
 
     # ── Signal reversal thresholds ──────────────────────────────────────
-    RSI_REVERSAL_LONG = 70            # RSI > 70 while long → overbought, exit
-    RSI_REVERSAL_SHORT = 30           # RSI < 30 while short → oversold, exit
-    MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
+    RSI_REVERSAL_LONG = 70
+    RSI_REVERSAL_SHORT = 30
+    MOMENTUM_REVERSAL_PCT = -0.10
+
+    # ── DISABLED PAIRS — skip entirely ────────────────────────────────
+    DISABLED_PAIRS: set[str] = {"SOL"}  # 0% win rate, remove from trading
 
     # ── Entry thresholds — 2-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s
@@ -240,24 +212,21 @@ class ScalpStrategy(BaseStrategy):
 
     # Per-pair base allocation (% of exchange capital) — tuned by performance
     PAIR_ALLOC_PCT: dict[str, float] = {
-        "XRP": 50.0,   # best performer, highest profit factor — maximize
+        "XRP": 50.0,   # best performer — maximize
         "ETH": 30.0,   # mixed but catches big moves
-        "BTC": 15.0,   # very low win rate — reduce exposure
-        "SOL":  5.0,   # worst performer — minimal allocation
+        "BTC": 20.0,   # low win rate but diversification
     }
     # Per-pair contract caps
     PAIR_MAX_CONTRACTS: dict[str, int] = {
-        "BTC": 1,              # BTC: 1 contract (minimum, diversification only)
-        "ETH": 2,              # ETH: 2 contracts
-        "SOL": 1,              # SOL: 1 contract (or skip)
-        "XRP": 50,             # XRP: 50 contracts (main earner, maximize)
+        "BTC": 1,
+        "ETH": 2,
+        "XRP": 50,
     }
-    # Minimum signal strength per pair — weaker performers need stronger signals
+    # Minimum signal strength per pair
     PAIR_MIN_STRENGTH: dict[str, int] = {
-        "XRP": 2,    # best performer: standard 2/4 is fine
-        "ETH": 2,    # mixed: standard 2/4
-        "BTC": 3,    # low win rate: require 3/4 or 4/4 signals only
-        "SOL": 3,    # worst performer: require 3/4 or 4/4 signals only
+        "XRP": 2,    # best performer: 2/4
+        "ETH": 2,    # mixed: 2/4
+        "BTC": 3,    # low win rate: 3/4 only
     }
     # Adaptive: track last N trades per pair for win-rate-based adjustment
     PERF_WINDOW = 5                     # look at last 5 trades per pair
@@ -384,23 +353,22 @@ class ScalpStrategy(BaseStrategy):
             rt_mixed = 0.20  # 0.1% × 2 = 0.2% round trip
             rt_taker = 0.20
         tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
+        disabled_tag = f" DISABLED={','.join(self.DISABLED_PAIRS)}" if self.DISABLED_PAIRS else ""
         self.logger.info(
-            "[%s] SMART TREND v5.5 ACTIVE (%s) — tick=1s/5s(dynamic), "
-            "SL=%.2f%%(floor,ATR-dynamic) TP=%.2f%% Trail@%.1f%% [%s] MaxHold=%ds Breakeven@%ds "
-            "Pullback=%.0f%%@%.1f%% Decay=peak>%.1f%%→exit<%.1f%% Flatline=%ds/%.2f%% "
+            "[%s] PHASE-BASED v5.6 ACTIVE (%s) — tick=1s/5s(dynamic), "
+            "SL=%.2f%% TP=%.2f%% Phase1=%ds Phase2=%ds MaxHold=%ds "
+            "Trail@+%.1f%%(%.2f%%) MoveToEntry@+%.1f%% Flat=%ds "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
-            "15m=SOFT_WEIGHT DailyLossLimit=%.0f%%%s",
+            "DailyLoss=%.0f%%%s%s",
             self.pair, tag,
             self._sl_pct, self._tp_pct,
-            self.TRAILING_ACTIVATE_PCT, tiers_str,
-            self.MAX_HOLD_SECONDS, self.BREAKEVEN_AFTER_SECONDS,
-            self.PROFIT_PULLBACK_PCT, self.PROFIT_PULLBACK_MIN_PEAK,
-            self.PROFIT_DECAY_PEAK_MIN, self.PROFIT_DECAY_EXIT_AT,
-            self.FLATLINE_SECONDS, self.FLATLINE_MIN_MOVE_PCT,
+            self.PHASE1_SECONDS, self.PHASE2_SECONDS, self.MAX_HOLD_SECONDS,
+            self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
+            self.MOVE_SL_TO_ENTRY_PCT, self.FLATLINE_SECONDS,
             self.MAX_POSITIONS, self._max_contracts,
             self.SL_COOLDOWN_SECONDS, self.CONSECUTIVE_LOSS_LIMIT,
             self.STREAK_PAUSE_SECONDS,
-            self.DAILY_LOSS_LIMIT_PCT,
+            self.DAILY_LOSS_LIMIT_PCT, disabled_tag,
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
@@ -474,6 +442,12 @@ class ScalpStrategy(BaseStrategy):
         self._tick_count += 1
         exchange = self.trade_exchange or self.executor.exchange
         now = time.monotonic()
+
+        # ── DISABLED PAIRS — skip entirely (SOL = 0% win rate) ─────────
+        if self._base_asset in self.DISABLED_PAIRS:
+            if not self.in_position:
+                return signals  # don't enter
+            # If somehow in position (restored), still check exits
 
         # ── Daily expiry check (5:30 PM IST) — ONLY for dated contracts ──
         # Perpetual futures (BTC/USD:USD, ETH/USD:USD etc.) never expire.
@@ -1010,243 +984,163 @@ class ScalpStrategy(BaseStrategy):
         return self._trail_distance_pct
 
     def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
-        """Check exit conditions — QUICK SCALP style.
+        """3-PHASE EXIT SYSTEM — let trades breathe, then manage.
 
-        Priority:
-        1. Stop loss — ATR-dynamic, cut losers fast
-        2. Breakeven SL — tighten to entry if not profitable by 60s
-        3. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
-        3.5. Profit decay — if peak was > 0.30% and drops to < 0.10%, EXIT
-        4. Signal reversal — exit at +0.30% profit if reversal detected
-        5. Trailing stop — activates at +0.20%, dynamic trail widens with profit
-        6. Timeout — 5 min max (only if not trailing)
-        7. Flatline — 2 min with < 0.05% move = dead momentum
+        PHASE 1 (0-3 min): Only hard SL. Nothing else. Let trade settle.
+        PHASE 2 (3-10 min): Move SL to entry at +0.3%. Trail at +0.5%. Reversals.
+        PHASE 3 (10-30 min): Trail or cut. Flatline exit. Hard timeout.
         """
         signals: list[Signal] = []
         hold_seconds = time.monotonic() - self.entry_time
         pnl_pct = self._calc_pnl_pct(current_price)
+        side = self.position_side or "long"
 
-        # Track peak unrealized P&L (for decay exit)
+        # Track peaks
         self._peak_unrealized_pnl = max(self._peak_unrealized_pnl, pnl_pct)
-
-        # ── 0. HARD SAFETY EXIT — catch stuck positions ─────────────────
-        # If position is past timeout AND losing, force close regardless of SL width.
-        # This prevents positions from surviving forever across restarts when
-        # SL is ATR-widened but the trade is clearly dead.
-        if hold_seconds >= self.MAX_HOLD_SECONDS and pnl_pct < 0:
-            self.logger.warning(
-                "[%s] SAFETY EXIT — %ds past timeout AND losing %.2f%% — force closing",
-                self.pair, int(hold_seconds), pnl_pct,
-            )
-            return self._do_exit(
-                current_price, pnl_pct, self.position_side or "long",
-                "SAFETY", hold_seconds,
-            )
-
-        if self.position_side == "long":
+        if side == "long":
             self.highest_since_entry = max(self.highest_since_entry, current_price)
-
-            # ── 1. STOP LOSS — ATR-dynamic, cut losers fast ─────────────
-            sl_price = self.entry_price * (1 - self._sl_pct / 100)
-            if current_price <= sl_price:
-                soul_msg = _soul_check("loss")
-                self.logger.info(
-                    "[%s] SL HIT at %.2f%% (SL=%.2f%% ATR=%.3f%%) — cutting loss | %s",
-                    self.pair, pnl_pct, self._sl_pct, self._last_atr_pct, soul_msg,
-                )
-                return self._do_exit(current_price, pnl_pct, "long", "SL", hold_seconds)
-
-            # ── 2. BREAKEVEN SL — tighten after 2 min if not profitable ─
-            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct < -1.0 and not self._trailing_active:
-                self.logger.info(
-                    "[%s] BREAKEVEN EXIT — %ds in, PnL=%.2f%% not profitable",
-                    self.pair, int(hold_seconds), pnl_pct,
-                )
-                return self._do_exit(current_price, pnl_pct, "long", "BREAKEVEN", hold_seconds)
-
-            # ── 3. PROFIT PULLBACK — protect gains if fading ────────────
-            # If we peaked above 0.50% and current drops 40% from peak → exit
-            peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
-            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
-                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
-                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
-                    self.logger.info(
-                        "[%s] PROFIT PULLBACK — peak=+%.2f%% now=+%.2f%% (%.0f%% pullback)",
-                        self.pair, peak_pnl, pnl_pct, pullback_pct,
-                    )
-                    return self._do_exit(current_price, pnl_pct, "long", "PULLBACK", hold_seconds)
-
-            # ── 3.5. PROFIT DECAY — don't let green go to zero ────────
-            if (self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN
-                    and pnl_pct < self.PROFIT_DECAY_EXIT_AT):
-                self.logger.info(
-                    "[%s] PROFIT DECAY — peak was +%.2f%% but decayed to +%.2f%% (< %.2f%%) | cutting",
-                    self.pair, self._peak_unrealized_pnl, pnl_pct, self.PROFIT_DECAY_EXIT_AT,
-                )
-                return self._do_exit(current_price, pnl_pct, "long", "DECAY", hold_seconds)
-
-            # ── 4. SIGNAL REVERSAL — exit early when in profit ─────────
-            if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
-                rsi_crossed_70 = rsi_now > self.RSI_REVERSAL_LONG and self._prev_rsi <= self.RSI_REVERSAL_LONG
-                momentum_reversed = momentum_60s < self.MOMENTUM_REVERSAL_PCT
-
-                if rsi_crossed_70:
-                    soul_msg = _soul_check("exit reversal")
-                    self.logger.info(
-                        "[%s] RSI %.1f crossed 70 at +%.2f%% — taking profit | %s",
-                        self.pair, rsi_now, pnl_pct, soul_msg,
-                    )
-                    return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-RSI", hold_seconds)
-
-                if momentum_reversed:
-                    soul_msg = _soul_check("exit reversal")
-                    self.logger.info(
-                        "[%s] Momentum flipped %+.3f%% at +%.2f%% — taking profit | %s",
-                        self.pair, momentum_60s, pnl_pct, soul_msg,
-                    )
-                    return self._do_exit(current_price, pnl_pct, "long", "REVERSAL-MOM", hold_seconds)
-
-            if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
-                self._trailing_active = True
-                self._update_trail_distance(pnl_pct)
-                trail_price = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
-                soul_msg = _soul_check("trailing")
-                self.logger.info(
-                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.2f%% behind peak $%.2f) | %s",
-                    self.pair, pnl_pct, trail_price, self._trail_distance_pct,
-                    self.highest_since_entry, soul_msg,
-                )
-
-            if self._trailing_active:
-                # Widen trail distance as profit grows (never tightens)
-                self._update_trail_distance(pnl_pct)
-                trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
-                if current_price <= trail_stop:
-                    soul_msg = _soul_check("exit trailing")
-                    self.logger.info(
-                        "[%s] TRAIL HIT at $%.2f (peak $%.2f, trail=%.2f%%) PnL=+%.2f%% | %s",
-                        self.pair, trail_stop, self.highest_since_entry,
-                        self._trail_distance_pct, pnl_pct, soul_msg,
-                    )
-                    return self._do_exit(current_price, pnl_pct, "long", "TRAIL", hold_seconds)
-                # Log trail status periodically
-                if self._tick_count % 12 == 0:
-                    dist = ((self.highest_since_entry - current_price) / self.highest_since_entry * 100)
-                    self.logger.info(
-                        "[%s] RIDING +%.2f%% | peak=$%.2f trail=$%.2f (%.2f%%) dist=%.2f%%",
-                        self.pair, pnl_pct, self.highest_since_entry, trail_stop,
-                        self._trail_distance_pct, dist,
-                    )
-
-            # ── 6. TIMEOUT — 5 min max (skip if trailing) ───────────────
-            if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
-                return self._do_exit(current_price, pnl_pct, "long", "TIMEOUT", hold_seconds)
-
-            # ── 7. FLATLINE — 2 min flat = momentum dead ────────────────
-            if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
-                return self._do_exit(current_price, pnl_pct, "long", "FLAT", hold_seconds)
-
-        elif self.position_side == "short":
+        else:
             self.lowest_since_entry = min(self.lowest_since_entry, current_price)
 
-            # ── 1. STOP LOSS — ATR-dynamic ────────────────────────────
+        # ══════════════════════════════════════════════════════════════
+        # ALWAYS: Hard SL — fires in ALL phases
+        # ══════════════════════════════════════════════════════════════
+        if side == "long":
+            sl_price = self.entry_price * (1 - self._sl_pct / 100)
+            if current_price <= sl_price:
+                self.logger.info(
+                    "[%s] SL HIT %.2f%% (SL=%.2f%%) — %ds in",
+                    self.pair, pnl_pct, self._sl_pct, int(hold_seconds),
+                )
+                return self._do_exit(current_price, pnl_pct, side, "SL", hold_seconds)
+        else:
             sl_price = self.entry_price * (1 + self._sl_pct / 100)
             if current_price >= sl_price:
-                soul_msg = _soul_check("loss")
                 self.logger.info(
-                    "[%s] SL HIT at %.2f%% (SL=%.2f%% ATR=%.3f%%) — cutting loss | %s",
-                    self.pair, pnl_pct, self._sl_pct, self._last_atr_pct, soul_msg,
+                    "[%s] SL HIT %.2f%% (SL=%.2f%%) — %ds in",
+                    self.pair, pnl_pct, self._sl_pct, int(hold_seconds),
                 )
-                return self._do_exit(current_price, pnl_pct, "short", "SL", hold_seconds)
+                return self._do_exit(current_price, pnl_pct, side, "SL", hold_seconds)
 
-            # ── 2. BREAKEVEN SL — tighten after 2 min if not profitable ─
-            if hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct < -1.0 and not self._trailing_active:
+        # ══════════════════════════════════════════════════════════════
+        # PHASE 1 (0-3 min): HANDS OFF — only SL above
+        # ══════════════════════════════════════════════════════════════
+        if hold_seconds < self.PHASE1_SECONDS:
+            if self._tick_count % 30 == 0:
                 self.logger.info(
-                    "[%s] BREAKEVEN EXIT — %ds in, PnL=%.2f%% not profitable",
-                    self.pair, int(hold_seconds), pnl_pct,
+                    "[%s] PHASE1 %ds/%ds | %s $%.2f | PnL=%+.2f%%",
+                    self.pair, int(hold_seconds), self.PHASE1_SECONDS,
+                    side, current_price, pnl_pct,
                 )
-                return self._do_exit(current_price, pnl_pct, "short", "BREAKEVEN", hold_seconds)
+            return signals
 
-            # ── 3. PROFIT PULLBACK — protect gains if fading ────────────
-            peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
-            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
-                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
-                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
-                    self.logger.info(
-                        "[%s] PROFIT PULLBACK — peak=+%.2f%% now=+%.2f%% (%.0f%% pullback)",
-                        self.pair, peak_pnl, pnl_pct, pullback_pct,
-                    )
-                    return self._do_exit(current_price, pnl_pct, "short", "PULLBACK", hold_seconds)
-
-            # ── 3.5. PROFIT DECAY — don't let green go to zero ────────
-            if (self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN
-                    and pnl_pct < self.PROFIT_DECAY_EXIT_AT):
-                self.logger.info(
-                    "[%s] PROFIT DECAY — peak was +%.2f%% but decayed to +%.2f%% (< %.2f%%) | cutting",
-                    self.pair, self._peak_unrealized_pnl, pnl_pct, self.PROFIT_DECAY_EXIT_AT,
+        # ══════════════════════════════════════════════════════════════
+        # PHASE 2 (3-10 min): WATCH — move SL to entry, trail, reversals
+        # ══════════════════════════════════════════════════════════════
+        if hold_seconds < self.PHASE2_SECONDS:
+            # SL moved to entry at +0.3% (only exit here if price returns to entry)
+            if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT and not self._trailing_active:
+                at_entry = (
+                    (side == "long" and current_price <= self.entry_price) or
+                    (side == "short" and current_price >= self.entry_price)
                 )
-                return self._do_exit(current_price, pnl_pct, "short", "DECAY", hold_seconds)
-
-            # ── 4. SIGNAL REVERSAL — exit early when in profit ─────────
-            if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
-                rsi_crossed_30 = rsi_now < self.RSI_REVERSAL_SHORT and self._prev_rsi >= self.RSI_REVERSAL_SHORT
-                momentum_reversed = momentum_60s > abs(self.MOMENTUM_REVERSAL_PCT)
-
-                if rsi_crossed_30:
-                    soul_msg = _soul_check("exit reversal")
+                if at_entry:
                     self.logger.info(
-                        "[%s] RSI %.1f crossed below 30 at +%.2f%% — taking short profit | %s",
-                        self.pair, rsi_now, pnl_pct, soul_msg,
+                        "[%s] BREAKEVEN — peaked +%.2f%%, back to entry | %ds in",
+                        self.pair, self._peak_unrealized_pnl, int(hold_seconds),
                     )
-                    return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-RSI", hold_seconds)
+                    return self._do_exit(current_price, pnl_pct, side, "BREAKEVEN", hold_seconds)
 
-                if momentum_reversed:
-                    soul_msg = _soul_check("exit reversal")
-                    self.logger.info(
-                        "[%s] Momentum flipped +%.3f%% at +%.2f%% — taking short profit | %s",
-                        self.pair, momentum_60s, pnl_pct, soul_msg,
-                    )
-                    return self._do_exit(current_price, pnl_pct, "short", "REVERSAL-MOM", hold_seconds)
-
-            # ── 5. TRAILING STOP (dynamic distance) ──────────────────────
+            # Trail at +0.5%
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
                 self._update_trail_distance(pnl_pct)
-                trail_price = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
-                soul_msg = _soul_check("trailing")
                 self.logger.info(
-                    "[%s] TRAIL ON at +%.2f%% — SL at $%.2f (%.2f%% above low $%.2f) | %s",
-                    self.pair, pnl_pct, trail_price, self._trail_distance_pct,
-                    self.lowest_since_entry, soul_msg,
+                    "[%s] TRAIL ON +%.2f%% — %.2f%% dist | %ds in",
+                    self.pair, pnl_pct, self._trail_distance_pct, int(hold_seconds),
                 )
 
             if self._trailing_active:
-                # Widen trail distance as profit grows (never tightens)
                 self._update_trail_distance(pnl_pct)
+                if side == "long":
+                    trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
+                    if current_price <= trail_stop:
+                        return self._do_exit(current_price, pnl_pct, side, "TRAIL", hold_seconds)
+                else:
+                    trail_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
+                    if current_price >= trail_stop:
+                        return self._do_exit(current_price, pnl_pct, side, "TRAIL", hold_seconds)
+
+            # Profit pullback
+            if side == "long":
+                peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+            else:
+                peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
+                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
+                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
+                    return self._do_exit(current_price, pnl_pct, side, "PULLBACK", hold_seconds)
+
+            # Profit decay
+            if self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
+                return self._do_exit(current_price, pnl_pct, side, "DECAY", hold_seconds)
+
+            # Signal reversal (only in profit)
+            if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
+                if side == "long":
+                    rev = (rsi_now > self.RSI_REVERSAL_LONG and self._prev_rsi <= self.RSI_REVERSAL_LONG) or \
+                          (momentum_60s < self.MOMENTUM_REVERSAL_PCT)
+                else:
+                    rev = (rsi_now < self.RSI_REVERSAL_SHORT and self._prev_rsi >= self.RSI_REVERSAL_SHORT) or \
+                          (momentum_60s > abs(self.MOMENTUM_REVERSAL_PCT))
+                if rev:
+                    return self._do_exit(current_price, pnl_pct, side, "REVERSAL", hold_seconds)
+
+            return signals
+
+        # ══════════════════════════════════════════════════════════════
+        # PHASE 3 (10-30 min): TRAIL OR CUT
+        # ══════════════════════════════════════════════════════════════
+
+        # Trailing
+        if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
+            self._trailing_active = True
+            self._update_trail_distance(pnl_pct)
+
+        if self._trailing_active:
+            self._update_trail_distance(pnl_pct)
+            if side == "long":
+                trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
+                if current_price <= trail_stop:
+                    return self._do_exit(current_price, pnl_pct, side, "TRAIL", hold_seconds)
+            else:
                 trail_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
                 if current_price >= trail_stop:
-                    soul_msg = _soul_check("exit trailing")
-                    self.logger.info(
-                        "[%s] TRAIL HIT at $%.2f (low $%.2f, trail=%.2f%%) PnL=+%.2f%% | %s",
-                        self.pair, trail_stop, self.lowest_since_entry,
-                        self._trail_distance_pct, pnl_pct, soul_msg,
-                    )
-                    return self._do_exit(current_price, pnl_pct, "short", "TRAIL", hold_seconds)
-                if self._tick_count % 12 == 0:
-                    dist = ((current_price - self.lowest_since_entry) / self.lowest_since_entry * 100)
-                    self.logger.info(
-                        "[%s] RIDING SHORT +%.2f%% | low=$%.2f trail=$%.2f (%.2f%%) dist=%.2f%%",
-                        self.pair, pnl_pct, self.lowest_since_entry, trail_stop,
-                        self._trail_distance_pct, dist,
-                    )
+                    return self._do_exit(current_price, pnl_pct, side, "TRAIL", hold_seconds)
 
-            # ── 6. TIMEOUT — 5 min max (skip if trailing) ───────────────
-            if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
-                return self._do_exit(current_price, pnl_pct, "short", "TIMEOUT", hold_seconds)
+        # Profit protection
+        if side == "long":
+            peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+        else:
+            peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+        if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
+            pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
+            if pullback_pct >= self.PROFIT_PULLBACK_PCT:
+                return self._do_exit(current_price, pnl_pct, side, "PULLBACK", hold_seconds)
+        if self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
+            return self._do_exit(current_price, pnl_pct, side, "DECAY", hold_seconds)
 
-            # ── 7. FLATLINE — 2 min flat = momentum dead ────────────────
-            if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
-                return self._do_exit(current_price, pnl_pct, "short", "FLAT", hold_seconds)
+        # Flatline — 10 min with no movement
+        if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
+            return self._do_exit(current_price, pnl_pct, side, "FLAT", hold_seconds)
+
+        # Hard timeout (skip if trailing)
+        if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
+            return self._do_exit(current_price, pnl_pct, side, "TIMEOUT", hold_seconds)
+
+        # Safety: past timeout AND losing
+        if hold_seconds >= self.MAX_HOLD_SECONDS and pnl_pct < 0:
+            return self._do_exit(current_price, pnl_pct, side, "SAFETY", hold_seconds)
 
         return signals
 
@@ -1276,41 +1170,32 @@ class ScalpStrategy(BaseStrategy):
 
         exit_type: str | None = None
 
-        # ── 0. HARD SAFETY EXIT — catch stuck positions ─────────────
-        if hold_seconds >= self.MAX_HOLD_SECONDS and pnl_pct < 0:
-            exit_type = "SAFETY"
-
-        # ── 1. STOP LOSS ──────────────────────────────────────────────
-        if not exit_type and side == "long":
+        # ── ALWAYS: Hard SL ──────────────────────────────────────────
+        if side == "long":
             sl_price = self.entry_price * (1 - self._sl_pct / 100)
             if current_price <= sl_price:
                 exit_type = "SL"
-        elif not exit_type and side == "short":
+        elif side == "short":
             sl_price = self.entry_price * (1 + self._sl_pct / 100)
             if current_price >= sl_price:
                 exit_type = "SL"
 
-        # ── 2. BREAKEVEN ──────────────────────────────────────────────
-        if not exit_type and hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct < -1.0 and not self._trailing_active:
-            exit_type = "BREAKEVEN"
+        # ── PHASE 1: only SL fires, skip everything else ────────────
+        if not exit_type and hold_seconds < self.PHASE1_SECONDS:
+            return  # hands off — no WS exits except SL
 
-        # ── 3. PROFIT PULLBACK ────────────────────────────────────────
-        if not exit_type and pnl_pct > 0:
-            if side == "long":
-                peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
-            else:
-                peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
-            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK:
-                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
-                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
-                    exit_type = "PULLBACK"
+        # ── PHASE 2+: breakeven (SL moved to entry after peak > +0.3%) ──
+        if not exit_type and hold_seconds >= self.PHASE1_SECONDS:
+            if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT and not self._trailing_active:
+                at_entry = (
+                    (side == "long" and current_price <= self.entry_price) or
+                    (side == "short" and current_price >= self.entry_price)
+                )
+                if at_entry:
+                    exit_type = "BREAKEVEN"
 
-        # ── 3.5. PROFIT DECAY ────────────────────────────────────────
-        if not exit_type and self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
-            exit_type = "DECAY"
-
-        # ── 5. TRAILING STOP ─────────────────────────────────────────
-        if not exit_type:
+        # ── PHASE 2+: trailing ───────────────────────────────────────
+        if not exit_type and hold_seconds >= self.PHASE1_SECONDS:
             if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
                 self._trailing_active = True
                 self._update_trail_distance(pnl_pct)
@@ -1326,13 +1211,29 @@ class ScalpStrategy(BaseStrategy):
                     if current_price >= trail_stop:
                         exit_type = "TRAIL"
 
-        # ── 6. TIMEOUT ───────────────────────────────────────────────
-        if not exit_type and hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
-            exit_type = "TIMEOUT"
+        # ── PHASE 2+: profit pullback ────────────────────────────────
+        if not exit_type and hold_seconds >= self.PHASE1_SECONDS and pnl_pct > 0:
+            if side == "long":
+                peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+            else:
+                peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK:
+                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
+                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
+                    exit_type = "PULLBACK"
 
-        # ── 7. FLATLINE ──────────────────────────────────────────────
+        # ── PHASE 2+: profit decay ──────────────────────────────────
+        if not exit_type and hold_seconds >= self.PHASE1_SECONDS:
+            if self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
+                exit_type = "DECAY"
+
+        # ── PHASE 3: flatline + timeout ──────────────────────────────
         if not exit_type and hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
             exit_type = "FLAT"
+        if not exit_type and hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
+            exit_type = "TIMEOUT"
+        if not exit_type and hold_seconds >= self.MAX_HOLD_SECONDS and pnl_pct < 0:
+            exit_type = "SAFETY"
 
         # ── EXECUTE EXIT ─────────────────────────────────────────────
         if exit_type:
