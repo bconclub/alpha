@@ -189,7 +189,7 @@ class AlphaBot:
         #         )
 
         # Inject restored position state into strategy instances
-        self._restore_strategy_state()
+        await self._restore_strategy_state()
 
         # ── Close orphaned positions from removed strategies ─────────────
         # If any open trades exist from non-scalp strategies (e.g. futures_momentum),
@@ -1162,14 +1162,21 @@ class AlphaBot:
                 delta_pos = delta_positions.get(pair)
                 if delta_pos:
                     position_exists = True
-                    # Use exchange data for accuracy (overrides DB if available)
-                    if delta_pos["entry_price"] > 0:
-                        entry_price = delta_pos["entry_price"]
+                    # Use EXCHANGE for size/side (truth), DB for entry_price (truth)
+                    # Exchange entryPrice can be average/current — DB has our real entry
+                    db_entry_price = float(trade.get("entry_price", 0) or 0)
+                    exchange_entry_price = delta_pos["entry_price"]
                     amount = delta_pos["contracts"]
                     position_type = delta_pos["side"]
+                    # Keep DB entry_price — only fall back to exchange if DB is 0
+                    if db_entry_price > 0:
+                        entry_price = db_entry_price
+                    elif exchange_entry_price > 0:
+                        entry_price = exchange_entry_price
                     logger.info(
-                        "Delta position %s verified: %s %.0f contracts @ $%.2f (exchange data)",
-                        pair, position_type, amount, entry_price,
+                        "Delta position %s verified: %s %.0f contracts | "
+                        "entry=$%.2f (DB) vs $%.2f (exchange) — using DB",
+                        pair, position_type, amount, db_entry_price, exchange_entry_price,
                     )
                 else:
                     # Position not found on Delta — it was closed externally
@@ -1214,8 +1221,8 @@ class AlphaBot:
                 })
                 restored += 1
                 logger.info(
-                    "Restored position: %s %s %s (%.6f @ $%.2f) on %s [%s]",
-                    position_type, side, pair, amount, entry_price, exchange_id, strategy,
+                    "RESTORED %s %s %.0f @ $%.2f (DB) on %s [%s]",
+                    pair, position_type, amount, entry_price, exchange_id, strategy,
                 )
             else:
                 # Position no longer on exchange — find actual exit price
@@ -1346,7 +1353,7 @@ class AlphaBot:
             restored, closed, len(open_trades),
         )
 
-    def _restore_strategy_state(self) -> None:
+    async def _restore_strategy_state(self) -> None:
         """Inject restored positions into strategy instances.
 
         Called AFTER strategies are created but BEFORE they start ticking.
@@ -1357,6 +1364,11 @@ class AlphaBot:
         (not time.monotonic()), so timeout/breakeven exits work correctly
         across bot restarts. Without this, timers reset to 0 on every deploy
         and positions can get stuck indefinitely.
+
+        ALSO: fetches current price on restore to:
+        - Update highest/lowest_since_entry for accurate trailing
+        - Activate trailing if already past threshold
+        - Log real PnL so we know the position's state immediately
         """
         if not hasattr(self, "_restored_trades") or not self._restored_trades:
             return
@@ -1418,11 +1430,57 @@ class AlphaBot:
                     scalp._peak_unrealized_pnl = float(peak_pnl)
                     logger.info("Restored %s peak_pnl: %.2f%%", pair, float(peak_pnl))
 
-                logger.info(
-                    "Injected restored position into ScalpStrategy: "
-                    "%s %s %.6f @ $%.2f on %s",
-                    pair, scalp.position_side, amount, entry_price, exchange_id,
-                )
+                # ── IMMEDIATE EXIT CHECK ON RESTORE ──────────────────
+                # Fetch current price and check if we should exit right away.
+                # This catches: SL breached while bot was down, TP reached,
+                # trailing threshold already passed.
+                try:
+                    current_price = await self._get_current_price(pair, exchange_id)
+                    if current_price and current_price > 0:
+                        current_pnl = scalp._calc_pnl_pct(current_price)
+
+                        # Update peak tracking with current price
+                        if scalp.position_side == "long":
+                            scalp.highest_since_entry = max(entry_price, current_price)
+                        else:
+                            scalp.lowest_since_entry = min(entry_price, current_price)
+                        scalp._peak_unrealized_pnl = max(scalp._peak_unrealized_pnl, current_pnl)
+
+                        # Activate trailing if already profitable enough
+                        if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
+                            scalp._trailing_active = True
+                            scalp._update_trail_distance(current_pnl)
+                            logger.info(
+                                "[%s] RESTORE: already at +%.2f%% — trailing activated",
+                                pair, current_pnl,
+                            )
+
+                        # If past SL, trigger immediate exit via WS check
+                        sl_pct = scalp._sl_pct
+                        if current_pnl <= -sl_pct:
+                            logger.warning(
+                                "[%s] RESTORE: already past SL (%.2f%% < -%.2f%%) — will exit on next tick",
+                                pair, current_pnl, sl_pct,
+                            )
+
+                        logger.info(
+                            "Restored %s %s %.0f @ $%.2f (DB) — current $%.2f — PnL %+.2f%%",
+                            pair, scalp.position_side, amount, entry_price,
+                            current_price, current_pnl,
+                        )
+                    else:
+                        logger.info(
+                            "Injected restored position into ScalpStrategy: "
+                            "%s %s %.0f @ $%.2f on %s",
+                            pair, scalp.position_side, amount, entry_price, exchange_id,
+                        )
+                except Exception:
+                    logger.info(
+                        "Injected restored position into ScalpStrategy: "
+                        "%s %s %.0f @ $%.2f on %s (price fetch failed)",
+                        pair, scalp.position_side, amount, entry_price, exchange_id,
+                    )
+
                 injected += 1
                 continue
 
@@ -1436,6 +1494,24 @@ class AlphaBot:
             "Strategy state restoration complete — %d positions injected",
             injected,
         )
+
+    # ==================================================================
+    # PRICE HELPERS
+    # ==================================================================
+
+    async def _get_current_price(self, pair: str, exchange_id: str) -> float | None:
+        """Fetch current price for a pair from the appropriate exchange.
+
+        Returns None on any failure (caller should handle gracefully).
+        """
+        try:
+            exchange = self.delta if exchange_id == "delta" else self.binance
+            if exchange:
+                ticker = await exchange.fetch_ticker(pair)
+                return float(ticker.get("last", 0) or 0) or None
+        except Exception:
+            logger.debug("Could not fetch current price for %s/%s", pair, exchange_id)
+        return None
 
     # ==================================================================
     # TELEGRAM HEALTH CHECK — verify connection every 5 minutes
@@ -1538,12 +1614,16 @@ class AlphaBot:
                     )
                     if open_trade and open_trade.get("status") == "open":
                         # DB knows about this position — restore into strategy
+                        # Use DB entry_price (truth), exchange for size/side only
+                        db_entry_price = float(open_trade.get("entry_price", 0) or 0)
+                        restore_price = db_entry_price if db_entry_price > 0 else entry_px
+
                         scalp.in_position = True
                         scalp.position_side = side
-                        scalp.entry_price = entry_px
+                        scalp.entry_price = restore_price
                         scalp.entry_amount = contracts
-                        scalp.highest_since_entry = entry_px
-                        scalp.lowest_since_entry = entry_px
+                        scalp.highest_since_entry = restore_price
+                        scalp.lowest_since_entry = restore_price
 
                         # Restore entry_time from DB opened_at
                         opened_at_str = open_trade.get("opened_at")
@@ -1562,16 +1642,40 @@ class AlphaBot:
                         else:
                             scalp.entry_time = time.monotonic()
 
+                        # Fetch actual current market price for immediate checks
+                        current_price = await self._get_current_price(pair, "delta")
+                        if current_price and current_price > 0:
+                            current_pnl = scalp._calc_pnl_pct(current_price)
+                            # Update highest/lowest with current market price
+                            if side == "long":
+                                scalp.highest_since_entry = max(restore_price, current_price)
+                            else:
+                                scalp.lowest_since_entry = min(restore_price, current_price)
+                            scalp._peak_unrealized_pnl = max(0, current_pnl)
+
+                            # Activate trailing if already profitable enough
+                            if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
+                                scalp._trailing_active = True
+                                scalp._update_trail_distance(current_pnl)
+                                logger.info(
+                                    "RESTORE: %s already at +%.2f%% — trailing activated",
+                                    pair, current_pnl,
+                                )
+                        else:
+                            current_price = entry_px  # fallback
+                            current_pnl = 0.0
+
                         logger.warning(
-                            "RESTORED: %s %s %.0f contracts @ $%.2f — "
-                            "exchange had position, bot didn't, DB confirmed open trade",
-                            pair, side, contracts, entry_px,
+                            "RESTORED: %s %s %.0f contracts @ $%.2f (DB) — "
+                            "current $%.2f — PnL %+.2f%%",
+                            pair, side, contracts, restore_price,
+                            current_price, current_pnl,
                         )
                         try:
                             await self.alerts.send_orphan_alert(
                                 pair=pair, side=side, contracts=contracts,
                                 action="RESTORED INTO BOT",
-                                detail=f"Entry: ${entry_px:.2f} — found in DB, now managing exits",
+                                detail=f"Entry: ${restore_price:.2f} (DB) — current ${current_price:.2f} — PnL {current_pnl:+.2f}%",
                             )
                         except Exception:
                             pass
