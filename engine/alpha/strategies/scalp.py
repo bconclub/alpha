@@ -20,7 +20,7 @@ EXIT — 3-PHASE SYSTEM (the core change from v5.5):
     - Let the trade settle after fill bounce
   PHASE 2 (3-10 min): WATCH
     - If PnL > +0.3% → move SL to entry (real breakeven)
-    - If PnL > +0.5% → activate trailing (0.25% distance)
+    - If PnL > +0.2% → activate trailing (0.15% distance)
     - If still losing but above SL → keep holding
   PHASE 3 (10-30 min): TRAIL OR CUT
     - Trailing active → let it trail, tighten at +1%
@@ -153,8 +153,8 @@ class ScalpStrategy(BaseStrategy):
     MOVE_SL_TO_ENTRY_PCT = 0.30       # move SL to entry at +0.30% profit
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
-    TRAILING_ACTIVATE_PCT = 0.50      # activate trail at +0.50%
-    TRAILING_DISTANCE_PCT = 0.25      # initial trail: 0.25% behind peak
+    TRAILING_ACTIVATE_PCT = 0.20      # activate trail at +0.20% — lock in profits earlier
+    TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak (tight at low profit)
 
     # ── Profit protection ─────────────────────────────────────────────
     PROFIT_PULLBACK_MIN_PEAK = 0.50
@@ -167,6 +167,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Dynamic trailing tiers — widen as profit grows ──────────────
     TRAIL_TIERS: list[tuple[float, float]] = [
+        (0.20, 0.15),   # +0.2% to +0.5%: very tight — lock it in early
         (0.50, 0.25),   # +0.5% to +1%: standard trail
         (1.00, 0.15),   # +1% to +2%: tighten to lock more profit
         (2.00, 0.50),   # +2% to +3%: widen, let it run
@@ -993,7 +994,7 @@ class ScalpStrategy(BaseStrategy):
         """3-PHASE EXIT SYSTEM — let trades breathe, then manage.
 
         PHASE 1 (0-3 min): Only hard SL. Nothing else. Let trade settle.
-        PHASE 2 (3-10 min): Move SL to entry at +0.3%. Trail at +0.5%. Reversals.
+        PHASE 2 (3-10 min): Move SL to entry at +0.3%. Trail at +0.2%. Reversals.
         PHASE 3 (10-30 min): Trail or cut. Flatline exit. Hard timeout.
         """
         signals: list[Signal] = []
