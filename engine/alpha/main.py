@@ -175,17 +175,18 @@ class AlphaBot:
                     market_analyzer=self.analyzer,
                 )
 
-        # Register options overlay — Delta only (reads signals from scalp)
-        if self.delta and self.delta_options:
-            for pair in self.delta_pairs:
-                scalp = self._scalp_strategies.get(pair)
-                self._options_strategies[pair] = OptionsScalpStrategy(
-                    pair, self.executor, self.risk_manager,
-                    options_exchange=self.delta_options,
-                    futures_exchange=self.delta,
-                    scalp_strategy=scalp,
-                    market_analyzer=self.delta_analyzer,
-                )
+        # Options overlay DISABLED — not actively trading, was interfering with scalp
+        # Re-enable when ready by uncommenting the block below.
+        # if self.delta and self.delta_options:
+        #     for pair in self.delta_pairs:
+        #         scalp = self._scalp_strategies.get(pair)
+        #         self._options_strategies[pair] = OptionsScalpStrategy(
+        #             pair, self.executor, self.risk_manager,
+        #             options_exchange=self.delta_options,
+        #             futures_exchange=self.delta,
+        #             scalp_strategy=scalp,
+        #             market_analyzer=self.delta_analyzer,
+        #         )
 
         # Inject restored position state into strategy instances
         self._restore_strategy_state()
@@ -1986,24 +1987,25 @@ class AlphaBot:
                 config.delta.testnet, config.delta.leverage, config.delta.base_url,
             )
 
-            # Delta Options — separate ccxt instance with defaultType=option
-            delta_options_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(
-                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
-                )
-            )
-            self.delta_options = ccxt.delta({
-                "apiKey": delta_key,
-                "secret": delta_secret,
-                "enableRateLimit": True,
-                "options": {"defaultType": "option"},
-                "session": delta_options_session,
-            })
-            self.delta_options.urls["api"] = {
-                "public": config.delta.base_url,
-                "private": config.delta.base_url,
-            }
-            logger.info("Delta Exchange India options initialized")
+            # Delta Options — DISABLED (not actively trading, saves resources)
+            # Re-enable when ready to trade options.
+            # delta_options_session = aiohttp.ClientSession(
+            #     connector=aiohttp.TCPConnector(
+            #         resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
+            #     )
+            # )
+            # self.delta_options = ccxt.delta({
+            #     "apiKey": delta_key,
+            #     "secret": delta_secret,
+            #     "enableRateLimit": True,
+            #     "options": {"defaultType": "option"},
+            #     "session": delta_options_session,
+            # })
+            # self.delta_options.urls["api"] = {
+            #     "public": config.delta.base_url,
+            #     "private": config.delta.base_url,
+            # }
+            # logger.info("Delta Exchange India options initialized")
         else:
             self.delta_pairs = []  # no Delta pairs if no credentials
             logger.info("Delta credentials not set -- futures disabled")

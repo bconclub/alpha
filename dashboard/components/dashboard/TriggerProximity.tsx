@@ -299,6 +299,9 @@ function extractBaseAsset(pair: string): string {
   return pair.replace(/USD.*$/, '');
 }
 
+// Only show our 4 active trading pairs (filter out stale BNB/DOGE/etc.)
+const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
+
 export function TriggerProximity() {
   const { strategyLog, openPositions } = useSupabase();
 
@@ -306,6 +309,8 @@ export function TriggerProximity() {
     const latestByPair = new Map<string, StrategyLog>();
     for (const log of strategyLog) {
       if (log.pair) {
+        const asset = extractBaseAsset(log.pair);
+        if (!ACTIVE_ASSETS.has(asset)) continue;
         const key = `${log.pair}-${log.exchange ?? 'binance'}`;
         if (!latestByPair.has(key)) {
           latestByPair.set(key, log);

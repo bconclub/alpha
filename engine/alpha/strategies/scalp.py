@@ -475,18 +475,13 @@ class ScalpStrategy(BaseStrategy):
         exchange = self.trade_exchange or self.executor.exchange
         now = time.monotonic()
 
-        # ── Daily expiry check (5:30 PM IST) ───────────────────────────
-        _expiry_no_new = False
+        # ── Daily expiry check (5:30 PM IST) — force-close only, never block entries ──
         _expiry_force_close = False
         _mins_to_expiry = 999.0
         if self.is_futures:
-            _expiry_no_new, _expiry_force_close, _mins_to_expiry = self._is_near_expiry()
-            if _expiry_no_new and not self.in_position:
-                if self._tick_count % 20 == 0:
-                    self.logger.info(
-                        "[%s] EXPIRY in %.0f min — no new entries", self.pair, _mins_to_expiry,
-                    )
-                return signals
+            _no_new, _expiry_force_close, _mins_to_expiry = self._is_near_expiry()
+            # NOTE: we do NOT block new entries near expiry — scalp trades independently.
+            # Only force-close existing positions in the final minutes before settlement.
 
         # ── Daily loss limit ───────────────────────────────────────────
         exchange_cap = self.risk_manager.get_exchange_capital(self._exchange_id)
