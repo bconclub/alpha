@@ -131,23 +131,20 @@ class AlertManager:
         engine_ver = get_version()
 
         # Capital block
-        cap_lines = f"\U0001f4b0 Capital: <code>{format_usd(capital)}</code>"
+        cap_lines = f"\U0001f4b0Capital: <code>{format_usd(capital)}</code>"
         if binance_balance is not None or delta_balance is not None:
-            cap_lines += f"\nBinance: <code>{_bal(binance_balance)}</code>"
-            cap_lines += f"\nDelta: <code>{_bal(delta_balance)}</code>"
+            cap_lines += f"\n       Binance: <code>{_bal(binance_balance)}</code>"
+            cap_lines += f"\n       Delta: <code>{_bal(delta_balance)}</code>"
 
         msg = (
             f"{LINE}\n"
             f"\U0001f7e2 <b>ALPHA v{engine_ver}</b>\n"
-            f"\n"
+            f"{LINE}\n"
             f"{cap_lines}\n"
-            f"\n"
             f"\u26a1 Pairs: <code>{pairs_str}</code>\n"
-            f"\n"
             f"\U0001f4ca Exchange: <code>{exchanges_str}</code>\n"
             f"\U0001f4aa Leverage: <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
-            f"\U0001f552 Started: <code>{now}</code>\n"
-            f"{LINE}"
+            f"\U0001f552 Started: <code>{now}</code>"
         )
         await self._send(msg)
 
