@@ -1884,36 +1884,81 @@ class AlphaBot:
                 scalp._phantom_cooldown_until = now + 60
                 ScalpStrategy._live_pnl.pop(pair, None)
 
-                # Mark closed in DB
+                # Mark closed in DB — use trade history to find real exit price & reason
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
                         pair=pair, exchange="delta", strategy="scalp",
                     )
                     if open_trade:
                         order_id = open_trade.get("order_id", "")
-                        if order_id:
-                            entry_px = float(open_trade.get("entry_price", 0) or 0)
-                            # Get current price for real P&L instead of 0.0
+                        entry_px = float(open_trade.get("entry_price", 0) or 0)
+                        trade_lev = open_trade.get("leverage", config.delta.leverage) or 1
+                        pos_type = open_trade.get("position_type", "long")
+                        phantom_amount = open_trade.get("amount", 0)
+                        phantom_exit = entry_px
+                        phantom_reason = "phantom_cleared"
+
+                        # Try to find actual exit from Delta trade history
+                        try:
+                            recent_trades = await self.delta.fetch_my_trades(pair, limit=20)
+                            if recent_trades:
+                                close_side = "sell" if pos_type == "long" else "buy"
+                                closing_fills = [
+                                    t for t in recent_trades
+                                    if t.get("side") == close_side
+                                ]
+                                if closing_fills:
+                                    last_fill = closing_fills[-1]
+                                    fill_price = float(last_fill.get("price", 0) or 0)
+                                    if fill_price > 0:
+                                        phantom_exit = fill_price
+                                        # Determine exit reason from fill context
+                                        fill_info = last_fill.get("info", {})
+                                        fill_type = str(fill_info.get("meta_data", {}).get("order_type", "")).lower() if isinstance(fill_info, dict) else ""
+                                        if "stop" in fill_type or "sl" in fill_type:
+                                            phantom_reason = "SL_EXCHANGE"
+                                        elif "take_profit" in fill_type or "tp" in fill_type:
+                                            phantom_reason = "TP_EXCHANGE"
+                                        else:
+                                            phantom_reason = "CLOSED_BY_EXCHANGE"
+                                        logger.info(
+                                            "Phantom %s: found exit fill $%.2f (reason=%s)",
+                                            pair, fill_price, phantom_reason,
+                                        )
+                        except Exception as e:
+                            logger.debug("Could not fetch trade history for %s: %s", pair, e)
+
+                        # Fallback: current ticker if no fill found
+                        if phantom_exit == entry_px:
                             try:
                                 ticker = await self.delta.fetch_ticker(pair)
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
-                                phantom_exit = entry_px
-                            trade_lev = open_trade.get("leverage", config.delta.leverage) or 1
-                            pos_type = open_trade.get("position_type", "long")
-                            phantom_amount = open_trade.get("amount", 0)
-                            phantom_pnl, phantom_pnl_pct = calc_pnl(
-                                entry_px, phantom_exit, phantom_amount,
-                                pos_type, trade_lev, "delta", pair,
-                            )
+                                pass
+
+                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                            entry_px, phantom_exit, phantom_amount,
+                            pos_type, trade_lev, "delta", pair,
+                        )
+                        trade_id = open_trade.get("id")
+                        if order_id:
                             await self.db.close_trade(
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
-                                reason="phantom_cleared",
+                                reason=phantom_reason,
                             )
-                            logger.info(
-                                "Phantom trade %s marked closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
-                                pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
-                            )
+                        elif trade_id:
+                            await self.db.update_trade(trade_id, {
+                                "status": "closed",
+                                "exit_price": phantom_exit,
+                                "closed_at": iso_now(),
+                                "pnl": round(phantom_pnl, 8),
+                                "pnl_pct": round(phantom_pnl_pct, 4),
+                                "reason": phantom_reason,
+                            })
+                        logger.info(
+                            "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%) reason=%s",
+                            pair, phantom_exit, phantom_pnl, phantom_pnl_pct, phantom_reason,
+                        )
 
                 # Remove from risk manager
                 self.risk_manager.record_close(pair, 0.0)
@@ -1978,27 +2023,62 @@ class AlphaBot:
                     )
                     if open_trade:
                         order_id = open_trade.get("order_id", "")
-                        if order_id:
-                            entry_px = float(open_trade.get("entry_price", 0) or 0)
-                            # Get current price for real P&L
+                        entry_px = float(open_trade.get("entry_price", 0) or 0)
+                        phantom_amount = open_trade.get("amount", 0)
+                        phantom_exit = entry_px
+                        phantom_reason = "phantom_cleared"
+
+                        # Try to find actual exit from Binance trade history
+                        try:
+                            recent_trades = await self.binance.fetch_my_trades(pair, limit=20)
+                            if recent_trades:
+                                closing_fills = [
+                                    t for t in recent_trades if t.get("side") == "sell"
+                                ]
+                                if closing_fills:
+                                    last_fill = closing_fills[-1]
+                                    fill_price = float(last_fill.get("price", 0) or 0)
+                                    if fill_price > 0:
+                                        phantom_exit = fill_price
+                                        phantom_reason = "CLOSED_BY_EXCHANGE"
+                                        logger.info(
+                                            "Phantom Binance %s: found sell fill $%.2f",
+                                            pair, fill_price,
+                                        )
+                        except Exception as e:
+                            logger.debug("Could not fetch Binance trade history for %s: %s", pair, e)
+
+                        # Fallback: current ticker if no fill found
+                        if phantom_exit == entry_px:
                             try:
                                 ticker = await self.binance.fetch_ticker(pair)
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
-                                phantom_exit = entry_px
-                            phantom_amount = open_trade.get("amount", 0)
-                            phantom_pnl, phantom_pnl_pct = calc_pnl(
-                                entry_px, phantom_exit, phantom_amount,
-                                "spot", 1, "binance", pair,
-                            )
+                                pass
+
+                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                            entry_px, phantom_exit, phantom_amount,
+                            "spot", 1, "binance", pair,
+                        )
+                        trade_id = open_trade.get("id")
+                        if order_id:
                             await self.db.close_trade(
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
-                                reason="phantom_cleared",
+                                reason=phantom_reason,
                             )
-                            logger.info(
-                                "Phantom Binance trade %s marked closed: exit=$%.2f pnl=$%.4f",
-                                pair, phantom_exit, phantom_pnl,
-                            )
+                        elif trade_id:
+                            await self.db.update_trade(trade_id, {
+                                "status": "closed",
+                                "exit_price": phantom_exit,
+                                "closed_at": iso_now(),
+                                "pnl": round(phantom_pnl, 8),
+                                "pnl_pct": round(phantom_pnl_pct, 4),
+                                "reason": phantom_reason,
+                            })
+                        logger.info(
+                            "Phantom Binance %s closed: exit=$%.2f pnl=$%.4f reason=%s",
+                            pair, phantom_exit, phantom_pnl, phantom_reason,
+                        )
                 self.risk_manager.record_close(pair, 0.0)
 
     async def _close_orphaned_positions(self) -> None:

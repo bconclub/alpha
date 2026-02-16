@@ -113,7 +113,21 @@ class BaseStrategy(ABC):
             except asyncio.CancelledError:
                 break
             except Exception:
-                self.logger.exception("Error in %s check loop", self.name.value)
+                # Include position context so we know the state when the crash happened
+                pos_info = ""
+                try:
+                    if hasattr(self, "in_position") and self.in_position:
+                        pos_info = (
+                            f" | IN POSITION: {getattr(self, 'position_side', '?')} "
+                            f"@ ${getattr(self, 'entry_price', 0):.2f} "
+                            f"peak={getattr(self, '_peak_unrealized_pnl', 0):.2f}%"
+                        )
+                except Exception:
+                    pass
+                self.logger.exception(
+                    "Error in %s check loop [%s]%s",
+                    self.name.value, self.pair, pos_info,
+                )
             await asyncio.sleep(self.get_tick_interval())
 
     def get_tick_interval(self) -> int:
