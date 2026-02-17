@@ -208,30 +208,39 @@ class ScalpStrategy(BaseStrategy):
     MOVE_SL_TO_ENTRY_PCT = 0.20       # move SL to entry at +0.20% profit (was 0.30)
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
-    TRAILING_ACTIVATE_PCT = 0.30      # activate at +0.30% — ensure gross > 2x fees before trailing (was 0.15)
-    TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak — tight scalp lock (was 0.20)
+    TRAILING_ACTIVATE_PCT = 0.25      # activate at +0.25% price = +5% capital at 20x (was 0.30)
+    TRAILING_DISTANCE_PCT = 0.10      # initial trail: 0.10% behind peak (was 0.15)
 
-    # ── Hard TP safety net (fires in ALL phases, no delays) ────────────
-    HARD_TP_CAPITAL_PCT = 10.0            # 10% capital gain → instant market exit
+    # ── Hard TP safety net (only if NOT trailing — ratchets protect runners) ──
+    HARD_TP_CAPITAL_PCT = 10.0        # 10% capital gain → exit only if trail not active
 
-    # ── Profit protection ─────────────────────────────────────────────
-    PROFIT_PULLBACK_MIN_PEAK = 0.50
-    PROFIT_PULLBACK_PCT = 30.0        # exit if 30% of peak profit lost (was 40%)
-    PROFIT_DECAY_PEAK_MIN = 0.30
-    PROFIT_DECAY_EXIT_AT = 0.10
+    # ── Ratcheting profit floors — HARD FLOORS that cannot go back down ──
+    # Once capital PnL reaches threshold, floor locks in. Cannot be lowered.
+    # If current capital PnL drops below floor → EXIT IMMEDIATELY.
+    PROFIT_RATCHETS: list[tuple[float, float]] = [
+        (3.0,  0.0),    # At +3% capital → floor at breakeven (0%)
+        (5.0,  2.0),    # At +5% capital → floor at +2%
+        (8.0,  5.0),    # At +8% capital → floor at +5%
+        (10.0, 7.0),    # At +10% capital → floor at +7%
+        (15.0, 10.0),   # At +15% capital → floor at +10%
+    ]
+
+    # ── Profit decay emergency — never give back profits ─────────────
+    PROFIT_DECAY_EMERGENCY_PEAK_CAP = 3.0   # min peak capital PnL to activate
+    PROFIT_DECAY_EMERGENCY_RATIO = 0.40     # exit if current < peak × 0.40 (lost 60%+)
+
+    # ── Fee-aware minimum — don't exit tiny profits ───────────────────
+    FEE_MINIMUM_GROSS_USD = 0.10      # skip exit unless gross > $0.10 (except SL/ratchet)
 
     # ── Signal reversal (phase 2+ only) ────────────────────────────────
     REVERSAL_MIN_PROFIT_PCT = 0.30
 
-    # ── Dynamic trailing tiers — widen as profit grows ──────────────
+    # ── Dynamic trailing tiers — TIGHT, lock profits fast ─────────────
     TRAIL_TIERS: list[tuple[float, float]] = [
-        (0.15, 0.15),   # +0.15% to +0.35%: instant trail — any green locks profit
-        (0.35, 0.20),   # +0.35% to +0.5%: tight scalp lock
-        (0.50, 0.25),   # +0.5% to +1%: standard trail
-        (1.00, 0.30),   # +1% to +2%: moderate trail
-        (2.00, 0.40),   # +2% to +3%: tighter (was 0.50)
-        (3.00, 0.50),   # +3% to +5%: lock hard (was 0.75)
-        (5.00, 0.75),   # +5%+: still tight for scalping (was 1.00)
+        (0.25, 0.10),   # +0.25% price (+5% cap): trail 0.10% (lock +0.15% = +3% cap)
+        (0.50, 0.15),   # +0.50% price (+10% cap): trail 0.15% (lock +0.35% = +7% cap)
+        (1.00, 0.20),   # +1.00% price (+20% cap): trail 0.20% (lock +0.80% = +16% cap)
+        (2.00, 0.30),   # +2.00% price (+40% cap): trail 0.30% (lock +1.70% = +34% cap)
     ]
 
     # ── Signal reversal thresholds ──────────────────────────────────────
@@ -386,6 +395,7 @@ class ScalpStrategy(BaseStrategy):
         _init_trail_dist = self.TRAILING_DISTANCE_PCT
         self._trail_distance_pct: float = _init_trail_dist  # dynamic, only widens
         self._peak_unrealized_pnl: float = 0.0  # track peak P&L for decay exit
+        self._profit_floor_pct: float = -999.0  # ratcheting capital floor (not yet locked)
         self._in_position_tick: int = 0  # counts 1s ticks while in position (for OHLCV refresh)
 
         # Previous RSI for reversal detection
@@ -1274,12 +1284,13 @@ class ScalpStrategy(BaseStrategy):
         return self._trail_distance_pct
 
     def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
-        """3-PHASE EXIT SYSTEM — let trades breathe, then manage.
+        """3-PHASE EXIT SYSTEM — aggressive profit taking.
 
-        PHASE 1 (0-30s): Only hard SL. Let trade settle.
-          Exception: if peak >= +1.0%, skip to Phase 2 immediately.
-        PHASE 2 (30s-10 min): Move SL to entry at +0.3%. Trail at +0.35%. Reversals.
-        PHASE 3 (10-30 min): Trail or cut. Flatline exit. Hard timeout.
+        ALWAYS: Hard SL, ratcheting profit floors, Hard TP (if not trailing).
+        PHASE 1 (0-30s): Only hard exits. Let trade settle.
+          Exception: if peak >= +0.5%, skip to Phase 2 immediately.
+        PHASE 2 (30s-10 min): Breakeven, trail, decay emergency, reversals.
+        PHASE 3 (10-30 min): Trail or cut. Flat/timeout ONLY close losers.
         """
         signals: list[Signal] = []
         hold_seconds = time.monotonic() - self.entry_time
@@ -1314,16 +1325,37 @@ class ScalpStrategy(BaseStrategy):
                 return self._do_exit(current_price, pnl_pct, side, "SL", hold_seconds)
 
         # ══════════════════════════════════════════════════════════════
-        # ALWAYS: Hard TP — 10% capital gain safety net (fires in ALL phases)
-        # Trail handles normal exits. This catches runaway winners.
+        # ALWAYS: Hard TP — 10% capital safety net (only if NOT trailing)
+        # If trailing is active, ratchets + trail protect the profit.
         # ══════════════════════════════════════════════════════════════
         capital_pnl = pnl_pct * self.leverage
-        if capital_pnl >= self.HARD_TP_CAPITAL_PCT:
+        if capital_pnl >= self.HARD_TP_CAPITAL_PCT and not self._trailing_active:
             self.logger.info(
                 "[%s] HARD TP HIT — capital +%.1f%% (price +%.2f%% × %dx) — %ds in",
                 self.pair, capital_pnl, pnl_pct, self.leverage, int(hold_seconds),
             )
             return self._do_exit(current_price, pnl_pct, side, "HARD_TP_10PCT", hold_seconds)
+
+        # ══════════════════════════════════════════════════════════════
+        # ALWAYS: Ratcheting profit floors — lock in gains, never give back
+        # Checked on EVERY tick, ALL phases. Cannot go back down.
+        # ══════════════════════════════════════════════════════════════
+        for threshold, floor in self.PROFIT_RATCHETS:
+            if capital_pnl >= threshold and floor > self._profit_floor_pct:
+                old_floor = self._profit_floor_pct
+                self._profit_floor_pct = floor
+                self.logger.info(
+                    "[%s] RATCHET LOCK — capital +%.1f%% >= +%.0f%%, "
+                    "floor raised %.1f%% → +%.1f%%",
+                    self.pair, capital_pnl, threshold,
+                    old_floor if old_floor > -999 else 0, floor,
+                )
+        if self._profit_floor_pct > -999 and capital_pnl < self._profit_floor_pct:
+            self.logger.info(
+                "[%s] PROFIT FLOOR BREACH — capital +%.1f%% < floor +%.1f%% — EXIT",
+                self.pair, capital_pnl, self._profit_floor_pct,
+            )
+            return self._do_exit(current_price, pnl_pct, side, "PROFIT_LOCK", hold_seconds)
 
         # ══════════════════════════════════════════════════════════════
         # PHASE 1 (0-30s): HANDS OFF — only SL and Hard TP above
@@ -1389,19 +1421,12 @@ class ScalpStrategy(BaseStrategy):
                     if current_price >= trail_stop:
                         return self._do_exit(current_price, pnl_pct, side, "TRAIL", hold_seconds)
 
-            # Profit pullback
-            if side == "long":
-                peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
-            else:
-                peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
-            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
-                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
-                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
-                    return self._do_exit(current_price, pnl_pct, side, "PULLBACK", hold_seconds)
-
-            # Profit decay
-            if self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
-                return self._do_exit(current_price, pnl_pct, side, "DECAY", hold_seconds)
+            # Profit decay emergency — lost 60%+ of peak profit
+            peak_capital = self._peak_unrealized_pnl * self.leverage
+            current_capital = pnl_pct * self.leverage
+            if (peak_capital >= self.PROFIT_DECAY_EMERGENCY_PEAK_CAP
+                    and current_capital < peak_capital * self.PROFIT_DECAY_EMERGENCY_RATIO):
+                return self._do_exit(current_price, pnl_pct, side, "DECAY_EMERGENCY", hold_seconds)
 
             # Signal reversal (only in profit)
             if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
@@ -1436,24 +1461,20 @@ class ScalpStrategy(BaseStrategy):
                 if current_price >= trail_stop:
                     return self._do_exit(current_price, pnl_pct, side, "TRAIL", hold_seconds)
 
-        # Profit protection
-        if side == "long":
-            peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
-        else:
-            peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
-        if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK and pnl_pct > 0:
-            pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
-            if pullback_pct >= self.PROFIT_PULLBACK_PCT:
-                return self._do_exit(current_price, pnl_pct, side, "PULLBACK", hold_seconds)
-        if self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
-            return self._do_exit(current_price, pnl_pct, side, "DECAY", hold_seconds)
+        # Profit decay emergency — lost 60%+ of peak profit
+        peak_capital = self._peak_unrealized_pnl * self.leverage
+        current_capital = pnl_pct * self.leverage
+        if (peak_capital >= self.PROFIT_DECAY_EMERGENCY_PEAK_CAP
+                and current_capital < peak_capital * self.PROFIT_DECAY_EMERGENCY_RATIO):
+            return self._do_exit(current_price, pnl_pct, side, "DECAY_EMERGENCY", hold_seconds)
 
-        # Flatline — 10 min with no movement
-        if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
+        # Flatline — 10 min with no movement — ONLY close losers
+        if (hold_seconds >= self.FLATLINE_SECONDS
+                and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT and pnl_pct <= 0):
             return self._do_exit(current_price, pnl_pct, side, "FLAT", hold_seconds)
 
-        # Hard timeout (skip if trailing)
-        if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
+        # Hard timeout — ONLY close losers (winners protected by trail/ratchet)
+        if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active and pnl_pct <= 0:
             return self._do_exit(current_price, pnl_pct, side, "TIMEOUT", hold_seconds)
 
         # Safety: past timeout AND losing
@@ -1498,7 +1519,27 @@ class ScalpStrategy(BaseStrategy):
             if current_price >= sl_price:
                 exit_type = "SL"
 
-        # Periodic SL check logging (every 10s) for visibility
+        # ── ALWAYS: Ratcheting profit floors ─────────────────────────
+        capital_pnl = pnl_pct * self.leverage
+        if not exit_type:
+            for threshold, floor in self.PROFIT_RATCHETS:
+                if capital_pnl >= threshold and floor > self._profit_floor_pct:
+                    old_floor = self._profit_floor_pct
+                    self._profit_floor_pct = floor
+                    self.logger.info(
+                        "[%s] WS RATCHET LOCK — capital +%.1f%% >= +%.0f%%, "
+                        "floor %.1f%% → +%.1f%%",
+                        self.pair, capital_pnl, threshold,
+                        old_floor if old_floor > -999 else 0, floor,
+                    )
+            if self._profit_floor_pct > -999 and capital_pnl < self._profit_floor_pct:
+                exit_type = "PROFIT_LOCK"
+
+        # ── ALWAYS: Hard TP (only if NOT trailing) ───────────────────
+        if not exit_type and capital_pnl >= self.HARD_TP_CAPITAL_PCT and not self._trailing_active:
+            exit_type = "HARD_TP_10PCT"
+
+        # Periodic logging (every 10s) for visibility
         now_mono = time.monotonic()
         if now_mono - self._last_ws_sl_log >= 10:
             self._last_ws_sl_log = now_mono
@@ -1509,25 +1550,26 @@ class ScalpStrategy(BaseStrategy):
                 else:
                     t_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
                 trail_info = f" Trail={self._trail_distance_pct:.2f}%@${t_stop:.2f}"
+            floor_info = f" Floor=+{self._profit_floor_pct:.0f}%cap" if self._profit_floor_pct > -999 else ""
             self.logger.info(
-                "[%s] WS TICK: %s @ $%.2f PnL=%+.2f%% peak=%+.2f%% SL=$%.2f(%.2f%%) hold=%ds%s%s",
-                self.pair, side, current_price, pnl_pct,
+                "[%s] WS TICK: %s @ $%.2f PnL=%+.2f%% (%+.1f%%cap) peak=%+.2f%% "
+                "SL=$%.2f(%.2f%%) hold=%ds%s%s%s",
+                self.pair, side, current_price, pnl_pct, capital_pnl,
                 self._peak_unrealized_pnl, sl_price, self._sl_pct,
                 int(hold_seconds),
-                trail_info,
-                " → SL HIT!" if exit_type == "SL" else "",
+                trail_info, floor_info,
+                " → " + exit_type + "!" if exit_type else "",
             )
 
-        # ── PHASE 1: only SL fires, skip everything else ────────────
-        # EXCEPTION: peak-aware skip — if peak >= +1.0%, allow Phase 2 checks
+        # ── PHASE 1: only hard exits fire, skip everything else ──────
         _in_phase2_plus = hold_seconds >= self.PHASE1_SECONDS
         if not exit_type and not _in_phase2_plus:
             if self._peak_unrealized_pnl >= self.PHASE1_SKIP_AT_PEAK_PCT:
                 _in_phase2_plus = True  # graduate early — real profit to protect
             else:
-                return  # hands off — no WS exits except SL
+                return  # hands off — no WS exits except SL/ratchet/hard_tp
 
-        # ── PHASE 2+: breakeven (SL moved to entry after peak > +0.3%) ──
+        # ── PHASE 2+: breakeven (SL moved to entry after peak > +0.20%) ──
         if not exit_type and _in_phase2_plus:
             if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT and not self._trailing_active:
                 at_entry = (
@@ -1554,27 +1596,20 @@ class ScalpStrategy(BaseStrategy):
                     if current_price >= trail_stop:
                         exit_type = "TRAIL"
 
-        # ── PHASE 2+: profit pullback ────────────────────────────────
-        if not exit_type and _in_phase2_plus and pnl_pct > 0:
-            if side == "long":
-                peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
-            else:
-                peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
-            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK:
-                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
-                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
-                    exit_type = "PULLBACK"
-
-        # ── PHASE 2+: profit decay ──────────────────────────────────
+        # ── PHASE 2+: profit decay emergency (lost 60%+ of peak) ─────
         if not exit_type and _in_phase2_plus:
-            if self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
-                exit_type = "DECAY"
+            peak_capital = self._peak_unrealized_pnl * self.leverage
+            if (peak_capital >= self.PROFIT_DECAY_EMERGENCY_PEAK_CAP
+                    and capital_pnl < peak_capital * self.PROFIT_DECAY_EMERGENCY_RATIO):
+                exit_type = "DECAY_EMERGENCY"
 
-        # ── PHASE 3: flatline + timeout ──────────────────────────────
-        if not exit_type and hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
-            exit_type = "FLAT"
-        if not exit_type and hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
-            exit_type = "TIMEOUT"
+        # ── PHASE 3: flatline + timeout — ONLY close losers ──────────
+        if not exit_type and hold_seconds >= self.FLATLINE_SECONDS:
+            if abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT and pnl_pct <= 0:
+                exit_type = "FLAT"
+        if not exit_type and hold_seconds >= self.MAX_HOLD_SECONDS:
+            if not self._trailing_active and pnl_pct <= 0:
+                exit_type = "TIMEOUT"
         if not exit_type and hold_seconds >= self.MAX_HOLD_SECONDS and pnl_pct < 0:
             exit_type = "SAFETY"
 
@@ -1607,7 +1642,30 @@ class ScalpStrategy(BaseStrategy):
         self, price: float, pnl_pct: float, side: str,
         exit_type: str, hold_seconds: float,
     ) -> list[Signal]:
-        """Execute an exit: build signal, record result, log."""
+        """Execute an exit: build signal, record result, log.
+
+        Fee-aware: skips tiny exits (gross < $0.10) unless it's an SL,
+        ratchet floor, hard TP, or safety exit.
+        """
+        # Fee-aware minimum — skip tiny exits that'd be eaten by fees
+        _FORCE_EXIT_TYPES = {"SL", "PROFIT_LOCK", "HARD_TP_10PCT", "SAFETY",
+                             "WS-SL", "WS-PROFIT_LOCK", "WS-HARD_TP_10PCT", "WS-SAFETY"}
+        clean_type = exit_type.replace("WS-", "")
+        if clean_type not in {"SL", "PROFIT_LOCK", "HARD_TP_10PCT", "SAFETY"} and self.entry_price > 0:
+            if self.is_futures:
+                from alpha.trade_executor import DELTA_CONTRACT_SIZE
+                contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0.01)
+                coin_amount = self.entry_amount * contract_size
+            else:
+                coin_amount = self.entry_amount
+            gross_usd = abs(price - self.entry_price) * coin_amount
+            if gross_usd < self.FEE_MINIMUM_GROSS_USD:
+                self.logger.info(
+                    "[%s] Skip %s — gross $%.4f < $%.2f minimum",
+                    self.pair, exit_type, gross_usd, self.FEE_MINIMUM_GROSS_USD,
+                )
+                return []  # empty = no exit
+
         cap_pct = pnl_pct * self.leverage
         reason = (
             f"Scalp {exit_type} {pnl_pct:+.2f}% price "
@@ -2079,6 +2137,7 @@ class ScalpStrategy(BaseStrategy):
         self._trailing_active = False
         self._trail_distance_pct = self.TRAILING_DISTANCE_PCT  # reset to initial tier
         self._peak_unrealized_pnl = 0.0  # reset peak P&L tracker for decay exit
+        self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
         self._hourly_trades.append(time.time())
 
@@ -2173,6 +2232,7 @@ class ScalpStrategy(BaseStrategy):
         self._trailing_active = False
         self._trail_distance_pct = self.TRAILING_DISTANCE_PCT
         self._peak_unrealized_pnl = 0.0  # reset for next trade
+        self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter
         self._last_position_exit = now
         ScalpStrategy._live_pnl.pop(self.pair, None)  # clean up live P&L tracker

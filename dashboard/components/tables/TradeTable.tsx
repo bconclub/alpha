@@ -166,13 +166,13 @@ function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): num
 function getExitReasonColor(reason: string): string {
   const upper = reason.toUpperCase();
   // Green: profit exits
-  if (upper === 'TRAIL' || upper === 'TP' || upper === 'HARD_TP' || upper === 'TP_EXCHANGE') return 'text-emerald-400';
+  if (['TRAIL', 'TP', 'HARD_TP', 'TP_EXCHANGE', 'PROFIT_LOCK'].includes(upper)) return 'text-emerald-400';
   // Blue: manual
   if (upper === 'MANUAL') return 'text-blue-400';
   // Red: stop loss
   if (upper === 'SL' || upper === 'SL_EXCHANGE') return 'text-red-400';
   // Yellow: conditional exits
-  if (upper === 'REVERSAL' || upper === 'PULLBACK' || upper === 'DECAY') return 'text-yellow-400';
+  if (['REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY'].includes(upper)) return 'text-yellow-400';
   // Orange: external/phantom
   if (upper === 'PHANTOM' || upper === 'POSITION_GONE' || upper === 'CLOSED_BY_EXCHANGE') return 'text-orange-400';
   // Gray: neutral exits
@@ -185,8 +185,9 @@ function parseExitReason(reason?: string | null): string | null {
   if (!reason) return null;
   const upper = reason.toUpperCase().trim();
   // Check from most specific to least (HARD_TP before TP)
-  const keywords = ['HARD_TP', 'MANUAL_CLOSE', 'TRAIL', 'TP', 'SL', 'FLAT',
-    'TIMEOUT', 'BREAKEVEN', 'REVERSAL', 'PULLBACK', 'DECAY', 'SAFETY', 'EXPIRY'];
+  const keywords = ['HARD_TP', 'PROFIT_LOCK', 'DECAY_EMERGENCY', 'MANUAL_CLOSE',
+    'TRAIL', 'TP', 'SL', 'FLAT', 'TIMEOUT', 'BREAKEVEN', 'REVERSAL', 'PULLBACK',
+    'DECAY', 'SAFETY', 'EXPIRY'];
   for (const kw of keywords) {
     if (upper.includes(kw)) return kw === 'MANUAL_CLOSE' ? 'MANUAL' : kw;
   }
@@ -1104,7 +1105,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             ) : trade.position_state === 'holding' ? (
                               <span className="text-zinc-400">
                                 <span className="mr-1">&#x23F3;</span>
-                                need +0.15%
+                                need +0.25%
                                 {trade.current_pnl != null ? (
                                   <span className="text-zinc-500"> (now {trade.current_pnl >= 0 ? '+' : ''}{trade.current_pnl.toFixed(2)}%)</span>
                                 ) : null}

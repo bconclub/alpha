@@ -84,9 +84,29 @@ The combination of signals that fire determines the setup type badge:
 
 ## 3-Phase Exit System
 
+### Always Active (ALL phases)
+
+| Exit Type | Trigger | Color |
+|-----------|---------|-------|
+| **Hard SL** | Price hits SL floor (0.25% all pairs) | Red |
+| **Ratchet Floor** | Capital PnL drops below locked floor → instant exit | Green |
+| **Hard TP** | Capital PnL >= 10% AND trail NOT active (safety net) | Green |
+
+### Ratcheting Profit Floors (cannot go back down)
+
+| Capital PnL Reached | Floor Locks At |
+|---------------------|----------------|
+| +3% | 0% (breakeven) |
+| +5% | +2% |
+| +8% | +5% |
+| +10% | +7% |
+| +15% | +10% |
+
+If current capital PnL drops below the locked floor → **EXIT IMMEDIATELY** (market order, reason: `PROFIT_LOCK`).
+
 ### Phase 1: Hands-Off (0-30 seconds)
 
-Only hard stop loss fires. Protects against fill slippage.
+Only hard SL, ratchet floors, and Hard TP fire. Protects against fill slippage.
 
 Exception: If peak PnL >= +0.5%, skip immediately to Phase 2.
 
@@ -105,11 +125,9 @@ Dynamic SL: `max(pair_floor, ATR_14 * 1.5)`
 
 | Exit Type | Trigger | Color |
 |-----------|---------|-------|
-| **Trailing Stop** | Peak PnL >= +0.30% activates trail (gross > 2x fees) | Green |
+| **Trailing Stop** | Peak PnL >= +0.25% activates trail | Green |
 | **Breakeven** | Peak >= +0.20% AND price returns to entry | Gray |
-| **Hard TP** | Capital PnL >= 10% (runaway winner safety) | Green |
-| **Profit Pullback** | Peak >= +0.50% AND 30% retracement from peak | Yellow |
-| **Profit Decay** | Peak >= +0.30% AND current < +0.10% | Yellow |
+| **Decay Emergency** | Peak capital >= +3% AND current < peak × 40% (lost 60%+) | Yellow |
 | **Signal Reversal** | In profit >= +0.30% AND RSI flips or momentum reverses | Yellow |
 
 ### Phase 3: Trail or Cut (10 - 30 minutes)
@@ -117,25 +135,29 @@ Dynamic SL: `max(pair_floor, ATR_14 * 1.5)`
 | Exit Type | Trigger | Color |
 |-----------|---------|-------|
 | **Trailing** | Continues from Phase 2 | Green |
-| **Flatline** | 10+ min hold AND \|PnL\| < 0.05% (dead momentum) | Gray |
-| **Timeout** | 30 min hold AND not trailing | Gray |
+| **Decay Emergency** | Same as Phase 2 (repeated check) | Yellow |
+| **Flatline** | 10+ min hold AND \|PnL\| < 0.05% — **ONLY if losing** | Gray |
+| **Timeout** | 30 min hold AND not trailing — **ONLY if losing** | Gray |
 | **Safety** | 30 min hold AND PnL < 0% (cut losers) | Gray |
+
+**Winners are NEVER closed by flatline or timeout.** Only trail, ratchet, or decay emergency can close a winner.
+
+### Fee-Aware Minimum
+
+Non-forced exits (TRAIL, BREAKEVEN, DECAY_EMERGENCY, REVERSAL, FLAT, TIMEOUT) are skipped if gross profit < $0.10. Exception: SL, PROFIT_LOCK, HARD_TP, and SAFETY always execute regardless of gross amount.
 
 ---
 
 ## Trailing Stop Tiers
 
-Trail activates at +0.30% peak PnL (ensures gross profit > 2x fees before trailing). Distance widens as profit grows (never tightens):
+Trail activates at +0.25% peak PnL (+5% capital at 20x). Distance widens as profit grows (never tightens):
 
-| Peak PnL | Trail Distance |
-|----------|----------------|
-| +0.30% | 0.15% |
-| +0.35% | 0.20% |
-| +0.50% | 0.25% |
-| +1.00% | 0.30% |
-| +2.00% | 0.40% |
-| +3.00% | 0.50% |
-| +5.00% | 0.75% |
+| Peak PnL | Trail Distance | Locked Min | Capital at 20x |
+|----------|----------------|------------|----------------|
+| +0.25% | 0.10% | +0.15% | +3% |
+| +0.50% | 0.15% | +0.35% | +7% |
+| +1.00% | 0.20% | +0.80% | +16% |
+| +2.00% | 0.30% | +1.70% | +34% |
 
 Trail tracks from **peak** price, not current price. Catches inter-tick spikes.
 
@@ -264,9 +286,9 @@ SCANNING (every 5s)
   |           |
   |           +-- Fill confirmed -> Track position
   |                 |
-  |                 +-- Phase 1 (0-30s): Hard SL only
-  |                 +-- Phase 2 (30s-10m): Trail + breakeven + pullback + decay
-  |                 +-- Phase 3 (10-30m): Flatline + timeout + safety
+  |                 +-- Phase 1 (0-30s): SL + ratchet + hard TP only
+  |                 +-- Phase 2 (30s-10m): Trail + breakeven + decay emergency
+  |                 +-- Phase 3 (10-30m): Trail + flat/timeout (losers only)
   |                 |
   |                 +-- EXIT triggered -> Market close order
   |                       |
@@ -285,17 +307,17 @@ SCANNING (every 5s)
 | Code | Meaning | Dashboard Color |
 |------|---------|----------------|
 | `TRAIL` | Trailing stop triggered | Green |
+| `PROFIT_LOCK` | Ratchet floor breached (locked profit) | Green |
 | `TP` | Take profit hit | Green |
-| `HARD_TP` | 10% capital gain safety | Green |
+| `HARD_TP` | 10% capital gain safety (if not trailing) | Green |
 | `TP_EXCHANGE` | TP filled by exchange | Green |
 | `MANUAL` | Manual close from dashboard | Blue |
 | `SL` | Stop loss hit | Red |
 | `SL_EXCHANGE` | SL filled by exchange | Red |
+| `DECAY_EMERGENCY` | Lost 60%+ of peak profit | Yellow |
 | `REVERSAL` | Signal reversal exit | Yellow |
-| `PULLBACK` | Profit pullback exit | Yellow |
-| `DECAY` | Momentum decay exit | Yellow |
-| `FLAT` | Flatline (no movement 10m) | Gray |
-| `TIMEOUT` | Hard timeout 30m | Gray |
+| `FLAT` | Flatline (no movement 10m, losers only) | Gray |
+| `TIMEOUT` | Hard timeout 30m (losers only) | Gray |
 | `BREAKEVEN` | Breakeven protection | Gray |
 | `SAFETY` | Losing after timeout | Gray |
 | `DUST` | Dust balance cleanup | Gray |
@@ -315,14 +337,15 @@ SCANNING (every 5s)
 | Leverage | 20x (capped) | 1x |
 | SL distance | 0.25% floor | 2.0% |
 | SL cap | 0.50% | 3.0% |
-| Trail activation | +0.30% peak | +1.50% peak |
-| Trail start distance | 0.15% | 0.80% |
-| Hard TP | 10% capital | 10% capital |
+| Trail activation | +0.25% peak | +1.50% peak |
+| Trail start distance | 0.10% | 0.80% |
+| Hard TP | 10% capital (if not trailing) | 10% capital |
+| Ratchet floors | +3%→0%, +5%→2%, +8%→5%, +10%→7%, +15%→10% | N/A |
 | Breakeven trigger | +0.20% peak | +0.20% peak |
-| Pullback exit | 30% of peak | 30% of peak |
-| Decay exit | peak >= 0.30%, now < 0.10% | same |
-| Flatline | 10 min, < 0.05% move | same |
-| Timeout | 30 min | 30 min |
+| Decay emergency | peak >= 3% cap, current < peak × 40% | same |
+| Fee minimum | gross > $0.10 (except SL/ratchet) | same |
+| Flatline | 10 min, losers only | same |
+| Timeout | 30 min, losers only | same |
 | Daily loss stop | 20% drawdown | 20% drawdown |
 | Rate limit | 10 trades/hour | 10 trades/hour |
 | Max concurrent | 2 per exchange | 1 |

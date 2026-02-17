@@ -117,7 +117,8 @@ def _extract_exit_reason(reason: str) -> str:
     if not reason:
         return "UNKNOWN"
     upper = reason.upper()
-    for kw in ("HARD_TP", "MANUAL_CLOSE", "TRAIL", "SL", "FLAT", "TIMEOUT",
+    for kw in ("HARD_TP", "PROFIT_LOCK", "DECAY_EMERGENCY", "MANUAL_CLOSE",
+               "TRAIL", "SL", "FLAT", "TIMEOUT",
                "BREAKEVEN", "REVERSAL", "PULLBACK", "DECAY", "SAFETY", "EXPIRY"):
         if kw in upper:
             return "MANUAL" if kw == "MANUAL_CLOSE" else kw
@@ -658,8 +659,8 @@ class TradeExecutor:
         # ── LIMIT EXIT OPTIMIZATION: Non-urgent Delta futures exits use limit-then-market ──
         # Saves ~60% on exit fees (maker 0.024% vs taker 0.059%)
         # Place limit at current price, wait 3s, cancel & market if unfilled
-        # Urgent exits (SL, HARD_TP) always use market — speed matters more than fees
-        _URGENT_EXITS = {"SL", "HARD_TP", "SL_EXCHANGE"}
+        # Urgent exits always use market — speed matters more than fees
+        _URGENT_EXITS = {"SL", "HARD_TP", "SL_EXCHANGE", "PROFIT_LOCK", "DECAY_EMERGENCY"}
         _exit_reason = _extract_exit_reason(signal.reason) if is_exit else ""
         _use_limit_exit = (
             is_exit
@@ -949,7 +950,7 @@ class TradeExecutor:
                 entry_fee_rate = self._binance_taker_fee
             entry_fee = round(notional * entry_fee_rate, 8)
 
-            trade_id = await self.db.log_trade({
+            trade_data: dict[str, Any] = {
                 "pair": signal.pair,
                 "side": signal.side,
                 "entry_price": fill_price,
@@ -965,7 +966,17 @@ class TradeExecutor:
                 "position_type": signal.position_type,
                 "setup_type": signal.metadata.get("setup_type", "unknown"),
                 "entry_fee": entry_fee,
-            })
+            }
+            # Store SL/TP prices (from signal or metadata) for dashboard display
+            if signal.stop_loss is not None:
+                trade_data["stop_loss"] = round(signal.stop_loss, 8)
+            elif signal.metadata.get("sl_price"):
+                trade_data["stop_loss"] = round(float(signal.metadata["sl_price"]), 8)
+            if signal.take_profit is not None:
+                trade_data["take_profit"] = round(signal.take_profit, 8)
+            elif signal.metadata.get("tp_price"):
+                trade_data["take_profit"] = round(float(signal.metadata["tp_price"]), 8)
+            trade_id = await self.db.log_trade(trade_data)
             logger.info(
                 "Trade opened in DB: id=%s %s %s @ $%.2f [%s]",
                 trade_id, signal.side, signal.pair, fill_price, signal.exchange_id,
