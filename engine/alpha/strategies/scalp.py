@@ -208,7 +208,7 @@ class ScalpStrategy(BaseStrategy):
     MOVE_SL_TO_ENTRY_PCT = 0.20       # move SL to entry at +0.20% profit (was 0.30)
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
-    TRAILING_ACTIVATE_PCT = 0.15      # activate at +0.15% — any green = trail it (was 0.35)
+    TRAILING_ACTIVATE_PCT = 0.30      # activate at +0.30% — ensure gross > 2x fees before trailing (was 0.15)
     TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak — tight scalp lock (was 0.20)
 
     # ── Hard TP safety net (fires in ALL phases, no delays) ────────────

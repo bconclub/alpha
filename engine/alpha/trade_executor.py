@@ -655,10 +655,17 @@ class TradeExecutor:
         order: dict | None = None
         last_error: Exception | None = None
 
-        # ── LIMIT EXIT OPTIMIZATION: Delta futures exits use limit-then-market ──
+        # ── LIMIT EXIT OPTIMIZATION: Non-urgent Delta futures exits use limit-then-market ──
         # Saves ~60% on exit fees (maker 0.024% vs taker 0.059%)
-        # Place limit at current price, wait 5s, cancel & market if unfilled
-        _use_limit_exit = False  # ALWAYS use market for exits — failed limits cost more than fees
+        # Place limit at current price, wait 3s, cancel & market if unfilled
+        # Urgent exits (SL, HARD_TP) always use market — speed matters more than fees
+        _URGENT_EXITS = {"SL", "HARD_TP", "SL_EXCHANGE"}
+        _exit_reason = _extract_exit_reason(signal.reason) if is_exit else ""
+        _use_limit_exit = (
+            is_exit
+            and signal.exchange_id == "delta"
+            and _exit_reason not in _URGENT_EXITS
+        )
         limit_order_id: str | None = None  # track limit order for recovery in market retry
 
         if _use_limit_exit:
@@ -673,10 +680,10 @@ class TradeExecutor:
                 )
                 limit_order_id = limit_order.get("id")
                 logger.info(
-                    "[%s] Limit exit placed: %s %.0f @ $%.2f (order=%s) — waiting 5s for fill",
-                    signal.pair, signal.side, order_amount, signal.price, limit_order_id,
+                    "[%s] Limit exit placed: %s %.0f @ $%.2f (order=%s, reason=%s) — waiting 3s for fill",
+                    signal.pair, signal.side, order_amount, signal.price, limit_order_id, _exit_reason,
                 )
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
 
                 # Check if filled
                 try:

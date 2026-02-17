@@ -94,9 +94,9 @@ Exception: If peak PnL >= +0.5%, skip immediately to Phase 2.
 
 | Pair | SL Floor | Cap |
 |------|----------|-----|
-| BTC | 0.40% | 1.5% (futures) |
-| ETH | 0.45% | 1.5% (futures) |
-| XRP | 0.50% | 1.5% (futures) |
+| BTC | 0.25% | 0.50% (futures) |
+| ETH | 0.25% | 0.50% (futures) |
+| XRP | 0.25% | 0.50% (futures) |
 | Spot | 2.0% | 3.0% (spot) |
 
 Dynamic SL: `max(pair_floor, ATR_14 * 1.5)`
@@ -105,7 +105,7 @@ Dynamic SL: `max(pair_floor, ATR_14 * 1.5)`
 
 | Exit Type | Trigger | Color |
 |-----------|---------|-------|
-| **Trailing Stop** | Peak PnL >= +0.15% activates trail | Green |
+| **Trailing Stop** | Peak PnL >= +0.30% activates trail (gross > 2x fees) | Green |
 | **Breakeven** | Peak >= +0.20% AND price returns to entry | Gray |
 | **Hard TP** | Capital PnL >= 10% (runaway winner safety) | Green |
 | **Profit Pullback** | Peak >= +0.50% AND 30% retracement from peak | Yellow |
@@ -125,11 +125,11 @@ Dynamic SL: `max(pair_floor, ATR_14 * 1.5)`
 
 ## Trailing Stop Tiers
 
-Trail activates at +0.15% peak PnL. Distance widens as profit grows (never tightens):
+Trail activates at +0.30% peak PnL (ensures gross profit > 2x fees before trailing). Distance widens as profit grows (never tightens):
 
 | Peak PnL | Trail Distance |
 |----------|----------------|
-| +0.15% | 0.15% |
+| +0.30% | 0.15% |
 | +0.35% | 0.20% |
 | +0.50% | 0.25% |
 | +1.00% | 0.30% |
@@ -217,6 +217,17 @@ BTC: 20% (lowest win rate — minimum)
 | Taker | 0.05% * 1.18 = 0.059% |
 | Mixed round-trip | 0.024% + 0.059% = 0.083% |
 
+### Exit Fee Optimization
+
+Non-urgent exits (TRAIL, TP, PULLBACK, DECAY, REVERSAL, FLAT, TIMEOUT, BREAKEVEN, SAFETY) use **limit-then-market** strategy:
+1. Place limit order at current price (maker fee: 0.024%)
+2. Wait 3 seconds for fill
+3. If not filled → cancel limit, execute market order (taker fee: 0.059%)
+
+Urgent exits (SL, HARD_TP, SL_EXCHANGE) always use immediate market orders — speed > fees.
+
+Savings: ~$0.02-0.03 per exit when limit fills (~60% fee reduction on exit leg).
+
 ### P&L Calculation
 
 ```
@@ -302,9 +313,9 @@ SCANNING (every 5s)
 |-----------|---------|------|
 | Entry gate | 3/4 signals | 3/4 signals |
 | Leverage | 20x (capped) | 1x |
-| SL distance | 0.40-0.50% floor | 2.0% |
-| SL cap | 1.5% | 3.0% |
-| Trail activation | +0.15% peak | +1.50% peak |
+| SL distance | 0.25% floor | 2.0% |
+| SL cap | 0.50% | 3.0% |
+| Trail activation | +0.30% peak | +1.50% peak |
 | Trail start distance | 0.15% | 0.80% |
 | Hard TP | 10% capital | 10% capital |
 | Breakeven trigger | +0.20% peak | +0.20% peak |
