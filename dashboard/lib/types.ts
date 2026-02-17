@@ -15,8 +15,11 @@ export interface Trade {
   amount: number;
   cost?: number;
   strategy: Strategy;
-  pnl: number;
+  pnl: number;              // NET P&L (after fees)
   pnl_pct?: number;
+  gross_pnl?: number;       // GROSS P&L (before fees)
+  entry_fee?: number;       // fee paid on entry
+  exit_fee?: number;        // fee paid on exit
   status: 'open' | 'closed' | 'cancelled';
   exchange: Exchange;
   leverage: number;
@@ -103,7 +106,7 @@ export interface BotStatus {
 export interface BotCommand {
   id?: string;
   timestamp?: string;
-  command: 'pause' | 'resume' | 'force_strategy' | 'update_config' | 'update_pair_config';
+  command: 'pause' | 'resume' | 'force_strategy' | 'update_config' | 'update_pair_config' | 'close_trade';
   params: Record<string, unknown>;
   executed?: boolean;
 }

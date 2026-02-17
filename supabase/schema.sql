@@ -35,8 +35,11 @@ create table if not exists public.trades (
     exchange      text        not null default 'binance',
 
     -- Result
-    pnl           numeric(20,8) not null default 0,
+    pnl           numeric(20,8) not null default 0,   -- NET P&L (after fees)
     pnl_pct       numeric(10,4) not null default 0,
+    gross_pnl     numeric(20,8) not null default 0,   -- GROSS P&L (before fees)
+    entry_fee     numeric(20,8) not null default 0,   -- fee paid on entry
+    exit_fee      numeric(20,8) not null default 0,   -- fee paid on exit
     status        text        not null default 'open'
                   check (status in ('open', 'closed', 'cancelled')),
     reason        text,                                -- human-readable entry/exit reason
@@ -178,8 +181,8 @@ create table if not exists public.bot_commands (
     created_at    timestamptz not null default now(),
 
     -- Command
-    command       text not null                          -- 'pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config'
-                  check (command in ('pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config')),
+    command       text not null                          -- 'pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config', 'close_trade'
+                  check (command in ('pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config', 'close_trade')),
     params        jsonb not null default '{}'::jsonb,    -- e.g. {"strategy": "grid"} or {"pair": "ETH/USDT"}
 
     -- Execution tracking

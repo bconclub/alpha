@@ -211,6 +211,9 @@ class ScalpStrategy(BaseStrategy):
     TRAILING_ACTIVATE_PCT = 0.15      # activate at +0.15% — any green = trail it (was 0.35)
     TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak — tight scalp lock (was 0.20)
 
+    # ── Hard TP safety net (fires in ALL phases, no delays) ────────────
+    HARD_TP_CAPITAL_PCT = 10.0            # 10% capital gain → instant market exit
+
     # ── Profit protection ─────────────────────────────────────────────
     PROFIT_PULLBACK_MIN_PEAK = 0.50
     PROFIT_PULLBACK_PCT = 30.0        # exit if 30% of peak profit lost (was 40%)
@@ -1311,7 +1314,19 @@ class ScalpStrategy(BaseStrategy):
                 return self._do_exit(current_price, pnl_pct, side, "SL", hold_seconds)
 
         # ══════════════════════════════════════════════════════════════
-        # PHASE 1 (0-30s): HANDS OFF — only SL above
+        # ALWAYS: Hard TP — 10% capital gain safety net (fires in ALL phases)
+        # Trail handles normal exits. This catches runaway winners.
+        # ══════════════════════════════════════════════════════════════
+        capital_pnl = pnl_pct * self.leverage
+        if capital_pnl >= self.HARD_TP_CAPITAL_PCT:
+            self.logger.info(
+                "[%s] HARD TP HIT — capital +%.1f%% (price +%.2f%% × %dx) — %ds in",
+                self.pair, capital_pnl, pnl_pct, self.leverage, int(hold_seconds),
+            )
+            return self._do_exit(current_price, pnl_pct, side, "HARD_TP_10PCT", hold_seconds)
+
+        # ══════════════════════════════════════════════════════════════
+        # PHASE 1 (0-30s): HANDS OFF — only SL and Hard TP above
         # EXCEPTION: if peak PnL >= +1.0%, skip to Phase 2 immediately
         #   (real profit appeared — don't let it evaporate)
         # ══════════════════════════════════════════════════════════════

@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { useLivePrices } from '@/hooks/useLivePrices';
+import { getSupabase } from '@/lib/supabase';
 import { formatNumber, formatCurrency, cn } from '@/lib/utils';
 
 // Delta contract sizes (must match engine)
@@ -43,6 +44,50 @@ interface PositionDisplay {
 export function LivePositions() {
   const { openPositions, strategyLog } = useSupabase();
   const livePrices = useLivePrices(openPositions.length > 0);
+
+  // Track which positions are being closed
+  const [closingIds, setClosingIds] = useState<Set<string>>(new Set());
+
+  const handleClose = useCallback(async (posId: string, pair: string) => {
+    const sb = getSupabase();
+    if (!sb) return;
+
+    setClosingIds((prev) => new Set(prev).add(posId));
+    try {
+      const { error } = await sb.from('bot_commands').insert({
+        command: 'close_trade',
+        params: { trade_id: Number(posId), pair },
+      });
+      if (error) {
+        console.error('[Alpha] close_trade command failed:', error.message);
+        setClosingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(posId);
+          return next;
+        });
+      }
+      // Don't clear closingIds on success — wait for realtime to remove position
+    } catch (e) {
+      console.error('[Alpha] close_trade insert error:', e);
+      setClosingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(posId);
+        return next;
+      });
+    }
+  }, []);
+
+  // Clear closing state when position disappears from openPositions
+  const openIds = useMemo(() => new Set(openPositions.map((p) => p.id)), [openPositions]);
+  useMemo(() => {
+    setClosingIds((prev) => {
+      const next = new Set<string>();
+      Array.from(prev).forEach((id) => {
+        if (openIds.has(id)) next.add(id);
+      });
+      return next.size !== prev.size ? next : prev;
+    });
+  }, [openIds]);
 
   // Build fallback prices from latest strategy_log entries (every ~5min)
   const fallbackPrices = useMemo(() => {
@@ -173,18 +218,19 @@ export function LivePositions() {
           const isProfit = (pos.pricePnlPct ?? 0) >= 0;
           const pnlColor = isProfit ? 'text-[#00c853]' : 'text-[#ff1744]';
           const bgColor = isProfit ? 'border-[#00c853]/20' : 'border-[#ff1744]/20';
+          const isClosing = closingIds.has(pos.id);
 
           return (
-            <Link
+            <div
               key={pos.id}
-              href="/trades"
               className={cn(
-                'block w-full text-left bg-zinc-900/50 border rounded-lg px-3 py-2.5 md:px-4 md:py-3',
-                'transition-colors hover:bg-zinc-800/50',
+                'w-full bg-zinc-900/50 border rounded-lg px-3 py-2.5 md:px-4 md:py-3',
+                'transition-colors',
                 bgColor,
+                isClosing && 'opacity-60',
               )}
             >
-              {/* Row 1: Pair + Side + Status + Duration */}
+              {/* Row 1: Pair + Side + Status + Close + Duration */}
               <div className="flex items-center justify-between gap-2 mb-1.5">
                 <div className="flex items-center gap-2 min-w-0">
                   <span
@@ -193,7 +239,9 @@ export function LivePositions() {
                       pos.positionType === 'short' ? 'bg-[#ff1744]' : 'bg-[#00c853]',
                     )}
                   />
-                  <span className="text-sm font-bold text-white">{pos.pairShort}</span>
+                  <Link href="/trades" className="text-sm font-bold text-white hover:underline">
+                    {pos.pairShort}
+                  </Link>
                   <span className={cn(
                     'text-[10px] font-semibold px-1.5 py-0.5 rounded',
                     pos.positionType === 'short'
@@ -218,35 +266,43 @@ export function LivePositions() {
                       HOLDING
                     </span>
                   )}
+                  <button
+                    onClick={() => handleClose(pos.id, pos.pair)}
+                    disabled={isClosing}
+                    className={cn(
+                      'px-2 py-0.5 rounded text-[10px] font-semibold transition-colors',
+                      isClosing
+                        ? 'bg-zinc-700/50 text-zinc-500 cursor-not-allowed'
+                        : 'bg-[#ff1744]/10 text-[#ff1744] hover:bg-[#ff1744]/20 active:bg-[#ff1744]/30',
+                    )}
+                  >
+                    {isClosing ? 'Closing...' : 'Close'}
+                  </button>
                   <span className="text-[9px] text-zinc-600 font-mono">{pos.duration}</span>
                 </div>
               </div>
 
-              {/* Row 2: Labeled P&L grid — clear what each number means */}
+              {/* Row 2: Labeled P&L grid */}
               {pos.pricePnlPct != null ? (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs font-mono">
-                  {/* P&L $ — the big number */}
                   <div>
                     <div className="text-[9px] text-zinc-500 uppercase">P&L</div>
                     <div className={cn('font-bold', pnlColor)}>
-                      {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : ''}${formatCurrency(pos.pnlUsd)}` : '—'}
+                      {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : ''}${formatCurrency(pos.pnlUsd)}` : '\u2014'}
                     </div>
                   </div>
-                  {/* Capital return % — your actual ROI */}
                   <div>
                     <div className="text-[9px] text-zinc-500 uppercase">Return</div>
                     <div className={cn('font-bold', pnlColor)}>
-                      {pos.capitalPnlPct != null ? `${pos.capitalPnlPct >= 0 ? '+' : ''}${pos.capitalPnlPct.toFixed(1)}%` : '—'}
+                      {pos.capitalPnlPct != null ? `${pos.capitalPnlPct >= 0 ? '+' : ''}${pos.capitalPnlPct.toFixed(1)}%` : '\u2014'}
                     </div>
                   </div>
-                  {/* Entry → Now */}
                   <div>
-                    <div className="text-[9px] text-zinc-500 uppercase">Entry → Now</div>
+                    <div className="text-[9px] text-zinc-500 uppercase">Entry &rarr; Now</div>
                     <div className="text-zinc-300">
-                      ${formatNumber(pos.entryPrice)} → ${pos.currentPrice != null ? formatNumber(pos.currentPrice) : '...'}
+                      ${formatNumber(pos.entryPrice)} &rarr; ${pos.currentPrice != null ? formatNumber(pos.currentPrice) : '...'}
                     </div>
                   </div>
-                  {/* Price move % + size */}
                   <div>
                     <div className="text-[9px] text-zinc-500 uppercase">Price Move</div>
                     <div className={cn(pnlColor)}>
@@ -267,10 +323,10 @@ export function LivePositions() {
                 )}
                 <span>
                   {pos.contracts}{pos.exchange === 'delta' ? ' ct' : ''}
-                  {pos.collateral != null && ` · $${pos.collateral.toFixed(2)} collateral`}
+                  {pos.collateral != null && ` \u00b7 $${pos.collateral.toFixed(2)} collateral`}
                 </span>
               </div>
-            </Link>
+            </div>
           );
         })}
       </div>

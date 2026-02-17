@@ -29,7 +29,7 @@ import { useLivePrices } from '@/hooks/useLivePrices';
 
 type SortKey = keyof Pick<
   Trade,
-  'timestamp' | 'pair' | 'side' | 'price' | 'amount' | 'strategy' | 'pnl' | 'pnl_pct' | 'status' | 'exchange' | 'position_type' | 'leverage'
+  'timestamp' | 'pair' | 'side' | 'price' | 'amount' | 'strategy' | 'pnl' | 'pnl_pct' | 'status' | 'exchange' | 'position_type' | 'leverage' | 'gross_pnl'
 >;
 
 type SortDirection = 'asc' | 'desc';
@@ -85,7 +85,9 @@ const COLUMNS: ColumnDef[] = [
   { key: 'amount', label: 'Contracts', align: 'right' },
   { key: 'strategy', label: 'Strategy' },
   { key: 'setup_type', label: 'Setup' },
-  { key: 'pnl', label: 'P&L', align: 'right' },
+  { key: 'gross_pnl', label: 'Gross P&L', align: 'right' },
+  { key: 'fees', label: 'Fees', align: 'right' },
+  { key: 'pnl', label: 'Net P&L', align: 'right' },
   { key: 'pnl_pct', label: 'P&L %', align: 'right' },
   { key: 'hold_time', label: 'Hold Time', align: 'right' },
   { key: 'exit_reason', label: 'Exit' },
@@ -379,7 +381,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -680,6 +682,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {display.isUnrealized && (
                           <span className="text-[9px] text-zinc-500 ml-1">live</span>
                         )}
+                        {trade.status === 'closed' && trade.gross_pnl != null && (
+                          <div className="text-[10px] text-zinc-500 font-mono">
+                            gross {formatPnL(trade.gross_pnl)} · fees -${((trade.entry_fee ?? 0) + (trade.exit_fee ?? 0)).toFixed(4)}
+                          </div>
+                        )}
                       </div>
                     </div>
                     {/* Prices row */}
@@ -935,7 +942,41 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           )}
                         </td>
 
-                        {/* P&L */}
+                        {/* Gross P&L */}
+                        <td
+                          className={cn(
+                            'whitespace-nowrap px-4 py-3 text-right font-mono text-xs',
+                            trade.status === 'open'
+                              ? getPnLColor(display.pnl)
+                              : getPnLColor(trade.gross_pnl ?? display.pnl),
+                          )}
+                        >
+                          {trade.status === 'open' ? (
+                            <>
+                              {formatPnL(display.pnl)}
+                              {display.isUnrealized && (
+                                <span className="text-[9px] text-zinc-500 ml-0.5 font-normal">live</span>
+                              )}
+                            </>
+                          ) : trade.gross_pnl != null ? (
+                            formatPnL(trade.gross_pnl)
+                          ) : (
+                            <span className="text-zinc-600">&mdash;</span>
+                          )}
+                        </td>
+
+                        {/* Fees (entry + exit) */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs text-zinc-500">
+                          {trade.status === 'closed' && (trade.entry_fee != null || trade.exit_fee != null) ? (
+                            <span title={`Entry: $${(trade.entry_fee ?? 0).toFixed(4)} + Exit: $${(trade.exit_fee ?? 0).toFixed(4)}`}>
+                              -${((trade.entry_fee ?? 0) + (trade.exit_fee ?? 0)).toFixed(4)}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-600">&mdash;</span>
+                          )}
+                        </td>
+
+                        {/* Net P&L */}
                         <td
                           className={cn(
                             'whitespace-nowrap px-4 py-3 text-right font-mono font-medium',

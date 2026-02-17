@@ -38,6 +38,24 @@ DELTA_CONTRACT_SIZE: dict[str, float] = {
 }
 
 
+class PnLResult:
+    """Structured P&L calculation result with fee breakdown."""
+    __slots__ = ("net_pnl", "pnl_pct", "gross_pnl", "entry_fee", "exit_fee")
+
+    def __init__(self, net_pnl: float, pnl_pct: float, gross_pnl: float,
+                 entry_fee: float, exit_fee: float) -> None:
+        self.net_pnl = net_pnl
+        self.pnl_pct = pnl_pct
+        self.gross_pnl = gross_pnl
+        self.entry_fee = entry_fee
+        self.exit_fee = exit_fee
+
+    def __iter__(self):
+        """Allow unpacking as (net_pnl, pnl_pct) for backward compat."""
+        yield self.net_pnl
+        yield self.pnl_pct
+
+
 def calc_pnl(
     entry_price: float,
     exit_price: float,
@@ -49,19 +67,20 @@ def calc_pnl(
     *,
     entry_fee_rate: float = 0.0,
     exit_fee_rate: float = 0.0,
-) -> tuple[float, float]:
+) -> PnLResult:
     """Single source of truth for P&L calculation across ALL close paths.
 
     Used by trade_executor._close_trade_in_db (normal exits) AND
     main.py reconciliation (orphan, restart, dust, manual close detection).
 
-    Returns (net_pnl_dollars, pnl_pct_on_collateral).
+    Returns PnLResult with net_pnl, pnl_pct, gross_pnl, entry_fee, exit_fee.
+    Supports tuple unpacking: (net_pnl, pnl_pct) = calc_pnl(...) for backward compat.
 
     amount = contracts for Delta, coins for Binance spot.
     Fee rates are per-side (e.g. 0.0005 = 0.05%).  Pass 0.0 to skip fees.
     """
     if entry_price <= 0 or exit_price <= 0:
-        return 0.0, 0.0
+        return PnLResult(0.0, 0.0, 0.0, 0.0, 0.0)
 
     # Convert contracts to coins for Delta
     coin_amount = float(amount)
@@ -78,15 +97,19 @@ def calc_pnl(
     # Fees
     entry_notional = entry_price * coin_amount
     exit_notional = exit_price * coin_amount
-    total_fees = (entry_notional * entry_fee_rate) + (exit_notional * exit_fee_rate)
-    net_pnl = gross_pnl - total_fees
+    entry_fee_dollars = entry_notional * entry_fee_rate
+    exit_fee_dollars = exit_notional * exit_fee_rate
+    net_pnl = gross_pnl - entry_fee_dollars - exit_fee_dollars
 
     # P&L % against collateral (not notional)
     lev = max(int(leverage or 1), 1)
     collateral = entry_notional / lev if lev > 1 else entry_notional
     pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
 
-    return round(net_pnl, 8), round(pnl_pct, 4)
+    return PnLResult(
+        round(net_pnl, 8), round(pnl_pct, 4), round(gross_pnl, 8),
+        round(entry_fee_dollars, 8), round(exit_fee_dollars, 8),
+    )
 
 
 class TradeExecutor:
@@ -890,6 +913,13 @@ class TradeExecutor:
             is_futures = signal.leverage > 1 and signal.position_type in ("long", "short")
             cost = notional / signal.leverage if is_futures else notional
 
+            # Calculate entry fee for storage
+            if signal.exchange_id == "delta":
+                entry_fee_rate = self._delta_taker_fee  # entries are always taker (market)
+            else:
+                entry_fee_rate = self._binance_taker_fee
+            entry_fee = round(notional * entry_fee_rate, 8)
+
             trade_id = await self.db.log_trade({
                 "pair": signal.pair,
                 "side": signal.side,
@@ -905,6 +935,7 @@ class TradeExecutor:
                 "leverage": signal.leverage,
                 "position_type": signal.position_type,
                 "setup_type": signal.metadata.get("setup_type", "unknown"),
+                "entry_fee": entry_fee,
             })
             logger.info(
                 "Trade opened in DB: id=%s %s %s @ $%.2f [%s]",
@@ -971,13 +1002,15 @@ class TradeExecutor:
                 entry_fee_rate = self._binance_taker_fee
                 exit_fee_rate = self._binance_taker_fee
 
-            pnl, pnl_pct = calc_pnl(
+            result = calc_pnl(
                 entry_price, fill_price, entry_amount,
                 position_type, trade_leverage,
                 exchange_id, signal.pair,
                 entry_fee_rate=entry_fee_rate,
                 exit_fee_rate=exit_fee_rate,
             )
+            pnl = result.net_pnl
+            pnl_pct = result.pnl_pct
 
             trade_id = open_trade["id"]
 
@@ -987,14 +1020,18 @@ class TradeExecutor:
                 "closed_at": iso_now(),
                 "pnl": round(pnl, 8),
                 "pnl_pct": round(pnl_pct, 4),
+                "gross_pnl": round(result.gross_pnl, 8),
+                "entry_fee": round(result.entry_fee, 8),
+                "exit_fee": round(result.exit_fee, 8),
                 "reason": signal.reason,
             })
 
             logger.info(
                 "Trade closed in DB: id=%s %s %s entry=$%.2f exit=$%.2f "
-                "net=$%.6f (%.2f%%) [%s]",
+                "gross=$%.6f fees=$%.6f net=$%.6f (%.2f%%) [%s]",
                 trade_id, position_type, signal.pair,
                 entry_price, fill_price,
+                result.gross_pnl, result.entry_fee + result.exit_fee,
                 pnl, pnl_pct, signal.exchange_id,
             )
 

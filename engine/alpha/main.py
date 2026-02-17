@@ -246,7 +246,7 @@ class AlphaBot:
         self._scheduler.add_job(self._save_status, "interval", minutes=2)
         self._scheduler.add_job(self._reconcile_exchange_positions, "interval", seconds=60)
         self._scheduler.add_job(self._telegram_health_check, "interval", minutes=5)
-        self._scheduler.add_job(self._poll_commands, "interval", seconds=10)
+        self._scheduler.add_job(self._poll_commands, "interval", seconds=5)
         self._scheduler.start()
 
         # Fetch live exchange balances → per-exchange capital for trade sizing
@@ -978,6 +978,11 @@ class AlphaBot:
                 await self.alerts.send_command_confirmation(
                     "update_pair_config", result_msg,
                 )
+
+            elif command == "close_trade":
+                result_msg = await self._handle_close_trade(params)
+                await self.alerts.send_command_confirmation("close_trade", result_msg)
+
             else:
                 result_msg = f"Unknown command: {command}"
 
@@ -1058,6 +1063,47 @@ class AlphaBot:
         result_msg = f"SENTINEL UPDATE: {pair_str} — {summary}"
         logger.info(result_msg)
         return result_msg
+
+    async def _handle_close_trade(self, params: dict) -> str:
+        """Force-close an open trade via dashboard command.
+
+        Finds the scalp strategy for the given pair, builds a market exit
+        signal, and executes it immediately.
+        """
+        pair_str = params.get("pair", "")
+        trade_id = params.get("trade_id")
+        if not pair_str:
+            return "Error: missing 'pair' param"
+
+        # Find the matching scalp strategy
+        scalp: ScalpStrategy | None = None
+        for p, s in self._scalp_strategies.items():
+            if p == pair_str or pair_str.startswith(p.split("/")[0]):
+                scalp = s
+                break
+
+        if not scalp:
+            return f"Error: no strategy found for pair {pair_str}"
+
+        if not scalp.in_position:
+            return f"No open position for {pair_str}"
+
+        # Build exit signal at current price
+        side = scalp.position_side or "long"
+        price = scalp.entry_price  # will be overridden by market order
+        exit_signal = scalp._exit_signal(price, side, f"MANUAL_CLOSE (dashboard cmd, trade_id={trade_id})")
+
+        # Execute immediately via market order
+        try:
+            result = await self.executor.execute(exit_signal)
+            if result:
+                logger.info("MANUAL CLOSE executed: %s %s", pair_str, side)
+                return f"Closed {pair_str} {side} via market order"
+            else:
+                return f"Error: execute() returned None for {pair_str}"
+        except Exception as e:
+            logger.exception("Failed to manual close %s", pair_str)
+            return f"Error closing {pair_str}: {e}"
 
     async def _close_binance_dust_trades(self) -> None:
         """Mark Binance trades below $6 as closed dust (too small to sell).
