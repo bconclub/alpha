@@ -235,3 +235,28 @@ export interface ActivityEvent {
 }
 
 export type ActivityFilter = 'all' | 'trades' | 'alerts';
+
+// ── Control Panel types ──────────────────────────────────────
+
+export interface PairConfig {
+  pair: string;
+  enabled: boolean;
+  allocation_pct: number;
+  updated_at: string;
+}
+
+export interface SetupConfig {
+  setup_type: string;
+  enabled: boolean;
+  updated_at: string;
+}
+
+export interface SignalState {
+  pair: string;
+  signal_id: string;
+  value: number | null;
+  threshold: number | null;
+  firing: boolean;
+  direction: string; // 'bull' | 'bear' | 'neutral'
+  updated_at: string;
+}

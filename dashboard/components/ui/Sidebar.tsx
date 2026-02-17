@@ -33,6 +33,16 @@ const navItems = [
     ),
   },
   {
+    name: 'Pairs',
+    href: '/pairs',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="7" cy="7" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
+        <circle cx="13" cy="13" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
+      </svg>
+    ),
+  },
+  {
     name: 'Trades',
     href: '/trades',
     icon: (

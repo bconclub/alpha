@@ -206,6 +206,9 @@ class AlphaBot:
             await scalp.start()
         logger.info("Scalp overlay started on %d pairs", len(self._scalp_strategies))
 
+        # Load pair/setup configs from DB → apply to scalp strategies
+        await self._load_pair_setup_configs()
+
         # Start options strategies (run as parallel overlays alongside scalp)
         for pair, opts in self._options_strategies.items():
             await opts.start()
@@ -388,6 +391,12 @@ class AlphaBot:
         """Analyze all pairs (both exchanges) concurrently, switch strategies by signal strength."""
         if not self._running:
             return
+
+        # Refresh pair/setup configs from DB (hot-reload every analysis cycle)
+        try:
+            await self._load_pair_setup_configs()
+        except Exception:
+            logger.exception("Failed to refresh pair/setup configs")
 
         try:
             # 1. Analyze all pairs in parallel
@@ -992,6 +1001,13 @@ class AlphaBot:
                 elif "daily_loss_limit_pct" in params:
                     self.risk_manager.daily_loss_limit_pct = float(params["daily_loss_limit_pct"])
                     result_msg = f"daily_loss_limit_pct -> {params['daily_loss_limit_pct']}"
+                elif "setup_type" in params:
+                    # Setup toggle from dashboard Strategies page
+                    st = params["setup_type"]
+                    en = params.get("enabled", True)
+                    for _pair, scalp in self._scalp_strategies.items():
+                        scalp._setup_config[st] = en
+                    result_msg = f"setup {st} -> {'enabled' if en else 'disabled'}"
                 else:
                     result_msg = f"Config updated: {params}"
                 await self.alerts.send_command_confirmation("update_config", result_msg)
@@ -1067,14 +1083,21 @@ class AlphaBot:
         if "enabled" in params:
             enabled = params["enabled"]
             if enabled is False or str(enabled).lower() in ("false", "0"):
+                scalp._pair_enabled = False
                 if scalp.is_active:
                     # Schedule stop on next tick — can't await in sync method
                     asyncio.ensure_future(scalp.stop())
                 changes.append("DISABLED")
             else:
+                scalp._pair_enabled = True
                 if not scalp.is_active:
                     asyncio.ensure_future(scalp.start())
                 changes.append("ENABLED")
+
+        if "allocation_pct" in params:
+            val = float(params["allocation_pct"])
+            scalp._allocation_pct = max(0.0, min(70.0, val))
+            changes.append(f"alloc={val}%")
 
         if "bias" in params:
             bias = str(params["bias"]).lower()
@@ -1086,6 +1109,32 @@ class AlphaBot:
         result_msg = f"SENTINEL UPDATE: {pair_str} — {summary}"
         logger.info(result_msg)
         return result_msg
+
+    async def _load_pair_setup_configs(self) -> None:
+        """Load pair_config + setup_config from DB and apply to all scalp strategies."""
+        try:
+            pair_configs = await self.db.get_pair_configs()
+            setup_configs = await self.db.get_setup_configs()
+        except Exception:
+            logger.debug("Could not load pair/setup configs from DB (tables may not exist yet)")
+            return
+
+        # Apply pair configs to matching scalp strategies
+        for pair, scalp in self._scalp_strategies.items():
+            base = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace(":USD", "")
+            pc = pair_configs.get(base, {})
+            if pc:
+                scalp._pair_enabled = pc.get("enabled", True)
+                scalp._allocation_pct = float(pc.get("allocation_pct", scalp._allocation_pct))
+
+            # Apply setup configs to all strategies (shared across all pairs)
+            scalp._setup_config = setup_configs
+
+        if pair_configs or setup_configs:
+            logger.info(
+                "Loaded configs: %d pair(s), %d setup(s)",
+                len(pair_configs), len(setup_configs),
+            )
 
     async def _handle_close_trade(self, params: dict) -> str:
         """Force-close an open trade via dashboard command.

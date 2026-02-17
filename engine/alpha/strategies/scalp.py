@@ -406,6 +406,11 @@ class ScalpStrategy(BaseStrategy):
         self._profit_floor_pct: float = -999.0  # ratcheting capital floor (not yet locked)
         self._in_position_tick: int = 0  # counts 1s ticks while in position (for OHLCV refresh)
 
+        # ── Dashboard-driven config (loaded from DB by main.py) ──────
+        self._pair_enabled: bool = True       # can be disabled via pair_config
+        self._allocation_pct: float = self.PAIR_ALLOC_PCT.get(base_asset, 15.0)
+        self._setup_config: dict[str, bool] = {}  # {setup_type: enabled}
+
         # Previous RSI for reversal detection
         self._prev_rsi: float = 50.0
 
@@ -573,6 +578,12 @@ class ScalpStrategy(BaseStrategy):
             if not self.in_position:
                 return signals  # don't enter
             # If somehow in position (restored), still check exits
+
+        # ── Dashboard pair disable (pair_config.enabled = false) ──────
+        if not self._pair_enabled:
+            if not self.in_position:
+                return signals  # pair disabled via dashboard
+            # If in position, still allow exit checks
 
         # ── Daily expiry check (5:30 PM IST) — ONLY for dated contracts ──
         # Perpetual futures (BTC/USD:USD, ETH/USD:USD etc.) never expire.
@@ -915,7 +926,9 @@ class ScalpStrategy(BaseStrategy):
                 self.pair, reason, signal_strength, soul_msg,
             )
             order_type = "limit" if use_limit else "market"
-            signals.append(self._build_entry_signal(side, current_price, amount, reason, order_type))
+            entry_signal = self._build_entry_signal(side, current_price, amount, reason, order_type)
+            if entry_signal is not None:
+                signals.append(entry_signal)
         else:
             # Update signal state even when no entry (options can see what's happening)
             self.last_signal_state = {
@@ -970,6 +983,18 @@ class ScalpStrategy(BaseStrategy):
                     self.pair, rsi_tag, vol_tag, mom_tag, bb_tag,
                     pass_count, action,
                 )
+
+        # ── Write signal state to DB for dashboard Signal Monitor ─────────
+        # Every scan tick (~5s), write current signal values
+        if self._tick_count % 5 == 0:  # every 5 ticks = ~25s
+            _bb_range = bb_upper - bb_lower if bb_upper > bb_lower else 1.0
+            _bb_pos = (current_price - bb_lower) / _bb_range if _bb_range > 0 else 0.5
+            try:
+                await self._write_signal_state(
+                    momentum_60s, vol_ratio, rsi_now, _bb_pos, momentum_300s,
+                )
+            except Exception:
+                pass  # non-critical
 
         return signals
 
@@ -1954,7 +1979,8 @@ class ScalpStrategy(BaseStrategy):
         Adaptive adjustment: if last 5 trades WR < 20%, reduce to minimum.
         If WR > 60%, boost by 20%.
         """
-        base_alloc = self.PAIR_ALLOC_PCT.get(self._base_asset, 15.0)
+        # Use dashboard-driven allocation if set, else fall back to class constant
+        base_alloc = self._allocation_pct
         win_rate, n_trades = self._get_pair_win_rate()
 
         # Adaptive adjustment based on recent performance
@@ -2108,15 +2134,156 @@ class ScalpStrategy(BaseStrategy):
         return "MIXED"
 
     # ======================================================================
+    # SIGNAL STATE WRITE (for dashboard Signal Monitor)
+    # ======================================================================
+
+    async def _write_signal_state(
+        self,
+        momentum_60s: float,
+        vol_ratio: float,
+        rsi_now: float,
+        bb_position: float,
+        momentum_300s: float,
+    ) -> None:
+        """Write current signal values to signal_state table for dashboard monitor.
+
+        Called once per scan cycle (every 5s) from check().
+        Uses _last_signal_breakdown for firing state of each signal.
+        """
+        db = self.executor.db
+        if not db or not db.is_connected:
+            return
+
+        breakdown = self._last_signal_breakdown
+        if not breakdown:
+            return
+
+        eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds()
+
+        # Determine dominant direction from breakdown
+        bull_count = breakdown.get("bull_count", 0)
+        bear_count = breakdown.get("bear_count", 0)
+        mom_dir = "bull" if momentum_60s > 0 else ("bear" if momentum_60s < 0 else "neutral")
+
+        signals = [
+            # Core 4
+            {
+                "signal_id": "MOM_60S",
+                "value": momentum_60s,
+                "threshold": eff_mom,
+                "firing": abs(momentum_60s) >= eff_mom,
+                "direction": mom_dir,
+            },
+            {
+                "signal_id": "VOL",
+                "value": vol_ratio,
+                "threshold": eff_vol,
+                "firing": vol_ratio >= eff_vol,
+                "direction": mom_dir if vol_ratio >= eff_vol else "neutral",
+            },
+            {
+                "signal_id": "RSI",
+                "value": rsi_now,
+                "threshold": eff_rsi_l,  # show the long threshold
+                "firing": rsi_now < eff_rsi_l or rsi_now > eff_rsi_s,
+                "direction": "bull" if rsi_now < eff_rsi_l else ("bear" if rsi_now > eff_rsi_s else "neutral"),
+            },
+            {
+                "signal_id": "BB",
+                "value": bb_position,
+                "threshold": self.BB_MEAN_REVERT_LOWER,
+                "firing": bb_position <= self.BB_MEAN_REVERT_LOWER or bb_position >= self.BB_MEAN_REVERT_UPPER,
+                "direction": "bull" if bb_position <= self.BB_MEAN_REVERT_LOWER else (
+                    "bear" if bb_position >= self.BB_MEAN_REVERT_UPPER else "neutral"
+                ),
+            },
+            # Bonus 7
+            {
+                "signal_id": "MOM_5M",
+                "value": momentum_300s,
+                "threshold": self.MOMENTUM_5M_MIN_PCT,
+                "firing": abs(momentum_300s) >= self.MOMENTUM_5M_MIN_PCT,
+                "direction": "bull" if momentum_300s > 0 else ("bear" if momentum_300s < 0 else "neutral"),
+            },
+            {
+                "signal_id": "TCONT",
+                "value": None,
+                "threshold": None,
+                "firing": breakdown.get("bull_mom", False) or breakdown.get("bear_mom", False),
+                "direction": "bull" if any("TCONT:" in s for s in breakdown.get("bull_signals", [])) else (
+                    "bear" if any("TCONT:" in s for s in breakdown.get("bear_signals", [])) else "neutral"
+                ),
+            },
+            {
+                "signal_id": "VWAP",
+                "value": None,
+                "threshold": None,
+                "firing": any("VWAP:" in s for s in breakdown.get("bull_signals", []) + breakdown.get("bear_signals", [])),
+                "direction": "bull" if any("VWAP:" in s for s in breakdown.get("bull_signals", [])) else (
+                    "bear" if any("VWAP:" in s for s in breakdown.get("bear_signals", [])) else "neutral"
+                ),
+            },
+            {
+                "signal_id": "BBSQZ",
+                "value": None,
+                "threshold": None,
+                "firing": any("BBSQZ:" in s for s in breakdown.get("bull_signals", []) + breakdown.get("bear_signals", [])),
+                "direction": "bull" if any("BBSQZ:" in s for s in breakdown.get("bull_signals", [])) else (
+                    "bear" if any("BBSQZ:" in s for s in breakdown.get("bear_signals", [])) else "neutral"
+                ),
+            },
+            {
+                "signal_id": "LIQSWEEP",
+                "value": None,
+                "threshold": None,
+                "firing": any("LIQSWEEP:" in s for s in breakdown.get("bull_signals", []) + breakdown.get("bear_signals", [])),
+                "direction": "bull" if any("LIQSWEEP:" in s for s in breakdown.get("bull_signals", [])) else (
+                    "bear" if any("LIQSWEEP:" in s for s in breakdown.get("bear_signals", [])) else "neutral"
+                ),
+            },
+            {
+                "signal_id": "FVG",
+                "value": None,
+                "threshold": None,
+                "firing": any("FVG:" in s for s in breakdown.get("bull_signals", []) + breakdown.get("bear_signals", [])),
+                "direction": "bull" if any("FVG:" in s for s in breakdown.get("bull_signals", [])) else (
+                    "bear" if any("FVG:" in s for s in breakdown.get("bear_signals", [])) else "neutral"
+                ),
+            },
+            {
+                "signal_id": "VOLDIV",
+                "value": None,
+                "threshold": None,
+                "firing": any("VOLDIV:" in s for s in breakdown.get("bull_signals", []) + breakdown.get("bear_signals", [])),
+                "direction": "bull" if any("VOLDIV:" in s for s in breakdown.get("bull_signals", [])) else (
+                    "bear" if any("VOLDIV:" in s for s in breakdown.get("bear_signals", [])) else "neutral"
+                ),
+            },
+        ]
+
+        try:
+            await db.upsert_signal_state(self._base_asset, signals)
+        except Exception:
+            pass  # non-critical — don't break trading for signal state
+
+    # ======================================================================
     # SIGNAL BUILDERS
     # ======================================================================
 
     def _build_entry_signal(
         self, side: str, price: float, amount: float, reason: str,
         order_type: str = "market",
-    ) -> Signal:
+    ) -> Signal | None:
         """Build an entry signal with ATR-dynamic SL. Trail handles the TP."""
         setup_type = self._classify_setup(reason)
+
+        # ── Setup disable gate (from dashboard setup_config) ──────
+        if not self._setup_config.get(setup_type, True):
+            self.logger.info(
+                "[%s] SETUP_DISABLED: %s — skipping entry", self.pair, setup_type,
+            )
+            return None
+
         self.logger.info(
             "[%s] %s -> %s entry (%s) SL=%.2f%% TP=%.2f%% ATR=%.3f%% setup=%s",
             self.pair, reason, side.upper(), order_type,

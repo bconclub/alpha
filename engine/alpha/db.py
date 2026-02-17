@@ -414,6 +414,74 @@ class Database:
             "worst_trade": worst_trade,
         }
 
+    # ── Control Panel config (pair_config, setup_config, signal_state) ──────
+
+    async def get_pair_configs(self) -> dict[str, dict[str, Any]]:
+        """Fetch all pair_config rows. Returns {pair: {enabled, allocation_pct}}."""
+        if not self.is_connected:
+            return {}
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: (
+                self._client.table("pair_config")  # type: ignore[union-attr]
+                .select("*")
+                .execute()
+            ),
+        )
+        return {
+            r["pair"]: {"enabled": r["enabled"], "allocation_pct": r["allocation_pct"]}
+            for r in (result.data or [])
+        }
+
+    async def get_setup_configs(self) -> dict[str, bool]:
+        """Fetch all setup_config rows. Returns {setup_type: enabled}."""
+        if not self.is_connected:
+            return {}
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: (
+                self._client.table("setup_config")  # type: ignore[union-attr]
+                .select("*")
+                .execute()
+            ),
+        )
+        return {r["setup_type"]: r["enabled"] for r in (result.data or [])}
+
+    async def upsert_signal_state(self, pair: str, signals: list[dict[str, Any]]) -> None:
+        """Upsert signal_state rows for a pair.
+
+        Each signal dict: {signal_id, value, threshold, firing, direction}.
+        """
+        if not self.is_connected:
+            return
+        now = iso_now()
+        rows = [
+            {
+                "pair": pair,
+                "signal_id": s["signal_id"],
+                "value": s.get("value"),
+                "threshold": s.get("threshold"),
+                "firing": s.get("firing", False),
+                "direction": s.get("direction", "neutral"),
+                "updated_at": now,
+            }
+            for s in signals
+        ]
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table("signal_state")  # type: ignore[union-attr]
+                    .upsert(rows, on_conflict="pair,signal_id")
+                    .execute()
+                ),
+            )
+        except Exception as e:
+            logger.error("signal_state upsert failed for %s: %s", pair, e)
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     async def _insert(self, table: str, data: dict[str, Any]) -> None:

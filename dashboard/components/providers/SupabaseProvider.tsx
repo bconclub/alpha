@@ -23,6 +23,9 @@ import type {
   StrategyPerformance,
   ActivityEvent,
   ActivityEventType,
+  PairConfig,
+  SetupConfig,
+  SignalState,
 } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -102,6 +105,10 @@ interface SupabaseContextValue {
   strategyPerformance: StrategyPerformance[];
   activityFeed: ActivityEvent[];
   refreshViews: () => void;
+  // Control Panel
+  pairConfigs: PairConfig[];
+  setupConfigs: SetupConfig[];
+  signalStates: SignalState[];
 }
 
 const SupabaseContext = createContext<SupabaseContextValue | null>(null);
@@ -122,6 +129,9 @@ const EMPTY_CONTEXT: SupabaseContextValue = {
   strategyPerformance: [],
   activityFeed: [],
   refreshViews: () => {},
+  pairConfigs: [],
+  setupConfigs: [],
+  signalStates: [],
 };
 
 function buildActivityEvent(
@@ -168,6 +178,11 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
   const [dailyPnL, setDailyPnL] = useState<DailyPnL[]>([]);
   const [strategyPerformance, setStrategyPerformance] = useState<StrategyPerformance[]>([]);
 
+  // Control Panel state
+  const [pairConfigs, setPairConfigs] = useState<PairConfig[]>([]);
+  const [setupConfigs, setSetupConfigs] = useState<SetupConfig[]>([]);
+  const [signalStates, setSignalStates] = useState<SignalState[]>([]);
+
   const activityRef = useRef<ActivityEvent[]>([]);
 
   const pushActivity = useCallback((event: ActivityEvent) => {
@@ -208,6 +223,22 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       if (res.data) setStrategyPerformance(res.data as StrategyPerformance[]);
       else if (res.error) console.warn('[Alpha] v_strategy_performance:', res.error.message);
     } catch (e) { console.warn('[Alpha] v_strategy_performance fetch failed', e); }
+
+    // Control Panel tables
+    try {
+      const res = await client.from('pair_config').select('*');
+      if (res.data) setPairConfigs(res.data as PairConfig[]);
+    } catch (e) { console.warn('[Alpha] pair_config fetch failed', e); }
+
+    try {
+      const res = await client.from('setup_config').select('*');
+      if (res.data) setSetupConfigs(res.data as SetupConfig[]);
+    } catch (e) { console.warn('[Alpha] setup_config fetch failed', e); }
+
+    try {
+      const res = await client.from('signal_state').select('*');
+      if (res.data) setSignalStates(res.data as SignalState[]);
+    } catch (e) { console.warn('[Alpha] signal_state fetch failed', e); }
   }, []);
 
   const buildInitialFeed = useCallback((trades: Trade[], logs: StrategyLog[]) => {
@@ -385,6 +416,16 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
           ),
         );
       })
+      // Control Panel realtime
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pair_config' }, () => {
+        client!.from('pair_config').select('*').then(res => { if (res.data) setPairConfigs(res.data as PairConfig[]); });
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'setup_config' }, () => {
+        client!.from('setup_config').select('*').then(res => { if (res.data) setSetupConfigs(res.data as SetupConfig[]); });
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'signal_state' }, () => {
+        client!.from('signal_state').select('*').then(res => { if (res.data) setSignalStates(res.data as SignalState[]); });
+      })
       .subscribe((status) => {
         setIsConnected(status === 'SUBSCRIBED');
       });
@@ -418,12 +459,16 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       strategyPerformance,
       activityFeed,
       refreshViews: fetchViews,
+      pairConfigs,
+      setupConfigs,
+      signalStates,
     }),
     [
       trades, recentTrades, botStatus, strategyLog, isConnected,
       exchangeFilter, filteredTrades,
       openPositions, pnlByExchange, futuresPositions, dailyPnL, strategyPerformance,
       activityFeed, fetchViews,
+      pairConfigs, setupConfigs, signalStates,
     ],
   );
 

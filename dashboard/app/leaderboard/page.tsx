@@ -3,7 +3,7 @@
 import { useState, useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { ExchangeToggle } from '@/components/dashboard/ExchangeToggle';
-import type { Trade } from '@/lib/types';
+import type { Trade, SignalState } from '@/lib/types';
 import {
   formatPnL,
   formatPercentage,
@@ -20,6 +20,14 @@ import {
   formatLeverage,
 } from '@/lib/utils';
 import { Badge } from '@/components/ui/Badge';
+
+const SENTINEL_PAIRS = ['BTC', 'ETH', 'XRP', 'SOL'] as const;
+const PAIR_COLORS: Record<string, string> = {
+  BTC: '#f7931a',
+  ETH: '#627eea',
+  XRP: '#23292f',
+  SOL: '#9945ff',
+};
 
 // ---------------------------------------------------------------------------
 // Types & Constants
@@ -83,7 +91,7 @@ function computeNotional(trade: Trade): number {
 // ---------------------------------------------------------------------------
 
 export default function LeaderboardPage() {
-  const { filteredTrades } = useSupabase();
+  const { filteredTrades, trades: allTrades, signalStates } = useSupabase();
 
   const [sortKey, setSortKey] = useState<SortKey>('pnl');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -294,6 +302,11 @@ export default function LeaderboardPage() {
           </div>
         </div>
       </div>
+
+      {/* ------------------------------------------------------------------- */}
+      {/* Per-Pair Sentinel Cards                                              */}
+      {/* ------------------------------------------------------------------- */}
+      <PairSentinelCards allTrades={allTrades} signalStates={signalStates} />
 
       {/* Sort Controls (mobile) */}
       <div className="flex items-center gap-3 md:hidden overflow-x-auto">
@@ -555,6 +568,182 @@ export default function LeaderboardPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-Pair Sentinel Cards
+// ---------------------------------------------------------------------------
+
+function PairSentinelCards({
+  allTrades,
+  signalStates,
+}: {
+  allTrades: Trade[];
+  signalStates: SignalState[];
+}) {
+  // Build signal map: { pair: { signal_id: SignalState } }
+  const signalMap = useMemo(() => {
+    const map: Record<string, Record<string, SignalState>> = {};
+    for (const s of signalStates) {
+      if (!map[s.pair]) map[s.pair] = {};
+      map[s.pair][s.signal_id] = s;
+    }
+    return map;
+  }, [signalStates]);
+
+  // Per-pair data
+  const pairData = useMemo(() => {
+    return SENTINEL_PAIRS.map((base) => {
+      // Match trades by base asset
+      const pairTrades = allTrades.filter((t) => {
+        const b = t.pair.includes('/') ? t.pair.split('/')[0] : t.pair.replace(/USD.*$/, '');
+        return b === base;
+      });
+      const closed = pairTrades.filter((t) => t.status === 'closed');
+      const openTrade = pairTrades.find((t) => t.status === 'open') ?? null;
+
+      // Overall stats
+      const wins = closed.filter((t) => t.pnl > 0).length;
+      const netPnl = closed.reduce((s, t) => s + t.pnl, 0);
+      const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0;
+      const totalFees = closed.reduce((s, t) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
+
+      // Setup breakdown: { setup_type: { trades, pnl } }
+      const setupBreakdown: Record<string, { trades: number; pnl: number }> = {};
+      for (const t of closed) {
+        const st = t.setup_type ?? 'UNKNOWN';
+        if (!setupBreakdown[st]) setupBreakdown[st] = { trades: 0, pnl: 0 };
+        setupBreakdown[st].trades++;
+        setupBreakdown[st].pnl += t.pnl;
+      }
+
+      // Momentum signal state
+      const momSignal = signalMap[base]?.['MOM_60S'] ?? null;
+      const hasMomentum = momSignal?.firing ?? false;
+
+      return {
+        base,
+        totalTrades: closed.length,
+        wins,
+        losses: closed.length - wins,
+        winRate,
+        netPnl,
+        totalFees,
+        setupBreakdown,
+        openTrade,
+        hasMomentum,
+        momDirection: momSignal?.direction ?? 'neutral',
+      };
+    });
+  }, [allTrades, signalMap]);
+
+  return (
+    <div>
+      <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-3">
+        Per-Pair Breakdown
+      </h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {pairData.map((pd) => (
+          <div
+            key={pd.base}
+            className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3"
+            style={{ borderTopColor: PAIR_COLORS[pd.base] ?? '#6b7280', borderTopWidth: 3 }}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold text-white">{pd.base}</span>
+                {/* Momentum dot */}
+                <span
+                  className={cn(
+                    'inline-block h-2.5 w-2.5 rounded-full',
+                    pd.hasMomentum
+                      ? pd.momDirection === 'bull'
+                        ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]'
+                        : pd.momDirection === 'bear'
+                          ? 'bg-red-400 shadow-[0_0_4px_rgba(248,113,113,0.5)]'
+                          : 'bg-zinc-600'
+                      : 'bg-zinc-700',
+                  )}
+                  title={pd.hasMomentum ? `Momentum: ${pd.momDirection}` : 'No momentum'}
+                />
+              </div>
+              <div className="text-right">
+                <span className={cn('text-sm font-mono font-bold', getPnLColor(pd.netPnl))}>
+                  {pd.totalTrades > 0 ? formatPnL(pd.netPnl) : '---'}
+                </span>
+              </div>
+            </div>
+
+            {/* Quick stats row */}
+            <div className="flex items-center gap-3 text-[10px] mb-2">
+              <span className="text-zinc-500">{pd.totalTrades} trades</span>
+              <span className={cn('font-mono', pd.winRate >= 50 ? 'text-emerald-400' : pd.totalTrades > 0 ? 'text-red-400' : 'text-zinc-500')}>
+                {pd.totalTrades > 0 ? `${pd.winRate.toFixed(0)}% WR` : '---'}
+              </span>
+              <span className="text-emerald-400 font-mono">{pd.wins}W</span>
+              <span className="text-red-400 font-mono">{pd.losses}L</span>
+              {pd.totalFees > 0 && (
+                <span className="text-zinc-500 font-mono">Fees: -${pd.totalFees.toFixed(2)}</span>
+              )}
+            </div>
+
+            {/* Setup breakdown mini table */}
+            {Object.keys(pd.setupBreakdown).length > 0 && (
+              <div className="mb-2">
+                <div className="text-[9px] text-zinc-500 uppercase tracking-wider mb-1">By Setup</div>
+                <div className="space-y-0.5">
+                  {Object.entries(pd.setupBreakdown)
+                    .sort((a, b) => b[1].pnl - a[1].pnl)
+                    .slice(0, 4)
+                    .map(([setup, data]) => (
+                      <div key={setup} className="flex items-center justify-between text-[10px]">
+                        <span className="text-zinc-400 truncate max-w-[80px]">
+                          {setup.replace(/_/g, ' ')}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-zinc-500 font-mono">{data.trades}</span>
+                          <span className={cn('font-mono', getPnLColor(data.pnl))}>
+                            {formatPnL(data.pnl)}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {/* Open position info */}
+            {pd.openTrade && (
+              <div className="pt-2 border-t border-zinc-800">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-amber-400 uppercase font-medium">Open</span>
+                  <span className="text-zinc-400">
+                    Entry: <span className="font-mono text-zinc-300">{formatCurrency(pd.openTrade.price)}</span>
+                  </span>
+                </div>
+                {pd.openTrade.current_pnl != null && (
+                  <div className="flex items-center justify-between text-[10px] mt-0.5">
+                    <span className="text-zinc-500">P&L:</span>
+                    <span className={cn('font-mono font-medium', getPnLColor(pd.openTrade.current_pnl))}>
+                      {formatPercentage(pd.openTrade.current_pnl)}
+                    </span>
+                  </div>
+                )}
+                {pd.openTrade.position_state && (
+                  <div className="mt-1">
+                    <Badge variant={pd.openTrade.position_state === 'trailing' ? 'success' : 'default'}>
+                      {pd.openTrade.position_state}
+                    </Badge>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
