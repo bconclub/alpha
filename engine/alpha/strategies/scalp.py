@@ -272,10 +272,18 @@ class ScalpStrategy(BaseStrategy):
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
     SPOT_TP_PCT = 3.0                 # 3% TP for spot
-    SPOT_TRAIL_ACTIVATE_PCT = 1.50    # trail activates at +1.5%
-    SPOT_TRAIL_DISTANCE_PCT = 0.80    # 0.8% trail distance
+    SPOT_TRAIL_ACTIVATE_PCT = 0.80    # trail activates at +0.80% (was 1.50 — spot rarely hits 1.5%)
+    SPOT_TRAIL_DISTANCE_PCT = 0.40    # 0.40% trail distance (was 0.80 — tighter trail)
     SPOT_CAPITAL_PCT = 50.0           # use 50% of Binance balance (target ~$5)
     SPOT_MAX_POSITIONS = 1            # max 1 spot position (capital too small)
+
+    # ── Spot-specific profit protection exits ──────────────────
+    SPOT_PULLBACK_MIN_PEAK_PCT = 0.50    # peak >= 0.50% to activate
+    SPOT_PULLBACK_RATIO = 0.50           # exit if current < peak * 0.50
+    SPOT_DECAY_MIN_PEAK_PCT = 0.40       # peak >= 0.40% to activate
+    SPOT_DECAY_EXIT_BELOW_PCT = 0.15     # exit if current < 0.15%
+    SPOT_BREAKEVEN_MIN_PEAK_PCT = 0.30   # peak >= 0.30% to activate
+    SPOT_BREAKEVEN_EXIT_BELOW_PCT = 0.05 # exit if current <= 0.05%
 
     # ── Adaptive widening (if idle too long, loosen by 20%) ──────────
     IDLE_WIDEN_SECONDS = 30 * 60      # after 30 min idle, widen thresholds
@@ -1458,6 +1466,22 @@ class ScalpStrategy(BaseStrategy):
                     and current_capital < peak_capital * self.PROFIT_DECAY_EMERGENCY_RATIO):
                 return self._do_exit(current_price, pnl_pct, side, "DECAY_EMERGENCY", hold_seconds)
 
+            # ── SPOT PROFIT PROTECTION (Phase 2, spot only) ────────────
+            if not self.is_futures and pnl_pct > 0:
+                peak = self._peak_unrealized_pnl
+                # Spot pullback: lost 50% of peak
+                if peak >= self.SPOT_PULLBACK_MIN_PEAK_PCT:
+                    if pnl_pct < peak * self.SPOT_PULLBACK_RATIO:
+                        return self._do_exit(current_price, pnl_pct, side, "SPOT_PULLBACK", hold_seconds)
+                # Spot decay: profit fading toward breakeven
+                if peak >= self.SPOT_DECAY_MIN_PEAK_PCT:
+                    if pnl_pct < self.SPOT_DECAY_EXIT_BELOW_PCT:
+                        return self._do_exit(current_price, pnl_pct, side, "SPOT_DECAY", hold_seconds)
+                # Spot breakeven: don't let green go red
+                if peak >= self.SPOT_BREAKEVEN_MIN_PEAK_PCT:
+                    if pnl_pct <= self.SPOT_BREAKEVEN_EXIT_BELOW_PCT:
+                        return self._do_exit(current_price, pnl_pct, side, "SPOT_BREAKEVEN", hold_seconds)
+
             # Signal reversal (only in profit)
             if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
                 if side == "long":
@@ -1497,6 +1521,22 @@ class ScalpStrategy(BaseStrategy):
         if (peak_capital >= self.PROFIT_DECAY_EMERGENCY_PEAK_CAP
                 and current_capital < peak_capital * self.PROFIT_DECAY_EMERGENCY_RATIO):
             return self._do_exit(current_price, pnl_pct, side, "DECAY_EMERGENCY", hold_seconds)
+
+        # ── SPOT PROFIT PROTECTION (Phase 3, spot only) ────────────
+        if not self.is_futures and pnl_pct > 0:
+            peak = self._peak_unrealized_pnl
+            # Spot pullback: lost 50% of peak
+            if peak >= self.SPOT_PULLBACK_MIN_PEAK_PCT:
+                if pnl_pct < peak * self.SPOT_PULLBACK_RATIO:
+                    return self._do_exit(current_price, pnl_pct, side, "SPOT_PULLBACK", hold_seconds)
+            # Spot decay: profit fading toward breakeven
+            if peak >= self.SPOT_DECAY_MIN_PEAK_PCT:
+                if pnl_pct < self.SPOT_DECAY_EXIT_BELOW_PCT:
+                    return self._do_exit(current_price, pnl_pct, side, "SPOT_DECAY", hold_seconds)
+            # Spot breakeven: don't let green go red
+            if peak >= self.SPOT_BREAKEVEN_MIN_PEAK_PCT:
+                if pnl_pct <= self.SPOT_BREAKEVEN_EXIT_BELOW_PCT:
+                    return self._do_exit(current_price, pnl_pct, side, "SPOT_BREAKEVEN", hold_seconds)
 
         # Flatline — 10 min with no movement — ONLY close losers
         if (hold_seconds >= self.FLATLINE_SECONDS
@@ -1632,6 +1672,22 @@ class ScalpStrategy(BaseStrategy):
             if (peak_capital >= self.PROFIT_DECAY_EMERGENCY_PEAK_CAP
                     and capital_pnl < peak_capital * self.PROFIT_DECAY_EMERGENCY_RATIO):
                 exit_type = "DECAY_EMERGENCY"
+
+        # ── PHASE 2+: SPOT PROFIT PROTECTION (spot only) ────────────
+        if not exit_type and _in_phase2_plus and not self.is_futures and pnl_pct > 0:
+            peak = self._peak_unrealized_pnl
+            # Spot pullback: lost 50% of peak
+            if peak >= self.SPOT_PULLBACK_MIN_PEAK_PCT:
+                if pnl_pct < peak * self.SPOT_PULLBACK_RATIO:
+                    exit_type = "SPOT_PULLBACK"
+            # Spot decay: profit fading toward breakeven
+            if not exit_type and peak >= self.SPOT_DECAY_MIN_PEAK_PCT:
+                if pnl_pct < self.SPOT_DECAY_EXIT_BELOW_PCT:
+                    exit_type = "SPOT_DECAY"
+            # Spot breakeven: don't let green go red
+            if not exit_type and peak >= self.SPOT_BREAKEVEN_MIN_PEAK_PCT:
+                if pnl_pct <= self.SPOT_BREAKEVEN_EXIT_BELOW_PCT:
+                    exit_type = "SPOT_BREAKEVEN"
 
         # ── PHASE 3: flatline + timeout — ONLY close losers ──────────
         if not exit_type and hold_seconds >= self.FLATLINE_SECONDS:

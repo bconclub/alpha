@@ -4,6 +4,7 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import type { Trade, Strategy, Exchange, PositionType } from '@/lib/types';
 import {
   formatCurrency,
+  formatPrice,
   formatPnL,
   formatPercentage,
   formatDate,
@@ -183,7 +184,7 @@ function getExitReasonColor(reason: string): string {
   // Red: stop loss
   if (upper === 'SL' || upper === 'SL_EXCHANGE') return 'text-red-400';
   // Yellow: conditional exits
-  if (['REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY'].includes(upper)) return 'text-yellow-400';
+  if (['REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN'].includes(upper)) return 'text-yellow-400';
   // Orange: external/phantom
   if (upper === 'PHANTOM' || upper === 'POSITION_GONE' || upper === 'CLOSED_BY_EXCHANGE') return 'text-orange-400';
   // Gray: neutral exits
@@ -197,6 +198,7 @@ function parseExitReason(reason?: string | null): string | null {
   const upper = reason.toUpperCase().trim();
   // Check from most specific to least (HARD_TP before TP)
   const keywords = ['HARD_TP', 'PROFIT_LOCK', 'DECAY_EMERGENCY', 'MANUAL_CLOSE',
+    'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN',
     'TRAIL', 'TP', 'SL', 'FLAT', 'TIMEOUT', 'BREAKEVEN', 'REVERSAL', 'PULLBACK',
     'DECAY', 'SAFETY', 'EXPIRY'];
   for (const kw of keywords) {
@@ -749,11 +751,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     {/* Prices row */}
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mb-1">
                       <span className="text-zinc-400">
-                        Entry: <span className="font-mono text-zinc-300">{formatCurrency(trade.price)}</span>
+                        Entry: <span className="font-mono text-zinc-300">{formatPrice(trade.price)}</span>
                       </span>
                       {trade.exit_price != null && (
                         <span className="text-zinc-400">
-                          Exit: <span className="font-mono text-zinc-300">{formatCurrency(trade.exit_price)}</span>
+                          Exit: <span className="font-mono text-zinc-300">{formatPrice(trade.exit_price)}</span>
                         </span>
                       )}
                       {trade.exchange === 'delta' && (
@@ -797,7 +799,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       )}
                       {trade.status === 'open' && trade.stop_loss != null && (
                         <span className="text-red-400 text-[10px] font-mono">
-                          SL {formatCurrency(trade.stop_loss)}
+                          SL {formatPrice(trade.stop_loss)}
                         </span>
                       )}
                       {trade.status !== 'open' && (() => {
@@ -974,7 +976,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           'sticky left-[240px] z-10 border-r border-zinc-700 whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
-                          {formatCurrency(trade.price)}
+                          {formatPrice(trade.price)}
                         </td>
 
                         {/* ── Scrollable columns ── */}
@@ -1007,7 +1009,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Exit Price */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
                           {trade.exit_price != null ? (
-                            formatCurrency(trade.exit_price)
+                            formatPrice(trade.exit_price)
                           ) : trade.status === 'open' ? (
                             <span className="text-zinc-500 text-xs italic">open</span>
                           ) : (
@@ -1126,7 +1128,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* SL Price */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
                           {trade.stop_loss != null ? (
-                            <span className={trade.status === 'open' ? 'text-red-400' : 'text-zinc-500'}>{formatCurrency(trade.stop_loss)}</span>
+                            <span className={trade.status === 'open' ? 'text-red-400' : 'text-zinc-500'}>{formatPrice(trade.stop_loss)}</span>
                           ) : (
                             <span className="text-zinc-600">&mdash;</span>
                           )}
@@ -1140,7 +1142,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                                 <span className="mr-1">&#x1F7E2;</span>
                                 {trade.peak_pnl != null ? `+${trade.peak_pnl.toFixed(2)}% peak` : ''}
                                 {trade.trail_stop_price != null ? (
-                                  <span className="text-zinc-400"> | stop @ {formatCurrency(trade.trail_stop_price)}</span>
+                                  <span className="text-zinc-400"> | stop @ {formatPrice(trade.trail_stop_price)}</span>
                                 ) : null}
                               </span>
                             ) : trade.position_state === 'holding' ? (
@@ -1158,7 +1160,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             const exitR = getExitReason(trade);
                             if (exitR === 'TRAIL') return <span className="text-emerald-400">Trailed</span>;
                             if (exitR === 'PROFIT_LOCK') return <span className="text-emerald-400">Locked</span>;
-                            if (trade.trail_stop_price != null) return <span className="text-zinc-500">@ {formatCurrency(trade.trail_stop_price)}</span>;
+                            if (trade.trail_stop_price != null) return <span className="text-zinc-500">@ {formatPrice(trade.trail_stop_price)}</span>;
                             return <span className="text-zinc-600">&mdash;</span>;
                           })()}
                         </td>

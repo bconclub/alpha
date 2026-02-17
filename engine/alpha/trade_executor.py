@@ -118,6 +118,7 @@ def _extract_exit_reason(reason: str) -> str:
         return "UNKNOWN"
     upper = reason.upper()
     for kw in ("HARD_TP", "PROFIT_LOCK", "DECAY_EMERGENCY", "MANUAL_CLOSE",
+               "SPOT_PULLBACK", "SPOT_DECAY", "SPOT_BREAKEVEN",
                "TRAIL", "SL", "FLAT", "TIMEOUT",
                "BREAKEVEN", "REVERSAL", "PULLBACK", "DECAY", "SAFETY", "EXPIRY"):
         if kw in upper:

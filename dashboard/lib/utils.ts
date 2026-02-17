@@ -2,7 +2,16 @@ import { format, formatDistanceToNow } from 'date-fns';
 import type { Exchange, PositionType } from './types';
 
 export function formatCurrency(value: number): string {
-  // Low-value assets (XRP ~$1.44, SOL ~$5) need more precision
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+/** Format asset price — more decimals for cheap assets (XRP $1.4457) */
+export function formatPrice(value: number): string {
   const decimals = Math.abs(value) < 10 ? 4 : 2;
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
