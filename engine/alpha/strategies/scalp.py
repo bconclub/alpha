@@ -1018,8 +1018,11 @@ class ScalpStrategy(BaseStrategy):
 
         Returns (side, reason, use_limit, signal_count) or None.
 
+        GATE 0: Momentum must fire (abs(mom_60s) >= threshold).
+        No momentum = no trade. Direction locked by momentum sign.
+
         RSI EXTREME OVERRIDE: RSI < 30 or > 70 enters immediately
-        regardless of other signal counts.
+        but still requires momentum in the matching direction.
 
         GATE: All pairs require 3/4+ signals (v6.1).
 
@@ -1044,6 +1047,22 @@ class ScalpStrategy(BaseStrategy):
         # ── Get effective thresholds (may be widened, but SAME for both dirs) ─
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
         widen_tag = " WIDE" if widened else ""
+
+        # ══════════════════════════════════════════════════════════════
+        # GATE 0: MOMENTUM MUST FIRE — no momentum = no trade, period
+        # ══════════════════════════════════════════════════════════════
+        if abs(momentum_60s) < eff_mom:
+            # Still build breakdown for dashboard (empty signals)
+            self._last_signal_breakdown = {
+                "bull_count": 0, "bear_count": 0,
+                "bull_signals": [], "bear_signals": [],
+                "bull_mom": False, "bull_vol": False, "bull_rsi": False, "bull_bb": False,
+                "bear_mom": False, "bear_vol": False, "bear_rsi": False, "bear_bb": False,
+            }
+            return None
+
+        # Direction is locked by momentum
+        mom_direction = "long" if momentum_60s > 0 else "short"
 
         # ── SIGNAL GATE: always require 3/4 signals ─────────────────────
         # v6.1: removed 15m trend soft weight that was letting 2/4 entries
@@ -1251,7 +1270,8 @@ class ScalpStrategy(BaseStrategy):
 
         # ── RSI EXTREME OVERRIDE: RSI <30 or >70 → enter immediately ─────
         # Strong oversold/overbought overrides all other conditions.
-        if rsi_now < self.RSI_OVERRIDE_LONG:
+        # Still requires momentum in the matching direction (Gate 0 passed).
+        if rsi_now < self.RSI_OVERRIDE_LONG and mom_direction == "long":
             reason = f"LONG RSI-OVERRIDE: RSI={rsi_now:.1f}<{self.RSI_OVERRIDE_LONG} [15m={trend_15m}]{widen_tag}"
             # Add any existing bull signals for context
             if bull_signals:
@@ -1260,7 +1280,7 @@ class ScalpStrategy(BaseStrategy):
             self._last_signal_breakdown = _build_breakdown()
             return ("long", reason, True, strength)
 
-        if rsi_now > self.RSI_OVERRIDE_SHORT and can_short:
+        if rsi_now > self.RSI_OVERRIDE_SHORT and can_short and mom_direction == "short":
             reason = f"SHORT RSI-OVERRIDE: RSI={rsi_now:.1f}>{self.RSI_OVERRIDE_SHORT} [15m={trend_15m}]{widen_tag}"
             if bear_signals:
                 reason += f" +{'+'.join(bear_signals)}"
