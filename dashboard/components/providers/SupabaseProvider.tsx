@@ -77,6 +77,12 @@ function normalizeTrade(raw: any): Trade {
     reason: raw.reason,
     order_id: raw.order_id,
     setup_type: raw.setup_type ?? undefined,
+    exit_reason: raw.exit_reason ?? undefined,
+    position_state: raw.position_state ?? null,
+    trail_stop_price: raw.trail_stop_price != null ? Number(raw.trail_stop_price) : null,
+    current_pnl: raw.current_pnl != null ? Number(raw.current_pnl) : null,
+    current_price: raw.current_price != null ? Number(raw.current_price) : null,
+    peak_pnl: raw.peak_pnl != null ? Number(raw.peak_pnl) : null,
   };
 }
 

@@ -112,6 +112,27 @@ def calc_pnl(
     )
 
 
+def _extract_exit_reason(reason: str) -> str:
+    """Extract clean exit_reason enum from verbose reason string."""
+    if not reason:
+        return "UNKNOWN"
+    upper = reason.upper()
+    for kw in ("HARD_TP", "MANUAL_CLOSE", "TRAIL", "SL", "FLAT", "TIMEOUT",
+               "BREAKEVEN", "REVERSAL", "PULLBACK", "DECAY", "SAFETY", "EXPIRY"):
+        if kw in upper:
+            return "MANUAL" if kw == "MANUAL_CLOSE" else kw
+    direct = {
+        "POSITION_GONE": "POSITION_GONE", "PHANTOM_CLEARED": "PHANTOM",
+        "SL_EXCHANGE": "SL_EXCHANGE", "TP_EXCHANGE": "TP_EXCHANGE",
+        "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE", "ORPHAN": "ORPHAN",
+        "DUST": "DUST",
+    }
+    for key, val in direct.items():
+        if key in upper:
+            return val
+    return "UNKNOWN"
+
+
 class TradeExecutor:
     """Unified order execution layer on top of ccxt."""
 
@@ -302,6 +323,7 @@ class TradeExecutor:
                         "pnl": round(pnl, 8),
                         "pnl_pct": round(pnl_pct, 4),
                         "reason": "position_gone",
+                        "exit_reason": "POSITION_GONE",
                     })
                     logger.info(
                         "[%s] Trade %s marked closed (position_gone) "
@@ -1024,6 +1046,7 @@ class TradeExecutor:
                 "entry_fee": round(result.entry_fee, 8),
                 "exit_fee": round(result.exit_fee, 8),
                 "reason": signal.reason,
+                "exit_reason": _extract_exit_reason(signal.reason),
             })
 
             logger.info(

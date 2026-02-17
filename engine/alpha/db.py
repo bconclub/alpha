@@ -76,7 +76,7 @@ class Database:
 
     async def close_trade(
         self, order_id: str, exit_price: float, pnl: float, pnl_pct: float,
-        reason: str = "",
+        reason: str = "", exit_reason: str = "",
     ) -> None:
         """Mark a trade as closed with exit price and realised P&L."""
         if not self.is_connected:
@@ -91,6 +91,8 @@ class Database:
         }
         if reason:
             data["reason"] = reason
+        if exit_reason:
+            data["exit_reason"] = exit_reason
         await loop.run_in_executor(
             None,
             lambda: (

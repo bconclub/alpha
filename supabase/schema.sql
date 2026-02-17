@@ -43,6 +43,7 @@ create table if not exists public.trades (
     status        text        not null default 'open'
                   check (status in ('open', 'closed', 'cancelled')),
     reason        text,                                -- human-readable entry/exit reason
+    exit_reason   text,                                -- clean exit type: TRAIL, SL, FLAT, MANUAL, etc.
 
     -- Futures
     leverage      numeric(5,2) not null default 1,     -- 1 = spot, >1 = futures

@@ -90,6 +90,9 @@ const COLUMNS: ColumnDef[] = [
   { key: 'pnl', label: 'Net P&L', align: 'right' },
   { key: 'pnl_pct', label: 'P&L %', align: 'right' },
   { key: 'hold_time', label: 'Hold Time', align: 'right' },
+  { key: 'sl_price', label: 'SL', align: 'right' },
+  { key: 'trail_info', label: 'Trail' },
+  { key: 'peak_info', label: 'Peak', align: 'right' },
   { key: 'exit_reason', label: 'Exit' },
   { key: 'status', label: 'Status' },
 ];
@@ -159,27 +162,53 @@ function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): num
   return 0;
 }
 
-/** Get color for exit reason */
+/** Get color for exit reason — expanded palette */
 function getExitReasonColor(reason: string): string {
   const upper = reason.toUpperCase();
-  if (upper === 'TRAIL' || upper === 'TP') return 'text-emerald-400';
-  if (upper === 'SL') return 'text-red-400';
+  // Green: profit exits
+  if (upper === 'TRAIL' || upper === 'TP' || upper === 'HARD_TP' || upper === 'TP_EXCHANGE') return 'text-emerald-400';
+  // Blue: manual
+  if (upper === 'MANUAL') return 'text-blue-400';
+  // Red: stop loss
+  if (upper === 'SL' || upper === 'SL_EXCHANGE') return 'text-red-400';
+  // Yellow: conditional exits
+  if (upper === 'REVERSAL' || upper === 'PULLBACK' || upper === 'DECAY') return 'text-yellow-400';
+  // Orange: external/phantom
+  if (upper === 'PHANTOM' || upper === 'POSITION_GONE' || upper === 'CLOSED_BY_EXCHANGE') return 'text-orange-400';
+  // Gray: neutral exits
+  if (['FLAT', 'TIMEOUT', 'BREAKEVEN', 'SAFETY', 'DUST', 'ORPHAN', 'EXPIRY'].includes(upper)) return 'text-zinc-500';
   return 'text-zinc-500';
 }
 
-/** Parse exit reason from trade reason field */
+/** Parse exit reason from trade reason field (fallback for older trades without exit_reason column) */
 function parseExitReason(reason?: string | null): string | null {
   if (!reason) return null;
-  // The reason field may contain values like "TRAIL", "SL", "TP", "FLAT", etc.
-  // Extract the first recognizable keyword
   const upper = reason.toUpperCase().trim();
-  const keywords = ['TRAIL', 'TP', 'SL', 'FLAT', 'MANUAL', 'TIMEOUT', 'LIQUIDATION'];
+  // Check from most specific to least (HARD_TP before TP)
+  const keywords = ['HARD_TP', 'MANUAL_CLOSE', 'TRAIL', 'TP', 'SL', 'FLAT',
+    'TIMEOUT', 'BREAKEVEN', 'REVERSAL', 'PULLBACK', 'DECAY', 'SAFETY', 'EXPIRY'];
   for (const kw of keywords) {
-    if (upper.includes(kw)) return kw;
+    if (upper.includes(kw)) return kw === 'MANUAL_CLOSE' ? 'MANUAL' : kw;
   }
-  // If it's short enough, just show it as-is
+  // Direct matches
+  const direct: Record<string, string> = {
+    'PHANTOM_CLEARED': 'PHANTOM', 'SL_EXCHANGE': 'SL_EXCHANGE',
+    'TP_EXCHANGE': 'TP_EXCHANGE', 'CLOSED_BY_EXCHANGE': 'CLOSED_BY_EXCHANGE',
+    'POSITION_GONE': 'POSITION_GONE', 'DUST_UNSELLABLE': 'DUST',
+    'ORPHAN_CLOSED': 'ORPHAN', 'ORPHAN_STRATEGY_REMOVED': 'ORPHAN',
+    'POSITION_NOT_FOUND_ON_RESTART': 'POSITION_GONE',
+  };
+  for (const [key, val] of Object.entries(direct)) {
+    if (upper.includes(key)) return val;
+  }
   if (reason.length <= 10) return reason.toUpperCase();
   return null;
+}
+
+/** Get exit reason: prefer exit_reason column, fall back to parsing reason field */
+function getExitReason(trade: Trade): string | null {
+  if (trade.exit_reason) return trade.exit_reason;
+  return parseExitReason(trade.reason);
 }
 
 /** Calculate hold time in seconds for a trade */
@@ -381,7 +410,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'sl_price' || key === 'trail_info' || key === 'peak_info') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -728,8 +757,23 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         </span>
                       )}
                       <HoldTimeCell trade={trade} now={now} />
+                      {trade.status === 'open' && trade.position_state === 'trailing' && (
+                        <span className="text-emerald-400 text-[10px]">
+                          &#x1F7E2; TRAIL {trade.peak_pnl != null ? `+${trade.peak_pnl.toFixed(2)}%` : ''}
+                        </span>
+                      )}
+                      {trade.status === 'open' && trade.position_state === 'holding' && (
+                        <span className="text-zinc-500 text-[10px]">
+                          &#x23F3; {trade.current_pnl != null ? `${trade.current_pnl >= 0 ? '+' : ''}${trade.current_pnl.toFixed(2)}%` : 'holding'}
+                        </span>
+                      )}
+                      {trade.status === 'open' && trade.stop_loss != null && (
+                        <span className="text-red-400 text-[10px] font-mono">
+                          SL {formatCurrency(trade.stop_loss)}
+                        </span>
+                      )}
                       {trade.status !== 'open' && (() => {
-                        const reason = parseExitReason(trade.reason);
+                        const reason = getExitReason(trade);
                         return reason ? (
                           <span className={cn('font-semibold', getExitReasonColor(reason))}>
                             {reason}
@@ -778,7 +822,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {/* ----------------------------------------------------------------- */}
       <div className="hidden md:block bg-card overflow-hidden rounded-xl border border-zinc-800">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1400px] text-sm">
+          <table className="w-full min-w-[1700px] text-sm">
             {/* Header */}
             <thead>
               <tr className="bg-zinc-900/50">
@@ -1013,12 +1057,63 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           <HoldTimeCell trade={trade} now={now} />
                         </td>
 
+                        {/* SL Price */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
+                          {trade.status === 'open' && trade.stop_loss != null ? (
+                            <span className="text-red-400">{formatCurrency(trade.stop_loss)}</span>
+                          ) : (
+                            <span className="text-zinc-600">&mdash;</span>
+                          )}
+                        </td>
+
+                        {/* Trail Info */}
+                        <td className="whitespace-nowrap px-4 py-3 text-xs">
+                          {trade.status === 'open' ? (
+                            trade.position_state === 'trailing' ? (
+                              <span className="text-emerald-400">
+                                <span className="mr-1">&#x1F7E2;</span>
+                                {trade.peak_pnl != null ? `+${trade.peak_pnl.toFixed(2)}% peak` : ''}
+                                {trade.trail_stop_price != null ? (
+                                  <span className="text-zinc-400"> | stop @ {formatCurrency(trade.trail_stop_price)}</span>
+                                ) : null}
+                              </span>
+                            ) : trade.position_state === 'holding' ? (
+                              <span className="text-zinc-400">
+                                <span className="mr-1">&#x23F3;</span>
+                                need +0.15%
+                                {trade.current_pnl != null ? (
+                                  <span className="text-zinc-500"> (now {trade.current_pnl >= 0 ? '+' : ''}{trade.current_pnl.toFixed(2)}%)</span>
+                                ) : null}
+                              </span>
+                            ) : (
+                              <span className="text-zinc-600">&mdash;</span>
+                            )
+                          ) : (
+                            <span className="text-zinc-600">&mdash;</span>
+                          )}
+                        </td>
+
+                        {/* Peak P&L */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
+                          {trade.status === 'open' && trade.peak_pnl != null ? (
+                            <span className={cn(
+                              trade.peak_pnl >= 0.3 ? 'text-emerald-400' :
+                              trade.peak_pnl >= 0.1 ? 'text-yellow-400' :
+                              trade.peak_pnl >= 0 ? 'text-zinc-400' : 'text-red-400'
+                            )}>
+                              {trade.peak_pnl >= 0 ? '+' : ''}{trade.peak_pnl.toFixed(2)}%
+                            </span>
+                          ) : (
+                            <span className="text-zinc-600">&mdash;</span>
+                          )}
+                        </td>
+
                         {/* Exit Reason */}
                         <td className="whitespace-nowrap px-4 py-3">
                           {trade.status === 'open' ? (
                             <span className="text-zinc-600">&mdash;</span>
                           ) : (() => {
-                            const reason = parseExitReason(trade.reason);
+                            const reason = getExitReason(trade);
                             return reason ? (
                               <span className={cn('text-xs font-semibold', getExitReasonColor(reason))}>
                                 {reason}

@@ -1145,6 +1145,7 @@ class AlphaBot:
                             await self.db.close_trade(
                                 order_id, current_price, pnl, pnl_pct,
                                 reason="dust_unsellable",
+                                exit_reason="DUST",
                             )
                         else:
                             await self.db.update_trade(trade_id, {
@@ -1154,6 +1155,7 @@ class AlphaBot:
                                 "pnl": pnl,
                                 "pnl_pct": pnl_pct,
                                 "reason": "dust_unsellable",
+                                "exit_reason": "DUST",
                             })
                         dust_count += 1
                         logger.info(
@@ -1407,6 +1409,7 @@ class AlphaBot:
                     await self.db.close_trade(
                         order_id, exit_price, pnl, pnl_pct,
                         reason="position_not_found_on_restart",
+                        exit_reason="POSITION_GONE",
                     )
                 elif trade_id:
                     await self.db.update_trade(trade_id, {
@@ -1416,6 +1419,7 @@ class AlphaBot:
                         "pnl": pnl,
                         "pnl_pct": pnl_pct,
                         "reason": "position_not_found_on_restart",
+                        "exit_reason": "POSITION_GONE",
                     })
 
                 closed += 1
@@ -1860,6 +1864,7 @@ class AlphaBot:
                                     await self.db.close_trade(
                                         order_id, exit_price, pnl, pnl_pct,
                                         reason="orphan_closed",
+                                        exit_reason="ORPHAN",
                                     )
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
@@ -1987,10 +1992,14 @@ class AlphaBot:
                             pos_type, trade_lev, "delta", pair,
                         )
                         trade_id = open_trade.get("id")
+                        _phantom_exit_map = {"phantom_cleared": "PHANTOM", "SL_EXCHANGE": "SL_EXCHANGE",
+                                             "TP_EXCHANGE": "TP_EXCHANGE", "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE"}
+                        phantom_exit_reason = _phantom_exit_map.get(phantom_reason, "PHANTOM")
                         if order_id:
                             await self.db.close_trade(
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
                                 reason=phantom_reason,
+                                exit_reason=phantom_exit_reason,
                             )
                         elif trade_id:
                             await self.db.update_trade(trade_id, {
@@ -2000,6 +2009,7 @@ class AlphaBot:
                                 "pnl": round(phantom_pnl, 8),
                                 "pnl_pct": round(phantom_pnl_pct, 4),
                                 "reason": phantom_reason,
+                                "exit_reason": phantom_exit_reason,
                             })
                         logger.info(
                             "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%) reason=%s",
@@ -2107,10 +2117,14 @@ class AlphaBot:
                             "spot", 1, "binance", pair,
                         )
                         trade_id = open_trade.get("id")
+                        _phantom_exit_map_bn = {"phantom_cleared": "PHANTOM", "SL_EXCHANGE": "SL_EXCHANGE",
+                                                "TP_EXCHANGE": "TP_EXCHANGE", "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE"}
+                        phantom_exit_reason = _phantom_exit_map_bn.get(phantom_reason, "PHANTOM")
                         if order_id:
                             await self.db.close_trade(
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
                                 reason=phantom_reason,
+                                exit_reason=phantom_exit_reason,
                             )
                         elif trade_id:
                             await self.db.update_trade(trade_id, {
@@ -2120,6 +2134,7 @@ class AlphaBot:
                                 "pnl": round(phantom_pnl, 8),
                                 "pnl_pct": round(phantom_pnl_pct, 4),
                                 "reason": phantom_reason,
+                                "exit_reason": phantom_exit_reason,
                             })
                         logger.info(
                             "Phantom Binance %s closed: exit=$%.2f pnl=$%.4f reason=%s",
@@ -2214,6 +2229,7 @@ class AlphaBot:
                     await self.db.close_trade(
                         order_id, current_price, pnl, pnl_pct,
                         reason="orphan_strategy_removed",
+                        exit_reason="ORPHAN",
                     )
 
                 # Send alert
@@ -2246,6 +2262,7 @@ class AlphaBot:
                         await self.db.close_trade(
                             order_id, fallback_exit, fallback_pnl, fallback_pnl_pct,
                             reason="orphan_strategy_removed",
+                            exit_reason="ORPHAN",
                         )
                         logger.info(
                             "Orphan fallback close %s: exit=$%.2f pnl=$%.4f (%.2f%%)",
