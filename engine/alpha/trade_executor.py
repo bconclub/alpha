@@ -1054,7 +1054,7 @@ class TradeExecutor:
 
             trade_id = open_trade["id"]
 
-            await self.db.update_trade(trade_id, {
+            close_data: dict[str, Any] = {
                 "status": "closed",
                 "exit_price": fill_price,
                 "closed_at": iso_now(),
@@ -1065,7 +1065,13 @@ class TradeExecutor:
                 "exit_fee": round(result.exit_fee, 8),
                 "reason": signal.reason,
                 "exit_reason": _extract_exit_reason(signal.reason),
-            })
+                "position_state": None,  # no longer open
+            }
+            # Persist peak_pnl from signal metadata (final value at close time)
+            if signal.metadata.get("peak_pnl") is not None:
+                close_data["peak_pnl"] = signal.metadata["peak_pnl"]
+
+            await self.db.update_trade(trade_id, close_data)
 
             logger.info(
                 "Trade closed in DB: id=%s %s %s entry=$%.2f exit=$%.2f "

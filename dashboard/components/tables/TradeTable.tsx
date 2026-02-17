@@ -836,7 +836,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
             }
           }}
         >
-          <div style={{ width: '1700px', height: '1px' }} />
+          <div style={{ width: '2100px', height: '1px' }} />
         </div>
         <div
           ref={tableScrollRef}
@@ -847,7 +847,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
             }
           }}
         >
-          <table className="w-full min-w-[1700px] text-sm">
+          <table className="w-full min-w-[2100px] text-sm">
             {/* Header */}
             <thead>
               <tr className="bg-zinc-900/50">
@@ -1084,8 +1084,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* SL Price */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
-                          {trade.status === 'open' && trade.stop_loss != null ? (
-                            <span className="text-red-400">{formatCurrency(trade.stop_loss)}</span>
+                          {trade.stop_loss != null ? (
+                            <span className={trade.status === 'open' ? 'text-red-400' : 'text-zinc-500'}>{formatCurrency(trade.stop_loss)}</span>
                           ) : (
                             <span className="text-zinc-600">&mdash;</span>
                           )}
@@ -1113,14 +1113,18 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             ) : (
                               <span className="text-zinc-600">&mdash;</span>
                             )
-                          ) : (
-                            <span className="text-zinc-600">&mdash;</span>
-                          )}
+                          ) : (() => {
+                            const exitR = getExitReason(trade);
+                            if (exitR === 'TRAIL') return <span className="text-emerald-400">Trailed</span>;
+                            if (exitR === 'PROFIT_LOCK') return <span className="text-emerald-400">Locked</span>;
+                            if (trade.trail_stop_price != null) return <span className="text-zinc-500">@ {formatCurrency(trade.trail_stop_price)}</span>;
+                            return <span className="text-zinc-600">&mdash;</span>;
+                          })()}
                         </td>
 
                         {/* Peak P&L */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
-                          {trade.status === 'open' && trade.peak_pnl != null ? (
+                          {trade.peak_pnl != null ? (
                             <span className={cn(
                               trade.peak_pnl >= 0.3 ? 'text-emerald-400' :
                               trade.peak_pnl >= 0.1 ? 'text-yellow-400' :

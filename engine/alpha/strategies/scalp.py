@@ -2095,6 +2095,14 @@ class ScalpStrategy(BaseStrategy):
             if self.is_futures:
                 amount *= self.leverage
 
+        # Compute peak P&L for DB persistence on close
+        if side == "long" and self.entry_price > 0:
+            peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+        elif side == "short" and self.entry_price > 0:
+            peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+        else:
+            peak_pnl = 0.0
+
         exit_side = "sell" if side == "long" else "buy"
         return Signal(
             side=exit_side,
@@ -2108,6 +2116,7 @@ class ScalpStrategy(BaseStrategy):
             position_type=side if self.is_futures else "spot",
             reduce_only=self.is_futures,
             exchange_id="delta" if self.is_futures else "binance",
+            metadata={"peak_pnl": round(peak_pnl, 4)},
         )
 
     # ======================================================================
