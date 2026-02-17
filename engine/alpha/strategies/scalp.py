@@ -1,4 +1,4 @@
-"""Alpha v6.0 — ENTRY QUALITY GATE + AGGRESSIVE PROFIT LOCK.
+"""Alpha v6.1 — ENTRY QUALITY GATE + AGGRESSIVE PROFIT LOCK.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
 best signals. After a loss, pause THAT PAIR. Use 15m trend as soft bias.
@@ -146,7 +146,7 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v6.0 — 3/4 entry gate, aggressive profit lock, tight trailing.
+    """Phase-based v6.1 — 3/4 entry gate, aggressive profit lock, tight trailing.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
@@ -161,9 +161,9 @@ class ScalpStrategy(BaseStrategy):
     STOP_LOSS_PCT = 0.35              # default fallback
     MIN_TP_PCT = 1.50                 # default TP
     PAIR_SL_FLOOR: dict[str, float] = {
-        "BTC": 0.30,   # BTC: tight, low % vol
-        "ETH": 0.35,   # ETH: medium vol
-        "XRP": 0.40,   # XRP: more volatile, needs room
+        "BTC": 0.40,   # BTC: was 0.30, widened to avoid noise SL
+        "ETH": 0.45,   # ETH: was 0.35, widened to avoid noise SL
+        "XRP": 0.50,   # XRP: was 0.40, widened to avoid noise SL
     }
     PAIR_TP_FLOOR: dict[str, float] = {
         "BTC": 1.50,
@@ -219,8 +219,8 @@ class ScalpStrategy(BaseStrategy):
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.08           # 0.08%+ move in 60s (was 0.15 — catches moves earlier)
     VOL_SPIKE_RATIO = 0.8             # volume > 0.8x average (was 1.2 — most vol is under 1x)
-    RSI_EXTREME_LONG = 40             # RSI < 40 = oversold → long
-    RSI_EXTREME_SHORT = 60            # RSI > 60 = overbought → short
+    RSI_EXTREME_LONG = 35             # RSI < 35 = oversold → long (was 40, too loose)
+    RSI_EXTREME_SHORT = 65            # RSI > 65 = overbought → short (was 60, too loose)
     # BB mean-reversion thresholds (upper = short, lower = long):
     BB_MEAN_REVERT_UPPER = 0.85      # price in top 15% of BB → short signal
     BB_MEAN_REVERT_LOWER = 0.15      # price in bottom 15% of BB → long signal
@@ -421,7 +421,7 @@ class ScalpStrategy(BaseStrategy):
         disabled_tag = f" DISABLED={','.join(self.DISABLED_PAIRS)}" if self.DISABLED_PAIRS else ""
         max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
         self.logger.info(
-            "[%s] PHASE-BASED v6.0 ACTIVE (%s) — tick=1s/5s(dynamic), "
+            "[%s] PHASE-BASED v6.1 ACTIVE (%s) — tick=1s/5s(dynamic), "
             "SL=%.2f%% TP=%.2f%% Phase1=%ds(skip@+%.1f%%) Phase2=%ds MaxHold=%ds "
             "Trail@+%.1f%%(%.2f%%) MoveToEntry@+%.1f%% Flat=%ds "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
@@ -952,17 +952,12 @@ class ScalpStrategy(BaseStrategy):
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
         widen_tag = " WIDE" if widened else ""
 
-        # ── 15M TREND SOFT WEIGHT: determine required signal count ─────────
-        # Trend-aligned = easier (2/4), counter-trend = harder (3/4)
-        if trend_15m == "bearish":
-            required_long = 3   # counter-trend long: harder
-            required_short = 2  # trend-aligned short: standard
-        elif trend_15m == "bullish":
-            required_long = 2   # trend-aligned long: standard
-            required_short = 3  # counter-trend short: harder
-        else:  # neutral
-            required_long = 2
-            required_short = 2
+        # ── SIGNAL GATE: always require 3/4 signals ─────────────────────
+        # v6.1: removed 15m trend soft weight that was letting 2/4 entries
+        # through for "trend-aligned" trades. 2/4 entries are coin flips at
+        # 20x leverage and were the root cause of the 26.6% WR collapse.
+        required_long = 3
+        required_short = 3
 
         # ── Post-streak gate: first trade after streak pause needs 3/4 ─────
         if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
