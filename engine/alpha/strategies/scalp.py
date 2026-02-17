@@ -1701,8 +1701,15 @@ class ScalpStrategy(BaseStrategy):
             f"Scalp {exit_type} {pnl_pct:+.2f}% price "
             f"({cap_pct:+.1f}% capital at {self.leverage}x)"
         )
+        # Compute peak P&L BEFORE _record_scalp_result resets entry_price/highest/lowest
+        if side == "long" and self.entry_price > 0:
+            peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+        elif side == "short" and self.entry_price > 0:
+            peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+        else:
+            peak_pnl = 0.0
         self._record_scalp_result(pnl_pct, exit_type.lower())
-        return [self._exit_signal(price, side, reason)]
+        return [self._exit_signal(price, side, reason, peak_pnl)]
 
     def _calc_pnl_pct(self, current_price: float) -> float:
         """Calculate unrealized P&L percentage."""
@@ -2085,8 +2092,12 @@ class ScalpStrategy(BaseStrategy):
                           "setup_type": setup_type},
             )
 
-    def _exit_signal(self, price: float, side: str, reason: str) -> Signal:
-        """Build an exit signal for the current position."""
+    def _exit_signal(self, price: float, side: str, reason: str, peak_pnl: float = 0.0) -> Signal:
+        """Build an exit signal for the current position.
+
+        peak_pnl must be pre-computed by the caller BEFORE _record_scalp_result
+        resets entry_price/highest_since_entry/lowest_since_entry.
+        """
         amount = self.entry_amount
         if amount <= 0:
             exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
@@ -2094,14 +2105,6 @@ class ScalpStrategy(BaseStrategy):
             amount = capital / price
             if self.is_futures:
                 amount *= self.leverage
-
-        # Compute peak P&L for DB persistence on close
-        if side == "long" and self.entry_price > 0:
-            peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
-        elif side == "short" and self.entry_price > 0:
-            peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
-        else:
-            peak_pnl = 0.0
 
         exit_side = "sell" if side == "long" else "buy"
         return Signal(
