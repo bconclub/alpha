@@ -1,4 +1,4 @@
-export type Exchange = 'binance' | 'delta';
+export type Exchange = 'binance' | 'delta';  // binance kept for historical trade compat
 export type PositionType = 'spot' | 'long' | 'short';
 
 // Strategy values as stored in the database (lowercase)
@@ -221,7 +221,7 @@ export interface PnLByPair {
   total_pnl: number;
 }
 
-export type ExchangeFilter = 'all' | 'binance' | 'delta';
+export type ExchangeFilter = 'all' | 'delta';  // binance removed — Delta only for now
 
 export type ActivityEventType = 'analysis' | 'strategy_switch' | 'trade_open' | 'trade_close' | 'short_open' | 'risk_alert';
 

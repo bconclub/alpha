@@ -69,7 +69,7 @@ function deriveTrend(log: StrategyLog): 'bullish' | 'bearish' | 'neutral' {
  */
 function computeTrigger(log: StrategyLog): TriggerInfo {
   const pair = log.pair;
-  const exchange: Exchange = log.exchange ?? 'binance';
+  const exchange: Exchange = log.exchange ?? 'delta';
   const isFutures = exchange === 'delta';
 
   const rsi = log.rsi ?? null;
@@ -280,7 +280,7 @@ export function TriggerProximity() {
       if (log.pair) {
         const asset = extractBaseAsset(log.pair);
         if (!ACTIVE_ASSETS.has(asset)) continue;
-        const key = `${log.pair}-${log.exchange ?? 'binance'}`;
+        const key = `${log.pair}-${log.exchange ?? 'delta'}`;
         if (!latestByPair.has(key)) {
           latestByPair.set(key, log);
         }
@@ -346,16 +346,6 @@ export function TriggerProximity() {
               <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-white">{t.pair}</span>
-                  <span
-                    className={cn(
-                      'inline-flex items-center justify-center w-4 h-4 rounded text-[8px] font-bold',
-                      t.exchange === 'binance'
-                        ? 'bg-[#f0b90b]/10 text-[#f0b90b]'
-                        : 'bg-[#00d2ff]/10 text-[#00d2ff]',
-                    )}
-                  >
-                    {t.exchange === 'binance' ? 'B' : 'D'}
-                  </span>
                   {t.currentPrice != null && (
                     <span className="text-[10px] font-mono text-zinc-500">
                       ${t.currentPrice.toLocaleString()}

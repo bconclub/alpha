@@ -6,7 +6,6 @@ import type { ExchangeFilter } from '@/lib/types';
 
 const toggleOptions: { label: string; value: ExchangeFilter; activeBorder?: string }[] = [
   { label: 'All', value: 'all' },
-  { label: 'Binance', value: 'binance', activeBorder: 'border-l-2 border-l-[#f0b90b]' },
   { label: 'Delta', value: 'delta', activeBorder: 'border-l-2 border-l-[#00d2ff]' },
 ];
 

@@ -68,7 +68,7 @@ function normalizeTrade(raw: any): Trade {
     entry_fee: raw.entry_fee ?? undefined,
     exit_fee: raw.exit_fee ?? undefined,
     status: raw.status ?? 'open',
-    exchange: raw.exchange ?? 'binance',
+    exchange: raw.exchange ?? 'delta',
     leverage: raw.leverage ?? 1,
     position_type: raw.position_type ?? 'spot',
     stop_loss: raw.stop_loss ?? null,
