@@ -74,13 +74,15 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
 type ColumnDef = { key: string; label: string; align?: 'right' };
 
 const COLUMNS: ColumnDef[] = [
-  { key: 'id', label: 'ID' },
-  { key: 'timestamp', label: 'Date' },
+  // ── Frozen columns (sticky left) ──
   { key: 'pair', label: 'Pair' },
-  { key: 'exchange', label: 'Exchange' },
   { key: 'position_type', label: 'Type' },
   { key: 'leverage', label: 'Lev', align: 'right' },
   { key: 'price', label: 'Entry', align: 'right' },
+  // ── Scrollable columns ──
+  { key: 'id', label: 'ID' },
+  { key: 'timestamp', label: 'Date' },
+  { key: 'exchange', label: 'Exchange' },
   { key: 'exit_price', label: 'Exit', align: 'right' },
   { key: 'amount', label: 'Contracts', align: 'right' },
   { key: 'strategy', label: 'Strategy' },
@@ -96,6 +98,15 @@ const COLUMNS: ColumnDef[] = [
   { key: 'exit_reason', label: 'Exit' },
   { key: 'status', label: 'Status' },
 ];
+
+// Frozen column sticky offsets (must match actual rendered widths)
+const STICKY_COLS: Record<string, string> = {
+  pair: 'left-0',
+  position_type: 'left-[100px]',
+  leverage: 'left-[180px]',
+  price: 'left-[240px]',
+};
+const LAST_STICKY_COL = 'price';
 
 // Setup type badge colors
 const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
@@ -308,6 +319,18 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Scroll sync refs for top + bottom scrollbars ------------------------
   const topScrollRef = useRef<HTMLDivElement>(null);
   const tableScrollRef = useRef<HTMLDivElement>(null);
+
+  // -- Dynamic top scrollbar width (matches actual table scroll width) -----
+  const [tableScrollWidth, setTableScrollWidth] = useState(2100);
+  useEffect(() => {
+    const el = tableScrollRef.current;
+    if (!el) return;
+    const update = () => setTableScrollWidth(el.scrollWidth);
+    update(); // initial
+    const obs = new ResizeObserver(update);
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
 
   // -- Live timer for open trade hold times --------------------------------
   const [now, setNow] = useState(Date.now());
@@ -836,7 +859,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
             }
           }}
         >
-          <div style={{ width: '2100px', height: '1px' }} />
+          <div style={{ width: `${tableScrollWidth}px`, height: '1px' }} />
         </div>
         <div
           ref={tableScrollRef}
@@ -858,6 +881,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     className={cn(
                       'cursor-pointer select-none whitespace-nowrap px-4 py-3 text-xs font-medium uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-200',
                       col.align === 'right' ? 'text-right' : 'text-left',
+                      STICKY_COLS[col.key] && `sticky ${STICKY_COLS[col.key]} z-20 bg-zinc-900`,
+                      col.key === LAST_STICKY_COL && 'border-r border-zinc-700',
                     )}
                   >
                     <span className="inline-flex items-center gap-1">
@@ -910,6 +935,50 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           trade.status === 'open' && 'bg-zinc-900/30',
                         )}
                       >
+                        {/* ── Frozen sticky columns ── */}
+
+                        {/* Pair — STICKY */}
+                        <td className={cn(
+                          'sticky left-0 z-10 whitespace-nowrap px-4 py-3 font-medium text-zinc-100',
+                          trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
+                        )}>
+                          {displayPair(trade.pair)}
+                        </td>
+
+                        {/* Type — STICKY */}
+                        <td className={cn(
+                          'sticky left-[100px] z-10 whitespace-nowrap px-4 py-3',
+                          trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
+                        )}>
+                          <span className={cn('text-xs font-medium', getPositionTypeColor(trade.position_type))}>
+                            {getPositionTypeLabel(trade.position_type)}
+                          </span>
+                        </td>
+
+                        {/* Leverage — STICKY */}
+                        <td className={cn(
+                          'sticky left-[180px] z-10 whitespace-nowrap px-4 py-3 text-right',
+                          trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
+                        )}>
+                          {trade.leverage > 1 ? (
+                            <span className="text-xs font-medium text-amber-400">
+                              {formatLeverage(trade.leverage)}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-zinc-500">&mdash;</span>
+                          )}
+                        </td>
+
+                        {/* Entry Price — STICKY + right border */}
+                        <td className={cn(
+                          'sticky left-[240px] z-10 border-r border-zinc-700 whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300',
+                          trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
+                        )}>
+                          {formatCurrency(trade.price)}
+                        </td>
+
+                        {/* ── Scrollable columns ── */}
+
                         {/* ID */}
                         <td className="whitespace-nowrap px-4 py-3 text-xs font-mono text-zinc-500">
                           #{typeof trade.id === 'string' && trade.id.length > 6
@@ -920,11 +989,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Date */}
                         <td className="whitespace-nowrap px-4 py-3 text-zinc-300">
                           {formatDate(trade.timestamp)}
-                        </td>
-
-                        {/* Pair */}
-                        <td className="whitespace-nowrap px-4 py-3 font-medium text-zinc-100">
-                          {displayPair(trade.pair)}
                         </td>
 
                         {/* Exchange */}
@@ -938,29 +1002,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               {getExchangeLabel(trade.exchange)}
                             </span>
                           </span>
-                        </td>
-
-                        {/* Type (position_type) */}
-                        <td className="whitespace-nowrap px-4 py-3">
-                          <span className={cn('text-xs font-medium', getPositionTypeColor(trade.position_type))}>
-                            {getPositionTypeLabel(trade.position_type)}
-                          </span>
-                        </td>
-
-                        {/* Leverage */}
-                        <td className="whitespace-nowrap px-4 py-3 text-right">
-                          {trade.leverage > 1 ? (
-                            <span className="text-xs font-medium text-amber-400">
-                              {formatLeverage(trade.leverage)}
-                            </span>
-                          ) : (
-                            <span className="text-xs text-zinc-500">&mdash;</span>
-                          )}
-                        </td>
-
-                        {/* Entry Price */}
-                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
-                          {formatCurrency(trade.price)}
                         </td>
 
                         {/* Exit Price */}
