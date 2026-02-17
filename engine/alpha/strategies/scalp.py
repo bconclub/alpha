@@ -1316,7 +1316,7 @@ class ScalpStrategy(BaseStrategy):
         # ── Check required signals (LONG) — trend-weighted ────────────────
         # NO fee filter — if 2/4 signals fire, ENTER. The signal system IS the filter.
         # RSI + VOL is a valid entry even when momentum is flat (price about to move).
-        if len(bull_signals) >= required_long:
+        if len(bull_signals) >= required_long and mom_direction == "long":
             req_tag = f" req={required_long}/4" if required_long > 2 else ""
             reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bull_signals[0]
@@ -1324,7 +1324,7 @@ class ScalpStrategy(BaseStrategy):
             return ("long", reason, use_limit, len(bull_signals))
 
         # ── Check required signals (SHORT) — trend-weighted ───────────────
-        if len(bear_signals) >= required_short and can_short:
+        if len(bear_signals) >= required_short and can_short and mom_direction == "short":
             req_tag = f" req={required_short}/4" if required_short > 2 else ""
             reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
