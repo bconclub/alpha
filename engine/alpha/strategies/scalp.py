@@ -218,11 +218,10 @@ class ScalpStrategy(BaseStrategy):
     # Once capital PnL reaches threshold, floor locks in. Cannot be lowered.
     # If current capital PnL drops below floor → EXIT IMMEDIATELY.
     PROFIT_RATCHETS: list[tuple[float, float]] = [
-        (3.0,  0.0),    # At +3% capital → floor at breakeven (0%)
-        (5.0,  2.0),    # At +5% capital → floor at +2%
-        (8.0,  5.0),    # At +8% capital → floor at +5%
-        (10.0, 7.0),    # At +10% capital → floor at +7%
-        (15.0, 10.0),   # At +15% capital → floor at +10%
+        (5.0,  0.0),    # +5% cap → floor breakeven (was +3%)
+        (8.0,  3.0),    # +8% cap → floor +3% (was +5%)
+        (12.0, 7.0),    # +12% cap → floor +7%
+        (15.0, 10.0),   # +15% cap → floor +10%
     ]
 
     # ── Profit decay emergency — never give back profits ─────────────
