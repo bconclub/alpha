@@ -10,7 +10,6 @@ import {
   formatPercentage,
   formatCurrency,
   formatTimeAgo,
-  formatDate,
   getStrategyColor,
   getStrategyLabel,
   getStrategyBadgeVariant,
@@ -19,7 +18,7 @@ import {
   cn,
   getPnLColor,
 } from '@/lib/utils';
-import type { Strategy, Trade, SetupConfig, SignalState } from '@/lib/types';
+import type { Strategy, Trade, SetupConfig, SignalState, PairConfig } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,7 +26,6 @@ import type { Strategy, Trade, SetupConfig, SignalState } from '@/lib/types';
 
 const STRATEGIES: Strategy[] = ['scalp', 'options_scalp'];
 
-// All setup types from the engine
 const SETUP_TYPES = [
   'RSI_OVERRIDE',
   'BB_SQUEEZE',
@@ -45,13 +43,17 @@ const SETUP_TYPES = [
 // Signal groups for the monitor
 const CORE_SIGNALS = ['MOM_60S', 'VOL', 'RSI', 'BB'] as const;
 const BONUS_SIGNALS = ['MOM_5M', 'TCONT', 'VWAP', 'BBSQZ', 'LIQSWEEP', 'FVG', 'VOLDIV'] as const;
-const ALL_SIGNALS = [...CORE_SIGNALS, ...BONUS_SIGNALS] as const;
 
-const ACTIVE_PAIRS = ['BTC', 'ETH', 'XRP', 'SOL'] as const;
+const ALL_PAIR_BASES = ['BTC', 'ETH', 'XRP', 'SOL'] as const;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function extractBaseAsset(pair: string): string {
+  if (pair.includes('/')) return pair.split('/')[0];
+  return pair.replace(/USD.*$/, '');
+}
 
 function computeStats(trades: Trade[], strategy: Strategy) {
   const normalizedStrategy = strategy.toLowerCase();
@@ -61,7 +63,6 @@ function computeStats(trades: Trade[], strategy: Strategy) {
   const totalPnL = filtered.reduce((sum, t) => sum + t.pnl, 0);
   const avgPnL = filtered.length > 0 ? totalPnL / filtered.length : 0;
 
-  // Spot vs futures breakdown
   const spotTrades = filtered.filter((t) => t.position_type === 'spot');
   const futuresTrades = filtered.filter((t) => t.position_type !== 'spot');
   const spotPnL = spotTrades.reduce((sum, t) => sum + t.pnl, 0);
@@ -87,10 +88,6 @@ function computeStats(trades: Trade[], strategy: Strategy) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
 function computeSetupStats(trades: Trade[], setupType: string) {
   const filtered = trades.filter(
     (t) => t.status === 'closed' && t.setup_type?.toUpperCase() === setupType.toUpperCase(),
@@ -98,14 +95,25 @@ function computeSetupStats(trades: Trade[], setupType: string) {
   const wins = filtered.filter((t) => t.pnl > 0).length;
   const losses = filtered.filter((t) => t.pnl <= 0).length;
   const totalPnL = filtered.reduce((sum, t) => sum + t.pnl, 0);
-  const avgPnL = filtered.length > 0 ? totalPnL / filtered.length : 0;
+  const avgWin = wins > 0 ? filtered.filter(t => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / wins : 0;
+  const avgLoss = losses > 0 ? filtered.filter(t => t.pnl <= 0).reduce((s, t) => s + t.pnl, 0) / losses : 0;
   const winRate = filtered.length > 0 ? (wins / filtered.length) * 100 : 0;
 
-  return { totalTrades: filtered.length, wins, losses, totalPnL, avgPnL, winRate };
+  // Last 5 trades (W/L)
+  const sorted = [...filtered].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+  );
+  const last5 = sorted.slice(0, 5).map((t) => t.pnl > 0);
+
+  return { totalTrades: filtered.length, wins, losses, totalPnL, avgWin, avgLoss, winRate, last5 };
 }
 
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
 export default function StrategiesPage() {
-  const { trades, strategyLog, strategyPerformance, setupConfigs, signalStates } = useSupabase();
+  const { trades, strategyLog, strategyPerformance, setupConfigs, signalStates, pairConfigs } = useSupabase();
   const [activeTab, setActiveTab] = useState<Strategy>('scalp');
 
   const statsMap = useMemo(() => {
@@ -121,9 +129,7 @@ export default function StrategiesPage() {
     [trades, activeTab],
   );
 
-  const recentLogs = useMemo(() => strategyLog.slice(0, 20), [strategyLog]);
-
-  // Setup stats (computed from trades with setup_type)
+  // Setup stats
   const setupStats = useMemo(() => {
     const map: Record<string, ReturnType<typeof computeSetupStats>> = {};
     for (const st of SETUP_TYPES) {
@@ -132,7 +138,7 @@ export default function StrategiesPage() {
     return map;
   }, [trades]);
 
-  // Sort setups by P&L (worst to best)
+  // Sort setups by P&L ascending (worst first)
   const sortedSetups = useMemo(() => {
     return [...SETUP_TYPES].sort(
       (a, b) => setupStats[a].totalPnL - setupStats[b].totalPnL,
@@ -148,7 +154,7 @@ export default function StrategiesPage() {
     return map;
   }, [setupConfigs]);
 
-  // Signal state map: { pair: { signal_id: SignalState } }
+  // Signal state map: { pairBase: { signal_id: SignalState } }
   const signalMap = useMemo(() => {
     const map: Record<string, Record<string, SignalState>> = {};
     for (const s of signalStates) {
@@ -157,6 +163,42 @@ export default function StrategiesPage() {
     }
     return map;
   }, [signalStates]);
+
+  // Determine which pairs are active (have signal data + not disabled)
+  const disabledBases = useMemo(() => {
+    const disabled = new Set<string>();
+    for (const pc of pairConfigs) {
+      if (!pc.enabled) {
+        disabled.add(extractBaseAsset(pc.pair));
+      }
+    }
+    return disabled;
+  }, [pairConfigs]);
+
+  const activePairs = useMemo(() => {
+    return ALL_PAIR_BASES.filter(
+      (base) => !disabledBases.has(base) && signalMap[base] != null,
+    );
+  }, [disabledBases, signalMap]);
+
+  // Filter signal rows: only show signals that have data for at least one active pair
+  const visibleCoreSignals = useMemo(() => {
+    return CORE_SIGNALS.filter((sigId) =>
+      activePairs.some((p) => {
+        const s = signalMap[p]?.[sigId];
+        return s != null;
+      }),
+    );
+  }, [activePairs, signalMap]);
+
+  const visibleBonusSignals = useMemo(() => {
+    return BONUS_SIGNALS.filter((sigId) =>
+      activePairs.some((p) => {
+        const s = signalMap[p]?.[sigId];
+        return s != null;
+      }),
+    );
+  }, [activePairs, signalMap]);
 
   // Toggle setup enable/disable
   const handleSetupToggle = useCallback(async (setupType: string) => {
@@ -232,7 +274,6 @@ export default function StrategiesPage() {
                     {formatCurrency(stats.avgPnL)}
                   </dd>
                 </div>
-                {/* Spot vs Futures breakdown */}
                 <div>
                   <dt className="text-zinc-500">Spot P&L</dt>
                   <dd className={cn('font-medium font-mono text-xs', stats.spotPnL >= 0 ? 'text-blue-400' : 'text-red-400')}>
@@ -342,86 +383,46 @@ export default function StrategiesPage() {
       </div>
 
       {/* ------------------------------------------------------------------- */}
-      {/* Strategy Switch Log (timeline)                                       */}
-      {/* ------------------------------------------------------------------- */}
-      <div className="bg-card border border-zinc-800 rounded-xl p-6">
-        <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-6">
-          Strategy Switch Log
-        </h3>
-
-        {recentLogs.length === 0 ? (
-          <p className="text-sm text-zinc-500">No strategy switch events yet</p>
-        ) : (
-          <div className="relative">
-            <div className="absolute left-[7px] top-2 bottom-2 w-px bg-zinc-700" />
-
-            <ul className="space-y-6">
-              {recentLogs.map((entry) => (
-                <li key={entry.id} className="relative flex gap-4 pl-6">
-                  <span className="absolute left-0 top-1.5 h-3.5 w-3.5 rounded-full border-2 border-zinc-700 bg-zinc-900" />
-
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs text-zinc-500 mb-1">
-                      {formatDate(entry.timestamp)}
-                    </p>
-                    <div className="flex flex-wrap items-center gap-2 mb-1">
-                      <Badge variant="default">{entry.market_condition}</Badge>
-                      <Badge variant={getStrategyBadgeVariant(entry.strategy_selected)}>
-                        {getStrategyLabel(entry.strategy_selected)}
-                      </Badge>
-                    </div>
-                    <p className="text-sm text-zinc-300">{entry.reason}</p>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-
-      {/* ------------------------------------------------------------------- */}
       {/* Setup Control                                                        */}
       {/* ------------------------------------------------------------------- */}
       <div>
         <h2 className="text-lg font-semibold text-white mb-4">Setup Control</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {sortedSetups.map((setupType) => {
             const stats = setupStats[setupType];
             const config = setupConfigMap[setupType];
             const enabled = config?.enabled ?? true;
             const wr = stats.winRate;
 
-            // HOT/COLD badge
-            let badge: { label: string; variant: 'success' | 'danger' | 'warning' } | null = null;
-            if (stats.totalTrades >= 3 && wr >= 60) badge = { label: 'HOT', variant: 'success' };
-            else if (stats.totalTrades >= 3 && wr < 30) badge = { label: 'COLD', variant: 'danger' };
-
-            // BG tint based on profitability
-            const bgTint = stats.totalTrades > 0
-              ? stats.totalPnL >= 0
-                ? 'bg-emerald-400/[0.03]'
-                : 'bg-red-400/[0.03]'
-              : '';
+            // Background tint based on WR
+            const bgTint = stats.totalTrades === 0
+              ? ''
+              : wr > 50
+                ? 'bg-emerald-500/[0.06]'
+                : wr < 30
+                  ? 'bg-red-500/[0.06]'
+                  : '';
 
             return (
               <div
                 key={setupType}
                 className={cn(
-                  'border rounded-xl p-3 transition-all',
-                  enabled ? 'border-zinc-700' : 'border-zinc-800 opacity-50',
+                  'border rounded-xl p-4 transition-all',
+                  enabled ? 'border-zinc-700' : 'border-zinc-800 opacity-40',
                   bgTint,
                 )}
               >
-                {/* Header: name + badge + toggle */}
-                <div className="flex items-center justify-between mb-2">
+                {/* Header: name + toggle */}
+                <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-xs font-semibold text-white truncate">
+                    <span className="text-sm font-semibold text-white truncate">
                       {setupType.replace(/_/g, ' ')}
                     </span>
-                    {badge && (
-                      <Badge variant={badge.variant} className="text-[8px] px-1.5 py-0">
-                        {badge.label}
-                      </Badge>
+                    {stats.totalTrades >= 3 && wr >= 60 && (
+                      <Badge variant="success" className="text-[8px] px-1.5 py-0">HOT</Badge>
+                    )}
+                    {stats.totalTrades >= 3 && wr < 30 && (
+                      <Badge variant="danger" className="text-[8px] px-1.5 py-0">COLD</Badge>
                     )}
                   </div>
                   <button
@@ -440,37 +441,62 @@ export default function StrategiesPage() {
                   </button>
                 </div>
 
-                {/* Stats */}
-                <div className="grid grid-cols-3 gap-2 text-[10px]">
-                  <div>
-                    <span className="text-zinc-500">Trades</span>
-                    <div className="text-zinc-200 font-mono">{stats.totalTrades}</div>
-                  </div>
-                  <div>
-                    <span className="text-zinc-500">WR</span>
-                    <div className={cn(
-                      'font-mono',
-                      stats.totalTrades > 0 ? (wr >= 50 ? 'text-emerald-400' : 'text-red-400') : 'text-zinc-500',
-                    )}>
-                      {stats.totalTrades > 0 ? `${wr.toFixed(0)}%` : '---'}
+                {stats.totalTrades === 0 ? (
+                  <p className="text-xs text-zinc-600">No trades</p>
+                ) : (
+                  <>
+                    {/* Stats row */}
+                    <div className="grid grid-cols-3 gap-3 text-xs mb-3">
+                      <div>
+                        <span className="text-zinc-500 block text-[10px]">Trades</span>
+                        <div className="text-zinc-200 font-mono font-medium">{stats.totalTrades}</div>
+                      </div>
+                      <div>
+                        <span className="text-zinc-500 block text-[10px]">Win Rate</span>
+                        <div className={cn(
+                          'font-mono font-medium',
+                          wr >= 50 ? 'text-emerald-400' : 'text-red-400',
+                        )}>
+                          {wr.toFixed(0)}%
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-zinc-500 block text-[10px]">Net P&L</span>
+                        <div className={cn('font-mono font-medium', getPnLColor(stats.totalPnL))}>
+                          {formatPnL(stats.totalPnL)}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <span className="text-zinc-500">P&L</span>
-                    <div className={cn('font-mono', getPnLColor(stats.totalPnL))}>
-                      {stats.totalTrades > 0 ? formatPnL(stats.totalPnL) : '---'}
-                    </div>
-                  </div>
-                </div>
 
-                {/* Avg P&L */}
-                {stats.totalTrades > 0 && (
-                  <div className="mt-1.5 text-[10px]">
-                    <span className="text-zinc-500">Avg: </span>
-                    <span className={cn('font-mono', getPnLColor(stats.avgPnL))}>
-                      {formatCurrency(stats.avgPnL)}
-                    </span>
-                  </div>
+                    {/* Last 5 trades dots */}
+                    {stats.last5.length > 0 && (
+                      <div className="flex items-center gap-1 mb-2">
+                        <span className="text-[10px] text-zinc-500 mr-1">Last {stats.last5.length}:</span>
+                        {stats.last5.map((isWin, i) => (
+                          <span
+                            key={i}
+                            className={cn(
+                              'inline-block h-2.5 w-2.5 rounded-full',
+                              isWin
+                                ? 'bg-emerald-400 shadow-[0_0_3px_rgba(52,211,153,0.4)]'
+                                : 'bg-red-400 shadow-[0_0_3px_rgba(248,113,113,0.4)]',
+                            )}
+                            title={isWin ? 'Win' : 'Loss'}
+                          />
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Avg win / avg loss */}
+                    <div className="flex gap-3 text-[10px] font-mono">
+                      <span className="text-emerald-400">
+                        Avg W: {formatCurrency(stats.avgWin)}
+                      </span>
+                      <span className="text-red-400">
+                        Avg L: {formatCurrency(stats.avgLoss)}
+                      </span>
+                    </div>
+                  </>
                 )}
               </div>
             );
@@ -487,6 +513,10 @@ export default function StrategiesPage() {
           <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-8 text-center text-sm text-zinc-500">
             No signal data yet — engine will publish signals when scanning
           </div>
+        ) : activePairs.length === 0 ? (
+          <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-8 text-center text-sm text-zinc-500">
+            No active pairs with signal data
+          </div>
         ) : (
           <div className="bg-[#0d1117] border border-zinc-800 rounded-xl overflow-hidden">
             <div className="overflow-x-auto">
@@ -496,7 +526,7 @@ export default function StrategiesPage() {
                     <th className="px-3 py-2.5 text-left text-[10px] font-medium uppercase tracking-wider text-zinc-500 sticky left-0 bg-zinc-900/50 z-10">
                       Signal
                     </th>
-                    {ACTIVE_PAIRS.map((pair) => (
+                    {activePairs.map((pair) => (
                       <th
                         key={pair}
                         className="px-3 py-2.5 text-center text-[10px] font-medium uppercase tracking-wider text-zinc-500"
@@ -507,30 +537,38 @@ export default function StrategiesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {/* Core signals header */}
-                  <tr>
-                    <td
-                      colSpan={ACTIVE_PAIRS.length + 1}
-                      className="px-3 py-1.5 text-[9px] font-semibold text-zinc-500 uppercase tracking-widest bg-zinc-900/30"
-                    >
-                      Core (4/4 gate)
-                    </td>
-                  </tr>
-                  {CORE_SIGNALS.map((signalId) => (
-                    <SignalRow key={signalId} signalId={signalId} pairs={ACTIVE_PAIRS} signalMap={signalMap} />
-                  ))}
-                  {/* Bonus signals header */}
-                  <tr>
-                    <td
-                      colSpan={ACTIVE_PAIRS.length + 1}
-                      className="px-3 py-1.5 text-[9px] font-semibold text-zinc-500 uppercase tracking-widest bg-zinc-900/30"
-                    >
-                      Bonus (7 confirmation)
-                    </td>
-                  </tr>
-                  {BONUS_SIGNALS.map((signalId) => (
-                    <SignalRow key={signalId} signalId={signalId} pairs={ACTIVE_PAIRS} signalMap={signalMap} />
-                  ))}
+                  {/* Core signals */}
+                  {visibleCoreSignals.length > 0 && (
+                    <>
+                      <tr>
+                        <td
+                          colSpan={activePairs.length + 1}
+                          className="px-3 py-1.5 text-[9px] font-semibold text-zinc-500 uppercase tracking-widest bg-zinc-900/30"
+                        >
+                          Core 4
+                        </td>
+                      </tr>
+                      {visibleCoreSignals.map((signalId) => (
+                        <SignalRow key={signalId} signalId={signalId} pairs={activePairs} signalMap={signalMap} />
+                      ))}
+                    </>
+                  )}
+                  {/* Bonus signals */}
+                  {visibleBonusSignals.length > 0 && (
+                    <>
+                      <tr>
+                        <td
+                          colSpan={activePairs.length + 1}
+                          className="px-3 py-1.5 text-[9px] font-semibold text-zinc-500 uppercase tracking-widest bg-zinc-900/30"
+                        >
+                          Bonus
+                        </td>
+                      </tr>
+                      {visibleBonusSignals.map((signalId) => (
+                        <SignalRow key={signalId} signalId={signalId} pairs={activePairs} signalMap={signalMap} />
+                      ))}
+                    </>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -551,7 +589,7 @@ function SignalRow({
   signalMap,
 }: {
   signalId: string;
-  pairs: readonly string[];
+  pairs: readonly string[] | string[];
   signalMap: Record<string, Record<string, SignalState>>;
 }) {
   return (
@@ -563,18 +601,16 @@ function SignalRow({
         const signal = signalMap[pair]?.[signalId];
         if (!signal) {
           return (
-            <td key={pair} className="px-3 py-2 text-center text-zinc-600">
+            <td key={pair} className="px-3 py-2 text-center text-zinc-700">
               —
             </td>
           );
         }
 
         const dirArrow =
-          signal.direction === 'bull' ? '↑' :
-          signal.direction === 'bear' ? '↓' : '—';
-        const dirColor =
-          signal.direction === 'bull' ? 'text-emerald-400' :
-          signal.direction === 'bear' ? 'text-red-400' : 'text-zinc-500';
+          signal.direction === 'bull' ? '\u2191' :
+          signal.direction === 'bear' ? '\u2193' : '';
+        const firing = signal.firing;
 
         return (
           <td key={pair} className="px-3 py-2 text-center">
@@ -583,15 +619,26 @@ function SignalRow({
               <span
                 className={cn(
                   'inline-block h-2 w-2 rounded-full',
-                  signal.firing ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]' : 'bg-zinc-700',
+                  firing ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]' : 'bg-zinc-700',
                 )}
               />
               {/* Value */}
-              <span className="font-mono text-zinc-300 text-[10px]">
+              <span className={cn(
+                'font-mono text-[10px]',
+                firing ? 'text-emerald-300' : 'text-zinc-600',
+              )}>
                 {signal.value != null ? signal.value.toFixed(2) : '—'}
               </span>
               {/* Direction arrow */}
-              <span className={cn('text-[10px]', dirColor)}>{dirArrow}</span>
+              {dirArrow && (
+                <span className={cn(
+                  'text-[10px]',
+                  signal.direction === 'bull' ? 'text-emerald-400' :
+                  signal.direction === 'bear' ? 'text-red-400' : 'text-zinc-500',
+                )}>
+                  {dirArrow}
+                </span>
+              )}
             </div>
           </td>
         );
