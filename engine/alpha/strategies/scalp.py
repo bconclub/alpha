@@ -207,11 +207,11 @@ class ScalpStrategy(BaseStrategy):
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
 
     # ── Phase 2: move SL to entry when profitable ─────────────────────
-    MOVE_SL_TO_ENTRY_PCT = 0.30       # breakeven only after trail (0.25%) has chance to catch
+    MOVE_SL_TO_ENTRY_PCT = 0.40       # breakeven at +0.40% peak — let trade breathe
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
-    TRAILING_ACTIVATE_PCT = 0.25      # activate at +0.25% price = +5% capital at 20x (was 0.30)
-    TRAILING_DISTANCE_PCT = 0.10      # initial trail: 0.10% behind peak (was 0.15)
+    TRAILING_ACTIVATE_PCT = 0.40      # activate at +0.40% price = +8% capital at 20x
+    TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak
 
     # ── Hard TP safety net (only if NOT trailing — ratchets protect runners) ──
     HARD_TP_CAPITAL_PCT = 10.0        # 10% capital gain → exit only if trail not active
@@ -220,10 +220,10 @@ class ScalpStrategy(BaseStrategy):
     # Once capital PnL reaches threshold, floor locks in. Cannot be lowered.
     # If current capital PnL drops below floor → EXIT IMMEDIATELY.
     PROFIT_RATCHETS: list[tuple[float, float]] = [
-        (6.0,  0.0),    # +6% cap → floor breakeven
-        (10.0, 4.0),    # +10% cap → floor +4%
-        (15.0, 8.0),    # +15% cap → floor +8%
-        (20.0, 12.0),   # +20% cap → floor +12%
+        (8.0,  0.0),    # +8% cap → floor breakeven
+        (12.0, 5.0),    # +12% cap → floor +5%
+        (18.0, 10.0),   # +18% cap → floor +10%
+        (25.0, 15.0),   # +25% cap → floor +15%
     ]
 
     # ── Profit decay emergency — never give back profits ─────────────
@@ -236,12 +236,12 @@ class ScalpStrategy(BaseStrategy):
     # ── Signal reversal (phase 2+ only) ────────────────────────────────
     REVERSAL_MIN_PROFIT_PCT = 0.30
 
-    # ── Dynamic trailing tiers — TIGHT, lock profits fast ─────────────
+    # ── Dynamic trailing tiers — WIDER, let trades ride ───────────────
     TRAIL_TIERS: list[tuple[float, float]] = [
-        (0.25, 0.10),   # +0.25% price (+5% cap): trail 0.10% (lock +0.15% = +3% cap)
-        (0.50, 0.15),   # +0.50% price (+10% cap): trail 0.15% (lock +0.35% = +7% cap)
-        (1.00, 0.20),   # +1.00% price (+20% cap): trail 0.20% (lock +0.80% = +16% cap)
-        (2.00, 0.30),   # +2.00% price (+40% cap): trail 0.30% (lock +1.70% = +34% cap)
+        (0.40, 0.15),   # +0.40% price (+8% cap): trail 0.15% (lock +0.25% = +5% cap)
+        (0.60, 0.20),   # +0.60% price (+12% cap): trail 0.20% (lock +0.40% = +8% cap)
+        (1.00, 0.25),   # +1.00% price (+20% cap): trail 0.25% (lock +0.75% = +15% cap)
+        (2.00, 0.35),   # +2.00% price (+40% cap): trail 0.35% (lock +1.65% = +33% cap)
     ]
 
     # ── Signal reversal thresholds ──────────────────────────────────────
