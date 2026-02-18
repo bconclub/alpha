@@ -15,6 +15,8 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
   'XRP/USD:USD': 1.0,
 };
 
+const TRAIL_ACTIVATION_PCT = 0.30; // must match engine TRAILING_ACTIVATE_PCT
+
 function extractBaseAsset(pair: string): string {
   if (pair.includes('/')) return pair.split('/')[0];
   return pair.replace(/USD.*$/, '');
@@ -36,10 +38,88 @@ interface PositionDisplay {
   duration: string;
   trailActive: boolean;
   trailStopPrice: number | null;
+  peakPnlPct: number | null;     // highest price P&L % reached
   slPrice: number | null;
   tpPrice: number | null;
   exchange: string;
 }
+
+// ---------------------------------------------------------------------------
+// Trail Progress Bar
+// ---------------------------------------------------------------------------
+
+function TrailProgressBar({
+  peakPct,
+  currentPct,
+  trailActive,
+  trailStopPrice,
+}: {
+  peakPct: number;
+  currentPct: number;
+  trailActive: boolean;
+  trailStopPrice: number | null;
+}) {
+  if (trailActive) {
+    return (
+      <div className="flex items-center gap-2 w-full">
+        <div className="flex-1 max-w-[120px] md:max-w-[160px]">
+          <div className="h-2 rounded-full bg-[#00c853]/30 overflow-hidden">
+            <div className="h-full rounded-full bg-[#00c853] animate-pulse" style={{ width: '100%' }} />
+          </div>
+        </div>
+        <span className="text-[10px] font-mono text-[#00c853] font-semibold whitespace-nowrap flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse inline-block" />
+          TRAILING
+          {trailStopPrice != null && (
+            <span className="text-zinc-400 font-normal ml-1">
+              stop@${formatNumber(trailStopPrice)}
+            </span>
+          )}
+        </span>
+      </div>
+    );
+  }
+
+  // Progress toward trail activation
+  const progress = Math.min(Math.max((peakPct / TRAIL_ACTIVATION_PCT) * 100, 0), 100);
+
+  // Color gradient based on progress
+  let barColor: string;
+  let textColor: string;
+  if (progress >= 66) {
+    barColor = 'bg-[#00c853]';
+    textColor = 'text-[#00c853]';
+  } else if (progress >= 33) {
+    barColor = 'bg-amber-400';
+    textColor = 'text-amber-400';
+  } else {
+    barColor = 'bg-[#ff1744]';
+    textColor = 'text-[#ff1744]';
+  }
+
+  // Show peak or current, whichever is higher (peak should always be >= current when positive)
+  const displayPct = Math.max(peakPct, currentPct, 0);
+
+  return (
+    <div className="flex items-center gap-2 w-full">
+      <div className="flex-1 max-w-[120px] md:max-w-[160px]">
+        <div className="h-2 rounded-full bg-zinc-800 overflow-hidden">
+          <div
+            className={cn('h-full rounded-full transition-all duration-500', barColor)}
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </div>
+      <span className={cn('text-[10px] font-mono whitespace-nowrap', textColor)}>
+        {displayPct.toFixed(2)}/{TRAIL_ACTIVATION_PCT.toFixed(2)}%
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Component
+// ---------------------------------------------------------------------------
 
 export function LivePositions() {
   const { openPositions, strategyLog } = useSupabase();
@@ -171,6 +251,9 @@ export function LivePositions() {
         }
       }
 
+      // Peak P&L: use bot's tracked value, fall back to current (which is a lower bound)
+      const peakPnlPct = pos.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
+
       return {
         id: pos.id,
         pair: pos.pair,
@@ -187,6 +270,7 @@ export function LivePositions() {
         duration: durationSince(pos.opened_at),
         trailActive,
         trailStopPrice,
+        peakPnlPct,
         slPrice: pos.stop_loss ?? null,
         tpPrice: pos.take_profit ?? null,
         exchange: pos.exchange,
@@ -314,16 +398,19 @@ export function LivePositions() {
                 <span className="text-xs text-zinc-500">Calculating...</span>
               )}
 
-              {/* Row 3: Trail info + position size */}
-              <div className="flex items-center gap-3 mt-1.5 text-[10px] font-mono text-zinc-500">
-                {pos.trailActive && pos.trailStopPrice != null && (
-                  <span>
-                    trail stop: <span className="text-zinc-300">${formatNumber(pos.trailStopPrice)}</span>
-                  </span>
+              {/* Row 3: Trail progress bar + position size */}
+              <div className="flex items-center gap-3 mt-1.5">
+                {pos.pricePnlPct != null && (
+                  <TrailProgressBar
+                    peakPct={pos.peakPnlPct ?? 0}
+                    currentPct={pos.pricePnlPct}
+                    trailActive={pos.trailActive}
+                    trailStopPrice={pos.trailStopPrice}
+                  />
                 )}
-                <span>
+                <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap shrink-0">
                   {pos.contracts}{pos.exchange === 'delta' ? ' ct' : ''}
-                  {pos.collateral != null && ` \u00b7 $${pos.collateral.toFixed(2)} collateral`}
+                  {pos.collateral != null && ` \u00b7 $${pos.collateral.toFixed(2)}`}
                 </span>
               </div>
             </div>
