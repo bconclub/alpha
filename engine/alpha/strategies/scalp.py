@@ -1096,6 +1096,15 @@ class ScalpStrategy(BaseStrategy):
         # Direction is locked by momentum
         mom_direction = "long" if momentum_60s > 0 else "short"
 
+        # ── MOMENTUM STRENGTH TIERS ─────────────────────────────────────
+        mom_abs = abs(momentum_60s)
+        if mom_abs >= 0.20:
+            mom_strength = "STRONG"
+        elif mom_abs >= 0.12:
+            mom_strength = "MODERATE"
+        else:
+            mom_strength = "WEAK"
+
         # ── SIGNAL GATE: always require 3/4 signals ─────────────────────
         # v6.1: removed 15m trend soft weight that was letting 2/4 entries
         # through for "trend-aligned" trades. 2/4 entries are coin flips at
@@ -1103,10 +1112,20 @@ class ScalpStrategy(BaseStrategy):
         required_long = 3
         required_short = 3
 
+        # Weak momentum (0.08-0.12%) = need more confirmation → 4/4
+        if mom_strength == "WEAK":
+            required_long = max(required_long, 4)
+            required_short = max(required_short, 4)
+
         # ── Post-streak gate: first trade after streak pause needs 3/4 ─────
         if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
             required_long = max(required_long, self.POST_STREAK_STRENGTH)
             required_short = max(required_short, self.POST_STREAK_STRENGTH)
+
+        self.logger.debug(
+            "[%s] MOM %s: %+.3f%% dir=%s req=%d/4",
+            self.pair, mom_strength, momentum_60s, mom_direction, required_long,
+        )
 
         # ── Count bullish and bearish signals ──────────────────────────────
         bull_signals: list[str] = []
@@ -1337,6 +1356,18 @@ class ScalpStrategy(BaseStrategy):
             use_limit = "MOM" not in bear_signals[0]
             self._last_signal_breakdown = _build_breakdown()
             return ("short", reason, use_limit, len(bear_signals))
+
+        # ── Log direction-blocked entries ────────────────────────────────
+        if len(bull_signals) >= required_long and mom_direction != "long":
+            self.logger.info(
+                "[%s] DIRECTION BLOCK: %d bull signals but mom is %+.3f%% (%s)",
+                self.pair, len(bull_signals), momentum_60s, mom_direction,
+            )
+        if len(bear_signals) >= required_short and mom_direction != "short":
+            self.logger.info(
+                "[%s] DIRECTION BLOCK: %d bear signals but mom is %+.3f%% (%s)",
+                self.pair, len(bear_signals), momentum_60s, mom_direction,
+            )
 
         self._last_signal_breakdown = _build_breakdown()
         return None
