@@ -207,10 +207,10 @@ class ScalpStrategy(BaseStrategy):
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
 
     # ── Phase 2: move SL to entry when profitable ─────────────────────
-    MOVE_SL_TO_ENTRY_PCT = 0.40       # breakeven at +0.40% peak — let trade breathe
+    MOVE_SL_TO_ENTRY_PCT = 0.30       # breakeven matches trail activation
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
-    TRAILING_ACTIVATE_PCT = 0.40      # activate at +0.40% price = +8% capital at 20x
+    TRAILING_ACTIVATE_PCT = 0.30      # activate at +0.30% price = +6% capital at 20x
     TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak
 
     # ── Hard TP safety net (only if NOT trailing — ratchets protect runners) ──
