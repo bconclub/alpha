@@ -231,7 +231,7 @@ class ScalpStrategy(BaseStrategy):
     PROFIT_DECAY_EMERGENCY_RATIO = 0.40     # exit if current < peak × 0.40 (lost 60%+)
 
     # ── Fee-aware minimum — don't exit tiny profits ───────────────────
-    FEE_MINIMUM_GROSS_USD = 0.10      # skip exit unless gross > $0.10 (except SL/ratchet)
+    FEE_MINIMUM_GROSS_USD = 0.10      # skip discretionary exit unless gross > $0.10 (protective exits always execute)
 
     # ── Signal reversal (phase 2+ only) ────────────────────────────────
     REVERSAL_MIN_PROFIT_PCT = 0.30
@@ -1817,10 +1817,12 @@ class ScalpStrategy(BaseStrategy):
         ratchet floor, hard TP, or safety exit.
         """
         # Fee-aware minimum — skip tiny exits that'd be eaten by fees
-        _FORCE_EXIT_TYPES = {"SL", "PROFIT_LOCK", "HARD_TP_10PCT", "SAFETY",
-                             "WS-SL", "WS-PROFIT_LOCK", "WS-HARD_TP_10PCT", "WS-SAFETY"}
+        # Fee minimum only applies to discretionary exits, NOT protective exits.
+        # TRAIL/BREAKEVEN/RATCHET protect profit — blocking them turns winners into losers.
+        _PROTECTED_EXIT_TYPES = {"SL", "TRAIL", "BREAKEVEN", "PROFIT_LOCK",
+                                 "HARD_TP", "HARD_TP_10PCT", "RATCHET", "SAFETY"}
         clean_type = exit_type.replace("WS-", "")
-        if clean_type not in {"SL", "PROFIT_LOCK", "HARD_TP_10PCT", "SAFETY"} and self.entry_price > 0:
+        if clean_type not in _PROTECTED_EXIT_TYPES and self.entry_price > 0:
             if self.is_futures:
                 from alpha.trade_executor import DELTA_CONTRACT_SIZE
                 contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0.01)
