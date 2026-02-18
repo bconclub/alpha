@@ -115,6 +115,7 @@ class AlertManager:
         msg = (
             f"{LINE}\n"
             f"\U0001f7e2 <b>ALPHA v{engine_ver}</b>\n"
+            f"\U0001f4b0 <code>{format_usd(capital)}</code>\n"
             f"\u26a1 <code>{pairs_str}</code>\n"
             f"\U0001f4aa <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
             f"\U0001f552 <code>{now}</code>\n"
