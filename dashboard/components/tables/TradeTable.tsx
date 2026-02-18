@@ -1134,25 +1134,41 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         </td>
 
                         {/* Trail Info */}
-                        <td className="whitespace-nowrap px-4 py-3 text-xs">
+                        <td className="px-4 py-3 text-xs">
                           {trade.status === 'open' ? (
                             trade.position_state === 'trailing' ? (
-                              <span className="text-emerald-400">
-                                <span className="mr-1">&#x1F7E2;</span>
-                                {trade.peak_pnl != null ? `+${trade.peak_pnl.toFixed(2)}% peak` : ''}
-                                {trade.trail_stop_price != null ? (
-                                  <span className="text-zinc-400"> | stop @ {formatPrice(trade.trail_stop_price)}</span>
-                                ) : null}
-                              </span>
-                            ) : trade.position_state === 'holding' ? (
-                              <span className="text-zinc-400">
-                                <span className="mr-1">&#x23F3;</span>
-                                need +0.25%
-                                {trade.current_pnl != null ? (
-                                  <span className="text-zinc-500"> (now {trade.current_pnl >= 0 ? '+' : ''}{trade.current_pnl.toFixed(2)}%)</span>
-                                ) : null}
-                              </span>
-                            ) : (
+                              <div className="flex items-center gap-1.5 min-w-[120px]">
+                                <div className="flex-1 max-w-[100px]">
+                                  <div className="h-1.5 rounded-full bg-emerald-400/30 overflow-hidden">
+                                    <div className="h-full rounded-full bg-emerald-400 animate-pulse" style={{ width: '100%' }} />
+                                  </div>
+                                </div>
+                                <span className="text-[10px] font-mono text-emerald-400 font-semibold whitespace-nowrap">
+                                  TRAILING
+                                </span>
+                              </div>
+                            ) : trade.position_state === 'holding' || trade.status === 'open' ? (() => {
+                              const TRAIL_ACT = 0.30;
+                              const peak = Math.max(trade.peak_pnl ?? 0, trade.current_pnl ?? 0, 0);
+                              const progress = Math.min((peak / TRAIL_ACT) * 100, 100);
+                              const barColor = progress >= 66 ? 'bg-emerald-400' : progress >= 33 ? 'bg-amber-400' : 'bg-red-400';
+                              const txtColor = progress >= 66 ? 'text-emerald-400' : progress >= 33 ? 'text-amber-400' : 'text-red-400';
+                              return (
+                                <div className="flex items-center gap-1.5 min-w-[120px]">
+                                  <div className="flex-1 max-w-[100px]">
+                                    <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                                      <div
+                                        className={cn('h-full rounded-full transition-all duration-500', barColor)}
+                                        style={{ width: `${progress}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                  <span className={cn('text-[10px] font-mono whitespace-nowrap', txtColor)}>
+                                    {peak.toFixed(2)}/{TRAIL_ACT.toFixed(2)}%
+                                  </span>
+                                </div>
+                              );
+                            })() : (
                               <span className="text-zinc-600">&mdash;</span>
                             )
                           ) : (() => {
