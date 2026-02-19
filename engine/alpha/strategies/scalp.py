@@ -1247,6 +1247,37 @@ class ScalpStrategy(BaseStrategy):
         elif self._market_regime == "TRENDING_DOWN":
             required_long = max(required_long, 4)  # longing against trend = 4/4
 
+        # SIDEWAYS + WEAK momentum = skip entirely (range-bound needs conviction)
+        if self._market_regime == "SIDEWAYS" and mom_strength == "WEAK":
+            self.logger.info(
+                "[%s] SIDEWAYS + WEAK mom (%+.3f%%) — skipping entry",
+                self.pair, momentum_60s,
+            )
+            self._last_signal_breakdown = {
+                "bull_count": 0, "bear_count": 0,
+                "bull_signals": [], "bear_signals": [],
+                "bull_mom": False, "bull_vol": False, "bull_rsi": False, "bull_bb": False,
+                "bear_mom": False, "bear_vol": False, "bear_rsi": False, "bear_bb": False,
+            }
+            return None
+
+        # WEAK momentum counter to 15m trend = skip (don't fight the bigger picture)
+        if mom_strength == "WEAK" and (
+            (mom_direction == "long" and trend_15m == "bearish")
+            or (mom_direction == "short" and trend_15m == "bullish")
+        ):
+            self.logger.info(
+                "[%s] WEAK mom %s counter-trend (15m=%s) — skipping entry",
+                self.pair, mom_direction, trend_15m,
+            )
+            self._last_signal_breakdown = {
+                "bull_count": 0, "bear_count": 0,
+                "bull_signals": [], "bear_signals": [],
+                "bull_mom": False, "bull_vol": False, "bull_rsi": False, "bull_bb": False,
+                "bear_mom": False, "bear_vol": False, "bear_rsi": False, "bear_bb": False,
+            }
+            return None
+
         # ── Post-streak gate: first trade after streak pause needs 3/4 ─────
         if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
             required_long = max(required_long, self.POST_STREAK_STRENGTH)
