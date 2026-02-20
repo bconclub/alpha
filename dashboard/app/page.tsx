@@ -6,7 +6,6 @@ import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { TriggerProximity } from '@/components/dashboard/TriggerProximity';
 import { OptionsTracker } from '@/components/dashboard/OptionsTracker';
 import { LivePositions } from '@/components/dashboard/LivePositions';
-import { OpenPositions } from '@/components/dashboard/OpenPositions';
 import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
 
 function ConnectionBanner() {
@@ -68,10 +67,7 @@ export default function DashboardPage() {
       {/* 4. Options Tracker — BTC + ETH options signal state */}
       <OptionsTracker />
 
-      {/* 5. Open Positions */}
-      <OpenPositions />
-
-      {/* 6. Performance — full width, collapsible */}
+      {/* 5. Performance — full width, collapsible */}
       <PerformancePanel />
     </div>
   );

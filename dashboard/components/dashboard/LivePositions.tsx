@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { useLivePrices } from '@/hooks/useLivePrices';
 import { getSupabase } from '@/lib/supabase';
-import { formatNumber, formatCurrency, cn } from '@/lib/utils';
+import { formatNumber, formatCurrency, formatPrice, cn } from '@/lib/utils';
 
 // Delta contract sizes (must match engine)
 const DELTA_CONTRACT_SIZE: Record<string, number> = {
@@ -20,6 +20,18 @@ const TRAIL_ACTIVATION_PCT = 0.30; // must match engine TRAILING_ACTIVATE_PCT
 function extractBaseAsset(pair: string): string {
   if (pair.includes('/')) return pair.split('/')[0];
   return pair.replace(/USD.*$/, '');
+}
+
+/** Format a price with 4 decimals for cheap assets (XRP), 2 for the rest */
+function fmtPrice(value: number): string {
+  const decimals = Math.abs(value) < 10 ? 4 : 2;
+  return formatNumber(value, decimals);
+}
+
+/** Format a dollar P&L with 4 decimals when the absolute value is small */
+function fmtPnl(value: number): string {
+  const decimals = Math.abs(value) < 10 ? 4 : 2;
+  return `$${formatNumber(Math.abs(value), decimals)}`;
 }
 
 interface PositionDisplay {
@@ -72,7 +84,7 @@ function TrailProgressBar({
           TRAILING
           {trailStopPrice != null && (
             <span className="text-zinc-400 font-normal ml-1">
-              stop@${formatNumber(trailStopPrice)}
+              stop@${fmtPrice(trailStopPrice)}
             </span>
           )}
         </span>
@@ -372,7 +384,7 @@ export function LivePositions() {
                   <div>
                     <div className="text-[9px] text-zinc-500 uppercase">P&L</div>
                     <div className={cn('font-bold', pnlColor)}>
-                      {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : ''}${formatCurrency(pos.pnlUsd)}` : '\u2014'}
+                      {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : '-'}${fmtPnl(pos.pnlUsd)}` : '\u2014'}
                     </div>
                   </div>
                   <div>
@@ -384,13 +396,13 @@ export function LivePositions() {
                   <div>
                     <div className="text-[9px] text-zinc-500 uppercase">Entry &rarr; Now</div>
                     <div className="text-zinc-300">
-                      ${formatNumber(pos.entryPrice)} &rarr; ${pos.currentPrice != null ? formatNumber(pos.currentPrice) : '...'}
+                      ${fmtPrice(pos.entryPrice)} &rarr; ${pos.currentPrice != null ? fmtPrice(pos.currentPrice) : '...'}
                     </div>
                   </div>
                   <div>
                     <div className="text-[9px] text-zinc-500 uppercase">Price Move</div>
                     <div className={cn(pnlColor)}>
-                      {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(3)}%
+                      {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(pos.entryPrice < 10 ? 4 : 3)}%
                     </div>
                   </div>
                 </div>
@@ -410,7 +422,7 @@ export function LivePositions() {
                 )}
                 <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap shrink-0">
                   {pos.contracts}{pos.exchange === 'delta' ? ' ct' : ''}
-                  {pos.collateral != null && ` \u00b7 $${pos.collateral.toFixed(2)}`}
+                  {pos.collateral != null && ` \u00b7 $${pos.collateral < 10 ? pos.collateral.toFixed(4) : pos.collateral.toFixed(2)}`}
                 </span>
               </div>
             </div>
