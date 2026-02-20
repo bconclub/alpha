@@ -105,6 +105,7 @@ interface SupabaseContextValue {
   dailyPnL: DailyPnL[];
   strategyPerformance: StrategyPerformance[];
   activityFeed: ActivityEvent[];
+  optionsLog: ActivityLogRow[];
   refreshViews: () => void;
   // Control Panel
   pairConfigs: PairConfig[];
@@ -129,6 +130,7 @@ const EMPTY_CONTEXT: SupabaseContextValue = {
   dailyPnL: [],
   strategyPerformance: [],
   activityFeed: [],
+  optionsLog: [],
   refreshViews: () => {},
   pairConfigs: [],
   setupConfigs: [],
@@ -172,6 +174,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
   const [isConnected, setIsConnected] = useState(false);
   const [exchangeFilter, setExchangeFilter] = useState<ExchangeFilter>('all');
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
+  const [optionsLog, setOptionsLog] = useState<ActivityLogRow[]>([]);
 
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
   const [pnlByExchange, setPnlByExchange] = useState<PnLByExchange[]>([]);
@@ -352,6 +355,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
           setBotStatus(normalizeBotStatus(botStatusRes.data[0]));
         }
         setStrategyLog(mergedLogs);
+        setOptionsLog(activityRows.filter(r => r.event_type.startsWith('options_')));
         buildInitialFeed(tradeData, activityRows);
       } catch (err) {
         console.error('[Alpha] fetchInitialData failed:', err);
@@ -440,6 +444,10 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_log' }, (payload) => {
         const row = payload.new as ActivityLogRow;
+        // Update options log (keep last 50 options events)
+        if (row.event_type.startsWith('options_')) {
+          setOptionsLog((prev) => [row, ...prev].slice(0, 50));
+        }
         const eventType = (['options_entry', 'options_skip', 'options_exit', 'risk_alert'].includes(row.event_type)
           ? row.event_type
           : 'options_skip') as ActivityEventType;
@@ -494,6 +502,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       dailyPnL,
       strategyPerformance,
       activityFeed,
+      optionsLog,
       refreshViews: fetchViews,
       pairConfigs,
       setupConfigs,
@@ -503,7 +512,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       trades, recentTrades, botStatus, strategyLog, isConnected,
       exchangeFilter, filteredTrades,
       openPositions, pnlByExchange, futuresPositions, dailyPnL, strategyPerformance,
-      activityFeed, fetchViews,
+      activityFeed, optionsLog, fetchViews,
       pairConfigs, setupConfigs, signalStates,
     ],
   );
