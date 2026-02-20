@@ -893,7 +893,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               entryPrice={posDisplay.entryPrice}
                             />
                             <div className="w-full mt-1">
-                              <div className="max-w-[200px]">
+                              <div className="max-w-[240px]">
                                 <PositionRangeBar pos={posDisplay} />
                               </div>
                             </div>
@@ -1241,14 +1241,14 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             if (posDisplay) {
                               const posState = getPositionState(posDisplay);
                               return (
-                                <div className="min-w-[160px] space-y-1">
+                                <div className="min-w-[140px] space-y-1">
                                   <StateBadge
                                     state={posState}
                                     trailStopPrice={posDisplay.trailStopPrice}
                                     entryPrice={posDisplay.entryPrice}
                                   />
-                                  <div className="max-w-[180px]">
-                                    <PositionRangeBar pos={posDisplay} />
+                                  <div className="w-[140px]">
+                                    <PositionRangeBar pos={posDisplay} compact />
                                   </div>
                                 </div>
                               );

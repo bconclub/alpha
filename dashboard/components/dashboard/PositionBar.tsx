@@ -138,7 +138,7 @@ export function StateBadge({ state, trailStopPrice }: {
 // Position Range Bar (SL <- Entry -> Peak/TP)
 // ---------------------------------------------------------------------------
 
-export function PositionRangeBar({ pos }: { pos: PositionDisplay }) {
+export function PositionRangeBar({ pos, compact = false }: { pos: PositionDisplay; compact?: boolean }) {
   const pnl = pos.pricePnlPct ?? 0;
   const entry = pos.entryPrice;
   const current = pos.currentPrice;
@@ -234,26 +234,46 @@ export function PositionRangeBar({ pos }: { pos: PositionDisplay }) {
       </div>
 
       {/* Labels below bar */}
-      <div className="relative h-4 mt-0.5">
-        <span className="absolute text-[10px] font-mono text-[#ff1744]/70" style={{ left: 0 }}>
-          SL ${fmtPrice(slPrice)}
-        </span>
-        <span
-          className="absolute text-[10px] font-mono text-zinc-500 -translate-x-1/2"
-          style={{ left: `${entryPos}%` }}
-        >
-          Entry
-        </span>
-        {pos.trailActive && pos.trailStopPrice != null ? (
-          <span className="absolute right-0 text-[10px] font-mono text-[#ffd600]/70">
-            Trail ${fmtPrice(pos.trailStopPrice)}
+      {compact ? (
+        <div className="flex justify-between mt-0.5">
+          <span className="text-[9px] font-mono text-[#ff1744]/70 leading-none">
+            SL
           </span>
-        ) : (
-          <span className="absolute right-0 text-[10px] font-mono text-zinc-600">
-            {peak > 0 ? `Peak +${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+          <span className="text-[9px] font-mono text-zinc-500 leading-none">
+            Entry
           </span>
-        )}
-      </div>
+          {pos.trailActive && pos.trailStopPrice != null ? (
+            <span className="text-[9px] font-mono text-[#ffd600]/70 leading-none">
+              Trail
+            </span>
+          ) : (
+            <span className="text-[9px] font-mono text-zinc-600 leading-none">
+              {peak > 0 ? `+${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="relative h-4 mt-0.5">
+          <span className="absolute text-[10px] font-mono text-[#ff1744]/70" style={{ left: 0 }}>
+            SL ${fmtPrice(slPrice)}
+          </span>
+          <span
+            className="absolute text-[10px] font-mono text-zinc-500 -translate-x-1/2"
+            style={{ left: `${entryPos}%` }}
+          >
+            Entry
+          </span>
+          {pos.trailActive && pos.trailStopPrice != null ? (
+            <span className="absolute right-0 text-[10px] font-mono text-[#ffd600]/70">
+              Trail ${fmtPrice(pos.trailStopPrice)}
+            </span>
+          ) : (
+            <span className="absolute right-0 text-[10px] font-mono text-zinc-600">
+              {peak > 0 ? `Peak +${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
