@@ -257,6 +257,31 @@ export interface ActivityLogRow {
 
 export type ActivityFilter = 'all' | 'trades' | 'options';
 
+/** options_state row from Supabase (engine upserts every ~30s per pair) */
+export interface OptionsState {
+  pair: string;
+  spot_price: number | null;
+  expiry: string | null;
+  expiry_label: string | null;
+  atm_strike: number | null;
+  call_premium: number | null;
+  put_premium: number | null;
+  signal_strength: number;
+  signal_side: string | null;
+  signal_reason: string | null;
+  // Active position (null when no position)
+  position_side: string | null;     // 'call' | 'put' | null
+  position_strike: number | null;
+  position_symbol: string | null;
+  entry_premium: number | null;
+  current_premium: number | null;
+  pnl_pct: number | null;
+  pnl_usd: number | null;
+  trailing_active: boolean;
+  highest_premium: number | null;
+  updated_at: string;
+}
+
 // ── Control Panel types ──────────────────────────────────────
 
 export interface PairConfig {

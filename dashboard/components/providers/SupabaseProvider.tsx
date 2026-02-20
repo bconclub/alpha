@@ -24,6 +24,7 @@ import type {
   ActivityEvent,
   ActivityEventType,
   ActivityLogRow,
+  OptionsState,
   PairConfig,
   SetupConfig,
   SignalState,
@@ -106,6 +107,7 @@ interface SupabaseContextValue {
   strategyPerformance: StrategyPerformance[];
   activityFeed: ActivityEvent[];
   optionsLog: ActivityLogRow[];
+  optionsState: OptionsState[];
   refreshViews: () => void;
   // Control Panel
   pairConfigs: PairConfig[];
@@ -131,6 +133,7 @@ const EMPTY_CONTEXT: SupabaseContextValue = {
   strategyPerformance: [],
   activityFeed: [],
   optionsLog: [],
+  optionsState: [],
   refreshViews: () => {},
   pairConfigs: [],
   setupConfigs: [],
@@ -175,6 +178,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
   const [exchangeFilter, setExchangeFilter] = useState<ExchangeFilter>('all');
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
   const [optionsLog, setOptionsLog] = useState<ActivityLogRow[]>([]);
+  const [optionsState, setOptionsState] = useState<OptionsState[]>([]);
 
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
   const [pnlByExchange, setPnlByExchange] = useState<PnLByExchange[]>([]);
@@ -318,7 +322,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
     async function fetchInitialData() {
       try {
-        const [allTradesData, botStatusRes, strategyLogRes, latestPerPairRes, activityLogRes] = await Promise.all([
+        const [allTradesData, botStatusRes, strategyLogRes, latestPerPairRes, activityLogRes, optionsStateRes] = await Promise.all([
           fetchAllTrades(),
           // bot_status uses created_at
           client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1),
@@ -328,12 +332,15 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
           client!.from('latest_strategy_log').select('*'),
           // activity_log — options decisions, risk alerts for Live Activity feed
           client!.from('activity_log').select('*').order('created_at', { ascending: false }).limit(50),
+          // options_state — real-time options monitoring (1 row per pair)
+          client!.from('options_state').select('*'),
         ]);
 
         if (botStatusRes.error) console.error('[Alpha] bot_status query error:', botStatusRes.error.message);
         if (strategyLogRes.error) console.error('[Alpha] strategy_log query error:', strategyLogRes.error.message);
         if (latestPerPairRes.error) console.warn('[Alpha] latest_strategy_log view error:', latestPerPairRes.error.message);
         if (activityLogRes.error) console.warn('[Alpha] activity_log query error:', activityLogRes.error.message);
+        if (optionsStateRes.error) console.warn('[Alpha] options_state query error:', optionsStateRes.error.message);
 
         // Normalize all data (map DB column names → app types)
         const tradeData = (allTradesData ?? []).map(normalizeTrade);
@@ -356,6 +363,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         }
         setStrategyLog(mergedLogs);
         setOptionsLog(activityRows.filter(r => r.event_type.startsWith('options_')));
+        if (optionsStateRes.data) setOptionsState(optionsStateRes.data as OptionsState[]);
         buildInitialFeed(tradeData, activityRows);
       } catch (err) {
         console.error('[Alpha] fetchInitialData failed:', err);
@@ -460,6 +468,19 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
           exchange: (row.exchange === 'delta' || row.exchange === 'binance') ? row.exchange : undefined,
         });
       })
+      // Options state realtime (engine upserts every ~30s)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'options_state' }, (payload) => {
+        const row = payload.new as OptionsState;
+        setOptionsState((prev) => {
+          const idx = prev.findIndex((s) => s.pair === row.pair);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = row;
+            return next;
+          }
+          return [...prev, row];
+        });
+      })
       // Control Panel realtime
       .on('postgres_changes', { event: '*', schema: 'public', table: 'pair_config' }, () => {
         client!.from('pair_config').select('*').then(res => { if (res.data) setPairConfigs(res.data as PairConfig[]); });
@@ -503,6 +524,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       strategyPerformance,
       activityFeed,
       optionsLog,
+      optionsState,
       refreshViews: fetchViews,
       pairConfigs,
       setupConfigs,
@@ -512,7 +534,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       trades, recentTrades, botStatus, strategyLog, isConnected,
       exchangeFilter, filteredTrades,
       openPositions, pnlByExchange, futuresPositions, dailyPnL, strategyPerformance,
-      activityFeed, optionsLog, fetchViews,
+      activityFeed, optionsLog, optionsState, fetchViews,
       pairConfigs, setupConfigs, signalStates,
     ],
   );

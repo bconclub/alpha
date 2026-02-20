@@ -483,6 +483,32 @@ class Database:
         except Exception as e:
             logger.error("signal_state upsert failed for %s: %s", pair, e)
 
+    # ── Options state (dashboard real-time options monitoring) ──────────────
+
+    TABLE_OPTIONS_STATE = "options_state"
+
+    async def upsert_options_state(self, pair: str, state: dict[str, Any]) -> None:
+        """Upsert options monitoring state for a pair (BTC or ETH).
+
+        Called every ~30s from options_scalp. Dashboard subscribes via realtime.
+        """
+        if not self.is_connected:
+            return
+        state["pair"] = pair
+        state["updated_at"] = iso_now()
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table(self.TABLE_OPTIONS_STATE)  # type: ignore[union-attr]
+                    .upsert(state, on_conflict="pair")
+                    .execute()
+                ),
+            )
+        except Exception as e:
+            logger.error("options_state upsert failed for %s: %s", pair, e)
+
     # ── Activity log (live feed events for dashboard) ───────────────────────
 
     async def log_activity(

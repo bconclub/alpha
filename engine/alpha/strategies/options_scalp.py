@@ -138,6 +138,10 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_skip_time: float = 0.0
         self._SKIP_LOG_INTERVAL = 5 * 60  # 5 minutes
 
+        # Dashboard state write interval
+        self._STATE_WRITE_INTERVAL = 30  # Write to DB every 30 seconds
+        self._last_state_write: float = 0.0
+
     # ==================================================================
     # ACTIVITY LOGGING
     # ==================================================================
@@ -336,6 +340,128 @@ class OptionsScalpStrategy(BaseStrategy):
         return symbol
 
     # ==================================================================
+    # DASHBOARD STATE
+    # ==================================================================
+
+    async def _write_dashboard_state(self) -> None:
+        """Write current options state to DB for dashboard every 30 seconds."""
+        now = time.monotonic()
+        if now - self._last_state_write < self._STATE_WRITE_INTERVAL:
+            return
+        self._last_state_write = now
+
+        if not self._db:
+            return
+
+        # ── Signal state from scalp ──
+        signal_strength = 0
+        signal_side: str | None = None
+        signal_reason = ""
+        spot_price = 0.0
+
+        if self._scalp and hasattr(self._scalp, "last_signal_state"):
+            ss = self._scalp.last_signal_state
+            if ss:
+                signal_strength = ss.get("strength", 0)
+                signal_side = ss.get("side")
+                signal_reason = ss.get("reason", "")
+                spot_price = ss.get("current_price", 0)
+
+        # ── Expiry info ──
+        expiry_label: str | None = None
+        expiry_ts: str | None = None
+        atm_strike: float | None = None
+        call_premium: float | None = None
+        put_premium: float | None = None
+
+        if self._selected_expiry:
+            now_utc = datetime.now(timezone.utc)
+            hours_away = (self._selected_expiry - now_utc).total_seconds() / 3600
+            expiry_label = (
+                f"{self._selected_expiry.strftime('%b %d %H:%M UTC')} — "
+                f"{int(hours_away)}h away"
+            )
+            expiry_ts = self._selected_expiry.isoformat()
+
+            # ATM strike
+            if self._available_strikes and spot_price > 0:
+                atm_strike = min(self._available_strikes, key=lambda s: abs(s - spot_price))
+
+                # Fetch ATM call + put premiums (best-effort, skip on error)
+                try:
+                    call_sym = self._build_option_symbol(
+                        atm_strike, "call", self._selected_expiry,
+                    )
+                    if call_sym and self.options_exchange:
+                        t = await self.options_exchange.fetch_ticker(call_sym)
+                        call_premium = t.get("last") or t.get("ask") or None
+                except Exception:
+                    pass
+
+                try:
+                    put_sym = self._build_option_symbol(
+                        atm_strike, "put", self._selected_expiry,
+                    )
+                    if put_sym and self.options_exchange:
+                        t = await self.options_exchange.fetch_ticker(put_sym)
+                        put_premium = t.get("last") or t.get("ask") or None
+                except Exception:
+                    pass
+
+        # ── Position info ──
+        position_side: str | None = None
+        position_strike: float | None = None
+        position_symbol: str | None = None
+        entry_prem: float | None = None
+        current_prem: float | None = None
+        pnl_pct: float | None = None
+        pnl_usd: float | None = None
+        trailing_active = False
+        highest_prem: float | None = None
+
+        if self.in_position and self.option_symbol:
+            position_side = self.option_side
+            position_strike = self.strike_price
+            position_symbol = self.option_symbol
+            entry_prem = self.entry_premium
+            highest_prem = self.highest_premium
+            trailing_active = self._trailing_active
+
+            # Fetch current premium for position
+            try:
+                if self.options_exchange:
+                    ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
+                    current_prem = ticker.get("last") or ticker.get("bid") or None
+                    if current_prem and entry_prem and entry_prem > 0:
+                        pnl_pct = (current_prem - entry_prem) / entry_prem * 100
+                        pnl_usd = (current_prem - entry_prem) * self.CONTRACTS_PER_TRADE
+            except Exception:
+                pass
+
+        state = {
+            "spot_price": spot_price or None,
+            "expiry": expiry_ts,
+            "expiry_label": expiry_label,
+            "atm_strike": atm_strike,
+            "call_premium": call_premium,
+            "put_premium": put_premium,
+            "signal_strength": signal_strength,
+            "signal_side": signal_side,
+            "signal_reason": signal_reason,
+            "position_side": position_side,
+            "position_strike": position_strike,
+            "position_symbol": position_symbol,
+            "entry_premium": entry_prem,
+            "current_premium": current_prem,
+            "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+            "pnl_usd": round(pnl_usd, 4) if pnl_usd is not None else None,
+            "trailing_active": trailing_active,
+            "highest_premium": highest_prem,
+        }
+
+        await self._db.upsert_options_state(self.pair, state)
+
+    # ==================================================================
     # MAIN CHECK LOOP
     # ==================================================================
 
@@ -345,6 +471,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Periodic chain refresh
         await self._refresh_option_chain()
+
+        # Write dashboard state every 30 seconds
+        await self._write_dashboard_state()
 
         # In position: manage exit
         if self.in_position:
