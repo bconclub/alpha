@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 from typing import Any
 
@@ -36,6 +37,15 @@ DELTA_CONTRACT_SIZE: dict[str, float] = {
     "XRP/USD:USD": 1.0,      # 1 contract = 1.0 XRP (~$0.55 notional)
     "XRPUSD": 1.0,           # alias
 }
+
+
+# Options symbol pattern: contains date-strike-C/P (e.g. "260221-98000-C")
+_OPTION_SYMBOL_RE = re.compile(r'\d{6}-\d+-[CP]')
+
+
+def is_option_symbol(pair: str) -> bool:
+    """Return True if pair looks like a Delta options contract symbol."""
+    return bool(_OPTION_SYMBOL_RE.search(pair))
 
 
 class PnLResult:
@@ -82,9 +92,13 @@ def calc_pnl(
     if entry_price <= 0 or exit_price <= 0:
         return PnLResult(0.0, 0.0, 0.0, 0.0, 0.0)
 
-    # Convert contracts to coins for Delta
+    # Options P&L: entry/exit prices are premiums, 1 contract = 1 unit
+    # No contract size conversion (options are NOT futures contracts)
+    is_option = is_option_symbol(pair)
+
+    # Convert contracts to coins for Delta futures (not options)
     coin_amount = float(amount)
-    if exchange_id == "delta":
+    if exchange_id == "delta" and not is_option:
         contract_size = DELTA_CONTRACT_SIZE.get(pair, 0.01)
         coin_amount = float(amount) * contract_size
 
@@ -101,9 +115,13 @@ def calc_pnl(
     exit_fee_dollars = exit_notional * exit_fee_rate
     net_pnl = gross_pnl - entry_fee_dollars - exit_fee_dollars
 
-    # P&L % against collateral (not notional)
+    # P&L % against collateral
     lev = max(int(leverage or 1), 1)
-    collateral = entry_notional / lev if lev > 1 else entry_notional
+    if is_option:
+        # Options collateral = premium / leverage (50x on Delta)
+        collateral = entry_notional / lev if lev > 1 else entry_notional
+    else:
+        collateral = entry_notional / lev if lev > 1 else entry_notional
     pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
 
     return PnLResult(
@@ -933,9 +951,10 @@ class TradeExecutor:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
 
-            # For Delta: filled_amount is in contracts. Convert to coin for notional calc.
+            # For Delta futures: filled_amount is in contracts. Convert to coin for notional calc.
+            # For Delta options: 1 contract = 1 unit (no conversion needed)
             coin_qty = filled_amount
-            if signal.exchange_id == "delta":
+            if signal.exchange_id == "delta" and not is_option_symbol(signal.pair):
                 contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
                 coin_qty = filled_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
 
@@ -1107,9 +1126,10 @@ class TradeExecutor:
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
-            # For Delta: amount is in contracts, convert to coin for value display
+            # For Delta futures: amount is in contracts, convert to coin for value display
+            # For Delta options: 1 contract = 1 unit (premium-based)
             coin_qty = filled_amount
-            if signal.exchange_id == "delta":
+            if signal.exchange_id == "delta" and not is_option_symbol(signal.pair):
                 contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
                 coin_qty = filled_amount * contract_size
             value = fill_price * coin_qty

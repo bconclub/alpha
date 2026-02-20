@@ -677,8 +677,18 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 10. Build entry signal
+        # 10. Classify setup_type from scalp signal reason
         signals_str = signal_state.get("reason", "")
+        setup_type = "unknown"
+        if self._scalp and signals_str:
+            try:
+                candidates = self._scalp._classify_setups(signals_str)
+                if candidates:
+                    setup_type = candidates[0]  # highest priority setup
+            except Exception:
+                pass
+
+        # 11. Build entry signal
         expiry_str = self._selected_expiry.strftime('%b %d %H:%M')
         strike_label = "ATM" if selected_strike == atm_strike else "OTM"
         reason = (
@@ -688,7 +698,7 @@ class OptionsScalpStrategy(BaseStrategy):
             f"Exp={expiry_str} "
             f"Premium=${premium:.4f}"
         )
-        self.logger.info("[%s] OPTIONS ENTRY — %s", self.pair, reason)
+        self.logger.info("[%s] OPTIONS ENTRY — %s (setup=%s)", self.pair, reason, setup_type)
 
         # Log to activity_log for dashboard
         await self._log_activity(
@@ -698,7 +708,7 @@ class OptionsScalpStrategy(BaseStrategy):
             {"option_type": option_type, "strike": selected_strike, "premium": premium,
              "strike_label": strike_label, "expiry": self._selected_expiry.isoformat(),
              "strength": strength, "underlying_price": current_price,
-             "symbol": selected_symbol},
+             "symbol": selected_symbol, "setup_type": setup_type},
         )
 
         return [Signal(
@@ -723,6 +733,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "underlying_pair": self.pair,
                 "tp_price": premium * (1 + self.TP_PREMIUM_GAIN_PCT / 100),
                 "sl_price": premium * (1 - self.SL_PREMIUM_LOSS_PCT / 100),
+                "setup_type": setup_type,
             },
         )]
 

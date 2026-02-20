@@ -25,7 +25,7 @@ from alpha.risk_manager import RiskManager
 from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
-from alpha.trade_executor import TradeExecutor, DELTA_CONTRACT_SIZE, calc_pnl
+from alpha.trade_executor import TradeExecutor, DELTA_CONTRACT_SIZE, calc_pnl, is_option_symbol
 from alpha.utils import iso_now, setup_logger
 
 logger = setup_logger("main")
@@ -1833,6 +1833,11 @@ class AlphaBot:
         all_checked_pairs = set(self.delta_pairs) | set(exchange_positions.keys())
 
         for pair in all_checked_pairs:
+            # Skip options positions — managed by OptionsScalpStrategy, not futures scalp
+            if is_option_symbol(pair):
+                logger.debug("Skipping options position in orphan check: %s", pair)
+                continue
+
             epos = exchange_positions.get(pair)
             scalp = self._scalp_strategies.get(pair)
 
