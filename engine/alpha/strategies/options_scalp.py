@@ -5,14 +5,18 @@ No leverage, no liquidation. When scalp sees 3/4+ momentum, buy the option.
 
 Entry: 3-of-4 or 4-of-4 momentum signals from scalp strategy
        Bullish → buy CALL, Bearish → buy PUT
-       1 contract per trade, ATM or 1-strike OTM
+       1 contract per trade, nearest affordable strike (ATM or up to 3 OTM)
 
 Exit:
-  - TP: 100% premium gain (premium doubles)
-  - SL: 50% premium loss (premium halves)
-  - Trailing: activates at 50% gain, trails 30% behind peak
+  - TP: 30% premium gain
+  - SL: 20% premium loss (always active, even in Phase 1)
+  - Trailing: activates at +10%, trails 5% behind peak
+  - Pullback: exit if lost 50% of peak gain (when peak was 5%+)
+  - Decay: exit if was +10%+ and faded to +3%
+  - Timeout: close after 15 minutes (theta kills options)
   - Time: close 2 hours before expiry
   - Signal reversal: close if opposite momentum fires
+  - Phase 1 (first 30s): only SL fires — no TP/trail/pullback/decay
   - Check every 10 seconds
 
 Position Sizing:
@@ -21,10 +25,6 @@ Position Sizing:
   - Premium must be $0.01 to $2.00
 
 Risk: Max loss = premium paid. No liquidation. Safest momentum play.
-
-I use options to amplify strong momentum signals. Options give me asymmetric
-risk — I can lose only what I pay, but win multiples. I only buy options on
-3/4+ signals. I am a buyer, never a seller of options.
 """
 
 from __future__ import annotations
@@ -68,6 +68,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Strike selection ──────────────────────────────────────────
     BTC_STRIKE_ROUND = 200               # BTC: nearest $200
     ETH_STRIKE_ROUND = 20                # ETH: nearest $20
+    MAX_OTM_STRIKES = 3                  # Max strikes to walk OTM for affordability
 
     # ── Premium limits ────────────────────────────────────────────
     OPTIONS_LEVERAGE = 50                # Delta options are 50x leveraged
@@ -80,11 +81,15 @@ class OptionsScalpStrategy(BaseStrategy):
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old
     CONTRACTS_PER_TRADE = 1              # 1 contract per trade
 
-    # ── Exit thresholds ───────────────────────────────────────────
-    TP_PREMIUM_GAIN_PCT = 100.0          # 100% gain (premium doubles)
-    SL_PREMIUM_LOSS_PCT = 50.0           # 50% loss (premium halves)
-    TRAILING_ACTIVATE_PCT = 50.0         # Activate trail at +50%
-    TRAILING_DISTANCE_PCT = 30.0         # Trail 30% behind peak
+    # ── Exit thresholds (tuned for momentum scalps) ────────────────
+    TP_PREMIUM_GAIN_PCT = 30.0           # Take profit at +30% premium gain
+    SL_PREMIUM_LOSS_PCT = 20.0           # Stop loss at -20% premium drop
+    TRAILING_ACTIVATE_PCT = 10.0         # Trail activates at +10% gain
+    TRAILING_DISTANCE_PCT = 5.0          # Trail 5% below peak premium
+    PULLBACK_EXIT_PCT = 50.0             # Exit if lost 50% of peak gain
+    DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
+    TIMEOUT_MINUTES = 15                 # Options timeout (theta kills you)
+    PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
 
     # ── Position limits ───────────────────────────────────────────
     MAX_OPTION_POSITIONS = 1             # 1 option at a time
@@ -198,10 +203,13 @@ class OptionsScalpStrategy(BaseStrategy):
         await self._refresh_option_chain()
         self.logger.info(
             "[%s] OPTIONS SCALP ACTIVE — min_strength=%d, "
-            "TP=%d%% SL=%d%% Trail=%d%%/%d%% MaxPremium=$%.2f",
+            "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
+            "Timeout=%dm Phase1=%ds MaxPremium=$%.2f",
             self.pair, self.MIN_SIGNAL_STRENGTH,
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
             int(self.TRAILING_ACTIVATE_PCT), int(self.TRAILING_DISTANCE_PCT),
+            int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
+            self.TIMEOUT_MINUTES, self.PHASE1_HANDS_OFF_SEC,
             self.MAX_PREMIUM_USD,
         )
 
@@ -286,34 +294,26 @@ class OptionsScalpStrategy(BaseStrategy):
     # STRIKE SELECTION
     # ==================================================================
 
-    def _find_strike(
-        self, current_price: float, option_type: str,
-    ) -> tuple[float, float] | None:
-        """Find ATM and OTM strike for the given option type.
-
-        Returns (atm_strike, otm_strike) or None if no valid strikes.
-        ATM: Nearest available strike to current price
-        OTM call: 1 strike above ATM, OTM put: 1 strike below ATM
-        """
+    def _get_atm_strike(self, current_price: float) -> float | None:
+        """Find the ATM strike nearest to spot price."""
         if not self._available_strikes:
             return None
+        return min(self._available_strikes, key=lambda s: abs(s - current_price))
 
-        # ATM: nearest strike to spot
-        atm_strike = min(self._available_strikes, key=lambda s: abs(s - current_price))
+    def _get_otm_candidates(
+        self, atm_strike: float, option_type: str,
+    ) -> list[float]:
+        """Get sorted OTM strikes away from ATM (up for calls, down for puts).
 
-        # OTM: 1 strike away in the out-of-money direction
+        Returns up to MAX_OTM_STRIKES candidates.
+        """
         if option_type == "call":
-            otm_candidates = [s for s in self._available_strikes if s > atm_strike]
-            otm_strike = min(otm_candidates) if otm_candidates else atm_strike
+            candidates = sorted(s for s in self._available_strikes if s > atm_strike)
         else:
-            otm_candidates = [s for s in self._available_strikes if s < atm_strike]
-            otm_strike = max(otm_candidates) if otm_candidates else atm_strike
-
-        self.logger.debug(
-            "[%s] %s spot $%.0f → ATM $%.0f, OTM $%.0f",
-            self.pair, self._base_asset, current_price, atm_strike, otm_strike,
-        )
-        return (atm_strike, otm_strike)
+            candidates = sorted(
+                (s for s in self._available_strikes if s < atm_strike), reverse=True,
+            )
+        return candidates[:self.MAX_OTM_STRIKES]
 
     def _build_option_symbol(
         self, strike: float, option_type: str, expiry: datetime,
@@ -505,34 +505,37 @@ class OptionsScalpStrategy(BaseStrategy):
 
         signal_state = self._scalp.last_signal_state
 
-        # Log full signal check on every tick for debugging
-        if signal_state is not None:
-            self.logger.info(
-                "[%s] OPTIONS CHECK: strength=%s side=%s age=%.1fs reason=%s",
-                self.pair,
-                signal_state.get("strength", 0),
-                signal_state.get("side"),
-                time.monotonic() - signal_state.get("timestamp", 0),
-                (signal_state.get("reason", "") or "")[:60],
-            )
-        else:
+        if signal_state is None:
             if self._tick_count % 6 == 0:
                 self.logger.info("[%s] OPTIONS: signal_state is None", self.pair)
             return []
 
         # 2. Check signal freshness
         signal_age = time.monotonic() - signal_state.get("timestamp", 0)
-        if signal_age > self.SIGNAL_STALENESS_SEC:
+        strength = signal_state.get("strength", 0)
+
+        # Only log OPTIONS CHECK when strength >= 1 (reduce spam)
+        if strength >= 1:
             self.logger.info(
-                "[%s] OPTIONS STALE: age=%.1fs > %ds — skipping",
-                self.pair, signal_age, self.SIGNAL_STALENESS_SEC,
+                "[%s] OPTIONS CHECK: strength=%d side=%s age=%.1fs reason=%s",
+                self.pair, strength,
+                signal_state.get("side"),
+                signal_age,
+                (signal_state.get("reason", "") or "")[:60],
             )
+
+        if signal_age > self.SIGNAL_STALENESS_SEC:
+            if strength >= 1:
+                self.logger.info(
+                    "[%s] OPTIONS STALE: age=%.1fs > %ds — skipping",
+                    self.pair, signal_age, self.SIGNAL_STALENESS_SEC,
+                )
             return []
 
         # 3. Check signal strength (3-of-4 minimum)
-        strength = signal_state.get("strength", 0)
         if strength < self.MIN_SIGNAL_STRENGTH:
-            if self._tick_count % 6 == 0:
+            # Log WEAK every ~60s (6 ticks × 10s = 60s), not every 10s
+            if strength >= 1 and self._tick_count % 6 == 0:
                 self.logger.info(
                     "[%s] OPTIONS WEAK: strength=%d < %d — waiting",
                     self.pair, strength, self.MIN_SIGNAL_STRENGTH,
@@ -582,9 +585,9 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 7. Find strike
-        strikes = self._find_strike(current_price, option_type)
-        if strikes is None:
+        # 7. Find ATM strike
+        atm_strike = self._get_atm_strike(current_price)
+        if atm_strike is None:
             if self._tick_count % 30 == 0:
                 self.logger.info("[%s] No valid strikes found", self.pair)
             await self._log_skip(
@@ -593,66 +596,95 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        atm_strike, _otm_strike = strikes
-
-        # 8. Build option symbol (prefer ATM for liquidity)
-        symbol = self._build_option_symbol(atm_strike, option_type, self._selected_expiry)
-        if symbol is None:
-            return []
-
-        # 9. Fetch current premium
-        try:
-            ticker = await self.options_exchange.fetch_ticker(symbol)
-            premium = ticker.get("last") or ticker.get("ask") or 0
-        except Exception as e:
-            self.logger.debug("[%s] Ticker fetch failed for %s: %s", self.pair, symbol, e)
-            return []
-
-        if premium <= 0:
-            return []
-
-        # 10. Premium / collateral checks (options are 50x leveraged)
-        collateral = premium / self.OPTIONS_LEVERAGE
+        # 8. Collateral budget
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         max_collateral = min(
             exchange_capital * (self.MAX_PREMIUM_CAPITAL_PCT / 100),
             self.MAX_PREMIUM_USD,
         )
 
-        if collateral > max_collateral:
+        # 9. Try ATM first, then walk OTM strikes if too expensive
+        strikes_to_try = [atm_strike] + self._get_otm_candidates(atm_strike, option_type)
+        selected_strike: float | None = None
+        selected_symbol: str | None = None
+        premium: float = 0.0
+        atm_collateral: float | None = None  # track ATM cost for logging
+
+        for i, strike in enumerate(strikes_to_try):
+            symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
+            if symbol is None:
+                continue
+
+            try:
+                ticker = await self.options_exchange.fetch_ticker(symbol)
+                prem = ticker.get("last") or ticker.get("ask") or 0
+            except Exception as e:
+                self.logger.debug("[%s] Ticker fetch failed for %s: %s", self.pair, symbol, e)
+                continue
+
+            if prem <= 0:
+                continue
+
+            collateral = prem / self.OPTIONS_LEVERAGE
+
+            # Track ATM collateral for logging
+            if i == 0:
+                atm_collateral = collateral
+
+            # Check premium not too small (illiquid)
+            if prem < self.MIN_PREMIUM_USD:
+                self.logger.debug(
+                    "[%s] Strike $%.0f premium $%.4f < min $%.2f — illiquid",
+                    self.pair, strike, prem, self.MIN_PREMIUM_USD,
+                )
+                continue
+
+            # Check collateral fits budget
+            if collateral <= max_collateral:
+                selected_strike = strike
+                selected_symbol = symbol
+                premium = prem
+                if i > 0:
+                    self.logger.info(
+                        "[%s] %s %s: ATM=$%.0f too expensive ($%.2f), "
+                        "selected $%.0f OTM ($%.2f collateral)",
+                        self.pair, self._base_asset, option_type.upper(),
+                        atm_strike, atm_collateral or 0,
+                        strike, collateral,
+                    )
+                break
+
+            self.logger.debug(
+                "[%s] Strike $%.0f collateral $%.4f > max $%.4f — trying OTM",
+                self.pair, strike, collateral, max_collateral,
+            )
+
+        if selected_strike is None or selected_symbol is None:
             if self._tick_count % 30 == 0:
                 self.logger.info(
-                    "[%s] Collateral $%.4f (premium $%.4f @ %dx) > max $%.4f — skipping %s",
-                    self.pair, collateral, premium, self.OPTIONS_LEVERAGE,
-                    max_collateral, symbol,
+                    "[%s] No affordable strike within %d OTM — skipping "
+                    "(ATM=$%.0f collateral=$%.4f max=$%.4f)",
+                    self.pair, self.MAX_OTM_STRIKES, atm_strike,
+                    atm_collateral or 0, max_collateral,
                 )
             await self._log_skip(
-                f"{self.pair} — OPTIONS SKIP: collateral ${collateral:.4f} "
-                f"(premium ${premium:.4f} @ {self.OPTIONS_LEVERAGE}x) > ${max_collateral:.4f} cap",
-                {"option_type": option_type, "strike": atm_strike, "premium": premium,
-                 "collateral": collateral, "max_collateral": max_collateral, "strength": strength},
+                f"{self.pair} — OPTIONS SKIP: no affordable strike within "
+                f"{self.MAX_OTM_STRIKES} OTM (ATM=${atm_strike:.0f} "
+                f"collateral=${atm_collateral or 0:.4f} > ${max_collateral:.4f})",
+                {"option_type": option_type, "atm_strike": atm_strike,
+                 "atm_collateral": atm_collateral, "max_collateral": max_collateral,
+                 "strength": strength},
             )
             return []
 
-        if premium < self.MIN_PREMIUM_USD:
-            if self._tick_count % 30 == 0:
-                self.logger.info(
-                    "[%s] Premium $%.4f < min $%.2f — illiquid %s",
-                    self.pair, premium, self.MIN_PREMIUM_USD, symbol,
-                )
-            await self._log_skip(
-                f"{self.pair} — OPTIONS SKIP: premium ${premium:.4f} illiquid (min ${self.MIN_PREMIUM_USD})",
-                {"option_type": option_type, "strike": atm_strike, "premium": premium, "strength": strength},
-            )
-            return []
-
-        # 11. Build entry signal
+        # 10. Build entry signal
         signals_str = signal_state.get("reason", "")
         expiry_str = self._selected_expiry.strftime('%b %d %H:%M')
+        strike_label = "ATM" if selected_strike == atm_strike else "OTM"
         reason = (
             f"OPTIONS {option_type.upper()} | {strength}/4 signals "
             f"({signals_str}) | "
-            f"Strike=${atm_strike:.0f} "
+            f"{strike_label} Strike=${selected_strike:.0f} "
             f"Exp={expiry_str} "
             f"Premium=${premium:.4f}"
         )
@@ -661,11 +693,12 @@ class OptionsScalpStrategy(BaseStrategy):
         # Log to activity_log for dashboard
         await self._log_activity(
             "options_entry",
-            f"{self.pair} — OPTIONS: {option_type.upper()} ATM ${atm_strike:.0f} | "
+            f"{self.pair} — OPTIONS: {option_type.upper()} {strike_label} ${selected_strike:.0f} | "
             f"premium=${premium:.4f} | expiry={expiry_str} | signals={strength}/4 {signals_str}",
-            {"option_type": option_type, "strike": atm_strike, "premium": premium,
-             "expiry": self._selected_expiry.isoformat(), "strength": strength,
-             "underlying_price": current_price, "symbol": symbol},
+            {"option_type": option_type, "strike": selected_strike, "premium": premium,
+             "strike_label": strike_label, "expiry": self._selected_expiry.isoformat(),
+             "strength": strength, "underlying_price": current_price,
+             "symbol": selected_symbol},
         )
 
         return [Signal(
@@ -675,7 +708,7 @@ class OptionsScalpStrategy(BaseStrategy):
             order_type="market",
             reason=reason,
             strategy=self.name,
-            pair=symbol,
+            pair=selected_symbol,
             leverage=self.OPTIONS_LEVERAGE,
             position_type="long",
             exchange_id="delta",
@@ -683,7 +716,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 "pending_side": option_type,
                 "pending_amount": float(self.CONTRACTS_PER_TRADE),
                 "option_type": option_type,
-                "strike": atm_strike,
+                "strike": selected_strike,
+                "strike_label": strike_label,
                 "expiry": self._selected_expiry.isoformat(),
                 "underlying_price": current_price,
                 "underlying_pair": self.pair,
@@ -699,12 +733,16 @@ class OptionsScalpStrategy(BaseStrategy):
     async def _check_option_exit(self) -> list[Signal]:
         """Check exit conditions for open option position.
 
-        Exit conditions:
-        1. Time: Close 2 hours before expiry
-        2. SL: 50% premium loss
-        3. TP: 100% premium gain → activates trailing
-        4. Trailing: 50% activate, 30% behind peak
-        5. Signal reversal: opposite 3/4+ momentum
+        Phase 1 (first 30s after fill): only SL fires — no TP/trail/pullback/decay.
+        After Phase 1:
+        1. Expiry: Close 2 hours before expiry
+        2. SL: -20% premium drop (always active)
+        3. TP: +30% premium gain
+        4. Trailing: activates at +10%, trails 5% behind peak
+        5. Pullback: exit if lost 50% of peak gain (when peak was 5%+)
+        6. Decay: exit if was +10%+ and faded to +3%
+        7. Timeout: close after 15 minutes
+        8. Signal reversal: opposite 3/4+ momentum
         """
         if not self.in_position or not self.option_symbol:
             return []
@@ -733,19 +771,26 @@ class OptionsScalpStrategy(BaseStrategy):
             (current_premium - self.entry_premium) / self.entry_premium * 100
         ) if self.entry_premium > 0 else 0
 
+        peak_pnl_pct = (
+            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+        ) if self.entry_premium > 0 else 0
+
         hold_seconds = time.monotonic() - self.entry_time
+        in_phase1 = hold_seconds < self.PHASE1_HANDS_OFF_SEC
 
         # Heartbeat (every ~60s)
         if self._tick_count % 6 == 0:
             trail_tag = " [TRAILING]" if self._trailing_active else ""
+            phase_tag = " [PHASE1]" if in_phase1 else ""
             self.logger.info(
-                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f | %ds%s",
+                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | %ds%s%s",
                 self.option_symbol, self.option_side,
                 self.entry_premium, current_premium, premium_change_pct,
-                self.highest_premium, int(hold_seconds), trail_tag,
+                self.highest_premium, peak_pnl_pct,
+                int(hold_seconds), trail_tag, phase_tag,
             )
 
-        # ── 1. TIME EXIT: close 2 hours before expiry ────────────────
+        # ── 1. EXPIRY EXIT: close 2 hours before expiry ──────────────
         if self.expiry_dt:
             time_to_expiry = (self.expiry_dt - datetime.now(timezone.utc)).total_seconds()
             close_threshold = self.CLOSE_BEFORE_EXPIRY_HOURS * 3600
@@ -756,7 +801,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
                 return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_CLOSE")
 
-        # ── 2. STOP LOSS: 50% premium loss ───────────────────────────
+        # ── 2. STOP LOSS: -20% premium drop (always active, even Phase 1)
         if premium_change_pct <= -self.SL_PREMIUM_LOSS_PCT:
             self.logger.info(
                 "[%s] OPTION SL — premium %+.1f%% ($%.4f → $%.4f)",
@@ -765,14 +810,27 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "SL")
 
-        # ── 3. TRAILING activation ────────────────────────────────────
+        # ── Phase 1 hands-off: only SL fires in first 30s ────────────
+        if in_phase1:
+            return []
+
+        # ── 3. TAKE PROFIT: +30% premium gain ────────────────────────
+        if premium_change_pct >= self.TP_PREMIUM_GAIN_PCT:
+            self.logger.info(
+                "[%s] OPTION TP — premium +%.1f%% ($%.4f → $%.4f)",
+                self.option_symbol, premium_change_pct,
+                self.entry_premium, current_premium,
+            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "TP")
+
+        # ── 4. TRAILING activation at +10% ───────────────────────────
         if premium_change_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
             self._trailing_active = True
             self.logger.info(
                 "[%s] OPTION TRAIL ON at +%.1f%%", self.option_symbol, premium_change_pct,
             )
 
-        # ── 4. TRAILING STOP check ───────────────────────────────────
+        # ── 5. TRAILING STOP: 5% below peak premium ─────────────────
         if self._trailing_active:
             trail_floor = self.highest_premium * (1 - self.TRAILING_DISTANCE_PCT / 100)
             if current_premium <= trail_floor:
@@ -783,7 +841,34 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
                 return await self._do_option_exit(current_premium, final_pct, "TRAIL")
 
-        # ── 5. SIGNAL REVERSAL ────────────────────────────────────────
+        # ── 6. PULLBACK: exit if lost 50% of peak gain (peak was 5%+)
+        if peak_pnl_pct >= 5.0 and premium_change_pct > 0:
+            pct_of_peak_lost = ((peak_pnl_pct - premium_change_pct) / peak_pnl_pct) * 100
+            if pct_of_peak_lost >= self.PULLBACK_EXIT_PCT:
+                self.logger.info(
+                    "[%s] OPTION PULLBACK — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
+                    self.option_symbol, peak_pnl_pct, premium_change_pct, pct_of_peak_lost,
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "PULLBACK")
+
+        # ── 7. DECAY: was +10%+ and faded to +3% ─────────────────────
+        if peak_pnl_pct >= 10.0 and premium_change_pct <= self.DECAY_THRESHOLD_PCT:
+            self.logger.info(
+                "[%s] OPTION DECAY — peak +%.1f%% faded to +%.1f%% (threshold +%.1f%%)",
+                self.option_symbol, peak_pnl_pct, premium_change_pct, self.DECAY_THRESHOLD_PCT,
+            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "DECAY")
+
+        # ── 8. TIMEOUT: close after 15 minutes ───────────────────────
+        if hold_seconds >= self.TIMEOUT_MINUTES * 60:
+            self.logger.info(
+                "[%s] OPTION TIMEOUT — held %dm (limit %dm) at %+.1f%%",
+                self.option_symbol, int(hold_seconds / 60),
+                self.TIMEOUT_MINUTES, premium_change_pct,
+            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "TIMEOUT")
+
+        # ── 9. SIGNAL REVERSAL ────────────────────────────────────────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
             ss = self._scalp.last_signal_state
             if ss:
