@@ -287,11 +287,31 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
     console.log('[Alpha] Supabase client ready, fetching data...');
 
+    /** Fetch ALL trades using pagination (Supabase caps at 1000 per request). */
+    async function fetchAllTrades() {
+      const PAGE = 1000;
+      let allRows: any[] = [];
+      let from = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { data, error } = await client!
+          .from('trades')
+          .select('*')
+          .order('opened_at', { ascending: false })
+          .range(from, from + PAGE - 1);
+        if (error) { console.error('[Alpha] trades page error:', error.message); break; }
+        if (!data || data.length === 0) break;
+        allRows = allRows.concat(data);
+        if (data.length < PAGE) break; // last page
+        from += PAGE;
+      }
+      return allRows;
+    }
+
     async function fetchInitialData() {
       try {
-        const [tradesRes, botStatusRes, strategyLogRes, latestPerPairRes] = await Promise.all([
-          // trades table uses opened_at, not timestamp
-          client!.from('trades').select('*').order('opened_at', { ascending: false }).limit(500),
+        const [allTradesData, botStatusRes, strategyLogRes, latestPerPairRes] = await Promise.all([
+          fetchAllTrades(),
           // bot_status uses created_at
           client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1),
           // strategy_log — recent history for activity feed & charts
@@ -300,13 +320,13 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
           client!.from('latest_strategy_log').select('*'),
         ]);
 
-        if (tradesRes.error) console.error('[Alpha] trades query error:', tradesRes.error.message);
         if (botStatusRes.error) console.error('[Alpha] bot_status query error:', botStatusRes.error.message);
         if (strategyLogRes.error) console.error('[Alpha] strategy_log query error:', strategyLogRes.error.message);
         if (latestPerPairRes.error) console.warn('[Alpha] latest_strategy_log view error:', latestPerPairRes.error.message);
 
         // Normalize all data (map DB column names → app types)
-        const tradeData = (tradesRes.data ?? []).map(normalizeTrade);
+        const tradeData = (allTradesData ?? []).map(normalizeTrade);
+        console.log(`[Alpha] Loaded ${tradeData.length} trades (paginated)`);
         const logData = (strategyLogRes.data ?? []).map(normalizeStrategyLog);
 
         // Merge: prepend latest-per-pair rows so MarketOverview always sees all pairs
@@ -335,11 +355,11 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
     // Poll every 60s as fallback (realtime may disconnect silently)
     const pollInterval = setInterval(async () => {
       try {
-        const [logRes, latestRes, statusRes, tradesRes] = await Promise.all([
+        const [logRes, latestRes, statusRes, allTradeRows] = await Promise.all([
           client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200),
           client!.from('latest_strategy_log').select('*'),
           client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1),
-          client!.from('trades').select('*').order('opened_at', { ascending: false }).limit(500),
+          fetchAllTrades(),
         ]);
 
         if (logRes.data) {
@@ -351,7 +371,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         }
 
         if (statusRes.data && statusRes.data.length > 0) setBotStatus(normalizeBotStatus(statusRes.data[0]));
-        if (tradesRes.data) setTrades(tradesRes.data.map(normalizeTrade));
+        if (allTradeRows) setTrades(allTradeRows.map(normalizeTrade));
       } catch (e) { console.warn('[Alpha] Poll refresh failed', e); }
 
       fetchViews();
