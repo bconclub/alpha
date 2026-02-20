@@ -324,6 +324,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Cooldown / loss protection (PER-PAIR: BTC streak doesn't affect XRP) ─
     SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after SL hit (per pair)
+    REVERSAL_COOLDOWN_SECONDS = 3 * 60 # 3 min pause after REVERSAL exit (same direction only)
     CONSECUTIVE_LOSS_LIMIT = 3          # after 3 consecutive losses on same pair...
     STREAK_PAUSE_SECONDS = 5 * 60      # ...pause that pair for 5 min
     POST_STREAK_STRENGTH = 3            # first trade after streak pause needs 3/4
@@ -341,6 +342,8 @@ class ScalpStrategy(BaseStrategy):
     _pair_consecutive_losses: dict[str, int] = {}        # base_asset → streak count
     _pair_streak_pause_until: dict[str, float] = {}      # base_asset → pause end time
     _pair_post_streak: dict[str, bool] = {}              # base_asset → True if first trade after streak
+    _pair_last_reversal_time: dict[str, float] = {}      # base_asset → monotonic time of last REVERSAL exit
+    _pair_last_reversal_side: dict[str, str] = {}        # base_asset → side of the REVERSAL exit (blocks same-dir re-entry)
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -992,6 +995,30 @@ class ScalpStrategy(BaseStrategy):
 
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
+
+            # ── REVERSAL COOLDOWN: don't re-enter same direction after reversal exit ──
+            rev_time = ScalpStrategy._pair_last_reversal_time.get(self._base_asset, 0.0)
+            rev_remaining = rev_time + self.REVERSAL_COOLDOWN_SECONDS - now
+            if rev_remaining > 0:
+                rev_side = ScalpStrategy._pair_last_reversal_side.get(self._base_asset, "")
+                if side == rev_side:
+                    self._skip_reason = f"REVERSAL_COOLDOWN ({int(rev_remaining)}s, was {rev_side})"
+                    if self._tick_count % 12 == 0:
+                        self.logger.info(
+                            "[%s] REVERSAL COOLDOWN — exited %s %ds ago, blocking same-dir re-entry for %ds",
+                            self.pair, rev_side,
+                            int(self.REVERSAL_COOLDOWN_SECONDS - rev_remaining),
+                            int(rev_remaining),
+                        )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
 
             # ── PER-PAIR STRENGTH GATE: weak pairs need stronger signals ──
             # During warmup (first 5 min), accept 2/4 for all pairs incl BTC
@@ -2616,6 +2643,16 @@ class ScalpStrategy(BaseStrategy):
                     self.pair, pair_losses, self._base_asset,
                     self._base_asset, self.STREAK_PAUSE_SECONDS,
                 )
+
+        # Reversal cooldown: block same-direction re-entry for 3 min (move is dead)
+        if exit_type.upper() == "REVERSAL":
+            exited_side = self.position_side or "long"
+            ScalpStrategy._pair_last_reversal_time[self._base_asset] = now
+            ScalpStrategy._pair_last_reversal_side[self._base_asset] = exited_side
+            self.logger.info(
+                "[%s] REVERSAL COOLDOWN SET — no %s re-entry on %s for %ds",
+                self.pair, exited_side, self._base_asset, self.REVERSAL_COOLDOWN_SECONDS,
+            )
 
         hold_sec = int(now - self.entry_time)
         duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s" if hold_sec >= 60 else f"{hold_sec}s"
