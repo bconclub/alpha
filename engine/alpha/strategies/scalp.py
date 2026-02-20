@@ -998,6 +998,19 @@ class ScalpStrategy(BaseStrategy):
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
 
+            # ── Write signal state immediately so options_scalp always sees it,
+            #    even if scalp skips due to cooldown/sizing/disabled setup. ──
+            self.last_signal_state = {
+                "side": side,
+                "reason": reason,
+                "strength": signal_strength,
+                "rsi": rsi_now,
+                "momentum_60s": momentum_60s,
+                "current_price": current_price,
+                "timestamp": time.monotonic(),
+                **self._last_signal_breakdown,
+            }
+
             # ── REVERSAL COOLDOWN: don't re-enter same direction after reversal exit ──
             rev_time = ScalpStrategy._pair_last_reversal_time.get(self._base_asset, 0.0)
             rev_remaining = rev_time + self.REVERSAL_COOLDOWN_SECONDS - now
