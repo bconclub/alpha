@@ -16,6 +16,7 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
 };
 
 const TRAIL_ACTIVATION_PCT = 0.30; // must match engine TRAILING_ACTIVATE_PCT
+const DEFAULT_SL_PCT = 0.25;      // must match engine STOP_LOSS_PCT fallback
 
 function extractBaseAsset(pair: string): string {
   if (pair.includes('/')) return pair.split('/')[0];
@@ -57,74 +58,203 @@ interface PositionDisplay {
 }
 
 // ---------------------------------------------------------------------------
-// Trail Progress Bar
+// Position State Badge
 // ---------------------------------------------------------------------------
 
-function TrailProgressBar({
-  peakPct,
-  currentPct,
-  trailActive,
-  trailStopPrice,
-}: {
-  peakPct: number;
-  currentPct: number;
-  trailActive: boolean;
+type PositionState = 'near_sl' | 'at_risk' | 'holding_loss' | 'holding_gain' | 'trailing';
+
+function getPositionState(pos: PositionDisplay): PositionState {
+  const pnl = pos.pricePnlPct ?? 0;
+  const peak = pos.peakPnlPct ?? 0;
+
+  // TRAILING: only if trail genuinely active AND peak confirms it
+  if (pos.trailActive && peak >= TRAIL_ACTIVATION_PCT) {
+    return 'trailing';
+  }
+
+  // Compute SL distance to check "near SL"
+  if (pos.slPrice != null && pos.currentPrice != null && pos.entryPrice > 0) {
+    const slDist = Math.abs(pos.entryPrice - pos.slPrice);
+    const currentDist = pos.positionType === 'long'
+      ? pos.currentPrice - pos.slPrice
+      : pos.slPrice - pos.currentPrice;
+    // Near SL: within 30% of the SL distance from entry
+    if (currentDist <= slDist * 0.30 && currentDist >= 0) {
+      return 'near_sl';
+    }
+  }
+
+  if (pnl < -0.15) return 'at_risk';
+  if (pnl < 0) return 'holding_loss';
+  return 'holding_gain';
+}
+
+function StateBadge({ state, trailStopPrice, entryPrice }: {
+  state: PositionState;
   trailStopPrice: number | null;
+  entryPrice: number;
 }) {
-  if (trailActive) {
-    return (
-      <div className="flex items-center gap-2 w-full">
-        <div className="flex-1 max-w-[120px] md:max-w-[160px]">
-          <div className="h-2 rounded-full bg-[#00c853]/30 overflow-hidden">
-            <div className="h-full rounded-full bg-[#00c853] animate-pulse" style={{ width: '100%' }} />
-          </div>
-        </div>
-        <span className="text-[10px] font-mono text-[#00c853] font-semibold whitespace-nowrap flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse inline-block" />
+  switch (state) {
+    case 'near_sl':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#ff1744]/15 text-[#ff1744]">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#ff1744] animate-pulse" />
+          NEAR SL
+        </span>
+      );
+    case 'at_risk':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#ff1744]/10 text-[#ff1744]">
+          AT RISK
+        </span>
+      );
+    case 'holding_loss':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-400/10 text-amber-400">
+          HOLDING
+        </span>
+      );
+    case 'holding_gain':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#00c853]/10 text-[#00c853]">
+          HOLDING
+        </span>
+      );
+    case 'trailing':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#00c853]/10 text-[#00c853]">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
           TRAILING
           {trailStopPrice != null && (
-            <span className="text-zinc-400 font-normal ml-1">
-              stop@${fmtPrice(trailStopPrice)}
+            <span className="text-zinc-400 font-normal ml-0.5">
+              @${fmtPrice(trailStopPrice)}
             </span>
           )}
         </span>
-      </div>
-    );
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Position Range Bar (SL ← Entry → Peak/TP)
+// ---------------------------------------------------------------------------
+
+function PositionRangeBar({ pos }: { pos: PositionDisplay }) {
+  const pnl = pos.pricePnlPct ?? 0;
+  const entry = pos.entryPrice;
+  const current = pos.currentPrice;
+  const peak = pos.peakPnlPct ?? 0;
+
+  if (current == null || entry <= 0) return null;
+
+  // Compute SL price (from DB or estimate)
+  const slPrice = pos.slPrice ?? (
+    pos.positionType === 'long'
+      ? entry * (1 - DEFAULT_SL_PCT / 100)
+      : entry * (1 + DEFAULT_SL_PCT / 100)
+  );
+
+  // Range: SL distance below entry, peak/trail above entry
+  const slDistPct = DEFAULT_SL_PCT; // distance from entry to SL in %
+  const peakPct = Math.max(peak, Math.abs(pnl), 0.05); // at least 0.05 to avoid zero range
+
+  // Total range: SL side + profit side
+  const totalRange = slDistPct + Math.max(peakPct, TRAIL_ACTIVATION_PCT);
+
+  // Entry position as % of total bar width (SL is at 0%, entry is partway)
+  const entryPos = (slDistPct / totalRange) * 100;
+
+  // Current price position on the bar
+  const currentPos = ((slDistPct + pnl) / totalRange) * 100;
+  const clampedCurrentPos = Math.max(0, Math.min(100, currentPos));
+
+  // Trail activation line position
+  const trailLinePos = ((slDistPct + TRAIL_ACTIVATION_PCT) / totalRange) * 100;
+
+  // Trail stop position (if active)
+  let trailStopPos: number | null = null;
+  if (pos.trailActive && pos.trailStopPrice != null && entry > 0) {
+    const trailStopPnl = pos.positionType === 'long'
+      ? ((pos.trailStopPrice - entry) / entry) * 100
+      : ((entry - pos.trailStopPrice) / entry) * 100;
+    trailStopPos = Math.max(0, Math.min(100, ((slDistPct + trailStopPnl) / totalRange) * 100));
   }
 
-  // Bar shows CURRENT P&L position — moves up AND down with price
-  const livePct = Math.max(currentPct, 0);
-  const progress = Math.min(Math.max((livePct / TRAIL_ACTIVATION_PCT) * 100, 0), 100);
-
-  // Color gradient based on progress
-  let barColor: string;
-  let textColor: string;
-  if (progress >= 66) {
-    barColor = 'bg-[#00c853]';
-    textColor = 'text-[#00c853]';
-  } else if (progress >= 33) {
-    barColor = 'bg-amber-400';
-    textColor = 'text-amber-400';
-  } else {
-    barColor = 'bg-[#ff1744]';
-    textColor = 'text-[#ff1744]';
-  }
-
-  const displayPct = livePct;
+  // Fill bar: from entry to current
+  const fillLeft = Math.min(entryPos, clampedCurrentPos);
+  const fillWidth = Math.abs(clampedCurrentPos - entryPos);
+  const isProfit = pnl >= 0;
 
   return (
-    <div className="flex items-center gap-2 w-full">
-      <div className="flex-1 max-w-[120px] md:max-w-[160px]">
-        <div className="h-2 rounded-full bg-zinc-800 overflow-hidden">
+    <div className="w-full">
+      {/* Bar with markers */}
+      <div className="relative h-2.5 bg-zinc-800 rounded-full overflow-hidden">
+        {/* SL zone background (left side, subtle red) */}
+        <div
+          className="absolute top-0 bottom-0 bg-[#ff1744]/8 rounded-l-full"
+          style={{ left: 0, width: `${entryPos}%` }}
+        />
+
+        {/* Fill bar: current P&L relative to entry */}
+        <div
+          className={cn(
+            'absolute top-0 bottom-0 transition-all duration-500 rounded-full',
+            isProfit ? 'bg-[#00c853]' : 'bg-[#ff1744]',
+          )}
+          style={{ left: `${fillLeft}%`, width: `${fillWidth}%` }}
+        />
+
+        {/* Entry line */}
+        <div
+          className="absolute top-0 bottom-0 w-px bg-zinc-500"
+          style={{ left: `${entryPos}%` }}
+        />
+
+        {/* Trail activation line (dashed) */}
+        <div
+          className="absolute top-0 bottom-0 w-px bg-[#00c853]/30"
+          style={{ left: `${Math.min(trailLinePos, 100)}%` }}
+        />
+
+        {/* Trail stop line (if active) */}
+        {trailStopPos != null && (
           <div
-            className={cn('h-full rounded-full transition-all duration-500', barColor)}
-            style={{ width: `${progress}%` }}
+            className="absolute top-0 bottom-0 w-px bg-[#ffd600]"
+            style={{ left: `${trailStopPos}%` }}
           />
-        </div>
+        )}
+
+        {/* Current price marker dot */}
+        <div
+          className={cn(
+            'absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full border border-zinc-900 z-10 transition-all duration-500',
+            isProfit ? 'bg-[#00c853]' : 'bg-[#ff1744]',
+          )}
+          style={{ left: `${clampedCurrentPos}%`, marginLeft: '-4px' }}
+        />
       </div>
-      <span className={cn('text-[10px] font-mono whitespace-nowrap', textColor)}>
-        {displayPct.toFixed(2)}/{TRAIL_ACTIVATION_PCT.toFixed(2)}%
-      </span>
+
+      {/* Labels below bar */}
+      <div className="relative h-3 mt-0.5">
+        <span className="absolute text-[8px] font-mono text-[#ff1744]/70" style={{ left: 0 }}>
+          SL ${fmtPrice(slPrice)}
+        </span>
+        <span
+          className="absolute text-[8px] font-mono text-zinc-500 -translate-x-1/2"
+          style={{ left: `${entryPos}%` }}
+        >
+          Entry
+        </span>
+        {pos.trailActive && pos.trailStopPrice != null ? (
+          <span className="absolute right-0 text-[8px] font-mono text-[#ffd600]/70">
+            Trail ${fmtPrice(pos.trailStopPrice)}
+          </span>
+        ) : (
+          <span className="absolute right-0 text-[8px] font-mono text-zinc-600">
+            {peak > 0 ? `Peak +${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -243,9 +373,12 @@ export function LivePositions() {
       }
 
       // Use ACTUAL position state from bot (written to DB every ~10s)
-      // Falls back to estimation if bot hasn't written state yet
-      const trailActive = pos.position_state === 'trailing'
-        || (pos.position_state == null && pricePnlPct != null && pricePnlPct >= 0.50);
+      // Only trust trailing state if peak P&L confirms it (≥0.30%)
+      const peakPnlPct = pos.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
+      const trailActive = (
+        pos.position_state === 'trailing'
+        && peakPnlPct >= TRAIL_ACTIVATION_PCT
+      );
 
       // Use ACTUAL trail stop price from bot, or estimate if not available
       let trailStopPrice: number | null = pos.trail_stop_price ?? null;
@@ -262,9 +395,6 @@ export function LivePositions() {
           trailStopPrice = currentPrice * (1 - trailDist / 100);
         }
       }
-
-      // Peak P&L: use bot's tracked value, fall back to current (which is a lower bound)
-      const peakPnlPct = pos.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
 
       return {
         id: pos.id,
@@ -313,7 +443,11 @@ export function LivePositions() {
         {positions.map((pos) => {
           const isProfit = (pos.pricePnlPct ?? 0) >= 0;
           const pnlColor = isProfit ? 'text-[#00c853]' : 'text-[#ff1744]';
-          const bgColor = isProfit ? 'border-[#00c853]/20' : 'border-[#ff1744]/20';
+          const posState = getPositionState(pos);
+          const borderColor = posState === 'trailing' ? 'border-[#00c853]/30'
+            : posState === 'near_sl' || posState === 'at_risk' ? 'border-[#ff1744]/20'
+            : isProfit ? 'border-[#00c853]/20'
+            : 'border-zinc-800/50';
           const isClosing = closingIds.has(pos.id);
 
           return (
@@ -322,7 +456,7 @@ export function LivePositions() {
               className={cn(
                 'w-full bg-zinc-900/50 border rounded-lg px-3 py-2.5 md:px-4 md:py-3',
                 'transition-colors',
-                bgColor,
+                borderColor,
                 isClosing && 'opacity-60',
               )}
             >
@@ -348,20 +482,11 @@ export function LivePositions() {
                   </span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {pos.trailActive ? (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#00c853]/10 text-[#00c853]">
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
-                      TRAILING
-                    </span>
-                  ) : (pos.pricePnlPct ?? 0) < 0 ? (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#ff1744]/10 text-[#ff1744]">
-                      HOLDING
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-400/10 text-amber-400">
-                      HOLDING
-                    </span>
-                  )}
+                  <StateBadge
+                    state={posState}
+                    trailStopPrice={pos.trailStopPrice}
+                    entryPrice={pos.entryPrice}
+                  />
                   <button
                     onClick={() => handleClose(pos.id, pos.pair)}
                     disabled={isClosing}
@@ -410,15 +535,12 @@ export function LivePositions() {
                 <span className="text-xs text-zinc-500">Calculating...</span>
               )}
 
-              {/* Row 3: Trail progress bar + position size */}
+              {/* Row 3: Position range bar + position size */}
               <div className="flex items-center gap-3 mt-1.5">
                 {pos.pricePnlPct != null && (
-                  <TrailProgressBar
-                    peakPct={pos.peakPnlPct ?? 0}
-                    currentPct={pos.pricePnlPct}
-                    trailActive={pos.trailActive}
-                    trailStopPrice={pos.trailStopPrice}
-                  />
+                  <div className="flex-1 max-w-[240px] md:max-w-[320px]">
+                    <PositionRangeBar pos={pos} />
+                  </div>
                 )}
                 <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap shrink-0">
                   {pos.contracts}{pos.exchange === 'delta' ? ' ct' : ''}
