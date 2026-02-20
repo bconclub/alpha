@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 import ccxt.async_support as ccxt
 
 from alpha.config import config
+from alpha.db import Database
 from alpha.strategies.base import BaseStrategy, Signal, StrategyName
 from alpha.utils import setup_logger
 
@@ -96,12 +97,14 @@ class OptionsScalpStrategy(BaseStrategy):
         futures_exchange: Any = None,
         scalp_strategy: ScalpStrategy | None = None,
         market_analyzer: Any = None,
+        db: Database | None = None,
     ) -> None:
         super().__init__(pair, executor, risk_manager)
         self.options_exchange: ccxt.Exchange | None = options_exchange
         self.futures_exchange: ccxt.Exchange | None = futures_exchange
         self._scalp = scalp_strategy
         self._market_analyzer = market_analyzer
+        self._db = db
         self._exchange_id = "delta"
 
         # Asset info
@@ -129,6 +132,43 @@ class OptionsScalpStrategy(BaseStrategy):
         self.hourly_wins: int = 0
         self.hourly_losses: int = 0
         self.hourly_pnl: float = 0.0
+
+        # Skip-logging throttle: only log each skip reason once per 5 min
+        self._last_skip_reason: str = ""
+        self._last_skip_time: float = 0.0
+        self._SKIP_LOG_INTERVAL = 5 * 60  # 5 minutes
+
+    # ==================================================================
+    # ACTIVITY LOGGING
+    # ==================================================================
+
+    async def _log_activity(
+        self,
+        event_type: str,
+        description: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Log an event to activity_log (visible on dashboard Live Activity)."""
+        if self._db:
+            try:
+                await self._db.log_activity(
+                    event_type=event_type,
+                    pair=self.pair,
+                    description=description,
+                    exchange="delta",
+                    metadata=metadata,
+                )
+            except Exception as e:
+                self.logger.debug("[%s] activity_log write failed: %s", self.pair, e)
+
+    async def _log_skip(self, reason: str, metadata: dict[str, Any] | None = None) -> None:
+        """Log an options skip event (throttled to avoid spam)."""
+        now = time.monotonic()
+        if reason == self._last_skip_reason and (now - self._last_skip_time) < self._SKIP_LOG_INTERVAL:
+            return
+        self._last_skip_reason = reason
+        self._last_skip_time = now
+        await self._log_activity("options_skip", reason, metadata)
 
     # ==================================================================
     # LIFECYCLE
@@ -353,6 +393,10 @@ class OptionsScalpStrategy(BaseStrategy):
         if self._selected_expiry is None:
             if self._tick_count % 30 == 0:
                 self.logger.info("[%s] No valid expiry available", self.pair)
+            await self._log_skip(
+                f"{self.pair} — OPTIONS SKIP: no valid expiry available",
+                {"option_type": option_type, "strength": strength},
+            )
             return []
 
         hours_to_expiry = (
@@ -364,6 +408,10 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] Nearest expiry only %.1fh away (need %dh+)",
                     self.pair, hours_to_expiry, self.MIN_EXPIRY_HOURS,
                 )
+            await self._log_skip(
+                f"{self.pair} — OPTIONS SKIP: expiry only {hours_to_expiry:.1f}h away (need {self.MIN_EXPIRY_HOURS}h+)",
+                {"option_type": option_type, "strength": strength, "hours_to_expiry": round(hours_to_expiry, 1)},
+            )
             return []
 
         # 7. Find strike
@@ -371,6 +419,10 @@ class OptionsScalpStrategy(BaseStrategy):
         if strikes is None:
             if self._tick_count % 30 == 0:
                 self.logger.info("[%s] No valid strikes found", self.pair)
+            await self._log_skip(
+                f"{self.pair} — OPTIONS SKIP: no valid strikes for {option_type.upper()}",
+                {"option_type": option_type, "strength": strength, "price": current_price},
+            )
             return []
 
         atm_strike, _otm_strike = strikes
@@ -404,6 +456,11 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] Premium $%.4f > max $%.2f — skipping %s",
                     self.pair, premium, max_premium, symbol,
                 )
+            await self._log_skip(
+                f"{self.pair} — OPTIONS SKIP: premium ${premium:.2f} > ${max_premium:.2f} cap",
+                {"option_type": option_type, "strike": atm_strike, "premium": premium,
+                 "max_premium": max_premium, "strength": strength},
+            )
             return []
 
         if premium < self.MIN_PREMIUM_USD:
@@ -412,17 +469,33 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] Premium $%.4f < min $%.2f — illiquid %s",
                     self.pair, premium, self.MIN_PREMIUM_USD, symbol,
                 )
+            await self._log_skip(
+                f"{self.pair} — OPTIONS SKIP: premium ${premium:.4f} illiquid (min ${self.MIN_PREMIUM_USD})",
+                {"option_type": option_type, "strike": atm_strike, "premium": premium, "strength": strength},
+            )
             return []
 
         # 11. Build entry signal
+        signals_str = signal_state.get("reason", "")
+        expiry_str = self._selected_expiry.strftime('%b %d %H:%M')
         reason = (
             f"OPTIONS {option_type.upper()} | {strength}/4 signals "
-            f"({signal_state.get('reason', '')}) | "
+            f"({signals_str}) | "
             f"Strike=${atm_strike:.0f} "
-            f"Exp={self._selected_expiry.strftime('%b %d %H:%M')} "
+            f"Exp={expiry_str} "
             f"Premium=${premium:.4f}"
         )
         self.logger.info("[%s] OPTIONS ENTRY — %s", self.pair, reason)
+
+        # Log to activity_log for dashboard
+        await self._log_activity(
+            "options_entry",
+            f"{self.pair} — OPTIONS: {option_type.upper()} ATM ${atm_strike:.0f} | "
+            f"premium=${premium:.4f} | expiry={expiry_str} | signals={strength}/4 {signals_str}",
+            {"option_type": option_type, "strike": atm_strike, "premium": premium,
+             "expiry": self._selected_expiry.isoformat(), "strength": strength,
+             "underlying_price": current_price, "symbol": symbol},
+        )
 
         return [Signal(
             side="buy",
@@ -478,7 +551,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if current_premium <= 0:
             # May have expired worthless
             if self.expiry_dt and datetime.now(timezone.utc) >= self.expiry_dt:
-                return self._do_option_exit(0, -100.0, "EXPIRED_WORTHLESS")
+                return await self._do_option_exit(0, -100.0, "EXPIRED_WORTHLESS")
             return []
 
         # Track peak premium
@@ -510,7 +583,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] EXPIRY in %.1fh — closing option",
                     self.option_symbol, time_to_expiry / 3600,
                 )
-                return self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_CLOSE")
+                return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_CLOSE")
 
         # ── 2. STOP LOSS: 50% premium loss ───────────────────────────
         if premium_change_pct <= -self.SL_PREMIUM_LOSS_PCT:
@@ -519,7 +592,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.option_symbol, premium_change_pct,
                 self.entry_premium, current_premium,
             )
-            return self._do_option_exit(current_premium, premium_change_pct, "SL")
+            return await self._do_option_exit(current_premium, premium_change_pct, "SL")
 
         # ── 3. TRAILING activation ────────────────────────────────────
         if premium_change_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
@@ -537,7 +610,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] OPTION TRAIL HIT — peak=$%.4f floor=$%.4f now=$%.4f",
                     self.option_symbol, self.highest_premium, trail_floor, current_premium,
                 )
-                return self._do_option_exit(current_premium, final_pct, "TRAIL")
+                return await self._do_option_exit(current_premium, final_pct, "TRAIL")
 
         # ── 5. SIGNAL REVERSAL ────────────────────────────────────────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
@@ -560,7 +633,7 @@ class OptionsScalpStrategy(BaseStrategy):
                             self.option_symbol, self.option_side,
                             new_side, premium_change_pct,
                         )
-                        return self._do_option_exit(
+                        return await self._do_option_exit(
                             current_premium, premium_change_pct, "REVERSAL",
                         )
 
@@ -570,7 +643,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # EXIT SIGNAL BUILDER
     # ==================================================================
 
-    def _do_option_exit(
+    async def _do_option_exit(
         self, current_premium: float, pnl_pct: float, exit_type: str,
     ) -> list[Signal]:
         """Build exit signal for option position."""
@@ -581,6 +654,18 @@ class OptionsScalpStrategy(BaseStrategy):
             f"({pnl_pct:+.1f}%) P&L=${pnl_usd:+.4f}"
         )
         self.logger.info("[%s] OPTIONS EXIT — %s", self.option_symbol, reason)
+
+        # Log to activity_log for dashboard
+        pnl_tag = f"+${pnl_usd:.4f}" if pnl_usd >= 0 else f"-${abs(pnl_usd):.4f}"
+        await self._log_activity(
+            "options_exit",
+            f"{self.pair} — OPTIONS EXIT: {exit_type} {self.option_side} | "
+            f"${self.entry_premium:.4f} -> ${current_premium:.4f} ({pnl_pct:+.1f}%) {pnl_tag}",
+            {"exit_type": exit_type, "option_side": self.option_side,
+             "entry_premium": self.entry_premium, "exit_premium": current_premium,
+             "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4),
+             "strike": self.strike_price, "symbol": self.option_symbol},
+        )
 
         # Stats
         if pnl_pct >= 0:

@@ -230,7 +230,10 @@ export interface PnLByPair {
 
 export type ExchangeFilter = 'all' | 'delta';  // binance removed — Delta only for now
 
-export type ActivityEventType = 'analysis' | 'strategy_switch' | 'trade_open' | 'trade_close' | 'short_open' | 'risk_alert';
+export type ActivityEventType =
+  | 'trade_open' | 'trade_close' | 'short_open'
+  | 'options_entry' | 'options_skip' | 'options_exit'
+  | 'risk_alert';
 
 export interface ActivityEvent {
   id: string;
@@ -241,7 +244,18 @@ export interface ActivityEvent {
   exchange?: Exchange;
 }
 
-export type ActivityFilter = 'all' | 'trades' | 'alerts';
+/** activity_log row from Supabase (engine writes these) */
+export interface ActivityLogRow {
+  id: number;
+  event_type: string;
+  pair: string;
+  description: string;
+  exchange: string;
+  metadata: Record<string, any> | null;
+  created_at: string;
+}
+
+export type ActivityFilter = 'all' | 'trades' | 'options';
 
 // ── Control Panel types ──────────────────────────────────────
 

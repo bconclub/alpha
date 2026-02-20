@@ -23,6 +23,7 @@ import type {
   StrategyPerformance,
   ActivityEvent,
   ActivityEventType,
+  ActivityLogRow,
   PairConfig,
   SetupConfig,
   SignalState,
@@ -241,7 +242,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
     } catch (e) { console.warn('[Alpha] signal_state fetch failed', e); }
   }, []);
 
-  const buildInitialFeed = useCallback((trades: Trade[], logs: StrategyLog[]) => {
+  const buildInitialFeed = useCallback((trades: Trade[], activityRows: ActivityLogRow[]) => {
     const events: ActivityEvent[] = [];
 
     for (const trade of trades.slice(0, 40)) {
@@ -261,15 +262,19 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       }
     }
 
-    for (const log of logs.slice(0, 20)) {
-      const pairLabel = log.pair || 'Market';
-      events.push(
-        buildActivityEvent(
-          'analysis',
-          log,
-          `${pairLabel} analyzed — ${log.market_condition}, strategy: ${log.strategy_selected}`,
-        ),
-      );
+    // Options / risk events from activity_log table
+    for (const row of activityRows) {
+      const eventType = (['options_entry', 'options_skip', 'options_exit', 'risk_alert'].includes(row.event_type)
+        ? row.event_type
+        : 'options_skip') as ActivityEventType;
+      events.push({
+        id: String(row.id),
+        timestamp: row.created_at,
+        pair: row.pair,
+        eventType,
+        description: row.description,
+        exchange: (row.exchange === 'delta' || row.exchange === 'binance') ? row.exchange : undefined,
+      });
     }
 
     events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -310,19 +315,22 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
     async function fetchInitialData() {
       try {
-        const [allTradesData, botStatusRes, strategyLogRes, latestPerPairRes] = await Promise.all([
+        const [allTradesData, botStatusRes, strategyLogRes, latestPerPairRes, activityLogRes] = await Promise.all([
           fetchAllTrades(),
           // bot_status uses created_at
           client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1),
-          // strategy_log — recent history for activity feed & charts
+          // strategy_log — recent history for charts & MarketOverview
           client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200),
           // latest_strategy_log view — guaranteed 1 row per pair+exchange (for MarketOverview)
           client!.from('latest_strategy_log').select('*'),
+          // activity_log — options decisions, risk alerts for Live Activity feed
+          client!.from('activity_log').select('*').order('created_at', { ascending: false }).limit(50),
         ]);
 
         if (botStatusRes.error) console.error('[Alpha] bot_status query error:', botStatusRes.error.message);
         if (strategyLogRes.error) console.error('[Alpha] strategy_log query error:', strategyLogRes.error.message);
         if (latestPerPairRes.error) console.warn('[Alpha] latest_strategy_log view error:', latestPerPairRes.error.message);
+        if (activityLogRes.error) console.warn('[Alpha] activity_log query error:', activityLogRes.error.message);
 
         // Normalize all data (map DB column names → app types)
         const tradeData = (allTradesData ?? []).map(normalizeTrade);
@@ -335,15 +343,16 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         const latestRows = (latestPerPairRes.data ?? []).map(normalizeStrategyLog);
         const extraRows = latestRows.filter(r => !seenIds.has(r.id));
         const mergedLogs = [...logData, ...extraRows];
+        const activityRows = (activityLogRes.data ?? []) as ActivityLogRow[];
 
-        console.log(`[Alpha] Fetched: ${tradeData.length} trades, ${mergedLogs.length} strategy logs (${extraRows.length} from view), ${botStatusRes.data?.length ?? 0} bot status`);
+        console.log(`[Alpha] Fetched: ${tradeData.length} trades, ${mergedLogs.length} strategy logs (${extraRows.length} from view), ${activityRows.length} activity events`);
 
         setTrades(tradeData);
         if (botStatusRes.data && botStatusRes.data.length > 0) {
           setBotStatus(normalizeBotStatus(botStatusRes.data[0]));
         }
         setStrategyLog(mergedLogs);
-        buildInitialFeed(tradeData, mergedLogs);
+        buildInitialFeed(tradeData, activityRows);
       } catch (err) {
         console.error('[Alpha] fetchInitialData failed:', err);
       }
@@ -427,14 +436,21 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'strategy_log' }, (payload) => {
         const log = normalizeStrategyLog(payload.new);
         setStrategyLog((prev) => [log, ...prev]);
-
-        pushActivity(
-          buildActivityEvent(
-            'analysis',
-            log,
-            `${log.pair ?? 'Market'} — ${log.market_condition}, ${log.strategy_selected}${log.adx ? `, ADX=${log.adx.toFixed(0)}` : ''}${log.rsi ? `, RSI=${log.rsi.toFixed(0)}` : ''}`,
-          ),
-        );
+        // No longer push analysis events to activity feed — replaced by activity_log
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_log' }, (payload) => {
+        const row = payload.new as ActivityLogRow;
+        const eventType = (['options_entry', 'options_skip', 'options_exit', 'risk_alert'].includes(row.event_type)
+          ? row.event_type
+          : 'options_skip') as ActivityEventType;
+        pushActivity({
+          id: String(row.id),
+          timestamp: row.created_at,
+          pair: row.pair,
+          eventType,
+          description: row.description,
+          exchange: (row.exchange === 'delta' || row.exchange === 'binance') ? row.exchange : undefined,
+        });
       })
       // Control Panel realtime
       .on('postgres_changes', { event: '*', schema: 'public', table: 'pair_config' }, () => {

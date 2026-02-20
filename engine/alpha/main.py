@@ -191,6 +191,7 @@ class AlphaBot:
                     futures_exchange=self.delta,
                     scalp_strategy=scalp,
                     market_analyzer=self.delta_analyzer,
+                    db=self.db,
                 )
 
         # Inject restored position state into strategy instances

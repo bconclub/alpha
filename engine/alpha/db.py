@@ -25,6 +25,7 @@ class Database:
     TABLE_STRATEGY_LOG = "strategy_log"
     TABLE_BOT_STATUS = "bot_status"
     TABLE_BOT_COMMANDS = "bot_commands"
+    TABLE_ACTIVITY_LOG = "activity_log"
 
     def __init__(self) -> None:
         self._client: Client | None = None
@@ -481,6 +482,33 @@ class Database:
             )
         except Exception as e:
             logger.error("signal_state upsert failed for %s: %s", pair, e)
+
+    # ── Activity log (live feed events for dashboard) ───────────────────────
+
+    async def log_activity(
+        self,
+        event_type: str,
+        pair: str,
+        description: str,
+        exchange: str = "delta",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Insert an activity event visible in the dashboard Live Activity feed.
+
+        event_type: options_entry, options_skip, options_exit, risk_alert, etc.
+        """
+        if not self.is_connected:
+            return
+        row: dict[str, Any] = {
+            "event_type": event_type,
+            "pair": pair,
+            "description": description,
+            "exchange": exchange,
+            "created_at": iso_now(),
+        }
+        if metadata:
+            row["metadata"] = metadata
+        await self._insert(self.TABLE_ACTIVITY_LOG, row)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 

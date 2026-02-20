@@ -6,27 +6,29 @@ import { formatShortDate, cn } from '@/lib/utils';
 import type { ActivityEventType, ActivityFilter } from '@/lib/types';
 
 const EVENT_ICONS: Record<ActivityEventType, string> = {
-  analysis: '\u{1F50D}',
-  strategy_switch: '\u{1F500}',
   trade_open: '\u{1F7E2}',
   trade_close: '\u2705',
   short_open: '\u{1F534}',
+  options_entry: '\u{1F4C8}',
+  options_skip: '\u23F8\uFE0F',
+  options_exit: '\u{1F4C9}',
   risk_alert: '\u26A0\uFE0F',
 };
 
 const EVENT_COLORS: Record<ActivityEventType, string> = {
-  analysis: 'border-l-[#2196f3]',
-  strategy_switch: 'border-l-[#ffd600]',
   trade_open: 'border-l-[#00c853]',
   trade_close: 'border-l-[#00c853]',
   short_open: 'border-l-[#ff1744]',
+  options_entry: 'border-l-[#7c4dff]',
+  options_skip: 'border-l-zinc-600',
+  options_exit: 'border-l-[#7c4dff]',
   risk_alert: 'border-l-[#ffd600]',
 };
 
 const FILTER_OPTIONS: { value: ActivityFilter; label: string }[] = [
   { value: 'all', label: 'All' },
-  { value: 'trades', label: 'Trades Only' },
-  { value: 'alerts', label: 'Alerts Only' },
+  { value: 'trades', label: 'Trades' },
+  { value: 'options', label: 'Options' },
 ];
 
 export function LiveActivityFeed() {
@@ -43,7 +45,12 @@ export function LiveActivityFeed() {
         e.eventType === 'short_open',
       );
     }
-    return activityFeed.filter((e) => e.eventType === 'risk_alert');
+    // Options filter
+    return activityFeed.filter((e) =>
+      e.eventType === 'options_entry' ||
+      e.eventType === 'options_skip' ||
+      e.eventType === 'options_exit',
+    );
   }, [activityFeed, filter]);
 
   // Auto-scroll when new items arrive
@@ -101,7 +108,12 @@ export function LiveActivityFeed() {
                     <span className="text-[10px] font-medium text-zinc-400">{event.pair}</span>
                   )}
                 </div>
-                <p className="text-xs text-zinc-300 mt-0.5 truncate">{event.description}</p>
+                <p className={cn(
+                  'text-xs mt-0.5',
+                  event.eventType === 'options_skip' ? 'text-zinc-500 truncate' : 'text-zinc-300 truncate',
+                )}>
+                  {event.description}
+                </p>
               </div>
             </div>
           ))
