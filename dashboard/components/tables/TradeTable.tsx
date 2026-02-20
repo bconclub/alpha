@@ -79,6 +79,28 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
   'XRP/USD:USD': 1.0,
 };
 
+// ── Options helpers ──────────────────────────────────────────
+/** Options symbol pattern: contains date-strike-C/P  (e.g. "260221-98000-C") */
+const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
+function isOptionTrade(trade: Trade): boolean {
+  return trade.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(trade.pair);
+}
+
+/** Shorten an options pair for display: "ETH/USD:USD-260221-2780-C" → "ETH 2780C Feb21" */
+function displayOptionPair(pair: string): string {
+  const m = pair.match(/^(\w+)\/.*-(\d{2})(\d{2})(\d{2})-(\d+)-([CP])$/);
+  if (!m) return displayPair(pair);
+  const [, asset, dd, mm, , strike, cp] = m;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthLabel = months[parseInt(mm, 10) - 1] ?? mm;
+  return `${asset} ${strike}${cp} ${monthLabel}${dd}`;
+}
+
+/** Format premium price with "P:" prefix */
+function formatPremium(value: number): string {
+  return `P: $${value.toFixed(4)}`;
+}
+
 type ColumnDef = { key: string; label: string; align?: 'right' };
 
 const COLUMNS: ColumnDef[] = [
@@ -292,9 +314,12 @@ function calcUnrealizedPnL(
   const contracts = trade.amount;
   if (!entryPrice || !contracts) return null;
 
+  const isOption = isOptionTrade(trade);
+
   // Get coin amount from contracts
+  // Options: 1 contract = 1 unit (no conversion). Futures: use contract size.
   let coinAmount = contracts;
-  if (trade.exchange === 'delta') {
+  if (trade.exchange === 'delta' && !isOption) {
     const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
     coinAmount = contracts * contractSize;
   }
@@ -307,8 +332,13 @@ function calcUnrealizedPnL(
     grossPnl = (currentPrice - entryPrice) * coinAmount;
   }
 
-  // P&L % against collateral
+  // P&L % against capital at risk
   const notional = entryPrice * coinAmount;
+  if (isOption) {
+    // Options: P&L % vs full premium (max loss = premium paid)
+    const pnlPct = notional > 0 ? (grossPnl / notional) * 100 : 0;
+    return { pnl: grossPnl, pnl_pct: pnlPct };
+  }
   const leverage = trade.leverage > 1 ? trade.leverage : 1;
   const collateral = notional / leverage;
   const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
@@ -332,16 +362,18 @@ function buildPositionDisplay(
   let pnlUsd: number | null = null;
   let collateral: number | null = null;
 
+  const isOption = isOptionTrade(trade);
+
   if (currentPrice != null && entry > 0) {
     if (trade.position_type === 'short') {
       pricePnlPct = ((entry - currentPrice) / entry) * 100;
     } else {
       pricePnlPct = ((currentPrice - entry) / entry) * 100;
     }
-    capitalPnlPct = pricePnlPct * leverage;
 
+    // Options: 1 contract = 1 unit (no contract size conversion)
     let coinAmount = trade.amount;
-    if (trade.exchange === 'delta') {
+    if (trade.exchange === 'delta' && !isOption) {
       const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
       coinAmount = trade.amount * contractSize;
     }
@@ -351,7 +383,14 @@ function buildPositionDisplay(
       pnlUsd = (currentPrice - entry) * coinAmount;
     }
     const notional = entry * coinAmount;
-    collateral = leverage > 1 ? notional / leverage : notional;
+    if (isOption) {
+      // Options: P&L % vs full premium, collateral = premium
+      capitalPnlPct = pricePnlPct;  // same as price P&L (no leverage multiplier)
+      collateral = notional;
+    } else {
+      capitalPnlPct = pricePnlPct * leverage;
+      collateral = leverage > 1 ? notional / leverage : notional;
+    }
   }
 
   const peakPnlPct = trade.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
@@ -812,9 +851,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             ? trade.id.slice(-6)
                             : trade.id}
                         </span>
-                        <span className="text-sm font-semibold text-white">{displayPair(trade.pair)}</span>
+                        <span className="text-sm font-semibold text-white">
+                          {isOptionTrade(trade) ? displayOptionPair(trade.pair) : displayPair(trade.pair)}
+                        </span>
                         <span className={cn('text-[10px] font-medium', getPositionTypeColor(trade.position_type))}>
-                          {getPositionTypeLabel(trade.position_type)}
+                          {isOptionTrade(trade) ? 'OPT' : getPositionTypeLabel(trade.position_type)}
                         </span>
                         <span
                           className="inline-block h-2 w-2 rounded-full"
@@ -843,15 +884,21 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     {/* Prices row */}
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mb-1">
                       <span className="text-zinc-400">
-                        Entry: <span className="font-mono text-zinc-300">{formatPrice(trade.price)}</span>
+                        Entry: <span className="font-mono text-zinc-300">
+                          {isOptionTrade(trade) ? formatPremium(trade.price) : formatPrice(trade.price)}
+                        </span>
                       </span>
                       {trade.exit_price != null && (
                         <span className="text-zinc-400">
-                          Exit: <span className="font-mono text-zinc-300">{formatPrice(trade.exit_price)}</span>
+                          Exit: <span className="font-mono text-zinc-300">
+                            {isOptionTrade(trade) ? formatPremium(trade.exit_price) : formatPrice(trade.exit_price)}
+                          </span>
                         </span>
                       )}
                       {trade.exchange === 'delta' && (
-                        <span className="text-zinc-500 font-mono">{trade.amount} contracts</span>
+                        <span className="text-zinc-500 font-mono">
+                          {trade.amount} {isOptionTrade(trade) ? 'opt' : 'contracts'}
+                        </span>
                       )}
                     </div>
                     {/* Details row */}
@@ -1042,7 +1089,12 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           'sticky left-0 z-10 whitespace-nowrap px-4 py-3 font-medium text-zinc-100',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
-                          {displayPair(trade.pair)}
+                          {isOptionTrade(trade) ? (
+                            <span title={trade.pair}>
+                              {displayOptionPair(trade.pair)}
+                              <span className="ml-1 text-[9px] text-pink-400/70 font-mono">OPT</span>
+                            </span>
+                          ) : displayPair(trade.pair)}
                         </td>
 
                         {/* Type — STICKY */}
@@ -1050,9 +1102,15 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           'sticky left-[100px] z-10 whitespace-nowrap px-4 py-3',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
-                          <span className={cn('text-xs font-medium', getPositionTypeColor(trade.position_type))}>
-                            {getPositionTypeLabel(trade.position_type)}
-                          </span>
+                          {isOptionTrade(trade) ? (
+                            <span className={cn('text-xs font-medium', trade.pair.endsWith('-C') ? 'text-emerald-400' : 'text-red-400')}>
+                              {trade.pair.endsWith('-C') ? 'CALL' : 'PUT'}
+                            </span>
+                          ) : (
+                            <span className={cn('text-xs font-medium', getPositionTypeColor(trade.position_type))}>
+                              {getPositionTypeLabel(trade.position_type)}
+                            </span>
+                          )}
                         </td>
 
                         {/* Leverage — STICKY */}
@@ -1060,7 +1118,12 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           'sticky left-[180px] z-10 whitespace-nowrap px-4 py-3 text-right',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
-                          {trade.leverage > 1 ? (
+                          {isOptionTrade(trade) ? (
+                            <span className="text-xs font-medium text-pink-400" title="Options trade — max loss = premium paid">
+                              {formatLeverage(trade.leverage)}
+                              <span className="text-[8px] text-pink-400/60 ml-0.5">OPT</span>
+                            </span>
+                          ) : trade.leverage > 1 ? (
                             <span className="text-xs font-medium text-amber-400">
                               {formatLeverage(trade.leverage)}
                             </span>
@@ -1074,7 +1137,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           'sticky left-[240px] z-10 border-r border-zinc-700 whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
-                          {formatPrice(trade.price)}
+                          {isOptionTrade(trade) ? (
+                            <span title="Entry premium">
+                              {formatPremium(trade.price)}
+                            </span>
+                          ) : formatPrice(trade.price)}
                         </td>
 
                         {/* ── Scrollable columns ── */}
@@ -1107,7 +1174,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Exit Price */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
                           {trade.exit_price != null ? (
-                            formatPrice(trade.exit_price)
+                            isOptionTrade(trade)
+                              ? <span title="Exit premium">{formatPremium(trade.exit_price)}</span>
+                              : formatPrice(trade.exit_price)
                           ) : trade.status === 'open' ? (
                             <span className="text-zinc-500 text-xs italic">open</span>
                           ) : (
@@ -1118,9 +1187,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Contracts / Amount */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
                           {trade.exchange === 'delta' ? (
-                            <span title={`${trade.amount} contracts`}>
+                            <span title={isOptionTrade(trade) ? `${trade.amount} option contract(s)` : `${trade.amount} contracts`}>
                               {trade.amount.toLocaleString('en-US', { maximumFractionDigits: 0 })}
-                              <span className="text-zinc-500 text-[10px] ml-0.5">ct</span>
+                              <span className="text-zinc-500 text-[10px] ml-0.5">{isOptionTrade(trade) ? 'opt' : 'ct'}</span>
                             </span>
                           ) : (
                             trade.amount.toLocaleString('en-US', {
@@ -1226,7 +1295,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* SL Price */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
                           {trade.stop_loss != null ? (
-                            <span className={trade.status === 'open' ? 'text-red-400' : 'text-zinc-500'}>{formatPrice(trade.stop_loss)}</span>
+                            <span className={trade.status === 'open' ? 'text-red-400' : 'text-zinc-500'}>
+                              {isOptionTrade(trade) ? formatPremium(trade.stop_loss) : formatPrice(trade.stop_loss)}
+                            </span>
                           ) : (
                             <span className="text-zinc-600">&mdash;</span>
                           )}

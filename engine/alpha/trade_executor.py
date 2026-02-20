@@ -115,11 +115,13 @@ def calc_pnl(
     exit_fee_dollars = exit_notional * exit_fee_rate
     net_pnl = gross_pnl - entry_fee_dollars - exit_fee_dollars
 
-    # P&L % against collateral
+    # P&L % against capital at risk
     lev = max(int(leverage or 1), 1)
     if is_option:
-        # Options collateral = premium / leverage (50x on Delta)
-        collateral = entry_notional / lev if lev > 1 else entry_notional
+        # Options: max loss = full premium paid. P&L % is vs premium, NOT margin.
+        # Margin (premium/50) is just exchange collateral; your real risk is the premium.
+        # -20% means you lost 20% of the premium you paid.
+        collateral = entry_notional  # full premium
     else:
         collateral = entry_notional / lev if lev > 1 else entry_notional
     pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
@@ -959,9 +961,14 @@ class TradeExecutor:
                 coin_qty = filled_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
 
             notional = fill_price * coin_qty
-            # Cost = collateral (actual capital at risk)
-            is_futures = signal.leverage > 1 and signal.position_type in ("long", "short")
-            cost = notional / signal.leverage if is_futures else notional
+            # Cost = actual capital at risk
+            is_option = is_option_symbol(signal.pair)
+            if is_option:
+                # Options: cost = full premium (max loss = premium paid)
+                cost = notional
+            else:
+                is_futures = signal.leverage > 1 and signal.position_type in ("long", "short")
+                cost = notional / signal.leverage if is_futures else notional
 
             # Calculate entry fee for storage
             if signal.exchange_id == "delta":
