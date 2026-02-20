@@ -31,11 +31,15 @@ function fmtStrike(v: number | null): string {
   return `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
 }
 
+/** How old is the last update in milliseconds? */
+function ageMs(updatedAt: string | null): number {
+  if (!updatedAt) return Infinity;
+  return Date.now() - new Date(updatedAt).getTime();
+}
+
 /** Staleness check: is updated_at older than 2 minutes? */
 function isStale(updatedAt: string | null): boolean {
-  if (!updatedAt) return true;
-  const ageMs = Date.now() - new Date(updatedAt).getTime();
-  return ageMs > 2 * 60 * 1000;
+  return ageMs(updatedAt) > 2 * 60 * 1000;
 }
 
 interface MergedPairState {
@@ -97,7 +101,11 @@ export function OptionsTracker() {
 
 function PairCard({ ps }: { ps: MergedPairState }) {
   const s = ps.state;
-  const hasPosition = s?.position_side != null;
+  // Position is only "live" if position_side is set AND data is fresh (< 5 min)
+  // Stale position_side means engine crashed/restarted without clearing state
+  const positionSideSet = s?.position_side != null;
+  const dataAge = ageMs(s?.updated_at ?? null);
+  const hasPosition = positionSideSet && dataAge < 5 * 60 * 1000;
   const isReady = (s?.signal_strength ?? 0) >= 3;
   const strength = s?.signal_strength ?? 0;
 
@@ -118,14 +126,16 @@ function PairCard({ ps }: { ps: MergedPairState }) {
         </div>
         <div className="flex items-center gap-1.5">
           {hasPosition && (
-            <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-[#7c4dff] bg-[#7c4dff]/10">
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-[#7c4dff] bg-[#7c4dff]/10 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#7c4dff] animate-pulse" />
               {s?.position_side?.toUpperCase()} OPEN
             </span>
           )}
           {ps.stale ? (
             <span className="text-[8px] text-zinc-600 font-mono">STALE</span>
           ) : s?.updated_at ? (
-            <span className="text-[8px] text-zinc-600 font-mono">
+            <span className="text-[8px] text-zinc-600 font-mono flex items-center gap-1">
+              <span className="w-1 h-1 rounded-full bg-[#00c853]" />
               {formatTimeAgo(s.updated_at)}
             </span>
           ) : null}
@@ -252,7 +262,26 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             </div>
           ) : (
             <div className="text-[9px] font-mono text-zinc-600 mb-2">
-              Position: None
+              {s.last_exit_type ? (
+                <span>
+                  Last: {s.last_exit_type}
+                  {s.last_exit_pnl_pct != null && (
+                    <span className={cn(
+                      'ml-1',
+                      s.last_exit_pnl_pct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                    )}>
+                      {s.last_exit_pnl_pct >= 0 ? '+' : ''}{s.last_exit_pnl_pct.toFixed(1)}%
+                    </span>
+                  )}
+                  {s.last_exit_pnl_usd != null && (
+                    <span className="text-zinc-600 ml-0.5">
+                      (${s.last_exit_pnl_usd >= 0 ? '+' : ''}{s.last_exit_pnl_usd.toFixed(4)})
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span>Position: None</span>
+              )}
             </div>
           )}
 

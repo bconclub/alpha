@@ -279,6 +279,10 @@ export interface OptionsState {
   pnl_usd: number | null;
   trailing_active: boolean;
   highest_premium: number | null;
+  // Last exit summary (written on close for dashboard)
+  last_exit_type?: string | null;
+  last_exit_pnl_pct?: number | null;
+  last_exit_pnl_usd?: number | null;
   updated_at: string;
 }
 

@@ -941,6 +941,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
         self.hourly_pnl += pnl_usd
 
+        # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
+        await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
+
         return [Signal(
             side="sell",
             price=current_premium,
@@ -954,6 +957,67 @@ class OptionsScalpStrategy(BaseStrategy):
             reduce_only=True,
             exchange_id="delta",
         )]
+
+    async def _clear_dashboard_position(
+        self, exit_type: str = "", pnl_pct: float = 0.0, pnl_usd: float = 0.0,
+    ) -> None:
+        """Write a final options_state update that clears all position fields.
+
+        Called on exit so the dashboard immediately shows 'No Position'
+        instead of stale 'CALL OPEN'.
+        """
+        if not self._db:
+            return
+
+        # Build state with position fields explicitly nulled
+        # Keep market data (spot, expiry, premiums) intact for display
+        signal_strength = 0
+        signal_side: str | None = None
+        signal_reason = ""
+        spot_price = 0.0
+
+        if self._scalp and hasattr(self._scalp, "last_signal_state"):
+            ss = self._scalp.last_signal_state
+            if ss:
+                signal_strength = ss.get("strength", 0)
+                signal_side = ss.get("side")
+                signal_reason = ss.get("reason", "")
+                spot_price = ss.get("current_price", 0)
+
+        state = {
+            "spot_price": spot_price or None,
+            "expiry": self._selected_expiry.isoformat() if self._selected_expiry else None,
+            "expiry_label": None,
+            "atm_strike": None,
+            "call_premium": None,
+            "put_premium": None,
+            "signal_strength": signal_strength,
+            "signal_side": signal_side,
+            "signal_reason": signal_reason,
+            # Position fields: ALL cleared
+            "position_side": None,
+            "position_strike": None,
+            "position_symbol": None,
+            "entry_premium": None,
+            "current_premium": None,
+            "pnl_pct": None,
+            "pnl_usd": None,
+            "trailing_active": False,
+            "highest_premium": None,
+            # Exit info for dashboard (last exit summary)
+            "last_exit_type": exit_type,
+            "last_exit_pnl_pct": round(pnl_pct, 2),
+            "last_exit_pnl_usd": round(pnl_usd, 4),
+        }
+
+        try:
+            await self._db.upsert_options_state(self.pair, state)
+            self.logger.info(
+                "[%s] Dashboard options state cleared (exit=%s pnl=%+.1f%%)",
+                self.pair, exit_type, pnl_pct,
+            )
+        except Exception as e:
+            self.logger.warning("[%s] Failed to clear dashboard options state: %s", self.pair, e)
 
     # ==================================================================
     # CALLBACKS
@@ -992,8 +1056,12 @@ class OptionsScalpStrategy(BaseStrategy):
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0
+            self.highest_premium = 0.0
             self._trailing_active = False
+            self.strike_price = 0.0
             self.expiry_dt = None
+            # Force next check() to immediately write cleared state to dashboard
+            self._last_state_write = 0.0
 
     def on_rejected(self, signal: Signal) -> None:
         """Handle rejected option orders."""
