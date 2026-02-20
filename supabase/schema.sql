@@ -28,8 +28,8 @@ create table if not exists public.trades (
     cost          numeric(20,8) not null default 0,    -- entry_price * amount (quote value)
 
     -- Classification
-    strategy      text        not null                 -- 'grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp'
-                  check (strategy in ('grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp')),
+    strategy      text        not null                 -- 'grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp', 'options_scalp'
+                  check (strategy in ('grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp', 'options_scalp')),
     order_type    text        not null default 'market'
                   check (order_type in ('market', 'limit')),
     exchange      text        not null default 'binance',
@@ -45,10 +45,11 @@ create table if not exists public.trades (
     reason        text,                                -- human-readable entry/exit reason
     exit_reason   text,                                -- clean exit type: TRAIL, SL, FLAT, MANUAL, etc.
 
-    -- Futures
-    leverage      numeric(5,2) not null default 1,     -- 1 = spot, >1 = futures
+    -- Futures / Options
+    leverage      numeric(5,2) not null default 1,     -- 1 = spot, >1 = futures/options
     position_type text        not null default 'spot'  -- 'spot', 'long', 'short'
                   check (position_type in ('spot', 'long', 'short')),
+    collateral    numeric(20,8),                        -- margin posted (notional/leverage)
 
     -- Exchange reference
     order_id      text,                                -- ccxt order id

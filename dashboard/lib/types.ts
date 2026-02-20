@@ -14,6 +14,7 @@ export interface Trade {
   exit_price?: number | null;
   amount: number;
   cost?: number;
+  collateral?: number;      // margin posted (notional/leverage). Options: premium/50
   strategy: Strategy;
   pnl: number;              // NET P&L (after fees)
   pnl_pct?: number;

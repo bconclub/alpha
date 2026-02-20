@@ -332,13 +332,8 @@ function calcUnrealizedPnL(
     grossPnl = (currentPrice - entryPrice) * coinAmount;
   }
 
-  // P&L % against capital at risk
+  // P&L % against collateral (margin posted)
   const notional = entryPrice * coinAmount;
-  if (isOption) {
-    // Options: P&L % vs full premium (max loss = premium paid)
-    const pnlPct = notional > 0 ? (grossPnl / notional) * 100 : 0;
-    return { pnl: grossPnl, pnl_pct: pnlPct };
-  }
   const leverage = trade.leverage > 1 ? trade.leverage : 1;
   const collateral = notional / leverage;
   const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
@@ -383,14 +378,9 @@ function buildPositionDisplay(
       pnlUsd = (currentPrice - entry) * coinAmount;
     }
     const notional = entry * coinAmount;
-    if (isOption) {
-      // Options: P&L % vs full premium, collateral = premium
-      capitalPnlPct = pricePnlPct;  // same as price P&L (no leverage multiplier)
-      collateral = notional;
-    } else {
-      capitalPnlPct = pricePnlPct * leverage;
-      collateral = leverage > 1 ? notional / leverage : notional;
-    }
+    // capitalPnlPct = return on collateral (margin posted)
+    capitalPnlPct = pricePnlPct * leverage;
+    collateral = leverage > 1 ? notional / leverage : notional;
   }
 
   const peakPnlPct = trade.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
@@ -639,11 +629,25 @@ export default function TradeTable({ trades }: TradeTableProps) {
   const filterBtnInactive = 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800';
 
   /** Get P&L display values for a trade (realized or unrealized) */
-  function getDisplayPnL(trade: Trade): { pnl: number; pnlPct: number | null; isUnrealized: boolean } {
+  function getDisplayPnL(trade: Trade): { pnl: number; pnlPct: number | null; grossPnl: number | null; isUnrealized: boolean } {
     if (trade.status === 'closed') {
+      // Options: always recalculate from entry/exit premium to fix legacy DB values
+      // (old trades had coin_amount multiplied by ETH contract size 0.01)
+      if (isOptionTrade(trade) && trade.price > 0 && trade.exit_price != null) {
+        const contracts = trade.amount || 1;
+        const grossPnl = (trade.exit_price - trade.price) * contracts;
+        const totalFees = (trade.entry_fee ?? 0) + (trade.exit_fee ?? 0);
+        const netPnl = grossPnl - totalFees;
+        // pnl_pct vs collateral (margin posted = premium / leverage)
+        const leverage = trade.leverage > 1 ? trade.leverage : 1;
+        const collateral = (trade.price * contracts) / leverage;
+        const pnlPct = collateral > 0 ? (netPnl / collateral) * 100 : 0;
+        return { pnl: netPnl, pnlPct, grossPnl, isUnrealized: false };
+      }
       return {
         pnl: trade.pnl,
         pnlPct: trade.pnl_pct ?? null,
+        grossPnl: trade.gross_pnl ?? null,
         isUnrealized: false,
       };
     }
@@ -657,12 +661,13 @@ export default function TradeTable({ trades }: TradeTableProps) {
         return {
           pnl: unrealized.pnl,
           pnlPct: unrealized.pnl_pct,
+          grossPnl: unrealized.pnl,
           isUnrealized: true,
         };
       }
     }
 
-    return { pnl: trade.pnl, pnlPct: trade.pnl_pct ?? null, isUnrealized: false };
+    return { pnl: trade.pnl, pnlPct: trade.pnl_pct ?? null, grossPnl: trade.gross_pnl ?? null, isUnrealized: false };
   }
 
   // -------------------------------------------------------------------------
@@ -874,9 +879,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {display.isUnrealized && (
                           <span className="text-[9px] text-zinc-500 ml-1">live</span>
                         )}
-                        {trade.status === 'closed' && trade.gross_pnl != null && (
+                        {trade.status === 'closed' && (display.grossPnl != null || trade.gross_pnl != null) && (
                           <div className="text-[10px] text-zinc-500 font-mono">
-                            gross {formatPnL(trade.gross_pnl)} · fees -${((trade.entry_fee ?? 0) + (trade.exit_fee ?? 0)).toFixed(4)}
+                            gross {formatPnL(display.grossPnl ?? trade.gross_pnl ?? 0)} · fees -${((trade.entry_fee ?? 0) + (trade.exit_fee ?? 0)).toFixed(4)}
                           </div>
                         )}
                       </div>
@@ -921,7 +926,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       )}
                       {display.pnlPct != null && (
                         <span className={cn('font-mono', getPnLColor(display.pnlPct))}>
-                          {formatPercentage(display.pnlPct)}
+                          {isOptionTrade(trade) && display.pnlPct < -100
+                            ? '-100% (liq)'
+                            : formatPercentage(display.pnlPct)}
                           {display.isUnrealized ? ' (unr)' : ''}
                         </span>
                       )}
@@ -1227,7 +1234,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             'whitespace-nowrap px-4 py-3 text-right font-mono text-xs',
                             trade.status === 'open'
                               ? getPnLColor(display.pnl)
-                              : getPnLColor(trade.gross_pnl ?? display.pnl),
+                              : getPnLColor(display.grossPnl ?? trade.gross_pnl ?? display.pnl),
                           )}
                         >
                           {trade.status === 'open' ? (
@@ -1237,6 +1244,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                                 <span className="text-[9px] text-zinc-500 ml-0.5 font-normal">live</span>
                               )}
                             </>
+                          ) : display.grossPnl != null ? (
+                            formatPnL(display.grossPnl)
                           ) : trade.gross_pnl != null ? (
                             formatPnL(trade.gross_pnl)
                           ) : (
@@ -1266,6 +1275,12 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           {display.isUnrealized && (
                             <span className="text-[9px] text-zinc-500 ml-0.5 font-normal">live</span>
                           )}
+                          {isOptionTrade(trade) && trade.status === 'closed' && (
+                            <div className="text-[9px] text-zinc-500 font-normal mt-0.5"
+                                 title={`Collateral: $${(trade.collateral ?? ((trade.price * (trade.amount || 1)) / Math.max(trade.leverage, 1))).toFixed(4)} (${trade.leverage}x)`}>
+                              risk: ${(trade.collateral ?? ((trade.price * (trade.amount || 1)) / Math.max(trade.leverage, 1))).toFixed(4)}
+                            </div>
+                          )}
                         </td>
 
                         {/* P&L % (return on collateral) */}
@@ -1278,7 +1293,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           {display.pnlPct != null
                             ? (
                               <>
-                                {formatPercentage(display.pnlPct)}
+                                {isOptionTrade(trade) && display.pnlPct < -100
+                                  ? <span title={`Actual: ${formatPercentage(display.pnlPct)}`}>-100.00% <span className="text-[9px] text-red-500">(liq)</span></span>
+                                  : formatPercentage(display.pnlPct)}
                                 {display.isUnrealized && (
                                   <span className="text-[9px] text-zinc-500 ml-0.5">unr</span>
                                 )}

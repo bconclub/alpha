@@ -115,15 +115,9 @@ def calc_pnl(
     exit_fee_dollars = exit_notional * exit_fee_rate
     net_pnl = gross_pnl - entry_fee_dollars - exit_fee_dollars
 
-    # P&L % against capital at risk
+    # P&L % against collateral (margin posted)
     lev = max(int(leverage or 1), 1)
-    if is_option:
-        # Options: max loss = full premium paid. P&L % is vs premium, NOT margin.
-        # Margin (premium/50) is just exchange collateral; your real risk is the premium.
-        # -20% means you lost 20% of the premium you paid.
-        collateral = entry_notional  # full premium
-    else:
-        collateral = entry_notional / lev if lev > 1 else entry_notional
+    collateral = entry_notional / lev if lev > 1 else entry_notional
     pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
 
     return PnLResult(
@@ -961,14 +955,9 @@ class TradeExecutor:
                 coin_qty = filled_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
 
             notional = fill_price * coin_qty
-            # Cost = actual capital at risk
-            is_option = is_option_symbol(signal.pair)
-            if is_option:
-                # Options: cost = full premium (max loss = premium paid)
-                cost = notional
-            else:
-                is_futures = signal.leverage > 1 and signal.position_type in ("long", "short")
-                cost = notional / signal.leverage if is_futures else notional
+            # Cost = collateral (margin posted to exchange)
+            is_futures = signal.leverage > 1 and signal.position_type in ("long", "short")
+            cost = notional / signal.leverage if is_futures else notional
 
             # Calculate entry fee for storage
             if signal.exchange_id == "delta":
@@ -977,12 +966,17 @@ class TradeExecutor:
                 entry_fee_rate = self._binance_taker_fee
             entry_fee = round(notional * entry_fee_rate, 8)
 
+            # Collateral = margin posted to exchange
+            lev = max(int(signal.leverage or 1), 1)
+            collateral = round(notional / lev, 8) if lev > 1 else round(notional, 8)
+
             trade_data: dict[str, Any] = {
                 "pair": signal.pair,
                 "side": signal.side,
                 "entry_price": fill_price,
                 "amount": filled_amount,
                 "cost": cost,
+                "collateral": collateral,
                 "strategy": signal.strategy.value,
                 "order_type": signal.order_type,
                 "exchange": signal.exchange_id,
