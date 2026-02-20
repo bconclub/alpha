@@ -345,8 +345,13 @@ class Database:
             "total_trades": total_trades,
         }
 
-    async def get_today_trade_stats(self) -> dict[str, Any]:
-        """Query today's closed trade stats (IST timezone).
+    async def get_today_trade_stats(self, previous_day: bool = False) -> dict[str, Any]:
+        """Query closed trade stats for an IST day.
+
+        Args:
+            previous_day: If True, query the day that just ended (yesterday IST).
+                          Used by _daily_reset which fires at midnight IST —
+                          at that moment "today" has 0 trades, so we need yesterday.
 
         Returns dict with total_trades, wins, losses, daily_pnl, pnl_by_pair,
         best_trade, worst_trade. This survives bot restarts — reads from DB.
@@ -365,18 +370,29 @@ class Database:
         ist = timezone(timedelta(hours=5, minutes=30))
         now_ist = datetime.now(ist)
         today_start_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-        today_start_utc = today_start_ist.astimezone(timezone.utc).isoformat()
 
-        result = await loop.run_in_executor(
-            None,
-            lambda: (
+        if previous_day:
+            # Daily report fires at midnight IST — we want the day that just ended
+            day_end_ist = today_start_ist  # midnight = end of previous day
+            day_start_ist = day_end_ist - timedelta(days=1)
+            start_utc = day_start_ist.astimezone(timezone.utc).isoformat()
+            end_utc = day_end_ist.astimezone(timezone.utc).isoformat()
+        else:
+            start_utc = today_start_ist.astimezone(timezone.utc).isoformat()
+            end_utc = None  # no upper bound — current day, still ongoing
+
+        def _query() -> Any:
+            q = (
                 self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
                 .select("pair, pnl")
                 .eq("status", "closed")
-                .gte("closed_at", today_start_utc)
-                .execute()
-            ),
-        )
+                .gte("closed_at", start_utc)
+            )
+            if end_utc is not None:
+                q = q.lt("closed_at", end_utc)
+            return q.execute()
+
+        result = await loop.run_in_executor(None, _query)
         rows = result.data or []
 
         total_trades = len(rows)

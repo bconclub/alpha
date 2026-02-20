@@ -674,9 +674,10 @@ class AlphaBot:
         logger.info("Daily reset triggered")
         rm = self.risk_manager
 
-        # Query today's trade stats from DB (survives restarts)
+        # Query the PREVIOUS day's trade stats — this runs at midnight IST,
+        # so "today" has 0 trades; we want the day that just ended.
         if self.db is not None:
-            today_stats = await self.db.get_today_trade_stats()
+            today_stats = await self.db.get_today_trade_stats(previous_day=True)
             total = today_stats["total_trades"]
             wins = today_stats["wins"]
             losses = today_stats["losses"]
