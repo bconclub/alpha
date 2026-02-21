@@ -118,9 +118,6 @@ export function LiveStatusBar() {
 
   const openPositionCount = botStatus?.open_positions ?? 0;
 
-  const shortingEnabled = botStatus?.shorting_enabled ?? false;
-  const leverageLevel = botStatus?.leverage ?? botStatus?.leverage_level ?? 1;
-  const activeStrategiesCount = botStatus?.active_strategy_count ?? botStatus?.active_strategies_count ?? 0;
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
 
   const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
@@ -174,11 +171,11 @@ export function LiveStatusBar() {
     });
   }, [dailyPnL, pnlRange]);
 
-  const derivedStrategyCount = useMemo(() => {
-    if (activeStrategiesCount > 0) return activeStrategiesCount;
-    const strategies = new Set(trades.filter((t) => t.status === 'open').map((t) => t.strategy));
+  // Count distinct strategies from all trades (not just open)
+  const liveStrategyCount = useMemo(() => {
+    const strategies = new Set(trades.map((t) => t.strategy));
     return strategies.size || 1;
-  }, [activeStrategiesCount, trades]);
+  }, [trades]);
 
   const lastHeartbeat = botStatus?.timestamp;
   const isStale = useMemo(() => {
@@ -452,22 +449,16 @@ export function LiveStatusBar() {
           </div>
         </div>
 
-        {/* Right: Indicators + Clock */}
+        {/* Right: Stats + Clock */}
         <div className="flex items-center gap-4">
           <div className="flex flex-col gap-1.5 text-[10px]">
             <div className="flex items-center gap-2">
-              <span className="text-zinc-500">Shorting</span>
-              <span className={shortingEnabled ? 'text-[#00c853]' : 'text-zinc-600'}>
-                {shortingEnabled ? 'ON' : 'OFF'}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-zinc-500">Leverage</span>
-              <span className="text-[#ffd600] font-mono">{leverageLevel}x</span>
-            </div>
-            <div className="flex items-center gap-2">
               <span className="text-zinc-500">Strategies</span>
-              <span className="text-[#2196f3] font-mono">{derivedStrategyCount}</span>
+              <span className="text-[#2196f3] font-mono">{liveStrategyCount}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-zinc-500">Total Trades</span>
+              <span className="text-zinc-300 font-mono">{trades.length}</span>
             </div>
           </div>
           <div className="border-l border-zinc-800 pl-4 flex flex-col items-end gap-1">
