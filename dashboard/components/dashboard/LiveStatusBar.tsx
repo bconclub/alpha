@@ -303,6 +303,9 @@ export function LiveStatusBar() {
               )} />
               {botState === 'running' ? 'Running' : 'Paused'}
             </span>
+            {botState !== 'running' && botStatus?.pause_reason && (
+              <span className="text-[9px] text-[#ffd600]/70 font-mono truncate max-w-[120px]">{botStatus.pause_reason}</span>
+            )}
             {uptimeSeconds > 0 && (
               <span className="text-[9px] text-zinc-500 font-mono">{formatUptime(uptimeSeconds)}</span>
             )}
@@ -438,6 +441,11 @@ export function LiveStatusBar() {
               />
               {botState === 'running' ? 'Running' : 'Paused'}
             </span>
+            {botState !== 'running' && botStatus?.pause_reason && (
+              <span className="text-[10px] text-[#ffd600]/70 font-mono max-w-[200px] truncate" title={botStatus.pause_reason}>
+                {botStatus.pause_reason}
+              </span>
+            )}
             {uptimeSeconds > 0 && (
               <span className="text-[10px] text-zinc-500">{formatUptime(uptimeSeconds)}</span>
             )}
