@@ -86,20 +86,17 @@ function isOptionTrade(trade: Trade): boolean {
   return trade.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(trade.pair);
 }
 
-/** Shorten an options pair for display: "ETH/USD:USD-260221-2780-C" → "ETH 2780C Feb21" */
+/** Shorten an options pair for display: "ETH/USD:USD-260221-1960-C" → "ETH 1960C 21Feb26" */
 function displayOptionPair(pair: string): string {
+  // Date format in symbol is YYMMDD: 260221 = 2026-02-21
   const m = pair.match(/^(\w+)\/.*-(\d{2})(\d{2})(\d{2})-(\d+)-([CP])$/);
   if (!m) return displayPair(pair);
-  const [, asset, dd, mm, , strike, cp] = m;
+  const [, asset, yy, mm, dd, strike, cp] = m;
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const monthLabel = months[parseInt(mm, 10) - 1] ?? mm;
-  return `${asset} ${strike}${cp} ${monthLabel}${dd}`;
+  return `${asset} ${strike}${cp} ${dd}${monthLabel}${yy}`;
 }
 
-/** Format premium price with "P:" prefix */
-function formatPremium(value: number): string {
-  return `P: $${value.toFixed(4)}`;
-}
 
 type ColumnDef = { key: string; label: string; align?: 'right' };
 
@@ -898,13 +895,13 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mb-1">
                       <span className="text-zinc-400">
                         Entry: <span className="font-mono text-zinc-300">
-                          {isOptionTrade(trade) ? formatPremium(trade.price) : formatPrice(trade.price)}
+                          {isOptionTrade(trade) ? formatPrice(trade.price) : formatPrice(trade.price)}
                         </span>
                       </span>
                       {trade.exit_price != null && (
                         <span className="text-zinc-400">
                           Exit: <span className="font-mono text-zinc-300">
-                            {isOptionTrade(trade) ? formatPremium(trade.exit_price) : formatPrice(trade.exit_price)}
+                            {isOptionTrade(trade) ? formatPrice(trade.exit_price) : formatPrice(trade.exit_price)}
                           </span>
                         </span>
                       )}
@@ -1152,11 +1149,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           'sticky left-[240px] z-10 border-r border-zinc-700 whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
-                          {isOptionTrade(trade) ? (
-                            <span title="Entry premium">
-                              {formatPremium(trade.price)}
-                            </span>
-                          ) : formatPrice(trade.price)}
+                          {formatPrice(trade.price)}
                         </td>
 
                         {/* ── Scrollable columns ── */}
@@ -1189,9 +1182,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Exit Price */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
                           {trade.exit_price != null ? (
-                            isOptionTrade(trade)
-                              ? <span title="Exit premium">{formatPremium(trade.exit_price)}</span>
-                              : formatPrice(trade.exit_price)
+                            formatPrice(trade.exit_price)
                           ) : trade.status === 'open' ? (
                             <span className="text-zinc-500 text-xs italic">open</span>
                           ) : (
@@ -1321,7 +1312,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
                           {trade.stop_loss != null ? (
                             <span className={trade.status === 'open' ? 'text-red-400' : 'text-zinc-500'}>
-                              {isOptionTrade(trade) ? formatPremium(trade.stop_loss) : formatPrice(trade.stop_loss)}
+                              {isOptionTrade(trade) ? formatPrice(trade.stop_loss) : formatPrice(trade.stop_loss)}
                             </span>
                           ) : (
                             <span className="text-zinc-600">&mdash;</span>
