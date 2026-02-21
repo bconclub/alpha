@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { Badge } from '@/components/ui/Badge';
@@ -308,6 +308,13 @@ function PairCard({
   const [localAllocation, setLocalAllocation] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Clear local override once DB value catches up to committed value
+  useEffect(() => {
+    if (localAllocation !== null && allocationPct === localAllocation) {
+      setLocalAllocation(null);
+    }
+  }, [allocationPct, localAllocation]);
+
   // Allocation slider value (local override while dragging, else DB value)
   const sliderValue = localAllocation ?? allocationPct;
   const positionSize = balance * (sliderValue / 100);
@@ -354,7 +361,6 @@ function PairCard({
       executed: false,
     });
 
-    setLocalAllocation(null);
     setSaving(false);
   }, [pairName]);
 
