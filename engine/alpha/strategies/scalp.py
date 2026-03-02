@@ -546,6 +546,8 @@ class ScalpStrategy(BaseStrategy):
         # Leverage and fees depend on exchange
         if self._exchange_id == "bybit":
             self.leverage: int = min(config.bybit.leverage, 20) if is_futures else 1
+        elif self._exchange_id == "kraken":
+            self.leverage: int = min(config.kraken.leverage, 20) if is_futures else 1
         else:
             self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.SPOT_CAPITAL_PCT
@@ -686,6 +688,9 @@ class ScalpStrategy(BaseStrategy):
         elif self._exchange_id == "delta":
             rt_mixed = config.delta.mixed_round_trip * 100
             rt_taker = config.delta.taker_round_trip * 100
+        elif self._exchange_id == "kraken":
+            rt_mixed = config.kraken.mixed_round_trip * 100
+            rt_taker = config.kraken.taker_round_trip * 100
         else:
             # Binance spot: 0.1% per side (check for BNB discount)
             rt_mixed = 0.20  # 0.1% × 2 = 0.2% round trip
@@ -2748,7 +2753,11 @@ class ScalpStrategy(BaseStrategy):
                     )
                 # Breakeven safety: if peak was high but we're back near entry
                 if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT:
-                    fee_adj = config.bybit.mixed_round_trip if self._exchange_id == "bybit" else config.delta.mixed_round_trip
+                    fee_adj = (
+                        config.bybit.mixed_round_trip if self._exchange_id == "bybit"
+                        else config.kraken.mixed_round_trip if self._exchange_id == "kraken"
+                        else config.delta.mixed_round_trip
+                    )
                     if side == "long":
                         be_price = self.entry_price * (1 + fee_adj)
                         at_be = current_price <= be_price
@@ -2898,7 +2907,11 @@ class ScalpStrategy(BaseStrategy):
 
             # If reversal signal but NOT in profit — check breakeven
             if reversal_reason and self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT:
-                fee_adj = config.delta.mixed_round_trip
+                fee_adj = (
+                    config.bybit.mixed_round_trip if self._exchange_id == "bybit"
+                    else config.kraken.mixed_round_trip if self._exchange_id == "kraken"
+                    else config.delta.mixed_round_trip
+                )
                 if side == "long":
                     be_price = self.entry_price * (1 + fee_adj)
                     at_be = current_price <= be_price
@@ -3037,7 +3050,11 @@ class ScalpStrategy(BaseStrategy):
         # ── PHASE 2+: breakeven (peaked high but returned to entry) ──
         if not exit_type and _in_phase2_plus:
             if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT:
-                fee_adj = config.delta.mixed_round_trip
+                fee_adj = (
+                    config.bybit.mixed_round_trip if self._exchange_id == "bybit"
+                    else config.kraken.mixed_round_trip if self._exchange_id == "kraken"
+                    else config.delta.mixed_round_trip
+                )
                 if side == "long":
                     be_price = self.entry_price * (1 + fee_adj)
                     at_be = current_price <= be_price
@@ -3572,9 +3589,18 @@ class ScalpStrategy(BaseStrategy):
             if usd_total > 0:
                 if self._exchange_id == "delta":
                     self.risk_manager.delta_capital = usd_total
+                elif self._exchange_id == "bybit":
+                    self.risk_manager.bybit_capital = usd_total
+                elif self._exchange_id == "kraken":
+                    self.risk_manager.kraken_capital = usd_total
                 else:
                     self.risk_manager.binance_capital = usd_total
-                self.risk_manager.capital = self.risk_manager.binance_capital + self.risk_manager.delta_capital
+                self.risk_manager.capital = (
+                    self.risk_manager.binance_capital
+                    + self.risk_manager.delta_capital
+                    + getattr(self.risk_manager, "bybit_capital", 0)
+                    + getattr(self.risk_manager, "kraken_capital", 0)
+                )
                 self._last_balance_refresh = now
                 self.logger.debug(
                     "[%s] Balance refreshed: %s=$%.2f",
@@ -4065,7 +4091,7 @@ class ScalpStrategy(BaseStrategy):
                 take_profit=None,  # trailing stop handles exit
                 leverage=self._trade_leverage if self.is_futures else 1,
                 position_type="long" if self.is_futures else "spot",
-                exchange_id="delta" if self.is_futures else "binance",
+                exchange_id=self._exchange_id,
                 metadata={"pending_side": "long", "pending_amount": amount,
                           "tp_price": tp, "sl_price": sl,
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
@@ -4090,7 +4116,7 @@ class ScalpStrategy(BaseStrategy):
                 take_profit=None,  # trailing stop handles exit
                 leverage=self._trade_leverage,
                 position_type="short",
-                exchange_id="delta",
+                exchange_id=self._exchange_id,
                 metadata={"pending_side": "short", "pending_amount": amount,
                           "tp_price": tp, "sl_price": sl,
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
@@ -4135,7 +4161,7 @@ class ScalpStrategy(BaseStrategy):
             leverage=self._trade_leverage if self.is_futures else 1,
             position_type=side if self.is_futures else "spot",
             reduce_only=self.is_futures,
-            exchange_id="delta" if self.is_futures else "binance",
+            exchange_id=self._exchange_id,
             metadata={"peak_pnl": round(peak_pnl, 4)},
         )
 
@@ -4213,8 +4239,10 @@ class ScalpStrategy(BaseStrategy):
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
         # Convert contracts to coin amount for correct P&L
+        # Delta uses integer contracts (1 contract = fractional coin)
+        # Bybit/Kraken use coin amounts directly (no conversion)
         coin_amount = self.entry_amount
-        if self.is_futures:
+        if self.is_futures and self._exchange_id == "delta":
             from alpha.trade_executor import DELTA_CONTRACT_SIZE
             contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0.01)
             coin_amount = self.entry_amount * contract_size
@@ -4229,6 +4257,9 @@ class ScalpStrategy(BaseStrategy):
         elif self._exchange_id == "delta":
             entry_fee_rate = config.delta.maker_fee_with_gst   # 0.024% (limit entry)
             exit_fee_rate = config.delta.taker_fee_with_gst    # 0.059% (market exit)
+        elif self._exchange_id == "kraken":
+            entry_fee_rate = config.kraken.maker_fee   # 0.02% (limit entry)
+            exit_fee_rate = config.kraken.taker_fee    # 0.05% (market exit)
         else:
             entry_fee_rate = getattr(self.executor, "_binance_taker_fee", 0.001)
             exit_fee_rate = entry_fee_rate

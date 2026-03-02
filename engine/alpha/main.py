@@ -599,6 +599,8 @@ class AlphaBot:
             await self.delta_options.close()
         if self.bybit:
             await self.bybit.close()
+        if self.kraken:
+            await self.kraken.close()
 
         logger.info("Shutdown complete")
 
@@ -617,22 +619,38 @@ class AlphaBot:
             logger.exception("Failed to refresh pair/setup configs")
 
         try:
-            # 1. Analyze all pairs in parallel
-            analysis_tasks = [
-                self.analyzer.analyze(pair)  # type: ignore[union-attr]
-                for pair in self.pairs
-            ]
-            # Delta pairs use the delta analyzer
+            # 1. Analyze all pairs in parallel (each exchange uses its own analyzer)
+            analysis_pairs: list[str] = []
+            analysis_tasks = []
+
+            # Binance spot pairs
+            for pair in self.pairs:
+                analysis_pairs.append(pair)
+                analysis_tasks.append(self.analyzer.analyze(pair))  # type: ignore[union-attr]
+
+            # Delta pairs
             if self.delta and self.delta_analyzer:
                 for pair in self.delta_pairs:
+                    analysis_pairs.append(pair)
                     analysis_tasks.append(self.delta_analyzer.analyze(pair))
 
-            all_tracked = self.all_pairs
+            # Bybit pairs
+            if self.bybit and self.bybit_analyzer:
+                for pair in self.bybit_pairs:
+                    analysis_pairs.append(pair)
+                    analysis_tasks.append(self.bybit_analyzer.analyze(pair))
+
+            # Kraken pairs
+            if self.kraken and self.kraken_analyzer:
+                for pair in self.kraken_pairs:
+                    analysis_pairs.append(pair)
+                    analysis_tasks.append(self.kraken_analyzer.analyze(pair))
+
             results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
 
             # 2. Collect successful analyses
             analyses = []
-            for pair, result in zip(all_tracked, results):
+            for pair, result in zip(analysis_pairs, results):
                 if isinstance(result, Exception):
                     logger.error("Analysis failed for %s: %s", pair, result)
                 else:
