@@ -103,6 +103,11 @@ class AlphaBot:
         self._position_first_seen: dict[str, float] = {}
         self.ORPHAN_GRACE_S = 120  # seconds before orphan close fires
 
+        # Orphan close retry tracking (key: "exchange:pair")
+        self._orphan_fail_count: dict[str, int] = {}
+        self._orphan_gave_up: set[str] = set()  # positions we've given up on
+        self.ORPHAN_MAX_RETRIES = 3  # stop trying after N failures
+
     @property
     def all_pairs(self) -> list[str]:
         """All tracked pairs across all exchanges."""
@@ -2717,14 +2722,22 @@ class AlphaBot:
             return
 
         # Build map: symbol → {side, amount, entry_price}
+        # Skip dust positions (near-zero residuals after close)
         exchange_positions: dict[str, dict[str, Any]] = {}
         for pos in positions:
             contracts = float(pos.get("contracts", 0) or 0)
-            if contracts == 0:
+            if abs(contracts) < 1e-8:
                 continue
             symbol = pos.get("symbol", "")
             side = "long" if contracts > 0 else "short"
             entry_px = float(pos.get("entryPrice", 0) or 0)
+            notional = abs(contracts) * entry_px if entry_px > 0 else 0
+            if notional < 1.0 and entry_px > 0:
+                logger.debug("Skipping dust position %s: %.8f coins worth $%.4f", symbol, abs(contracts), notional)
+                self._position_first_seen.pop(f"bybit:{symbol}", None)
+                self._orphan_fail_count.pop(f"bybit:{symbol}", None)
+                self._orphan_gave_up.discard(f"bybit:{symbol}")
+                continue
             exchange_positions[symbol] = {
                 "side": side,
                 "amount": abs(contracts),
@@ -2738,8 +2751,17 @@ class AlphaBot:
             epos = exchange_positions.get(pair)
             scalp = self._get_scalp(pair, exchange="bybit")
 
+            # Clean up orphan tracking for pairs no longer on exchange
+            if not epos:
+                fs_key = f"bybit:{pair}"
+                self._position_first_seen.pop(fs_key, None)
+                self._orphan_fail_count.pop(fs_key, None)
+                self._orphan_gave_up.discard(fs_key)
+
             if epos and scalp and scalp.in_position:
                 self._position_first_seen.pop(f"bybit:{pair}", None)
+                self._orphan_fail_count.pop(f"bybit:{pair}", None)
+                self._orphan_gave_up.discard(f"bybit:{pair}")
 
                 # ── SAFETY: ensure DB also has this trade ──────────────
                 try:
@@ -2856,8 +2878,13 @@ class AlphaBot:
                         restored = True
 
                 if not restored:
-                    # ── Grace period: don't close newly-detected positions ──
                     fs_key = f"bybit:{pair}"
+
+                    # ── Already gave up on this position? Silent skip ──
+                    if fs_key in self._orphan_gave_up:
+                        continue
+
+                    # ── Grace period: don't close newly-detected positions ──
                     if fs_key not in self._position_first_seen:
                         self._position_first_seen[fs_key] = time.monotonic()
                     age = time.monotonic() - self._position_first_seen[fs_key]
@@ -2867,19 +2894,20 @@ class AlphaBot:
                             pair, age, self.ORPHAN_GRACE_S,
                         )
                         continue
-                    self._position_first_seen.pop(fs_key, None)
 
                     # ── CASE 1: True ORPHAN — close it ─────────────────
+                    fail_count = self._orphan_fail_count.get(fs_key, 0)
                     logger.warning(
                         "ORPHAN DETECTED: %s %s %.6f coins @ $%.2f — "
-                        "NOT in bot memory! CLOSING",
+                        "NOT in bot memory! CLOSING (attempt %d/%d)",
                         pair, side, amount, entry_px,
+                        fail_count + 1, self.ORPHAN_MAX_RETRIES,
                     )
                     try:
                         await self.alerts.send_orphan_alert(
                             pair=pair, side=side, contracts=amount,
                             action="CLOSING AT MARKET",
-                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB",
+                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB (attempt {fail_count + 1}/{self.ORPHAN_MAX_RETRIES})",
                         )
                     except Exception:
                         pass
@@ -2894,6 +2922,10 @@ class AlphaBot:
                             "ORPHAN CLOSED: %s %s %.6f coins at market",
                             pair, side, amount,
                         )
+
+                        self._position_first_seen.pop(fs_key, None)
+                        self._orphan_fail_count.pop(fs_key, None)
+                        self._orphan_gave_up.discard(fs_key)
 
                         if self.db.is_connected:
                             open_trade = await self.db.get_open_trade(
@@ -2921,17 +2953,37 @@ class AlphaBot:
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
                     except Exception:
-                        logger.exception(
-                            "Failed to close orphan %s — MANUAL INTERVENTION NEEDED", pair,
-                        )
-                        try:
-                            await self.alerts.send_orphan_alert(
-                                pair=pair, side=side, contracts=amount,
-                                action="CLOSE FAILED — MANUAL CLOSE NEEDED",
-                                detail="Auto-close failed. Close manually on Bybit!",
+                        fail_count += 1
+                        self._orphan_fail_count[fs_key] = fail_count
+
+                        if fail_count >= self.ORPHAN_MAX_RETRIES:
+                            self._orphan_gave_up.add(fs_key)
+                            self._position_first_seen.pop(fs_key, None)
+                            logger.error(
+                                "ORPHAN GAVE UP: %s failed %d times — silencing alerts. CLOSE MANUALLY!",
+                                pair, fail_count,
                             )
-                        except Exception:
-                            pass
+                            try:
+                                await self.alerts.send_orphan_alert(
+                                    pair=pair, side=side, contracts=amount,
+                                    action=f"GIVING UP after {fail_count} failures",
+                                    detail=f"Auto-close failed {fail_count}x. Close {pair} manually on Bybit! No more alerts for this position.",
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            logger.exception(
+                                "Failed to close orphan %s (attempt %d/%d) — will retry",
+                                pair, fail_count, self.ORPHAN_MAX_RETRIES,
+                            )
+                            try:
+                                await self.alerts.send_orphan_alert(
+                                    pair=pair, side=side, contracts=amount,
+                                    action=f"CLOSE FAILED (attempt {fail_count}/{self.ORPHAN_MAX_RETRIES})",
+                                    detail=f"Auto-close failed. Will retry {self.ORPHAN_MAX_RETRIES - fail_count} more time(s).",
+                                )
+                            except Exception:
+                                pass
 
         # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
         now = time.monotonic()
@@ -3073,14 +3125,27 @@ class AlphaBot:
             return
 
         # Build map: symbol → {side, amount, entry_price}
+        # Skip dust positions (near-zero residuals after close)
         exchange_positions: dict[str, dict[str, Any]] = {}
         for pos in positions:
             contracts = float(pos.get("contracts", 0) or 0)
-            if contracts == 0:
+            if abs(contracts) < 1e-8:
                 continue
             symbol = pos.get("symbol", "")
             side = "long" if contracts > 0 else "short"
             entry_px = float(pos.get("entryPrice", 0) or 0)
+            notional = abs(contracts) * entry_px if entry_px > 0 else 0
+            # Skip dust: position worth less than $1
+            if notional < 1.0 and entry_px > 0:
+                logger.debug(
+                    "Skipping dust position %s: %.8f coins worth $%.4f",
+                    symbol, abs(contracts), notional,
+                )
+                # Clear any orphan tracking for this dust position
+                self._position_first_seen.pop(f"kraken:{symbol}", None)
+                self._orphan_fail_count.pop(f"kraken:{symbol}", None)
+                self._orphan_gave_up.discard(f"kraken:{symbol}")
+                continue
             exchange_positions[symbol] = {
                 "side": side,
                 "amount": abs(contracts),
@@ -3094,8 +3159,17 @@ class AlphaBot:
             epos = exchange_positions.get(pair)
             scalp = self._get_scalp(pair, exchange="kraken")
 
+            # Clean up orphan tracking for pairs no longer on exchange
+            if not epos:
+                fs_key = f"kraken:{pair}"
+                self._position_first_seen.pop(fs_key, None)
+                self._orphan_fail_count.pop(fs_key, None)
+                self._orphan_gave_up.discard(fs_key)
+
             if epos and scalp and scalp.in_position:
                 self._position_first_seen.pop(f"kraken:{pair}", None)
+                self._orphan_fail_count.pop(f"kraken:{pair}", None)
+                self._orphan_gave_up.discard(f"kraken:{pair}")
 
                 # ── SAFETY: ensure DB also has this trade ──────────────
                 try:
@@ -3212,8 +3286,13 @@ class AlphaBot:
                         restored = True
 
                 if not restored:
-                    # ── Grace period: don't close newly-detected positions ──
                     fs_key = f"kraken:{pair}"
+
+                    # ── Already gave up on this position? Silent skip ──
+                    if fs_key in self._orphan_gave_up:
+                        continue
+
+                    # ── Grace period: don't close newly-detected positions ──
                     if fs_key not in self._position_first_seen:
                         self._position_first_seen[fs_key] = time.monotonic()
                     age = time.monotonic() - self._position_first_seen[fs_key]
@@ -3223,19 +3302,20 @@ class AlphaBot:
                             pair, age, self.ORPHAN_GRACE_S,
                         )
                         continue
-                    self._position_first_seen.pop(fs_key, None)
 
                     # ── CASE 1: True ORPHAN — close it ─────────────────
+                    fail_count = self._orphan_fail_count.get(fs_key, 0)
                     logger.warning(
                         "ORPHAN DETECTED: %s %s %.6f coins @ $%.2f — "
-                        "NOT in bot memory! CLOSING",
+                        "NOT in bot memory! CLOSING (attempt %d/%d)",
                         pair, side, amount, entry_px,
+                        fail_count + 1, self.ORPHAN_MAX_RETRIES,
                     )
                     try:
                         await self.alerts.send_orphan_alert(
                             pair=pair, side=side, contracts=amount,
                             action="CLOSING AT MARKET",
-                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB",
+                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB (attempt {fail_count + 1}/{self.ORPHAN_MAX_RETRIES})",
                         )
                     except Exception:
                         pass
@@ -3250,6 +3330,11 @@ class AlphaBot:
                             "ORPHAN CLOSED: %s %s %.6f coins at market",
                             pair, side, amount,
                         )
+
+                        # ── Success: clean up all tracking ────────────
+                        self._position_first_seen.pop(fs_key, None)
+                        self._orphan_fail_count.pop(fs_key, None)
+                        self._orphan_gave_up.discard(fs_key)
 
                         if self.db.is_connected:
                             open_trade = await self.db.get_open_trade(
@@ -3277,17 +3362,40 @@ class AlphaBot:
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
                     except Exception:
-                        logger.exception(
-                            "Failed to close orphan %s — MANUAL INTERVENTION NEEDED", pair,
-                        )
-                        try:
-                            await self.alerts.send_orphan_alert(
-                                pair=pair, side=side, contracts=amount,
-                                action="CLOSE FAILED — MANUAL CLOSE NEEDED",
-                                detail="Auto-close failed. Close manually on Kraken!",
+                        # ── Failed: increment retry counter ───────────
+                        fail_count += 1
+                        self._orphan_fail_count[fs_key] = fail_count
+
+                        if fail_count >= self.ORPHAN_MAX_RETRIES:
+                            # Give up — no more retries, no more alerts
+                            self._orphan_gave_up.add(fs_key)
+                            self._position_first_seen.pop(fs_key, None)
+                            logger.error(
+                                "ORPHAN GAVE UP: %s failed %d times — "
+                                "silencing alerts. CLOSE MANUALLY!",
+                                pair, fail_count,
                             )
-                        except Exception:
-                            pass
+                            try:
+                                await self.alerts.send_orphan_alert(
+                                    pair=pair, side=side, contracts=amount,
+                                    action=f"GIVING UP after {fail_count} failures",
+                                    detail=f"Auto-close failed {fail_count}x. Close {pair} manually on Kraken! No more alerts for this position.",
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            logger.exception(
+                                "Failed to close orphan %s (attempt %d/%d) — will retry",
+                                pair, fail_count, self.ORPHAN_MAX_RETRIES,
+                            )
+                            try:
+                                await self.alerts.send_orphan_alert(
+                                    pair=pair, side=side, contracts=amount,
+                                    action=f"CLOSE FAILED (attempt {fail_count}/{self.ORPHAN_MAX_RETRIES})",
+                                    detail=f"Auto-close failed. Will retry {self.ORPHAN_MAX_RETRIES - fail_count} more time(s).",
+                                )
+                            except Exception:
+                                pass
 
         # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
         now = time.monotonic()
@@ -3424,14 +3532,30 @@ class AlphaBot:
             return
 
         # Build map: symbol → {side, contracts, entry_price}
+        # Skip dust positions (near-zero residuals after close)
         exchange_positions: dict[str, dict[str, Any]] = {}
         for pos in positions:
             contracts = float(pos.get("contracts", 0) or 0)
-            if contracts == 0:
+            if abs(contracts) < 1e-8:
                 continue
             symbol = pos.get("symbol", "")
             side = "long" if contracts > 0 else "short"
             entry_px = float(pos.get("entryPrice", 0) or 0)
+            # Delta uses contract sizes, compute notional for dust check
+            contract_size = DELTA_CONTRACT_SIZE.get(symbol, 1.0)
+            # Also try ccxt symbol for contract size lookup
+            native = symbol.replace("/", "").replace(":USD", "")
+            for ccxt_p, cs in DELTA_CONTRACT_SIZE.items():
+                if ccxt_p.replace("/", "").replace(":USD", "") == native:
+                    contract_size = cs
+                    break
+            notional = abs(contracts) * contract_size * entry_px if entry_px > 0 else 0
+            if notional < 1.0 and entry_px > 0:
+                logger.debug("Skipping dust position %s: %.0f ct worth $%.4f", symbol, abs(contracts), notional)
+                self._position_first_seen.pop(f"delta:{symbol}", None)
+                self._orphan_fail_count.pop(f"delta:{symbol}", None)
+                self._orphan_gave_up.discard(f"delta:{symbol}")
+                continue
             exchange_positions[symbol] = {
                 "side": side,
                 "contracts": abs(contracts),
@@ -3470,9 +3594,18 @@ class AlphaBot:
             epos = normalized_positions.get(pair)
             scalp = self._get_scalp(pair, exchange="delta")
 
+            # Clean up orphan tracking for pairs no longer on exchange
+            if not epos:
+                fs_key = f"delta:{pair}"
+                self._position_first_seen.pop(fs_key, None)
+                self._orphan_fail_count.pop(fs_key, None)
+                self._orphan_gave_up.discard(fs_key)
+
             if epos and scalp and scalp.in_position:
                 # ALL GOOD — exchange has it, bot is managing it
                 self._position_first_seen.pop(f"delta:{pair}", None)
+                self._orphan_fail_count.pop(f"delta:{pair}", None)
+                self._orphan_gave_up.discard(f"delta:{pair}")
 
                 # ── SAFETY: ensure DB also has this trade ──────────────
                 # If _open_trade_in_db() failed silently, the dashboard
@@ -3642,8 +3775,13 @@ class AlphaBot:
                             )
                         continue
 
-                    # ── Grace period: don't close newly-detected positions ──
                     fs_key = f"delta:{pair}"
+
+                    # ── Already gave up on this position? Silent skip ──
+                    if fs_key in self._orphan_gave_up:
+                        continue
+
+                    # ── Grace period: don't close newly-detected positions ──
                     if fs_key not in self._position_first_seen:
                         self._position_first_seen[fs_key] = time.monotonic()
                     age = time.monotonic() - self._position_first_seen[fs_key]
@@ -3653,19 +3791,20 @@ class AlphaBot:
                             pair, age, self.ORPHAN_GRACE_S,
                         )
                         continue
-                    self._position_first_seen.pop(fs_key, None)
 
                     # ── CASE 1: True ORPHAN — no DB trade, close it ────────
+                    fail_count = self._orphan_fail_count.get(fs_key, 0)
                     logger.warning(
                         "ORPHAN DETECTED: %s %s %.0f contracts @ $%.2f — "
-                        "NOT in bot memory, no DB trade! CLOSING",
+                        "NOT in bot memory, no DB trade! CLOSING (attempt %d/%d)",
                         pair, side, contracts, entry_px,
+                        fail_count + 1, self.ORPHAN_MAX_RETRIES,
                     )
                     try:
                         await self.alerts.send_orphan_alert(
                             pair=pair, side=side, contracts=contracts,
                             action="CLOSING AT MARKET",
-                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB",
+                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB (attempt {fail_count + 1}/{self.ORPHAN_MAX_RETRIES})",
                         )
                     except Exception:
                         pass
@@ -3680,6 +3819,11 @@ class AlphaBot:
                             "ORPHAN CLOSED: %s %s %.0f contracts at market",
                             pair, side, contracts,
                         )
+
+                        # ── Success: clean up all tracking ────────────
+                        self._position_first_seen.pop(fs_key, None)
+                        self._orphan_fail_count.pop(fs_key, None)
+                        self._orphan_gave_up.discard(fs_key)
 
                         # Also mark any stale DB trade as closed
                         if self.db.is_connected:
@@ -3708,17 +3852,37 @@ class AlphaBot:
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
                     except Exception:
-                        logger.exception(
-                            "Failed to close orphan %s — MANUAL INTERVENTION NEEDED", pair,
-                        )
-                        try:
-                            await self.alerts.send_orphan_alert(
-                                pair=pair, side=side, contracts=contracts,
-                                action="CLOSE FAILED — MANUAL CLOSE NEEDED",
-                                detail="Auto-close failed. Close manually on Delta Exchange!",
+                        fail_count += 1
+                        self._orphan_fail_count[fs_key] = fail_count
+
+                        if fail_count >= self.ORPHAN_MAX_RETRIES:
+                            self._orphan_gave_up.add(fs_key)
+                            self._position_first_seen.pop(fs_key, None)
+                            logger.error(
+                                "ORPHAN GAVE UP: %s failed %d times — silencing alerts. CLOSE MANUALLY!",
+                                pair, fail_count,
                             )
-                        except Exception:
-                            pass
+                            try:
+                                await self.alerts.send_orphan_alert(
+                                    pair=pair, side=side, contracts=contracts,
+                                    action=f"GIVING UP after {fail_count} failures",
+                                    detail=f"Auto-close failed {fail_count}x. Close {pair} manually on Delta! No more alerts for this position.",
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            logger.exception(
+                                "Failed to close orphan %s (attempt %d/%d) — will retry",
+                                pair, fail_count, self.ORPHAN_MAX_RETRIES,
+                            )
+                            try:
+                                await self.alerts.send_orphan_alert(
+                                    pair=pair, side=side, contracts=contracts,
+                                    action=f"CLOSE FAILED (attempt {fail_count}/{self.ORPHAN_MAX_RETRIES})",
+                                    detail=f"Auto-close failed. Will retry {self.ORPHAN_MAX_RETRIES - fail_count} more time(s).",
+                                )
+                            except Exception:
+                                pass
 
         # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
         now = time.monotonic()
