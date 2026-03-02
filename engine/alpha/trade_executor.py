@@ -1606,6 +1606,21 @@ class TradeExecutor:
                         pnl = closed_trade.get("pnl", 0.0) or 0.0
                         pnl_pct = closed_trade.get("pnl_pct", 0.0) or 0.0
 
+            # Build option metadata for options-specific close alert
+            option_meta = None
+            if self._is_option_symbol(signal.pair):
+                # Parse option details from pair: e.g. ETH-260302-2800-C
+                _parts = signal.pair.split("-")
+                option_meta = {
+                    "option_type": "CALL" if signal.pair.endswith("-C") else "PUT" if signal.pair.endswith("-P") else "OPT",
+                    "strike": int(_parts[2]) if len(_parts) >= 4 and _parts[2].isdigit() else None,
+                    "base_asset": _parts[0] if _parts else signal.pair.split("/")[0],
+                    "contracts": signal.amount,
+                }
+                # Try to get expiry from signal metadata or open trade
+                if close_result and close_result.get("pair"):
+                    option_meta["expiry"] = signal.metadata.get("expiry", "")
+
             await self.alerts.send_trade_closed(
                 pair=signal.pair,
                 entry_price=entry_price,
@@ -1617,6 +1632,7 @@ class TradeExecutor:
                 leverage=signal.leverage,
                 position_type=signal.position_type,
                 exit_reason=signal.reason,
+                option_meta=option_meta,
             )
 
             # ── Meme bot: send a meme/joke after losing trades ──

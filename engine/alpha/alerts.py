@@ -332,15 +332,30 @@ class AlertManager:
         leverage: int = 1,
         position_type: str = "spot",
         exit_reason: str = "",
+        option_meta: dict[str, Any] | None = None,
     ) -> None:
-        """Clean 4-line trade exit notification.
+        """Clean trade exit notification — futures or options format.
 
-        Format:
+        Futures format:
         🔴 CLOSED ETH/USD
         $2,005.85 → $2,004.95
         P&L: -0.8% | $-0.02
         Hold: 3m | Profit decay
+
+        Options format:
+        🔴 CLOSED CALL ETH $2,800 Strike
+        Premium: $37.30 → $31.15
+        P&L: -829.8% | $-0.50
+        Hold: 5m | OPT_DEAD_MOMENTUM | 50x Options
         """
+        # ── Options close format ──
+        if option_meta:
+            await self._send_option_closed(
+                pair, entry_price, exit_price, pnl, pnl_pct,
+                duration_min, exchange, leverage, exit_reason, option_meta,
+            )
+            return
+
         pair_short = _pair_short(pair)
         emoji = "\u2705" if pnl >= 0 else "\U0001f534"
         pnl_sign = "+" if pnl >= 0 else ""
@@ -368,6 +383,69 @@ class AlertManager:
         msg = f"{line1}\n{line2}\n{line3}"
         if line4:
             msg += f"\n{line4}"
+        await self._send(msg)
+
+    async def _send_option_closed(
+        self,
+        pair: str,
+        entry_premium: float,
+        exit_premium: float,
+        pnl: float,
+        pnl_pct: float,
+        duration_min: float | None,
+        exchange: str,
+        leverage: int,
+        exit_reason: str,
+        meta: dict[str, Any],
+    ) -> None:
+        """Options-specific close notification with strike/expiry."""
+        opt_type = (meta.get("option_type") or "OPT").upper()
+        strike = meta.get("strike")
+        expiry = meta.get("expiry", "")
+        base = meta.get("base_asset", "")
+        contracts = meta.get("contracts", "")
+
+        emoji = "\u2705" if pnl >= 0 else "\U0001f534"
+        pnl_sign = "+" if pnl >= 0 else ""
+
+        # Line 1: emoji CLOSED CALL/PUT BASE $strike Strike
+        strike_str = f" <code>${strike:,.0f}</code> Strike" if strike else ""
+        line1 = f"{emoji} <b>CLOSED {opt_type} {base}</b>{strike_str}"
+
+        # Line 2: Premium: entry → exit
+        line2 = f"Premium: <code>${entry_premium:,.4f}</code> \u2192 <code>${exit_premium:,.4f}</code>"
+
+        # Line 3: P&L
+        line3 = f"P&amp;L: <code>{pnl_sign}{pnl_pct:.1f}%</code> | <code>{pnl_sign}{format_usd(pnl)}</code>"
+
+        # Line 4: Hold | exit reason | leverage + Options
+        parts: list[str] = []
+        if duration_min is not None:
+            if duration_min >= 60:
+                parts.append(f"Hold: {duration_min / 60:.1f}h")
+            else:
+                parts.append(f"Hold: {duration_min:.0f}m")
+        if exit_reason:
+            parts.append(self._humanize_exit_reason(exit_reason))
+        parts.append(f"{leverage}x Options")
+        line4 = " | ".join(parts)
+
+        # Line 5: Expiry + contracts (if available)
+        extras: list[str] = []
+        if expiry:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(expiry)
+                extras.append(f"Exp {dt.strftime('%b %d %H:%M')}")
+            except Exception:
+                extras.append(f"Exp {expiry[:16]}")
+        if contracts:
+            extras.append(f"x{contracts}")
+        line5 = " | ".join(extras) if extras else ""
+
+        msg = f"{line1}\n{line2}\n{line3}\n{line4}"
+        if line5:
+            msg += f"\n{line5}"
         await self._send(msg)
 
     # backward compat -- old call signature routes to send_trade_opened
