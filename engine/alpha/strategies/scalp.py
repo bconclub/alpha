@@ -173,14 +173,14 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v6.3 — 11-signal arsenal + setup tracking.
+    """Phase-based v6.3 — 12-signal arsenal + setup tracking.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
     Binance spot uses wider SL/TP/trail (no leverage, needs room).
     RSI extreme override: <30 or >70 enters regardless of other signals.
-    11 entry signals: MOM, VOL, RSI, BB, MOM5m, TCONT, VWAP, BBSQZ, LIQSWEEP, FVG, VOLDIV.
-    Setup type tracked per trade (BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, VOL_DIVERGENCE, etc.).
+    12 entry signals: MOM, VOL, RSI, BB, MOM5m, TCONT, VWAP, BBSQZ, LIQSWEEP, FVG, VOLDIV, BPRC.
+    Setup type tracked per trade (BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, BPRC_RELOAD, VOL_DIVERGENCE, etc.).
     """
 
     name = StrategyName.SCALP
@@ -653,6 +653,10 @@ class ScalpStrategy(BaseStrategy):
 
         # BB Squeeze tracking (signal #8)
         self._squeeze_tick_count: int = 0
+
+        # BPRC alternation state (signal #12)
+        self._last_bprc_direction: dict[str, str] = {}   # per-pair: "long" or "short"
+        self._last_bprc_time: dict[str, float] = {}      # per-pair: monotonic timestamp
 
         # ── Tier 1 anticipatory entry state ──────────────────────────
         self._entry_path: str = "momentum"     # "momentum" or "tier1"
@@ -1977,7 +1981,7 @@ class ScalpStrategy(BaseStrategy):
 
         GATE: All pairs require 3/4+ signals (v6.1).
 
-        Signals (up to 11, but counted against N/4 threshold):
+        Signals (up to 12, but counted against N/4 threshold):
         1. Momentum 60s: 0.08%+ move in 60s
         2. Volume: 0.8x+ spike
         3. RSI: < 35 oversold (long) or > 65 overbought (short)
@@ -1989,8 +1993,9 @@ class ScalpStrategy(BaseStrategy):
         9. Liquidity Sweep: price sweeps swing H/L then reclaims + RSI divergence
         10. Fair Value Gap: price filling a 3-candle imbalance gap
         11. Volume Divergence: price vs volume trend divergence
+        12. BPRC: Breakout-Pullback-Reload-Continue (Pine Script BPRC v2)
 
-        Signals 5-11 are BONUS — they count toward the total but the
+        Signals 5-12 are BONUS — they count toward the total but the
         threshold is still expressed as N-of-4 scale (3/4).
         """
         can_short = self.is_futures and config.delta.enable_shorting
@@ -2212,6 +2217,23 @@ class ScalpStrategy(BaseStrategy):
                 vol_drop = (1 - recent_vol / older_vol) * 100 if older_vol > 0 else 0
                 bull_signals.append(f"VOLDIV:price↓vol↓{vol_drop:.0f}%")
 
+        # 12. BPRC — Breakout Pullback Reload Continue
+        #     Catches breakout → pullback → resume patterns (Pine Script BPRC v2).
+        #     T2 signal (confirming), same tier as TCONT/VWAP/FVG.
+        #     Promotes to T1+T2 when combined with volume (vol_ratio >= 1.2x).
+        bprc_sig, bprc_dir = self._detect_bprc(df)
+        if bprc_sig is not None:
+            bprc_tag = f"BPRC:{bprc_dir}"
+            if bprc_dir == "long":
+                bull_signals.append(bprc_tag)
+                # BPRC + volume → also count as T1 (high-conviction anticipatory)
+                if vol_ratio >= 1.2:
+                    bull_signals.append(f"T1:BPRC+VOL{vol_ratio:.1f}x")
+            elif bprc_dir == "short":
+                bear_signals.append(bprc_tag)
+                if vol_ratio >= 1.2:
+                    bear_signals.append(f"T1:BPRC+VOL{vol_ratio:.1f}x")
+
         # ── Build directional signal breakdown for dashboard ────────────────
         # Stored on self so last_signal_state can spread it in evaluate().
         def _build_breakdown() -> dict[str, Any]:
@@ -2229,6 +2251,8 @@ class ScalpStrategy(BaseStrategy):
                 "bear_vol": any(s.startswith("VOL:") for s in bear_signals),
                 "bear_rsi": any(s.startswith("RSI:") for s in bear_signals),
                 "bear_bb": any(s.startswith(("BB:", "BBSQZ:")) for s in bear_signals),
+                "bull_bprc": any(s.startswith("BPRC:") for s in bull_signals),
+                "bear_bprc": any(s.startswith("BPRC:") for s in bear_signals),
             }
 
         # ══════════════════════════════════════════════════════════════
@@ -2344,6 +2368,152 @@ class ScalpStrategy(BaseStrategy):
 
         self._last_signal_breakdown = _build_breakdown()
         return None
+
+    # ======================================================================
+    # SIGNAL 12: BPRC (Breakout Pullback Reload Continue)
+    # Translated from Pine Script BPRC v2
+    # ======================================================================
+
+    def _detect_bprc(self, df: "pd.DataFrame | None") -> tuple[str | None, str | None]:
+        """Detect Breakout-Pullback-Reload-Continue pattern.
+
+        Returns ("BPRC", direction) or (None, None).
+        direction is "long" or "short".
+
+        Pine Script BPRC v2 parameters:
+        - SMA length: 9
+        - ATR length: 4
+        - Breakout multiple: 0.60 (price must exceed SMA by 0.6x ATR)
+        - Pullback band: 0.40 (price must return within 0.4x ATR of SMA)
+        - Max bars for pullback + resume: 2
+        - Min bars between signals: 7 (= 7 minutes on 1m candles)
+        - Alternation enforced: buy then sell then buy
+        """
+        if df is None or len(df) < 15:
+            return None, None
+
+        closes = df["close"].values.astype(float)
+        highs = df["high"].values.astype(float)
+        lows = df["low"].values.astype(float)
+        opens = df["open"].values.astype(float)
+        n = len(closes)
+
+        # ── Alternation & cooldown check ──
+        pair = self.pair
+        now = time.monotonic()
+        last_time = self._last_bprc_time.get(pair, 0.0)
+        if now - last_time < 7 * 60:  # 7-minute cooldown
+            return None, None
+
+        last_dir = self._last_bprc_direction.get(pair)
+
+        # ── Helper: compute SMA(9) at index ──
+        def sma9_at(idx: int) -> float:
+            start = max(0, idx - 8)
+            return float(closes[start:idx + 1].sum()) / (idx + 1 - start)
+
+        # ── Helper: compute ATR(4) at index ──
+        def atr4_at(idx: int) -> float:
+            trs = []
+            for j in range(max(1, idx - 3), idx + 1):
+                tr = max(
+                    highs[j] - lows[j],
+                    abs(highs[j] - closes[j - 1]),
+                    abs(lows[j] - closes[j - 1]),
+                )
+                trs.append(tr)
+            return sum(trs) / len(trs) if trs else 0.0
+
+        curr = n - 1
+        sma_curr = sma9_at(curr)
+
+        # === BUY PATTERN ===
+        if last_dir != "long":  # alternation: skip if last was long
+            for start_idx in range(n - 3, n - 1):  # -3, -2 (breakout candle)
+                if start_idx < 9:
+                    continue
+
+                sma_at = sma9_at(start_idx)
+                atr_at = atr4_at(start_idx)
+                if atr_at <= 0:
+                    continue
+
+                bt = 0.60 * atr_at
+                pb = 0.40 * atr_at
+
+                # Breakout: close > sma + threshold
+                if closes[start_idx] <= sma_at + bt:
+                    continue
+
+                bars_after = curr - start_idx
+                if bars_after < 1 or bars_after > 2:
+                    continue
+
+                # Pullback: any candle after breakout has low <= sma + pullback_band, still above sma
+                pulled = False
+                for pb_idx in range(start_idx + 1, n):
+                    sma_pb = sma9_at(pb_idx)
+                    if lows[pb_idx] <= sma_pb + pb and closes[pb_idx] > sma_pb:
+                        pulled = True
+                        break
+
+                if not pulled:
+                    continue
+
+                # Continue: current candle close > sma AND close > open (bullish)
+                if closes[curr] > sma_curr and closes[curr] > opens[curr]:
+                    # Reset on SMA cross: if price had crossed below SMA, clear alternation
+                    self._last_bprc_direction[pair] = "long"
+                    self._last_bprc_time[pair] = now
+                    return "BPRC", "long"
+
+        # === SELL PATTERN === (mirror of buy)
+        can_short = self.is_futures and config.delta.enable_shorting
+        if can_short and last_dir != "short":  # alternation: skip if last was short
+            for start_idx in range(n - 3, n - 1):
+                if start_idx < 9:
+                    continue
+
+                sma_at = sma9_at(start_idx)
+                atr_at = atr4_at(start_idx)
+                if atr_at <= 0:
+                    continue
+
+                bt = 0.60 * atr_at
+                pb = 0.40 * atr_at
+
+                # Breakdown: close < sma - threshold
+                if closes[start_idx] >= sma_at - bt:
+                    continue
+
+                bars_after = curr - start_idx
+                if bars_after < 1 or bars_after > 2:
+                    continue
+
+                # Pullback: high >= sma - pullback_band, still below sma
+                pulled = False
+                for pb_idx in range(start_idx + 1, n):
+                    sma_pb = sma9_at(pb_idx)
+                    if highs[pb_idx] >= sma_pb - pb and closes[pb_idx] < sma_pb:
+                        pulled = True
+                        break
+
+                if not pulled:
+                    continue
+
+                # Continue: close < sma AND close < open (bearish)
+                if closes[curr] < sma_curr and closes[curr] < opens[curr]:
+                    self._last_bprc_direction[pair] = "short"
+                    self._last_bprc_time[pair] = now
+                    return "BPRC", "short"
+
+        # ── SMA cross reset: clear alternation if price crosses SMA ──
+        if last_dir == "long" and closes[curr] < sma_curr:
+            self._last_bprc_direction.pop(pair, None)
+        elif last_dir == "short" and closes[curr] > sma_curr:
+            self._last_bprc_direction.pop(pair, None)
+
+        return None, None
 
     # ======================================================================
     # TIER 1 ANTICIPATORY ENTRY — leading signals, direction from order flow
@@ -3851,6 +4021,7 @@ class ScalpStrategy(BaseStrategy):
           8. VWAP_RECLAIM        (VWAP tag)
           9. LIQ_SWEEP           (LIQSWEEP tag)
          10. FVG_FILL            (FVG tag)
+         10.5 BPRC_RELOAD        (BPRC tag — breakout pullback reload continue)
          11. VOL_DIVERGENCE      (VOLDIV tag)
          12. MULTI_SIGNAL        (none of above matched — true catch-all)
          13. MIXED               (final fallback)
@@ -3906,6 +4077,10 @@ class ScalpStrategy(BaseStrategy):
         if "FVG:" in r:
             return ["FVG_FILL"]
 
+        # Priority 10.5: BPRC_RELOAD — breakout pullback reload continue
+        if "BPRC:" in r:
+            return ["BPRC_RELOAD"]
+
         # Priority 11: VOL_DIVERGENCE
         if "VOLDIV:" in r:
             return ["VOL_DIVERGENCE"]
@@ -3916,6 +4091,7 @@ class ScalpStrategy(BaseStrategy):
             has_mom, has_vol, has_rsi, has_bb,
             "VWAP:" in r, "TCONT:" in r, "BBSQZ:" in r,
             "LIQSWEEP:" in r, "FVG:" in r, "VOLDIV:" in r,
+            "BPRC:" in r,
         ])
         if signal_count >= 4:
             return ["MULTI_SIGNAL"]
