@@ -3,8 +3,7 @@
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { LiveStatusBar } from '@/components/dashboard/LiveStatusBar';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
-import { TriggerProximity } from '@/components/dashboard/TriggerProximity';
-import { OptionsTracker } from '@/components/dashboard/OptionsTracker';
+import { EntrySignals } from '@/components/dashboard/TriggerProximity';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
 
@@ -60,12 +59,9 @@ export default function DashboardPage() {
           <LivePositions />
         </div>
         <div className="lg:col-span-2">
-          <TriggerProximity />
+          <EntrySignals />
         </div>
       </div>
-
-      {/* 4. Options Tracker — BTC + ETH options signal state */}
-      <OptionsTracker />
 
       {/* 5. Performance — full width, collapsible */}
       <PerformancePanel />

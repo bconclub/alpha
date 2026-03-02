@@ -1,3 +1,5 @@
+// DEPRECATED: Options data is now shown inline in EntrySignals (TriggerProximity.tsx).
+// This file is kept for reference. Not imported anywhere.
 'use client';
 
 import { useMemo } from 'react';

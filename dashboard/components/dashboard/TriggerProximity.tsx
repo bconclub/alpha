@@ -2,8 +2,8 @@
 
 import { useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
-import { cn } from '@/lib/utils';
-import type { StrategyLog, Exchange, OpenPosition } from '@/lib/types';
+import { formatTimeAgo, cn } from '@/lib/utils';
+import type { StrategyLog, Exchange, OpenPosition, OptionsState, ActivityLogRow } from '@/lib/types';
 
 // ── Engine thresholds (Focused Signal v6.1) ─────────────────────────
 // Used ONLY as fallback when DB doesn't have signal_count/signal_* fields
@@ -13,6 +13,17 @@ const MOMENTUM_MIN_PCT = 0.08;     // Level 5/10 — matches scalp.py MOMENTUM_M
 const VOL_SPIKE_RATIO = 0.6;       // Level 5/10 — matches scalp.py VOL_SPIKE_RATIO
 const BB_TREND_UPPER = 0.85;
 const BB_TREND_LOWER = 0.15;
+
+// Only show our 4 active trading pairs (filter out stale BNB/DOGE/etc.)
+const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
+
+// BTC + ETH are options-eligible (options_scalp only runs on these)
+const OPTIONS_ELIGIBLE = new Set(['BTC', 'ETH']);
+
+// Options symbol pattern: date-strike-C/P
+const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
+
+// ── Types ────────────────────────────────────────────────────────────
 
 interface IndicatorStatus {
   active: boolean;
@@ -48,6 +59,36 @@ interface TriggerInfo {
   skipReason: string | null;
   // Active position on this pair (if any)
   activePosition: OpenPosition | null;
+  // Options data (only populated for BTC + ETH)
+  optionsState: OptionsState | null;
+  optionsOpenTrade: OpenPosition | null;
+  optionsRecentEvents: ActivityLogRow[];
+  optionsStale: boolean;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+function extractBaseAsset(pair: string): string {
+  if (pair.includes('/')) return pair.split('/')[0];
+  return pair.replace(/USD.*$/, '');
+}
+
+/** Format premium as $X.XXXX */
+function fmtPrem(v: number | null): string {
+  if (v == null) return '—';
+  return `$${v.toFixed(4)}`;
+}
+
+/** Format strike ($69,400 for BTC, $2,060 for ETH) */
+function fmtStrike(v: number | null): string {
+  if (v == null) return '—';
+  return `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+}
+
+/** Staleness check: is updated_at older than 2 minutes? */
+function isStale(updatedAt: string | null): boolean {
+  if (!updatedAt) return true;
+  return Date.now() - new Date(updatedAt).getTime() > 2 * 60 * 1000;
 }
 
 /** Derive 15m trend direction — use DB field if present, else compute from DI/ADX. */
@@ -67,6 +108,8 @@ function deriveTrend(log: StrategyLog): 'bullish' | 'bearish' | 'neutral' {
   return 'neutral';
 }
 
+// ── Compute trigger from strategy_log ────────────────────────────────
+
 /**
  * Build trigger info from strategy_log entry.
  * Primary: reads signal_count/signal_* fields written by the bot (exact match).
@@ -75,7 +118,7 @@ function deriveTrend(log: StrategyLog): 'bullish' | 'bearish' | 'neutral' {
 function computeTrigger(log: StrategyLog): TriggerInfo {
   const pair = log.pair;
   const exchange: Exchange = log.exchange ?? 'delta';
-  const isFutures = exchange === 'delta';
+  const isFutures = exchange !== 'binance'; // all active exchanges are futures
 
   const rsi = log.rsi ?? null;
   const volumeRatio = log.volume_ratio ?? null;
@@ -85,6 +128,14 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const bbLower = log.bb_lower ?? null;
   const hasData = rsi != null;
   const trend = deriveTrend(log);
+
+  // Default options fields (set later in useMemo for eligible assets)
+  const optDefaults = {
+    optionsState: null as OptionsState | null,
+    optionsOpenTrade: null as OpenPosition | null,
+    optionsRecentEvents: [] as ActivityLogRow[],
+    optionsStale: false,
+  };
 
   // ── PRIMARY: use bot-written signal state if available ──────────────
   const hasBotSignals = log.signal_count != null;
@@ -109,7 +160,6 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     ];
 
     // Per-direction indicators from bot breakdown fields
-    // If engine hasn't written bull_mom/etc yet (all null), compute from indicator values
     const hasDirectionalBooleans = log.bull_mom != null || log.bear_mom != null;
 
     let bullIndicators: IndicatorStatus[];
@@ -129,7 +179,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
         { active: log.bear_bb === true,  label: 'BB',  direction: 'bear' },
       ];
     } else {
-      // Fallback: compute from indicator values (engine not yet writing per-direction booleans)
+      // Fallback: compute from indicator values
       const momBull = priceChangePct != null && priceChangePct >= MOMENTUM_MIN_PCT;
       const momBear = priceChangePct != null && priceChangePct <= -MOMENTUM_MIN_PCT;
       const volHigh = volumeRatio != null && volumeRatio >= VOL_SPIKE_RATIO;
@@ -174,7 +224,6 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
       statusColor = 'text-zinc-500';
     }
 
-    // Skip reason from bot
     const skipReason = log.skip_reason || null;
 
     return {
@@ -185,6 +234,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
       overallStatus, statusColor,
       skipReason,
       activePosition: null,
+      ...optDefaults,
     };
   }
 
@@ -269,10 +319,12 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     overallStatus, statusColor,
     skipReason: null,
     activePosition: null,
+    ...optDefaults,
   };
 }
 
-// ── Signal bar (fills based on signal count) ────────────────────────────
+// ── Sub-components ───────────────────────────────────────────────────
+
 function SignalBar({ count, variant = 'bull' }: { count: number; variant?: 'bull' | 'bear' }) {
   const filled = (count / 4) * 100;
   const readyColor = variant === 'bear' ? '#ff1744' : '#00c853';
@@ -291,7 +343,6 @@ function SignalBar({ count, variant = 'bull' }: { count: number; variant?: 'bull
   );
 }
 
-// ── Single indicator dot ─────────────────────────────────────────────
 function Dot({ active, label, direction }: { active: boolean; label: string; direction?: 'bull' | 'bear' | null }) {
   const isBear = direction === 'bear';
   const activeColor = isBear ? 'bg-[#ff1744] border-[#ff1744] shadow-[0_0_6px_rgba(255,23,68,0.5)]'
@@ -316,7 +367,6 @@ function Dot({ active, label, direction }: { active: boolean; label: string; dir
   );
 }
 
-// ── Trend badge ─────────────────────────────────────────────────────
 function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | 'neutral' }) {
   const cfg = {
     bullish:  { icon: '\u2191', label: '15m Bull', color: 'text-[#00c853]', bg: 'bg-[#00c853]/10' },
@@ -334,16 +384,178 @@ function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | 'neutral' }) {
   );
 }
 
-function extractBaseAsset(pair: string): string {
-  if (pair.includes('/')) return pair.split('/')[0];
-  return pair.replace(/USD.*$/, '');
+function ExchangeBadge({ exchange }: { exchange: string }) {
+  const cfg: Record<string, { label: string; color: string; bg: string }> = {
+    kraken: { label: 'Kraken', color: 'text-[#7B61FF]', bg: 'bg-[#7B61FF]/10' },
+    delta:  { label: 'Delta',  color: 'text-[#00d2ff]', bg: 'bg-[#00d2ff]/10' },
+    bybit:  { label: 'Bybit',  color: 'text-[#f7a600]', bg: 'bg-[#f7a600]/10' },
+  };
+  const c = cfg[exchange] ?? { label: exchange, color: 'text-zinc-400', bg: 'bg-zinc-700/30' };
+  return (
+    <span className={cn(
+      'inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono font-medium',
+      c.color, c.bg,
+    )}>
+      {c.label}
+    </span>
+  );
 }
 
-// Only show our 4 active trading pairs (filter out stale BNB/DOGE/etc.)
-const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
+// ── Options inline section (BTC + ETH only) ──────────────────────────
 
-export function TriggerProximity() {
-  const { strategyLog, openPositions } = useSupabase();
+function OptionsInlineSection({
+  optionsState: s,
+  openTrade,
+}: {
+  optionsState: OptionsState;
+  openTrade: OpenPosition | null;
+}) {
+  // Derive position info (same logic from OptionsTracker PairCard)
+  const positionSideSet = s.position_side != null;
+  const dataAge = Date.now() - new Date(s.updated_at).getTime();
+  const hasPositionFromState = positionSideSet && dataAge < 5 * 60 * 1000;
+  const hasPositionFromTrades = openTrade != null;
+  const hasPosition = hasPositionFromState || hasPositionFromTrades;
+
+  const positionSide = s.position_side ?? (
+    hasPositionFromTrades
+      ? (openTrade!.pair.endsWith('-C') ? 'call' : openTrade!.pair.endsWith('-P') ? 'put' : 'call')
+      : null
+  );
+  const entryPremium = s.entry_premium ?? (hasPositionFromTrades ? openTrade!.entry_price : null);
+  const currentPremium = s.current_premium ?? (hasPositionFromTrades ? (openTrade!.current_price ?? null) : null);
+  const pnlPct = s.pnl_pct ?? (hasPositionFromTrades ? (openTrade!.current_pnl ?? null) : null);
+  const pnlUsd = s.pnl_usd ?? null;
+  const positionStrike = s.position_strike ?? null;
+  const trailingActive = s.trailing_active ?? (hasPositionFromTrades && openTrade!.position_state === 'trailing');
+  const highestPremium = s.highest_premium ?? null;
+
+  const strength = s.signal_strength ?? 0;
+  const isReady = strength >= 3;
+  const stale = isStale(s.updated_at);
+
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-[#7c4dff]/20">
+      {/* Options header */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="text-[9px] font-mono font-medium text-[#7c4dff] uppercase">Options</span>
+          <ExchangeBadge exchange="delta" />
+        </div>
+        <div className="flex items-center gap-1.5">
+          {hasPosition && (
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-[#7c4dff] bg-[#7c4dff]/10 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#7c4dff] animate-pulse" />
+              {positionSide?.toUpperCase()} OPEN
+            </span>
+          )}
+          {stale ? (
+            <span className="text-[8px] text-zinc-600 font-mono">STALE</span>
+          ) : s.updated_at ? (
+            <span className="text-[8px] text-zinc-600 font-mono flex items-center gap-1">
+              <span className="w-1 h-1 rounded-full bg-[#00c853]" />
+              {formatTimeAgo(s.updated_at)}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Expiry + Strike + Premiums — compact row */}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[9px] font-mono text-zinc-400 mb-2">
+        <span><span className="text-zinc-600">Exp </span>{s.expiry_label ?? '—'}</span>
+        <span><span className="text-zinc-600">ATM </span>{fmtStrike(s.atm_strike)}</span>
+        <span className="text-[#00c853]"><span className="text-zinc-600">C </span>{fmtPrem(s.call_premium)}</span>
+        <span className="text-[#ff1744]"><span className="text-zinc-600">P </span>{fmtPrem(s.put_premium)}</span>
+      </div>
+
+      {/* Options signal bar */}
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="text-[9px] text-zinc-500 uppercase w-8 shrink-0">Opt</span>
+        <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-700"
+            style={{
+              width: `${(strength / 4) * 100}%`,
+              backgroundColor: strength >= 3 ? '#7c4dff' : strength >= 1 ? '#ffd600' : '#71717a',
+            }}
+          />
+        </div>
+        <span className={cn(
+          'text-[10px] font-mono w-8 text-right',
+          strength >= 3 ? 'text-[#7c4dff]' : strength >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
+        )}>
+          {strength}/4
+        </span>
+      </div>
+
+      {/* Signal status text */}
+      <div className="text-[9px] font-mono mb-1.5">
+        {isReady ? (
+          <span className={s.signal_side === 'long' ? 'text-[#00c853]' : 'text-[#ff1744]'}>
+            OPT SIGNAL: {s.signal_side === 'long' ? 'CALL' : 'PUT'} {strength}/4 ✔
+          </span>
+        ) : strength > 0 ? (
+          <span className="text-[#ffd600]">
+            {s.signal_side === 'long' ? 'CALL' : s.signal_side === 'short' ? 'PUT' : '...'} building ({strength}/4)
+          </span>
+        ) : (
+          <span className="text-zinc-600">Waiting for 3/4+ signal...</span>
+        )}
+      </div>
+
+      {/* Active options position inline */}
+      {hasPosition && (
+        <div className="bg-[#7c4dff]/5 border border-[#7c4dff]/20 rounded p-2 mb-1.5">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] font-medium text-[#7c4dff] uppercase">
+              {positionSide?.toUpperCase()} Position
+            </span>
+            {trailingActive && (
+              <span className="flex items-center gap-1 text-[8px] font-mono text-[#00c853]">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
+                TRAILING
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] font-mono text-zinc-400">
+            {positionStrike != null && <span><span className="text-zinc-600">Strike </span>{fmtStrike(positionStrike)}</span>}
+            <span><span className="text-zinc-600">Entry </span>{fmtPrem(entryPremium)}</span>
+            <span><span className="text-zinc-600">Now </span>{currentPremium != null ? fmtPrem(currentPremium) : 'updating...'}</span>
+            <span>
+              <span className="text-zinc-600">P&L </span>
+              <span className={cn('font-medium', (pnlPct ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                {pnlPct != null ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%` : '—'}
+                {pnlUsd != null && ` ($${pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(4)})`}
+              </span>
+            </span>
+          </div>
+          {highestPremium != null && entryPremium != null && entryPremium > 0 && (
+            <div className="text-[8px] font-mono text-zinc-600 mt-1">
+              Peak ${highestPremium.toFixed(4)} ({((highestPremium - entryPremium) / entryPremium * 100).toFixed(1)}%)
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Last exit (when no position) */}
+      {!hasPosition && s.last_exit_type && (
+        <div className="text-[8px] font-mono text-zinc-600">
+          Last: {s.last_exit_type}
+          {s.last_exit_pnl_pct != null && (
+            <span className={cn('ml-1', s.last_exit_pnl_pct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+              {s.last_exit_pnl_pct >= 0 ? '+' : ''}{s.last_exit_pnl_pct.toFixed(1)}%
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main component ───────────────────────────────────────────────────
+
+export function EntrySignals() {
+  const { strategyLog, openPositions, optionsState, optionsLog } = useSupabase();
 
   const triggers = useMemo(() => {
     const latestByPair = new Map<string, StrategyLog>();
@@ -351,9 +563,9 @@ export function TriggerProximity() {
       if (log.pair) {
         const asset = extractBaseAsset(log.pair);
         if (!ACTIVE_ASSETS.has(asset)) continue;
-        // Only show Delta futures pairs (user requested: remove Binance)
+        // Show all active futures exchanges (Kraken, Bybit, Delta) — skip Binance
         const exchange = log.exchange ?? 'delta';
-        if (exchange !== 'delta') continue;
+        if (exchange === 'binance') continue;
         const key = `${log.pair}-${exchange}`;
         if (!latestByPair.has(key)) {
           latestByPair.set(key, log);
@@ -362,30 +574,60 @@ export function TriggerProximity() {
     }
 
     // Build lookup of open SCALP positions by base asset + exchange
-    // Only show "IN TRADE" badge for scalp positions (not options)
-    const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
     const positionMap = new Map<string, OpenPosition>();
+    const optionTrades = new Map<string, OpenPosition>();
     for (const pos of (openPositions ?? [])) {
-      // Skip options positions — they show in Options Overview, not here
-      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) continue;
       const asset = extractBaseAsset(pos.pair);
-      const key = `${asset}-${pos.exchange}`;
-      positionMap.set(key, pos);
+      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) {
+        // Options positions — tracked separately
+        optionTrades.set(asset, pos);
+      } else {
+        // Futures/scalp positions
+        const key = `${asset}-${pos.exchange}`;
+        positionMap.set(key, pos);
+      }
+    }
+
+    // Options state by asset
+    const optionsStateMap = new Map<string, OptionsState>();
+    for (const os of optionsState) {
+      const asset = extractBaseAsset(os.pair);
+      optionsStateMap.set(asset, os);
+    }
+
+    // Options recent events by asset
+    const optionsEventsByAsset = new Map<string, ActivityLogRow[]>();
+    for (const ev of optionsLog) {
+      const asset = extractBaseAsset(ev.pair);
+      const arr = optionsEventsByAsset.get(asset) ?? [];
+      arr.push(ev);
+      optionsEventsByAsset.set(asset, arr);
     }
 
     const results: TriggerInfo[] = [];
     for (const log of Array.from(latestByPair.values())) {
       const trigger = computeTrigger(log);
       const asset = extractBaseAsset(trigger.pair);
+
+      // Futures position
       const posKey = `${asset}-${trigger.exchange}`;
       trigger.activePosition = positionMap.get(posKey) ?? null;
+
+      // Options data (only for BTC + ETH)
+      if (OPTIONS_ELIGIBLE.has(asset)) {
+        trigger.optionsState = optionsStateMap.get(asset) ?? null;
+        trigger.optionsOpenTrade = optionTrades.get(asset) ?? null;
+        trigger.optionsRecentEvents = (optionsEventsByAsset.get(asset) ?? []).slice(0, 5);
+        trigger.optionsStale = isStale(trigger.optionsState?.updated_at ?? null);
+      }
+
       results.push(trigger);
     }
 
     // Priority: 1) in-trade pairs first, 2) highest signal count, 3) has data
     results.sort((a, b) => {
-      const aInTrade = a.activePosition != null ? 1 : 0;
-      const bInTrade = b.activePosition != null ? 1 : 0;
+      const aInTrade = (a.activePosition != null || a.optionsOpenTrade != null) ? 1 : 0;
+      const bInTrade = (b.activePosition != null || b.optionsOpenTrade != null) ? 1 : 0;
       if (aInTrade !== bInTrade) return bInTrade - aInTrade;
       if (a.signalCount !== b.signalCount) return b.signalCount - a.signalCount;
       if (a.hasData && !b.hasData) return -1;
@@ -394,13 +636,13 @@ export function TriggerProximity() {
     });
 
     return results;
-  }, [strategyLog, openPositions]);
+  }, [strategyLog, openPositions, optionsState, optionsLog]);
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
-          Entry Signals — Futures
+          Entry Signals
         </h3>
         <span className="text-[9px] text-zinc-600 font-mono">need 3/4</span>
       </div>
@@ -408,7 +650,7 @@ export function TriggerProximity() {
       {triggers.length === 0 ? (
         <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
       ) : (
-        <div className="space-y-3 max-h-none md:max-h-[600px] overflow-y-auto overflow-x-hidden pr-1">
+        <div className="space-y-3 max-h-none md:max-h-[800px] overflow-y-auto overflow-x-hidden pr-1">
           {triggers.map((t) => {
             const hasActivePos = t.activePosition != null;
             const posPnl = t.activePosition?.current_pnl ?? null;
@@ -425,16 +667,20 @@ export function TriggerProximity() {
             const posColor = isTrailing ? 'bg-[#00c853]/10 text-[#00c853]'
               : isNegative ? 'bg-[#ff1744]/10 text-[#ff1744]'
               : 'bg-amber-400/10 text-amber-400';
-            const borderClr = isTrailing ? 'border-[#00c853]/30'
-              : isNegative ? 'border-[#ff1744]/20'
-              : 'border-amber-400/30';
+
+            // Options position border takes precedence if no futures position
+            const hasOptionsPos = t.optionsOpenTrade != null;
+            const borderClr = hasActivePos
+              ? (isTrailing ? 'border-[#00c853]/30' : isNegative ? 'border-[#ff1744]/20' : 'border-amber-400/30')
+              : hasOptionsPos ? 'border-[#7c4dff]/30'
+              : 'border-zinc-800/50';
 
             return (
             <div
               key={`${t.pair}-${t.exchange}`}
               className={cn(
                 'bg-zinc-900/40 border rounded-lg p-3',
-                hasActivePos ? borderClr : 'border-zinc-800/50',
+                borderClr,
               )}
             >
               {/* Header */}
@@ -446,9 +692,10 @@ export function TriggerProximity() {
                       ${t.currentPrice.toLocaleString()}
                     </span>
                   )}
+                  <ExchangeBadge exchange={t.exchange} />
                 </div>
                 <div className="flex items-center gap-2">
-                  {t.isFutures && t.hasData && <TrendBadge trend={t.trend} />}
+                  {t.hasData && <TrendBadge trend={t.trend} />}
                   {hasActivePos ? (
                     <span className={cn(
                       'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
@@ -500,7 +747,7 @@ export function TriggerProximity() {
                         ))}
                       </div>
                     </div>
-                    {/* Bear row: bar + dots (futures only) */}
+                    {/* Bear row: bar + dots */}
                     {t.isFutures && (
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
@@ -568,6 +815,14 @@ export function TriggerProximity() {
               ) : (
                 <p className="text-[11px] text-zinc-600">Awaiting indicator data from bot...</p>
               )}
+
+              {/* ── OPTIONS SECTION (BTC + ETH only) ───────────────── */}
+              {t.optionsState != null && (
+                <OptionsInlineSection
+                  optionsState={t.optionsState}
+                  openTrade={t.optionsOpenTrade}
+                />
+              )}
             </div>
           );
           })}
@@ -576,3 +831,6 @@ export function TriggerProximity() {
     </div>
   );
 }
+
+// Backward-compat alias
+export { EntrySignals as TriggerProximity };
