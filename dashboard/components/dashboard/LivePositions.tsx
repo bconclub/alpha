@@ -9,6 +9,8 @@ import { cn } from '@/lib/utils';
 import {
   type PositionDisplay,
   TRAIL_ACTIVATION_PCT,
+  OPT_TRAIL_ACTIVATION_PCT,
+  OPT_TRAIL_DISTANCE_PCT,
   fmtPrice,
   fmtPnl,
   getPositionState,
@@ -172,26 +174,32 @@ export function LivePositions() {
       }
 
       // Use ACTUAL position state from bot (written to DB every ~10s)
-      // Only trust trailing state if peak P&L confirms it (≥0.30%)
+      // Options trail activates at 15% premium gain, futures at 0.15% spot
       const peakPnlPct = pos.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
+      const trailThreshold = isOption ? OPT_TRAIL_ACTIVATION_PCT : TRAIL_ACTIVATION_PCT;
       const trailActive = (
         pos.position_state === 'trailing'
-        && peakPnlPct >= TRAIL_ACTIVATION_PCT
+        && peakPnlPct >= trailThreshold
       );
 
       // Use ACTUAL trail stop price from bot, or estimate if not available
       let trailStopPrice: number | null = pos.trail_stop_price ?? null;
       if (trailStopPrice == null && trailActive && currentPrice != null && pricePnlPct != null) {
-        // Fallback estimation when bot hasn't written state yet
-        let trailDist = 0.30;
-        const tiers: [number, number][] = [[0.50, 0.30], [1.00, 0.50], [2.00, 0.70], [3.00, 1.00]];
-        for (const [minProfit, dist] of tiers) {
-          if (pricePnlPct >= minProfit) trailDist = dist;
-        }
-        if (pos.position_type === 'short') {
-          trailStopPrice = currentPrice * (1 + trailDist / 100);
+        if (isOption) {
+          // Options: trail 5% behind peak premium (matches engine OPT_TRAIL_DISTANCE_PCT)
+          trailStopPrice = currentPrice * (1 - OPT_TRAIL_DISTANCE_PCT / 100);
         } else {
-          trailStopPrice = currentPrice * (1 - trailDist / 100);
+          // Futures: tiered trail distance
+          let trailDist = 0.30;
+          const tiers: [number, number][] = [[0.50, 0.30], [1.00, 0.50], [2.00, 0.70], [3.00, 1.00]];
+          for (const [minProfit, dist] of tiers) {
+            if (pricePnlPct >= minProfit) trailDist = dist;
+          }
+          if (pos.position_type === 'short') {
+            trailStopPrice = currentPrice * (1 + trailDist / 100);
+          } else {
+            trailStopPrice = currentPrice * (1 - trailDist / 100);
+          }
         }
       }
 

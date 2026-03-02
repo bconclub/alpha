@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import type { Trade, Strategy, Exchange, PositionType } from '@/lib/types';
+import type { Trade, Strategy, Exchange, PositionType, OptionsState } from '@/lib/types';
 import {
   formatCurrency,
   formatPrice,
@@ -27,6 +27,8 @@ import {
   type PositionDisplay,
   TRAIL_ACTIVATION_PCT,
   DEFAULT_SL_PCT,
+  OPT_TRAIL_ACTIVATION_PCT,
+  OPT_TRAIL_DISTANCE_PCT,
   getPositionState,
   StateBadge,
   PositionRangeBar,
@@ -86,6 +88,12 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
 const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
 function isOptionTrade(trade: Trade): boolean {
   return trade.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(trade.pair);
+}
+
+function getOptionSide(pair: string): 'CALL' | 'PUT' | null {
+  if (pair.endsWith('-C')) return 'CALL';
+  if (pair.endsWith('-P')) return 'PUT';
+  return null;
 }
 
 /** Shorten an options pair for display: "ETH/USD:USD-260221-1960-C" → "ETH 1960C 21Feb26" */
@@ -349,6 +357,7 @@ function calcUnrealizedPnL(
 function buildPositionDisplay(
   trade: Trade,
   currentPrice: number | null,
+  optionsState?: OptionsState[],
 ): PositionDisplay | null {
   if (trade.status !== 'open') return null;
 
@@ -390,23 +399,43 @@ function buildPositionDisplay(
   }
 
   const peakPnlPct = trade.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
+
+  // Options trail activates at 15% premium gain, futures at 0.15% spot
+  const trailThreshold = isOption ? OPT_TRAIL_ACTIVATION_PCT : TRAIL_ACTIVATION_PCT;
   const trailActive = (
     trade.position_state === 'trailing'
-    && peakPnlPct >= TRAIL_ACTIVATION_PCT
+    && peakPnlPct >= trailThreshold
   );
 
   let trailStopPrice: number | null = trade.trail_stop_price ?? null;
   if (trailStopPrice == null && trailActive && currentPrice != null && pricePnlPct != null) {
-    let trailDist = 0.30;
-    const tiers: [number, number][] = [[0.50, 0.30], [1.00, 0.50], [2.00, 0.70], [3.00, 1.00]];
-    for (const [minProfit, dist] of tiers) {
-      if (pricePnlPct >= minProfit) trailDist = dist;
-    }
-    if (trade.position_type === 'short') {
-      trailStopPrice = currentPrice * (1 + trailDist / 100);
-    } else {
+    if (isOption) {
+      // Options: trail 5% behind peak premium (matches engine OPT_TRAIL_DISTANCE_PCT)
+      const trailDist = OPT_TRAIL_DISTANCE_PCT;
       trailStopPrice = currentPrice * (1 - trailDist / 100);
+    } else {
+      // Futures: tiered trail distance
+      let trailDist = 0.30;
+      const tiers: [number, number][] = [[0.50, 0.30], [1.00, 0.50], [2.00, 0.70], [3.00, 1.00]];
+      for (const [minProfit, dist] of tiers) {
+        if (pricePnlPct >= minProfit) trailDist = dist;
+      }
+      if (trade.position_type === 'short') {
+        trailStopPrice = currentPrice * (1 + trailDist / 100);
+      } else {
+        trailStopPrice = currentPrice * (1 - trailDist / 100);
+      }
     }
+  }
+
+  // Extract options strike/expiry from optionsState
+  let optionStrike: number | null = null;
+  let optionExpiry: string | null = null;
+  if (isOption && optionsState) {
+    const pairKey = `${asset}/USD:USD`;
+    const optState = optionsState.find((s) => s.pair === pairKey);
+    optionStrike = optState?.position_strike ?? null;
+    optionExpiry = optState?.expiry_label ?? null;
   }
 
   const openedMs = new Date(trade.timestamp).getTime();
@@ -433,6 +462,10 @@ function buildPositionDisplay(
     slPrice: trade.stop_loss ?? null,
     tpPrice: trade.take_profit ?? null,
     exchange: trade.exchange,
+    isOption,
+    optionSide: isOption ? getOptionSide(trade.pair) : null,
+    optionStrike,
+    optionExpiry,
     // Momentum fade / dead momentum timer state
     fadeTimerActive: trade.fade_timer_active ?? false,
     fadeElapsed: trade.fade_elapsed ?? null,
@@ -988,7 +1021,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           const optState = optionsState.find((s) => s.pair === `${asset}/USD:USD`);
                           cp = optState?.current_premium ?? null;
                         }
-                        const posDisplay = buildPositionDisplay(trade, cp);
+                        const posDisplay = buildPositionDisplay(trade, cp, optionsState);
                         if (!posDisplay) return null;
                         const posState = getPositionState(posDisplay);
                         return (
@@ -1393,7 +1426,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               const optState = optionsState.find((s) => s.pair === `${asset}/USD:USD`);
                               cp = optState?.current_premium ?? null;
                             }
-                            const posDisplay = buildPositionDisplay(trade, cp);
+                            const posDisplay = buildPositionDisplay(trade, cp, optionsState);
                             if (posDisplay) {
                               const posState = getPositionState(posDisplay);
                               return (

@@ -15,6 +15,12 @@ import { formatNumber, cn } from '@/lib/utils';
 export const TRAIL_ACTIVATION_PCT = 0.15; // must match engine TRAIL_TIER_TABLE first tier
 export const DEFAULT_SL_PCT = 0.25;       // must match engine STOP_LOSS_PCT fallback
 
+// Options-specific thresholds (must match engine options_scalp.py)
+export const OPT_SL_PCT = 30.0;               // 30% premium loss SL
+export const OPT_TP_PCT = 30.0;               // 30% premium gain TP
+export const OPT_TRAIL_ACTIVATION_PCT = 15.0;  // 15% premium gain to activate trail
+export const OPT_TRAIL_DISTANCE_PCT = 5.0;     // 5% behind peak premium
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -77,9 +83,12 @@ export type PositionState = 'near_sl' | 'at_risk' | 'holding_loss' | 'holding_ga
 export function getPositionState(pos: PositionDisplay): PositionState {
   const pnl = pos.pricePnlPct ?? 0;
   const peak = pos.peakPnlPct ?? 0;
+  const isOpt = pos.isOption === true;
 
   // TRAILING: only if trail genuinely active AND peak confirms it
-  if (pos.trailActive && peak >= TRAIL_ACTIVATION_PCT) {
+  // Options trail activates at 15%, futures at 0.15%
+  const trailThreshold = isOpt ? OPT_TRAIL_ACTIVATION_PCT : TRAIL_ACTIVATION_PCT;
+  if (pos.trailActive && peak >= trailThreshold) {
     return 'trailing';
   }
 
@@ -95,7 +104,9 @@ export function getPositionState(pos: PositionDisplay): PositionState {
     }
   }
 
-  if (pnl < -0.15) return 'at_risk';
+  // Options: premium swings are much wider; -0.15% is noise for options
+  const atRiskThreshold = isOpt ? -15.0 : -0.15;
+  if (pnl < atRiskThreshold) return 'at_risk';
   if (pnl < 0) return 'holding_loss';
   return 'holding_gain';
 }
@@ -232,22 +243,29 @@ export function PositionRangeBar({ pos, compact = false }: { pos: PositionDispla
   const entry = pos.entryPrice;
   const current = pos.currentPrice;
   const peak = pos.peakPnlPct ?? 0;
+  const isOpt = pos.isOption === true;
 
   if (current == null || entry <= 0) return null;
+
+  // Options use premium-scale percentages (30% SL, 15% trail)
+  // Futures use spot-scale percentages (0.25% SL, 0.15% trail)
+  const slPct = isOpt ? OPT_SL_PCT : DEFAULT_SL_PCT;
+  const trailActPct = isOpt ? OPT_TRAIL_ACTIVATION_PCT : TRAIL_ACTIVATION_PCT;
 
   // Compute SL price (from DB or estimate)
   const slPrice = pos.slPrice ?? (
     pos.positionType === 'long'
-      ? entry * (1 - DEFAULT_SL_PCT / 100)
-      : entry * (1 + DEFAULT_SL_PCT / 100)
+      ? entry * (1 - slPct / 100)
+      : entry * (1 + slPct / 100)
   );
 
   // Range: SL distance below entry, peak/trail above entry
-  const slDistPct = DEFAULT_SL_PCT; // distance from entry to SL in %
-  const peakPct = Math.max(peak, Math.abs(pnl), 0.05); // at least 0.05 to avoid zero range
+  const slDistPct = slPct;
+  const minPeak = isOpt ? 1.0 : 0.05; // avoid zero-range bar
+  const peakPct = Math.max(peak, Math.abs(pnl), minPeak);
 
   // Total range: SL side + profit side
-  const totalRange = slDistPct + Math.max(peakPct, TRAIL_ACTIVATION_PCT);
+  const totalRange = slDistPct + Math.max(peakPct, trailActPct);
 
   // Entry position as % of total bar width (SL is at 0%, entry is partway)
   const entryPos = (slDistPct / totalRange) * 100;
@@ -257,7 +275,7 @@ export function PositionRangeBar({ pos, compact = false }: { pos: PositionDispla
   const clampedCurrentPos = Math.max(0, Math.min(100, currentPos));
 
   // Trail activation line position
-  const trailLinePos = ((slDistPct + TRAIL_ACTIVATION_PCT) / totalRange) * 100;
+  const trailLinePos = ((slDistPct + trailActPct) / totalRange) * 100;
 
   // Trail stop position (if active)
   let trailStopPos: number | null = null;
@@ -272,6 +290,13 @@ export function PositionRangeBar({ pos, compact = false }: { pos: PositionDispla
   const fillLeft = Math.min(entryPos, clampedCurrentPos);
   const fillWidth = Math.abs(clampedCurrentPos - entryPos);
   const isProfit = pnl >= 0;
+
+  // Options: format premium price (always small values like $11.50)
+  const fmtSl = isOpt ? `$${slPrice.toFixed(2)}` : `$${fmtPrice(slPrice)}`;
+  const fmtTrail = pos.trailStopPrice != null
+    ? (isOpt ? `$${pos.trailStopPrice.toFixed(2)}` : `$${fmtPrice(pos.trailStopPrice)}`)
+    : '';
+  const peakLabel = peak > 0 ? `+${peak.toFixed(isOpt ? 1 : 2)}%` : `+${trailActPct}%`;
 
   return (
     <div className="w-full">
@@ -326,10 +351,10 @@ export function PositionRangeBar({ pos, compact = false }: { pos: PositionDispla
       {compact ? (
         <div className="flex justify-between mt-0.5">
           <span className="text-[9px] font-mono text-[#ff1744]/70 leading-none">
-            SL
+            {isOpt ? `-${slPct}%` : 'SL'}
           </span>
           <span className="text-[9px] font-mono text-zinc-500 leading-none">
-            Entry
+            {isOpt ? 'Prem' : 'Entry'}
           </span>
           {pos.trailActive && pos.trailStopPrice != null ? (
             <span className="text-[9px] font-mono text-[#ffd600]/70 leading-none">
@@ -337,25 +362,25 @@ export function PositionRangeBar({ pos, compact = false }: { pos: PositionDispla
             </span>
           ) : (
             <span className="text-[9px] font-mono text-zinc-600 leading-none">
-              {peak > 0 ? `+${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+              {peakLabel}
             </span>
           )}
         </div>
       ) : (
         <div className="flex justify-between mt-0.5">
           <span className="text-[9px] font-mono text-[#ff1744]/70 leading-none truncate">
-            SL ${fmtPrice(slPrice)}
+            {isOpt ? `SL ${fmtSl}` : `SL ${fmtSl}`}
           </span>
           <span className="text-[9px] font-mono text-zinc-500 leading-none shrink-0 mx-1">
-            Entry
+            {isOpt ? 'Premium' : 'Entry'}
           </span>
           {pos.trailActive && pos.trailStopPrice != null ? (
             <span className="text-[9px] font-mono text-[#ffd600]/70 leading-none truncate text-right">
-              Trail ${fmtPrice(pos.trailStopPrice)}
+              Trail {fmtTrail}
             </span>
           ) : (
             <span className="text-[9px] font-mono text-zinc-600 leading-none text-right">
-              {peak > 0 ? `+${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+              {peakLabel}
             </span>
           )}
         </div>
