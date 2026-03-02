@@ -734,8 +734,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
       }
 
       const asset = extractBaseAsset(trade.pair);
-      // Priority: live API price (3s) → strategy_log price (~5min)
-      const currentPrice = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+      // Priority: live API price (3s) → bot DB price (~10s) → strategy_log price (~5min)
+      const currentPrice = livePrices.prices[trade.pair] ?? trade.current_price ?? currentPrices.get(asset) ?? null;
       const unrealized = calcUnrealizedPnL(trade, currentPrice);
       if (unrealized) {
         return {
@@ -1015,7 +1015,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       <HoldTimeCell trade={trade} now={now} />
                       {trade.status === 'open' && (() => {
                         const asset = extractBaseAsset(trade.pair);
-                        let cp: number | null = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                        // Priority: live API (3s) → bot DB price (~10s) → strategy_log (~5min)
+                        let cp: number | null = livePrices.prices[trade.pair] ?? trade.current_price ?? currentPrices.get(asset) ?? null;
                         // Options: use current_premium from options_state, NOT spot price
                         if (isOptionTrade(trade)) {
                           const optState = optionsState.find((s) => s.pair === `${asset}/USD:USD`);
@@ -1421,7 +1422,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         <td className="px-4 py-3 text-xs">
                           {trade.status === 'open' ? (() => {
                             const asset = extractBaseAsset(trade.pair);
-                            let cp: number | null = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                            // Priority: live API (3s) → bot DB price (~10s) → strategy_log (~5min)
+                            let cp: number | null = livePrices.prices[trade.pair] ?? trade.current_price ?? currentPrices.get(asset) ?? null;
                             if (isOptionTrade(trade)) {
                               const optState = optionsState.find((s) => s.pair === `${asset}/USD:USD`);
                               cp = optState?.current_premium ?? null;

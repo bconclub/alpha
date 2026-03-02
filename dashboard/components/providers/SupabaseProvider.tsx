@@ -66,6 +66,7 @@ function normalizeTrade(raw: any): Trade {
     exit_price: raw.exit_price ?? null,
     amount: raw.amount ?? 0,
     cost: raw.cost ?? undefined,
+    collateral: raw.collateral != null ? Number(raw.collateral) : undefined,
     strategy: raw.strategy ?? '',
     pnl: raw.pnl ?? 0,
     // Keep null/undefined distinct from 0 — null means "not yet calculated"
@@ -84,11 +85,19 @@ function normalizeTrade(raw: any): Trade {
     order_id: raw.order_id,
     setup_type: raw.setup_type ?? undefined,
     exit_reason: raw.exit_reason ?? undefined,
+    // Live position state (written by bot every ~10s for open trades)
     position_state: raw.position_state ?? null,
     trail_stop_price: raw.trail_stop_price != null ? Number(raw.trail_stop_price) : null,
     current_pnl: raw.current_pnl != null ? Number(raw.current_pnl) : null,
     current_price: raw.current_price != null ? Number(raw.current_price) : null,
     peak_pnl: raw.peak_pnl != null ? Number(raw.peak_pnl) : null,
+    // Momentum fade / dead momentum timer state
+    fade_timer_active: raw.fade_timer_active ?? false,
+    fade_elapsed: raw.fade_elapsed != null ? Number(raw.fade_elapsed) : null,
+    fade_required: raw.fade_required != null ? Number(raw.fade_required) : null,
+    dead_timer_active: raw.dead_timer_active ?? false,
+    dead_elapsed: raw.dead_elapsed != null ? Number(raw.dead_elapsed) : null,
+    dead_required: raw.dead_required != null ? Number(raw.dead_required) : null,
   };
 }
 
