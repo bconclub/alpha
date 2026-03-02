@@ -2722,6 +2722,46 @@ class AlphaBot:
 
             if epos and scalp and scalp.in_position:
                 self._position_first_seen.pop(f"bybit:{pair}", None)
+
+                # ── SAFETY: ensure DB also has this trade ──────────────
+                try:
+                    if self.db.is_connected:
+                        db_trade = await self.db.get_open_trade(pair=pair, exchange="bybit")
+                        if not db_trade:
+                            side = epos["side"]
+                            amount = epos["amount"]
+                            entry_px = epos["entry_price"]
+                            s_entry = getattr(scalp, "entry_price", 0) or 0
+                            fill_price = s_entry if s_entry > 0 else entry_px
+                            lev = getattr(scalp, "_leverage", config.bybit.leverage) or 20
+                            notional = fill_price * amount
+                            cost = notional / lev if lev > 1 else notional
+                            position_type = scalp.position_side or side
+
+                            trade_id = await self.db.log_trade({
+                                "pair": pair,
+                                "side": "buy" if position_type == "long" else "sell",
+                                "entry_price": fill_price,
+                                "amount": amount,
+                                "contracts": amount,
+                                "cost": cost,
+                                "collateral": round(notional / lev, 8) if lev > 1 else round(notional, 8),
+                                "strategy": "scalp",
+                                "order_type": "market",
+                                "exchange": "bybit",
+                                "status": "open",
+                                "reason": "BACKFILL (DB insert missed)",
+                                "leverage": lev,
+                                "position_type": position_type,
+                                "setup_type": "backfill",
+                            })
+                            logger.warning(
+                                "DB BACKFILL: inserted missing trade for %s %s (id=%s)",
+                                pair, position_type, trade_id,
+                            )
+                except Exception:
+                    logger.debug("DB backfill check failed for %s (bybit)", pair)
+
                 continue  # ALL GOOD
 
             if epos and (not scalp or not scalp.in_position):
@@ -3038,6 +3078,46 @@ class AlphaBot:
 
             if epos and scalp and scalp.in_position:
                 self._position_first_seen.pop(f"kraken:{pair}", None)
+
+                # ── SAFETY: ensure DB also has this trade ──────────────
+                try:
+                    if self.db.is_connected:
+                        db_trade = await self.db.get_open_trade(pair=pair, exchange="kraken")
+                        if not db_trade:
+                            side = epos["side"]
+                            amount = epos["amount"]
+                            entry_px = epos["entry_price"]
+                            s_entry = getattr(scalp, "entry_price", 0) or 0
+                            fill_price = s_entry if s_entry > 0 else entry_px
+                            lev = getattr(scalp, "_leverage", config.kraken.leverage) or 20
+                            notional = fill_price * amount
+                            cost = notional / lev if lev > 1 else notional
+                            position_type = scalp.position_side or side
+
+                            trade_id = await self.db.log_trade({
+                                "pair": pair,
+                                "side": "buy" if position_type == "long" else "sell",
+                                "entry_price": fill_price,
+                                "amount": amount,
+                                "contracts": amount,
+                                "cost": cost,
+                                "collateral": round(notional / lev, 8) if lev > 1 else round(notional, 8),
+                                "strategy": "scalp",
+                                "order_type": "market",
+                                "exchange": "kraken",
+                                "status": "open",
+                                "reason": "BACKFILL (DB insert missed)",
+                                "leverage": lev,
+                                "position_type": position_type,
+                                "setup_type": "backfill",
+                            })
+                            logger.warning(
+                                "DB BACKFILL: inserted missing trade for %s %s (id=%s)",
+                                pair, position_type, trade_id,
+                            )
+                except Exception:
+                    logger.debug("DB backfill check failed for %s (kraken)", pair)
+
                 continue  # ALL GOOD
 
             if epos and (not scalp or not scalp.in_position):
@@ -3375,6 +3455,63 @@ class AlphaBot:
             if epos and scalp and scalp.in_position:
                 # ALL GOOD — exchange has it, bot is managing it
                 self._position_first_seen.pop(f"delta:{pair}", None)
+
+                # ── SAFETY: ensure DB also has this trade ──────────────
+                # If _open_trade_in_db() failed silently, the dashboard
+                # can't see the position. Detect and backfill here.
+                try:
+                    if self.db.is_connected:
+                        db_trade = await self.db.get_open_trade(pair=pair, exchange="delta")
+                        if not db_trade:
+                            side = epos["side"]
+                            contracts = epos["contracts"]
+                            entry_px = epos["entry_price"]
+                            # Use strategy entry_price if available (more accurate)
+                            s_entry = getattr(scalp, "entry_price", 0) or 0
+                            fill_price = s_entry if s_entry > 0 else entry_px
+                            lev = getattr(scalp, "_leverage", config.delta.leverage) or 20
+                            contract_size = DELTA_CONTRACT_SIZE.get(pair, 1.0)
+                            coin_qty = contracts * contract_size
+                            notional = fill_price * coin_qty
+                            cost = notional / lev if lev > 1 else notional
+                            collateral = round(notional / lev, 8) if lev > 1 else round(notional, 8)
+                            position_type = scalp.position_side or side
+
+                            trade_data = {
+                                "pair": pair,
+                                "side": "buy" if position_type == "long" else "sell",
+                                "entry_price": fill_price,
+                                "amount": contracts,
+                                "contracts": contracts,
+                                "cost": cost,
+                                "collateral": collateral,
+                                "strategy": "scalp",
+                                "order_type": "market",
+                                "exchange": "delta",
+                                "status": "open",
+                                "reason": "BACKFILL (DB insert missed)",
+                                "leverage": lev,
+                                "position_type": position_type,
+                                "setup_type": "backfill",
+                            }
+                            trade_id = await self.db.log_trade(trade_data)
+                            logger.warning(
+                                "DB BACKFILL: inserted missing trade for %s %s %.0f ct "
+                                "@ $%.4f (id=%s) — dashboard can now see it",
+                                pair, position_type, contracts, fill_price, trade_id,
+                            )
+                            try:
+                                await self.alerts.send_orphan_alert(
+                                    pair=pair, side=position_type,
+                                    contracts=contracts,
+                                    action="DB BACKFILL",
+                                    detail=f"Trade was on exchange + bot but missing from DB. Inserted id={trade_id}",
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    logger.debug("DB backfill check failed for %s", pair)
+
                 continue
 
             if epos and (not scalp or not scalp.in_position):

@@ -1307,7 +1307,20 @@ class TradeExecutor:
                 trade_id, signal.side, signal.pair, fill_price, signal.exchange_id,
             )
         except Exception:
-            logger.exception("Failed to log open trade to DB")
+            logger.exception("Failed to log open trade to DB — retrying once...")
+            try:
+                await asyncio.sleep(2)
+                trade_id = await self.db.log_trade(trade_data)
+                logger.info(
+                    "Trade opened in DB (retry OK): id=%s %s %s @ $%.2f [%s]",
+                    trade_id, signal.side, signal.pair, fill_price, signal.exchange_id,
+                )
+            except Exception:
+                logger.exception(
+                    "CRITICAL: DB insert retry also failed for %s %s — "
+                    "reconciliation will backfill within 60s",
+                    signal.pair, signal.exchange_id,
+                )
 
     async def _close_trade_in_db(self, signal: Signal, order: dict) -> dict | None:
         """UPDATE the existing open trade row with exit price and P&L.
