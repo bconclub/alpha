@@ -249,46 +249,55 @@ export function LiveStatusBar() {
       {/* ═══ MOBILE LAYOUT ═══ */}
       <div className="flex flex-col gap-2 md:hidden">
 
-        {/* Row 1 — Balance cards (only show live exchanges with balance) */}
+        {/* Row 1 — Total Capital (prominent full-width card) */}
+        <div className="bg-zinc-900/60 border border-zinc-700 rounded-xl px-4 py-3.5">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Total Capital</div>
+              <div className="flex items-baseline gap-2">
+                <span className="font-mono text-2xl font-bold text-white">{formatCurrency(totalCapital)}</span>
+                {capitalInr > 0 && (
+                  <span className="text-xs text-zinc-500 font-mono">{'\u20B9'}{capitalInr.toLocaleString('en-IN')}</span>
+                )}
+              </div>
+            </div>
+            {openPositionCount > 0 && (
+              <span className="text-xs font-mono font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-full px-2.5 py-1">{openPositionCount} open</span>
+            )}
+          </div>
+        </div>
+
+        {/* Row 2 — Exchange balance cards */}
         <div className="grid grid-cols-2 gap-2">
           {bybitConnected && bybitBalance > 0 && (
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
-              <div className="flex items-center gap-1 mb-1">
-                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
-                <span className="text-[10px] font-semibold text-[#f7a600] truncate">BYBIT</span>
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
+                <span className="text-[11px] font-bold text-[#f7a600]">BYBIT</span>
               </div>
-              <span className="font-mono text-sm text-white">{formatCurrency(bybitBalance)}</span>
+              <span className="font-mono text-lg font-semibold text-white">{formatCurrency(bybitBalance)}</span>
             </div>
           )}
 
           {deltaConnected && deltaBalance > 0 && (
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
-              <div className="flex items-center gap-1 mb-1">
-                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
-                <span className="text-[10px] font-semibold text-[#00d2ff] truncate">DELTA</span>
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
+                <span className="text-[11px] font-bold text-[#00d2ff]">DELTA</span>
               </div>
-              <span className="font-mono text-sm text-white">{formatCurrency(deltaBalance)}</span>
+              <span className="font-mono text-lg font-semibold text-white">{formatCurrency(deltaBalance)}</span>
             </div>
           )}
 
           {krakenConnected && krakenBalance > 0 && (
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
-              <div className="flex items-center gap-1 mb-1">
-                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
-                <span className="text-[10px] font-semibold text-[#7B61FF] truncate">KRAKEN</span>
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
+                <span className="text-[11px] font-bold text-[#7B61FF]">KRAKEN</span>
               </div>
-              <span className="font-mono text-sm text-white">{formatCurrency(krakenBalance)}</span>
+              <span className="font-mono text-lg font-semibold text-white">{formatCurrency(krakenBalance)}</span>
             </div>
           )}
-
-          {/* Capital */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2 text-center">
-            <div className="text-[9px] uppercase tracking-wider text-zinc-500 mb-1">Capital</div>
-            <span className="font-mono text-sm font-bold text-white">{formatCurrency(totalCapital)}</span>
-            {capitalInr > 0 && (
-              <div className="text-[9px] text-zinc-500 font-mono">{'\u20B9'}{capitalInr.toLocaleString('en-IN')}</div>
-            )}
-          </div>
         </div>
 
         {/* Row 2 — PnL / Deposits toggled card */}
