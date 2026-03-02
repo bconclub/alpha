@@ -118,10 +118,14 @@ export function LivePositions() {
       // For options: use current_premium from options_state (NOT spot price!)
       // Spot price for ETH is ~$2000, but option premium is ~$11
       let currentPrice: number | null = null;
+      let optionStrike: number | null = null;
+      let optionExpiry: string | null = null;
       if (isOption) {
         const pairKey = `${asset}/USD:USD`;
         const optState = optionsState.find((s) => s.pair === pairKey);
         currentPrice = optState?.current_premium ?? null;
+        optionStrike = optState?.position_strike ?? null;
+        optionExpiry = optState?.expiry_label ?? null;
       } else {
         // Priority: live API price (3s) → bot DB price (~10s) → strategy_log (~5min)
         currentPrice =
@@ -213,6 +217,8 @@ export function LivePositions() {
         exchange: pos.exchange,
         isOption,
         optionSide: isOption ? getOptionSide(pos.pair) : null,
+        optionStrike: isOption ? optionStrike : null,
+        optionExpiry: isOption ? optionExpiry : null,
         // Momentum fade / dead momentum timer state
         fadeTimerActive: pos.fade_timer_active ?? false,
         fadeElapsed: pos.fade_elapsed ?? null,
@@ -289,6 +295,16 @@ export function LivePositions() {
                       <span className="text-[10px] font-mono text-pink-400/70 px-1 py-0.5 rounded bg-pink-400/5">
                         {pos.leverage}x<span className="text-[8px] ml-0.5">OPT</span>
                       </span>
+                      {pos.optionStrike != null && (
+                        <span className="text-[10px] font-mono text-zinc-400 px-1 py-0.5 rounded bg-zinc-800/50">
+                          ${pos.optionStrike.toLocaleString()}
+                        </span>
+                      )}
+                      {pos.optionExpiry != null && (
+                        <span className="text-[10px] font-mono text-zinc-500">
+                          {pos.optionExpiry}
+                        </span>
+                      )}
                     </>
                   ) : (
                     <span className={cn(
@@ -340,13 +356,17 @@ export function LivePositions() {
                     </div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-zinc-500 uppercase">Entry &rarr; Now</div>
+                    <div className="text-[11px] text-zinc-500 uppercase">
+                      {pos.isOption ? 'Premium' : 'Entry \u2192 Now'}
+                    </div>
                     <div className="text-zinc-300">
                       ${fmtPrice(pos.entryPrice)} &rarr; ${pos.currentPrice != null ? fmtPrice(pos.currentPrice) : '...'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-zinc-500 uppercase">Price Move</div>
+                    <div className="text-[11px] text-zinc-500 uppercase">
+                      {pos.isOption ? 'Premium Move' : 'Price Move'}
+                    </div>
                     <div className={cn(pnlColor)}>
                       {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(pos.entryPrice < 10 ? 4 : 3)}%
                     </div>

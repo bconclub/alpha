@@ -57,6 +57,8 @@ export interface PositionDisplay {
   exchange: string;
   isOption?: boolean;             // options trade flag
   optionSide?: 'CALL' | 'PUT' | null;  // CALL or PUT (null if not an option)
+  optionStrike?: number | null;   // strike price for options
+  optionExpiry?: string | null;   // expiry label for options (e.g. "240315-2800-C")
   // Momentum fade / dead momentum timer state
   fadeTimerActive?: boolean;
   fadeElapsed?: number | null;
