@@ -1,36 +1,34 @@
 """Alpha Options Scalp — Buy CALLs/PUTs on strong momentum signals.
 
-PHILOSOPHY: Options are the safest momentum play. Max loss = premium paid.
-No leverage, no liquidation. When scalp sees 4/4 momentum, buy the option.
+PHILOSOPHY: Trade what works, kill what doesn't. Based on 109 historical trades.
+The ONLY profitable pattern: MOMENTUM_BURST CALLs during uptrends.
 
-Entry: 3-of-4+ momentum signals from scalp strategy (trending regime only)
-       Bullish → buy CALL, Bearish → buy PUT
-       Range Gate: zone-based filtering (LOW favors CALLs, HIGH favors PUTs)
-       Pullback entry: wait up to 30s for 5% premium dip before buying
-       Dynamic sizing: contracts = floor(balance × alloc% × 80% / (premium / leverage))
-       Nearest affordable strike (ATM or up to 3 OTM)
-       Minimum 0.25% momentum required
+GPFC OVERHAUL — Data-driven changes:
+  - Setup whitelist: ONLY MOMENTUM_BURST + BB_SQUEEZE allowed
+  - Trend-aligned: TRENDING_UP→CALLs only, TRENDING_DOWN→PUTs only
+  - Sideways: only MOMENTUM_BURST (no BB_SQUEEZE)
+  - Premium cap: skip if all premiums > $40 (low gamma, more to lose)
+  - Wider ratchets: first floor at +10% (was +5%), let winners run
+  - Longer timeout: 10min (was 5) + only timeout if premium decaying
+  - Momentum fade patience: 60s confirm (was 15s — premium lags spot)
+  - Winner-weighted sizing: MOMENTUM_BURST full, BB_SQUEEZE 60%, sideways 50%
+
+Entry: 2-of-4+ momentum signals from scalp strategy
+       Setup must be MOMENTUM_BURST or BB_SQUEEZE
+       Must be trend-aligned (no counter-trend options)
+       Premium < $40
+       Pullback entry: wait up to 15s for 3% premium dip
 
 Exit:
-  - Ratchet floor: lock profit at (5→2, 10→5, 20→12, 50→35, 100→70)%
+  - Ratchet floor: lock profit at (10→3, 15→7, 25→15, 40→25, 100→70)%
   - SL: 30% premium loss (always active, even in Phase 1)
-  - Momentum Fade: profitable + momentum < 0.02% for 15s → exit (min 60s hold)
+  - Momentum Fade: profitable + momentum < 0.02% for 60s → exit (min 60s hold)
   - Dead Momentum: losing + momentum dead 45s + held 3min → exit
   - TP: 30% premium gain
   - Trailing: activates at +15%, trails 5% behind peak
-  - Pullback: exit if lost 40% of peak gain (when peak was 8%+)
+  - Timeout: 10 minutes (only if premium decaying)
   - Decay: exit if was +10%+ and faded to +3%
-  - Timeout: close after 5 minutes (theta kills options)
-  - Time: close 2 hours before expiry
-  - Signal reversal: close if opposite momentum fires
-  - Phase 1 (first 30s): only SL fires — no TP/trail/pullback/decay
-  - Check every 10 seconds
-  - Position verified against exchange every 30s
-
-Position Sizing:
-  - Max 20% of capital on options ($2 max)
-  - Max 1 option position at a time
-  - Premium must be $0.01 to $2.00
+  - Phase 1 (first 30s): only SL fires
 
 Risk: Max loss = premium paid. No liquidation. Safest momentum play.
 """
@@ -87,6 +85,11 @@ class OptionsScalpStrategy(BaseStrategy):
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
     MIN_MOMENTUM_PCT = 0.15             # Skip if |momentum_60s| < 0.15% (was 0.25 — too restrictive)
 
+    # ── GPFC: Setup whitelist — only proven setups ──────────────
+    ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
+    # ── GPFC: Premium cap — avoid expensive low-gamma options ───
+    MAX_PREMIUM_USD = 40.0               # skip if all premiums > $40
+
     # ── Dynamic option sizing ──────────────────────────────────────
     # Same pair allocation as futures so capital is balanced.
     OPT_PAIR_ALLOC_PCT: dict[str, float] = {
@@ -111,12 +114,13 @@ class OptionsScalpStrategy(BaseStrategy):
     PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain (was 50 — too aggressive)
     PULLBACK_ACTIVATE_PCT = 8.0          # Pullback only fires after +8% peak (was 5 — let winners breathe)
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
-    TIMEOUT_MINUTES = 5                  # Options timeout (was 10 — theta kills, 5min enough)
+    TIMEOUT_MINUTES = 10                 # Options timeout (was 5 — give gamma time to work)
+    TIMEOUT_DECAY_PCT = 15.0             # Only timeout if premium decayed > 15% from entry
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
 
     # ── Momentum fade — premium profitable but momentum dying ────────
     OPT_MOM_FADE_THRESHOLD = 0.02        # momentum < 0.02% = dying
-    OPT_MOM_FADE_CONFIRM_SEC = 15        # hold 15s below threshold to confirm
+    OPT_MOM_FADE_CONFIRM_SEC = 60        # hold 60s below threshold to confirm (was 15 — options premium lags spot)
     OPT_MOM_FADE_MIN_HOLD = 60           # min 60s in position before fade can fire
     OPT_MOM_FADE_TREND_HOLD = 90         # trend-aligned: need 90s hold
     OPT_MOM_FADE_TREND_CONFIRM = 20      # trend-aligned: need 20s confirm
@@ -126,12 +130,13 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_DEAD_MOM_MIN_HOLD = 180          # min 3min hold before dead fires
 
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
+    # GPFC: Wider ratchet floors — don't activate until +10%, let winners run
     OPT_RATCHET_FLOOR_TABLE = [
-        (5.0, 2.0),
-        (10.0, 5.0),
-        (20.0, 12.0),
-        (50.0, 35.0),
-        (100.0, 70.0),
+        (10.0, 3.0),     # was (5, 2) — first floor at 10% peak (was 5%)
+        (15.0, 7.0),     # new tier
+        (25.0, 15.0),    # was (20, 12) — more room
+        (40.0, 25.0),    # was (50, 35) — lock 25% at 40% peak
+        (100.0, 70.0),   # same — 70% locked at 100% peak
     ]
 
     # ── Position limits ───────────────────────────────────────────
@@ -206,6 +211,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Regime skip logging throttle (log once per 60s to avoid spam)
         self._last_regime_log: float = 0.0
+        self._current_regime: str | None = None
 
         # Position verification ticker (every 3rd tick = ~30s)
         self._position_verify_tick: int = 0
@@ -705,19 +711,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 1. Market regime gate — allow ALL regimes for options
-        # Options have capped downside (max loss = premium) so volatility
-        # is actually beneficial — bigger moves = bigger option gains.
-        # Only log regime for context, never block.
+        # 1. Market regime gate — GPFC: trend-aligned only
+        # TRENDING_UP → only CALLs. TRENDING_DOWN → only PUTs.
+        # SIDEWAYS → both allowed but only MOMENTUM_BURST setup.
+        self._current_regime = None
         if self._market_analyzer:
             analysis = self._market_analyzer.last_analysis_for(self.pair)
             if analysis:
+                self._current_regime = analysis.condition.value
                 now = time.monotonic()
                 if now - self._last_regime_log >= 120:
                     self._last_regime_log = now
                     self.logger.info(
-                        "[%s] OPTIONS regime: %s (all regimes allowed)",
-                        self.pair, analysis.condition.value,
+                        "[%s] OPTIONS regime: %s (trend-aligned filter active)",
+                        self.pair, self._current_regime,
                     )
 
         # 2. Read scalp strategy's latest signal
@@ -781,6 +788,22 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # 4. Determine option type
         option_type = "call" if side == "long" else "put"
+
+        # 4a. GPFC: Trend alignment — never go counter-trend
+        if self._current_regime == "trending" or self._current_regime == "TRENDING_UP":
+            if option_type == "put":
+                self.logger.info(
+                    "[%s] OPTIONS TREND_BLOCK: no PUTs in TRENDING_UP — skipping",
+                    self.pair,
+                )
+                return []
+        elif self._current_regime == "TRENDING_DOWN":
+            if option_type == "call":
+                self.logger.info(
+                    "[%s] OPTIONS TREND_BLOCK: no CALLs in TRENDING_DOWN — skipping",
+                    self.pair,
+                )
+                return []
 
         # 4b. Range Gate — zone-based filtering for options (soft)
         # Counter-zone options (PUTs in low, CALLs in high) log warning
@@ -929,6 +952,57 @@ class OptionsScalpStrategy(BaseStrategy):
                     setup_type = candidates[0]  # highest priority setup
             except Exception:
                 pass
+
+        # 10a. GPFC: Setup whitelist — only MOMENTUM_BURST and BB_SQUEEZE
+        if setup_type not in self.ALLOWED_SETUPS:
+            self.logger.info(
+                "[%s] OPTIONS SETUP_BLOCK: %s not in whitelist %s — skipping",
+                self.pair, setup_type, self.ALLOWED_SETUPS,
+            )
+            await self._log_skip(
+                f"{self.pair} — OPTIONS SETUP_BLOCK: {setup_type} not in whitelist",
+                {"option_type": option_type, "setup_type": setup_type, "strength": strength},
+            )
+            return []
+
+        # 10b. GPFC: Sideways regime — only MOMENTUM_BURST allowed
+        if self._current_regime and "SIDEWAYS" in str(self._current_regime).upper():
+            if setup_type != "MOMENTUM_BURST":
+                self.logger.info(
+                    "[%s] OPTIONS SIDEWAYS_BLOCK: only MOMENTUM_BURST in sideways, got %s",
+                    self.pair, setup_type,
+                )
+                return []
+
+        # 10c. GPFC: Premium too expensive — low gamma, more to lose
+        if premium > self.MAX_PREMIUM_USD:
+            self.logger.info(
+                "[%s] OPTIONS PREMIUM_HIGH: $%.2f > $%.0f cap — skipping",
+                self.pair, premium, self.MAX_PREMIUM_USD,
+            )
+            await self._log_skip(
+                f"{self.pair} — OPTIONS PREMIUM_HIGH: ${premium:.2f} > ${self.MAX_PREMIUM_USD:.0f}",
+                {"option_type": option_type, "premium": premium, "setup_type": setup_type},
+            )
+            return []
+
+        # 10d. GPFC: Winner-weighted sizing adjustment
+        # MOMENTUM_BURST in trending regime: full allocation
+        # BB_SQUEEZE: 60% allocation
+        # SIDEWAYS regime: 50% allocation
+        sizing_factor = 1.0
+        if setup_type == "BB_SQUEEZE":
+            sizing_factor = 0.60
+        if self._current_regime and "SIDEWAYS" in str(self._current_regime).upper():
+            sizing_factor = min(sizing_factor, 0.50)
+        if sizing_factor < 1.0 and opt_contracts > 1:
+            adjusted = max(1, int(opt_contracts * sizing_factor))
+            self.logger.info(
+                "[%s] OPTIONS SIZING: %s in %s → factor=%.0f%% → %d→%d contracts",
+                self.pair, setup_type, self._current_regime,
+                sizing_factor * 100, opt_contracts, adjusted,
+            )
+            opt_contracts = adjusted
 
         # 11. Pullback entry — wait up to 30s for premium dip before buying
         expiry_str = self._selected_expiry.strftime('%b %d %H:%M')
@@ -1432,14 +1506,23 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "DECAY")
 
-        # ── 8. TIMEOUT: close after 5 minutes ────────────────────────
+        # ── 8. TIMEOUT: close after 10 minutes (GPFC: only if decaying) ──
         if hold_seconds >= self.TIMEOUT_MINUTES * 60:
-            self.logger.info(
-                "[%s] OPTION TIMEOUT — held %dm (limit %dm) at %+.1f%%",
-                self.option_symbol, int(hold_seconds / 60),
-                self.TIMEOUT_MINUTES, premium_change_pct,
-            )
-            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_TIMEOUT")
+            # GPFC: Don't timeout a flat/rising trade — only if premium decayed
+            if premium_change_pct <= -self.TIMEOUT_DECAY_PCT or premium_change_pct < 0:
+                self.logger.info(
+                    "[%s] OPTION TIMEOUT — held %dm (limit %dm) at %+.1f%%",
+                    self.option_symbol, int(hold_seconds / 60),
+                    self.TIMEOUT_MINUTES, premium_change_pct,
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_TIMEOUT")
+            else:
+                # Profitable or flat — let it ride, log once
+                if self._tick_count % 6 == 0:
+                    self.logger.info(
+                        "[%s] OPTION TIMEOUT SKIP — held %dm but at %+.1f%% (no decay)",
+                        self.option_symbol, int(hold_seconds / 60), premium_change_pct,
+                    )
 
         # ── 9. SIGNAL REVERSAL ────────────────────────────────────────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
