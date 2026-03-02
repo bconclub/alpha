@@ -279,7 +279,78 @@ export function LivePositions() {
               )}
             >
               {/* Row 1: Pair + Side + Status + Close + Duration */}
-              <div className="flex items-center justify-between gap-2 mb-1.5">
+              {/* Mobile: wrap to 2 rows */}
+              <div className="flex flex-col gap-1.5 mb-1.5 md:hidden">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className={cn(
+                        'w-1.5 h-5 rounded-sm shrink-0',
+                        pos.positionType === 'short' ? 'bg-[#ff1744]' : 'bg-[#00c853]',
+                      )}
+                    />
+                    <Link href="/trades" className="text-sm font-bold text-white hover:underline">
+                      {pos.pairShort}
+                    </Link>
+                    {pos.isOption ? (
+                      <span className={cn(
+                        'text-xs font-semibold px-1.5 py-0.5 rounded',
+                        pos.optionSide === 'PUT'
+                          ? 'bg-[#ff1744]/10 text-[#ff1744]'
+                          : 'bg-[#00c853]/10 text-[#00c853]',
+                      )}>
+                        {pos.optionSide ?? 'OPT'} {pos.leverage}x
+                      </span>
+                    ) : (
+                      <span className={cn(
+                        'text-xs font-semibold px-1.5 py-0.5 rounded',
+                        pos.positionType === 'short'
+                          ? 'bg-[#ff1744]/10 text-[#ff1744]'
+                          : 'bg-[#00c853]/10 text-[#00c853]',
+                      )}>
+                        {pos.positionType.toUpperCase()} {pos.leverage}x
+                      </span>
+                    )}
+                    <span className="text-[11px] text-zinc-500 font-mono">{pos.duration}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <StateBadge
+                      state={posState}
+                      trailStopPrice={pos.trailStopPrice}
+                      entryPrice={pos.entryPrice}
+                      pos={pos}
+                    />
+                    <button
+                      onClick={() => handleClose(pos.id, pos.pair)}
+                      disabled={isClosing}
+                      className={cn(
+                        'px-2 py-0.5 rounded text-[11px] font-semibold transition-colors',
+                        isClosing
+                          ? 'bg-zinc-700/50 text-zinc-500 cursor-not-allowed'
+                          : 'bg-[#ff1744]/10 text-[#ff1744] hover:bg-[#ff1744]/20 active:bg-[#ff1744]/30',
+                      )}
+                    >
+                      {isClosing ? 'Closing...' : 'Close'}
+                    </button>
+                  </div>
+                </div>
+                {pos.isOption && (pos.optionStrike != null || pos.optionExpiry != null) && (
+                  <div className="flex items-center gap-2 ml-3.5 pl-0.5">
+                    {pos.optionStrike != null && (
+                      <span className="text-[10px] font-mono text-zinc-400 px-1 py-0.5 rounded bg-zinc-800/50">
+                        Strike ${pos.optionStrike.toLocaleString()}
+                      </span>
+                    )}
+                    {pos.optionExpiry != null && (
+                      <span className="text-[10px] font-mono text-zinc-500">
+                        {pos.optionExpiry}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* Desktop: single row */}
+              <div className="hidden md:flex items-center justify-between gap-2 mb-1.5">
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     className={cn(
@@ -350,7 +421,7 @@ export function LivePositions() {
 
               {/* Row 2: Labeled P&L grid */}
               {pos.pricePnlPct != null ? (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs font-mono">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1.5 text-xs font-mono">
                   <div>
                     <div className="text-[11px] text-zinc-500 uppercase">P&L</div>
                     <div className={cn('font-bold', pnlColor)}>
