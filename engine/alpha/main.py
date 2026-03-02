@@ -2732,7 +2732,7 @@ class AlphaBot:
             side = "long" if contracts > 0 else "short"
             entry_px = float(pos.get("entryPrice", 0) or 0)
             notional = abs(contracts) * entry_px if entry_px > 0 else 0
-            if notional < 1.0 and entry_px > 0:
+            if entry_px <= 0 or notional < 1.0:
                 logger.debug("Skipping dust position %s: %.8f coins worth $%.4f", symbol, abs(contracts), notional)
                 self._position_first_seen.pop(f"bybit:{symbol}", None)
                 self._orphan_fail_count.pop(f"bybit:{symbol}", None)
@@ -3125,7 +3125,7 @@ class AlphaBot:
             return
 
         # Build map: symbol → {side, amount, entry_price}
-        # Skip dust positions (near-zero residuals after close)
+        # Skip dust/ghost positions (near-zero residuals after close)
         exchange_positions: dict[str, dict[str, Any]] = {}
         for pos in positions:
             contracts = float(pos.get("contracts", 0) or 0)
@@ -3135,11 +3135,11 @@ class AlphaBot:
             side = "long" if contracts > 0 else "short"
             entry_px = float(pos.get("entryPrice", 0) or 0)
             notional = abs(contracts) * entry_px if entry_px > 0 else 0
-            # Skip dust: position worth less than $1
-            if notional < 1.0 and entry_px > 0:
+            # Skip dust/ghost: no entry price, or position worth less than $1
+            if entry_px <= 0 or notional < 1.0:
                 logger.debug(
-                    "Skipping dust position %s: %.8f coins worth $%.4f",
-                    symbol, abs(contracts), notional,
+                    "Skipping dust/ghost position %s: %.8f coins @ $%.2f worth $%.4f",
+                    symbol, abs(contracts), entry_px, notional,
                 )
                 # Clear any orphan tracking for this dust position
                 self._position_first_seen.pop(f"kraken:{symbol}", None)
@@ -3322,10 +3322,20 @@ class AlphaBot:
 
                     try:
                         close_side = "sell" if side == "long" else "buy"
-                        await self.kraken.create_order(
-                            pair, "market", close_side, amount,
-                            params={"reduceOnly": True},
-                        )
+                        # Kraken: try with reduce_only first, fall back to plain market
+                        try:
+                            await self.kraken.create_order(
+                                pair, "market", close_side, amount,
+                                params={"reduce_only": True},
+                            )
+                        except Exception as e1:
+                            logger.warning(
+                                "Kraken reduceOnly close failed for %s: %s — retrying plain market",
+                                pair, e1,
+                            )
+                            await self.kraken.create_order(
+                                pair, "market", close_side, amount,
+                            )
                         logger.info(
                             "ORPHAN CLOSED: %s %s %.6f coins at market",
                             pair, side, amount,
@@ -3550,7 +3560,7 @@ class AlphaBot:
                     contract_size = cs
                     break
             notional = abs(contracts) * contract_size * entry_px if entry_px > 0 else 0
-            if notional < 1.0 and entry_px > 0:
+            if entry_px <= 0 or notional < 1.0:
                 logger.debug("Skipping dust position %s: %.0f ct worth $%.4f", symbol, abs(contracts), notional)
                 self._position_first_seen.pop(f"delta:{symbol}", None)
                 self._orphan_fail_count.pop(f"delta:{symbol}", None)

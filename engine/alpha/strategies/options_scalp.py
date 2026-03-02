@@ -83,7 +83,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 2              # 2-of-4 required (was 3 — options are capped-loss, be aggressive)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
-    MIN_MOMENTUM_PCT = 0.15             # Skip if |momentum_60s| < 0.15% (was 0.25 — too restrictive)
+    MIN_MOMENTUM_PCT = 0.05             # Skip if |momentum_60s| < 0.05% (was 0.15 — capped-loss, just need direction)
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
@@ -1386,7 +1386,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_CLOSE")
 
         # ── Ratchet floor update (always, before any exit checks) ─────
-        self._update_opt_ratchet_floor(premium_change_pct)
+        # Use PEAK pnl, not current — so the floor locks even if price has already dropped
+        self._update_opt_ratchet_floor(peak_pnl_pct)
 
         # ── 2a. RATCHET EXIT: premium fell below locked floor ─────────
         if self._opt_ratchet_floor > 0 and premium_change_pct < self._opt_ratchet_floor:

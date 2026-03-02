@@ -2554,6 +2554,19 @@ class ScalpStrategy(BaseStrategy):
                     self._trail_skip_logged = True
             return  # peak hasn't reached first tier yet
 
+        # ACCEL entries: don't activate trail until peak >= 0.15% — let the move develop
+        if self._entry_path == "acceleration" and peak_pnl < 0.15 and not self._trailing_active:
+            return
+
+        # ── ACCEL minimum trail distance ──
+        # ACCEL entries caught real momentum — don't trail so tight that
+        # the first tiny pullback exits. Minimum 0.20% distance.
+        if self._entry_path == "acceleration" and new_dist < 0.20:
+            self.logger.debug(
+                "[%s] ACCEL trail min: %.2f%% → 0.20%%", self.pair, new_dist,
+            )
+            new_dist = 0.20
+
         # ── Momentum-aware trail widening ──
         # When momentum is alive and aligned with position direction,
         # widen the trail to let winners run instead of getting stopped
