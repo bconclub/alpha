@@ -1069,36 +1069,112 @@ class TradeExecutor:
                         )
                         # ── LIMIT ENTRY: wait for fill, cancel if unfilled ──
                         # Limit entries (ANTIC) may never fill if price moves away.
-                        # Wait 5s, check fill status. If not filled, cancel.
+                        # Wait 3s, check fill status BEFORE attempting cancel.
+                        # This prevents the race: order fills between check and cancel,
+                        # cancel returns notFound, bot doesn't track the position → orphan.
                         if not is_exit:
                             _le_id = _limit_entry_order.get("id")
                             logger.info(
-                                "[%s] Limit entry placed: %s %.0f @ $%.2f (order=%s) — waiting 5s for fill",
+                                "[%s] Limit entry placed: %s %.0f @ $%.2f (order=%s) — waiting 3s for fill",
                                 signal.pair, signal.side, order_amount, signal.price, _le_id,
                             )
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(3)
+
+                            # ── Step 1: Check fill status BEFORE attempting cancel ──
+                            _le_filled_ok = False
                             try:
                                 _le_updated = await exchange.fetch_order(_le_id, signal.pair)
                                 _le_status = _le_updated.get("status", "")
                                 _le_filled = float(_le_updated.get("filled", 0) or 0)
-                            except Exception:
+                                if _le_status == "closed" or _le_filled >= order_amount:
+                                    _le_filled_ok = True
+                            except Exception as _fetch_err:
+                                logger.debug("[%s] fetch_order failed: %s", signal.pair, _fetch_err)
                                 _le_status = "unknown"
                                 _le_filled = 0
-                            if _le_status == "closed" or _le_filled >= order_amount:
+
+                            if _le_filled_ok:
                                 logger.info("[%s] Limit entry FILLED (maker fee)", signal.pair)
                                 order = _le_updated
                             else:
-                                # Not filled — cancel and abort
+                                # ── Step 2: Not filled — try to cancel ──
                                 logger.warning(
-                                    "[%s] Limit entry NOT filled after 5s (status=%s, filled=%.0f) — cancelling",
+                                    "[%s] Limit entry NOT filled after 3s (status=%s, filled=%.0f) — cancelling",
                                     signal.pair, _le_status, _le_filled,
                                 )
+                                _cancel_ok = False
                                 try:
                                     await exchange.cancel_order(_le_id, signal.pair)
                                     logger.info("[%s] Limit entry order %s cancelled", signal.pair, _le_id)
+                                    _cancel_ok = True
                                 except Exception as cancel_err:
+                                    _cancel_str = str(cancel_err).lower()
                                     logger.warning("[%s] Cancel limit entry failed: %s", signal.pair, cancel_err)
-                                return None
+
+                                    # ── Step 3: Cancel failed — check if order filled in the meantime ──
+                                    # Kraken returns "notFound" when order already executed.
+                                    # This is the #1 cause of orphan positions.
+                                    if "not found" in _cancel_str or "notfound" in _cancel_str or "not_found" in _cancel_str:
+                                        logger.warning(
+                                            "[%s] Cancel notFound — order likely FILLED during cancel. Checking...",
+                                            signal.pair,
+                                        )
+                                        try:
+                                            _le_recheck = await exchange.fetch_order(_le_id, signal.pair)
+                                            _rc_status = _le_recheck.get("status", "")
+                                            _rc_filled = float(_le_recheck.get("filled", 0) or 0)
+                                            _rc_price = float(
+                                                _le_recheck.get("average", 0)
+                                                or _le_recheck.get("price", 0)
+                                                or 0
+                                            )
+                                            if _rc_status == "closed" or _rc_filled >= order_amount * 0.95:
+                                                logger.info(
+                                                    "[%s] Limit order CONFIRMED FILLED: %s @ $%.4f (cancel was late)",
+                                                    signal.pair, _rc_filled, _rc_price,
+                                                )
+                                                order = _le_recheck
+                                                _cancel_ok = False  # don't return None
+                                            else:
+                                                logger.warning(
+                                                    "[%s] Order status=%s filled=%.0f after notFound cancel — "
+                                                    "ambiguous state, treating as not filled",
+                                                    signal.pair, _rc_status, _rc_filled,
+                                                )
+                                                _cancel_ok = True  # treat as cancelled
+                                        except Exception as _recheck_err:
+                                            logger.warning(
+                                                "[%s] fetch_order recheck also failed: %s — "
+                                                "checking exchange positions as last resort",
+                                                signal.pair, _recheck_err,
+                                            )
+                                            # ── Last resort: check if position exists on exchange ──
+                                            try:
+                                                _positions = await exchange.fetch_positions([signal.pair])
+                                                _has_pos = any(
+                                                    abs(float(p.get("contracts", 0) or 0)) > 0
+                                                    for p in _positions
+                                                    if p.get("symbol") == signal.pair
+                                                )
+                                                if _has_pos:
+                                                    logger.warning(
+                                                        "[%s] POSITION EXISTS on exchange after failed cancel+fetch — "
+                                                        "returning original order to track it",
+                                                        signal.pair,
+                                                    )
+                                                    order = _limit_entry_order
+                                                    _cancel_ok = False
+                                                else:
+                                                    _cancel_ok = True  # no position, safe to skip
+                                            except Exception:
+                                                _cancel_ok = True  # can't verify, skip
+                                    else:
+                                        # Non-notFound cancel error — order might still be open
+                                        # Safer to return None and let reconciliation handle it
+                                        _cancel_ok = True
+
+                                if _cancel_ok:
+                                    return None
                         else:
                             order = _limit_entry_order
                     break
