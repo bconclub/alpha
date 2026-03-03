@@ -703,6 +703,115 @@ class Database:
             logger.error("Changelog INSERT failed: %s | %s", type(e).__name__, e)
             return None
 
+    # ── Fill reconciliation helpers ──────────────────────────────────────────
+
+    async def find_trade_by_fill(
+        self,
+        exchange: str,
+        pair: str,
+        side: str,
+        entry_price: float,
+        fill_time: str,
+        tolerance_secs: int = 10,
+    ) -> dict[str, Any] | None:
+        """Find a DB trade matching a fill (same exchange/pair/side, close price + time).
+
+        Used by fill reconciliation to check if a fill is already tracked.
+        Returns the matching trade row or None.
+        """
+        if not self.is_connected:
+            return None
+
+        from datetime import datetime, timezone, timedelta
+
+        try:
+            fill_dt = datetime.fromisoformat(fill_time.replace("Z", "+00:00"))
+            t_min = (fill_dt - timedelta(seconds=tolerance_secs)).isoformat()
+            t_max = (fill_dt + timedelta(seconds=tolerance_secs)).isoformat()
+        except (ValueError, TypeError):
+            return None
+
+        loop = asyncio.get_running_loop()
+
+        def _query() -> Any:
+            return (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("*")
+                .eq("exchange", exchange)
+                .eq("pair", pair)
+                .eq("side", side)
+                .gte("opened_at", t_min)
+                .lte("opened_at", t_max)
+                .limit(5)
+                .execute()
+            )
+
+        try:
+            result = await loop.run_in_executor(None, _query)
+            if not result.data:
+                return None
+
+            # Check price proximity (within 0.5% — accounts for fill splits/rounding)
+            for row in result.data:
+                db_price = float(row.get("entry_price", 0) or 0)
+                if db_price > 0 and abs(db_price - entry_price) / db_price < 0.005:
+                    return row
+
+            return None
+        except Exception as e:
+            logger.debug("find_trade_by_fill failed: %s", e)
+            return None
+
+    async def find_orphan_closed_trade(
+        self,
+        exchange: str,
+        pair: str,
+        fill_time: str,
+        window_secs: int = 300,
+    ) -> dict[str, Any] | None:
+        """Find a recently orphan-closed trade near a fill time.
+
+        Used by fill reconciliation to correct exit prices on trades
+        that were closed by orphan sweep with an estimated ticker price.
+        """
+        if not self.is_connected:
+            return None
+
+        from datetime import datetime, timezone, timedelta
+
+        try:
+            fill_dt = datetime.fromisoformat(fill_time.replace("Z", "+00:00"))
+            t_min = (fill_dt - timedelta(seconds=window_secs)).isoformat()
+            t_max = (fill_dt + timedelta(seconds=window_secs)).isoformat()
+        except (ValueError, TypeError):
+            return None
+
+        loop = asyncio.get_running_loop()
+
+        def _query() -> Any:
+            return (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("*")
+                .eq("exchange", exchange)
+                .eq("pair", pair)
+                .eq("status", "closed")
+                .in_("exit_reason", [
+                    "ORPHAN_SWEEP", "POSITION_GONE", "DUPLICATE", "ORPHAN",
+                ])
+                .gte("closed_at", t_min)
+                .lte("closed_at", t_max)
+                .order("closed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+        try:
+            result = await loop.run_in_executor(None, _query)
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.debug("find_orphan_closed_trade failed: %s", e)
+            return None
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     async def _insert(self, table: str, data: dict[str, Any]) -> None:
