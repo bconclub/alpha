@@ -361,7 +361,7 @@ async def main() -> None:
                 ep = t.get("entry_price", 0)
                 xp = t.get("exit_price", "-")
                 print(
-                    f"    id={t.get('id','?'):>5s} {t.get('pair',''):15s} "
+                    f"    id={str(t.get('id','?')):>5s} {t.get('pair',''):15s} "
                     f"{t.get('position_type',''):5s} ${ep} → ${xp} | "
                     f"{status} | {t.get('opened_at','')[:19]}"
                 )
