@@ -139,11 +139,13 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
     # GPFC: Wider ratchet floors — don't activate until +10%, let winners run
     OPT_RATCHET_FLOOR_TABLE = [
-        (10.0, 3.0),     # was (5, 2) — first floor at 10% peak (was 5%)
-        (15.0, 7.0),     # new tier
-        (25.0, 15.0),    # was (20, 12) — more room
-        (40.0, 25.0),    # was (50, 35) — lock 25% at 40% peak
-        (100.0, 70.0),   # same — 70% locked at 100% peak
+        (3.0, 0.0),      # breakeven lock — +3% peak → never let it become a loss
+        (5.0, 2.0),      # small winner lock — +5% peak → floor at +2%
+        (10.0, 3.0),     # first major floor at 10% peak
+        (15.0, 7.0),     # mid-tier
+        (25.0, 15.0),    # big runner
+        (40.0, 25.0),    # lock 25% at 40% peak
+        (100.0, 70.0),   # 70% locked at 100% peak
     ]
 
     # ── Position limits ───────────────────────────────────────────
