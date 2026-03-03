@@ -245,14 +245,19 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_LONG = 70            # long exit when RSI crosses above 70
     RSI_REVERSAL_SHORT = 30           # short exit when RSI crosses below 30
     MOMENTUM_DYING_PCT = 0.02         # exit if abs(momentum) drops below 0.02% (was 0.04 — normal oscillation)
-    MOM_FLIP_CONFIRM_SECONDS = 15     # momentum must stay flipped for 15s before reversal exit
-    MOM_DYING_CONFIRM_SECONDS = 20    # momentum must stay dead (<0.02%) for 20s before reversal
-    MOM_FADE_CONFIRM_SECONDS = 15     # momentum must stay dead for 15s before MOMENTUM_FADE profit exit
+    MOM_FLIP_CONFIRM_SECONDS = 10     # 10s confirm for reversal (was 15 — keep reversals fast)
+    MOM_FLIP_THRESHOLD_PCT = 0.10     # momentum must counter by 0.10% for flip (not just < 0)
+    MOM_DYING_CONFIRM_SECONDS = 20    # (legacy — kept for compat, no longer triggers reversal)
+    MOM_FADE_CONFIRM_SECONDS = 60     # 60s fading confirm (was 15 — too fast, killed trades)
     MOM_FADE_MIN_HOLD = 90            # minimum 90s hold before MOMENTUM_FADE can fire
     MOM_FADE_TREND_HOLD = 120         # if trend-aligned, extend min hold to 120s
-    MOM_FADE_TREND_CONFIRM = 20       # if trend-aligned, extend confirmation to 20s
-    REVERSAL_MIN_PROFIT_PCT = 0.30    # need at least +0.30% peak to consider reversal exit (was 0.10 — exiting dust)
-    DEAD_MOM_MIN_HOLD = 180           # minimum 180s (3 min) hold before DEAD_MOMENTUM can fire (was 60s — too aggressive)
+    MOM_FADE_TREND_CONFIRM = 60       # if trend-aligned, 60s confirmation (was 20)
+    REVERSAL_MIN_PROFIT_PCT = 0.0     # REMOVED — reversal exits regardless of P&L (was 0.30)
+    DEAD_MOM_MIN_HOLD = 300           # 5 min minimum age before DEAD_MOMENTUM (was 180s — too fast)
+    DEAD_MOM_FLAT_DURATION = 180      # 3 min continuous flat required for DEAD_MOMENTUM
+    # ── Trail activation patience ────────────────────────────────
+    TRAIL_MIN_AGE_SEC = 120           # 2 min minimum before trail activates
+    TRAIL_INSTANT_PROFIT_PCT = 0.30   # 0.30%+ peak → immediate trail (protect profit)
 
     # ── Trailing stop tiers: peak PnL % → trail distance % from peak price ─
     # When peak crosses a tier, trail_stop_price = peak * (1 - trail_dist/100)
@@ -313,6 +318,11 @@ class ScalpStrategy(BaseStrategy):
     CONFIRM_MOM_PCT = 0.15            # momentum threshold for tier1 confirmation (was 0.06 → 0.15)
     CONFIRM_COUNTER_PCT = 0.10        # counter-momentum → immediate rejection (was 0.15)
     T1_ACCEL_CONFIRM_VEL = 0.03      # velocity_5s for acceleration-based T1 confirm
+    # ── ANTIC stale check: 10s real-time momentum must be alive at execution ─
+    ANTIC_STALE_MOM_PCT = 0.08        # 10s momentum >= 0.08% at T1 confirm (was 0.05 — too low)
+    # ── ANTIC trail delay: let entries develop before trailing ──
+    ANTIC_TRAIL_DELAY_SEC = 15        # don't trail until 15s after entry
+    ANTIC_TRAIL_MIN_PROFIT = 0.20     # AND peak must be >= 0.20% (not tiny 0.15%)
 
     # ── TIER-BASED POSITION SIZING ─────────────────────────────────
     TIER1_SIZE_3_MULT = 1.0           # 3+ T1 signals → full size
@@ -350,6 +360,10 @@ class ScalpStrategy(BaseStrategy):
     ACCEL_MIN_TICKS = 3               # minimum ticks in 5s window (legacy, see _FAST/_SLOW)
     ACCEL_COOLDOWN = 30               # seconds between accel entries on same pair
     ACCEL_MIN_SUPPORT = 2             # need 2/4 cached indicator support
+    # ── XRP-specific ACCEL quality bar (noisy pair, needs more confirmation) ─
+    ACCEL_MIN_VELOCITY_XRP = 0.06     # XRP: 0.06%/5s minimum (filters noise ticks)
+    ACCEL_MIN_SUPPORT_XRP = 3         # XRP: 3/4 support required (was 2/4)
+    ACCEL_XRP_WEAK_SIZE_MULT = 0.60   # XRP: 60% sizing at 3/4 support, full at 4/4
 
     # ── Exchange-aware ACCEL tuning (tick-rate adaptation) ────────
     ACCEL_MIN_TICKS_FAST = 3          # Kraken/Bybit (~60 ticks/min)
@@ -457,13 +471,16 @@ class ScalpStrategy(BaseStrategy):
             # Momentum / reversal exits
             "MOMENTUM_DYING_PCT": cls.MOMENTUM_DYING_PCT,
             "MOM_FLIP_CONFIRM_SECONDS": cls.MOM_FLIP_CONFIRM_SECONDS,
+            "MOM_FLIP_THRESHOLD_PCT": cls.MOM_FLIP_THRESHOLD_PCT,
             "MOM_DYING_CONFIRM_SECONDS": cls.MOM_DYING_CONFIRM_SECONDS,
             "MOM_FADE_CONFIRM_SECONDS": cls.MOM_FADE_CONFIRM_SECONDS,
             "MOM_FADE_MIN_HOLD": cls.MOM_FADE_MIN_HOLD,
             "MOM_FADE_TREND_HOLD": cls.MOM_FADE_TREND_HOLD,
             "MOM_FADE_TREND_CONFIRM": cls.MOM_FADE_TREND_CONFIRM,
             "DEAD_MOM_MIN_HOLD": cls.DEAD_MOM_MIN_HOLD,
-            "REVERSAL_MIN_PROFIT_PCT": cls.REVERSAL_MIN_PROFIT_PCT,
+            "DEAD_MOM_FLAT_DURATION": cls.DEAD_MOM_FLAT_DURATION,
+            "TRAIL_MIN_AGE_SEC": cls.TRAIL_MIN_AGE_SEC,
+            "TRAIL_INSTANT_PROFIT_PCT": cls.TRAIL_INSTANT_PROFIT_PCT,
             "RSI_REVERSAL_LONG": cls.RSI_REVERSAL_LONG,
             "RSI_REVERSAL_SHORT": cls.RSI_REVERSAL_SHORT,
             # Trail tiers (tuples → lists for JSON)
@@ -616,6 +633,7 @@ class ScalpStrategy(BaseStrategy):
         self._mom_flip_since: float = 0.0
         self._mom_dying_since: float = 0.0
         self._mom_fade_since: float = 0.0   # MOMENTUM_FADE confirmation timer
+        self._flat_since: float = 0.0       # continuous flat momentum tracker (DEAD_MOMENTUM)
         # Suppress repeated reversal exit logs (only log first detection)
         self._reversal_exit_logged: bool = False
 
@@ -626,6 +644,9 @@ class ScalpStrategy(BaseStrategy):
         self._last_position_exit: float = 0.0
         # Phantom cooldown: no new entries until this time (set by orphan reconciliation)
         self._phantom_cooldown_until: float = 0.0
+        # Pending exit restore: position state saved before _record_scalp_result clears it.
+        # If the exit order fails (on_rejected), we restore from this to avoid RESTORE loops.
+        self._pending_exit_restore: dict[str, Any] | None = None
         # Rate limit rejection logs
         self._last_reject_log: float = 0.0
         # Periodic SL check logging (every 10s while in position)
@@ -1350,6 +1371,20 @@ class ScalpStrategy(BaseStrategy):
                         )
                     self._skip_reason = f"T1_PENDING ({pt1_side}, {int(pt1_age)}s/{self.PHASE1_SECONDS}s)"
                     return signals  # don't scan for new entries while pending
+
+        # ── ANTIC stale check: verify 10s real-time momentum at execution ──
+        # Ensures the move is still alive at confirm time, not a blip that faded
+        if entry is not None and self._entry_path == "tier1":
+            _antic_mom_10s = 0.0
+            _antic_recent = [(ts, px) for ts, px in self._price_history if now - 10 <= ts <= now]
+            if len(_antic_recent) >= 2:
+                _antic_mom_10s = abs((_antic_recent[-1][1] - _antic_recent[0][1]) / _antic_recent[0][1] * 100)
+            if _antic_mom_10s < self.ANTIC_STALE_MOM_PCT:
+                self.logger.info(
+                    "[%s] ANTIC_STALE — 10s mom=%.3f%% < %.2f%% minimum, rejecting T1 entry",
+                    self.pair, _antic_mom_10s, self.ANTIC_STALE_MOM_PCT,
+                )
+                entry = None
 
         # ── Quality momentum detection (3-of-4 with setup tracking) ──
         if entry is None:
@@ -2703,6 +2738,12 @@ class ScalpStrategy(BaseStrategy):
             return  # spot uses pullback system, not trail tiers
 
         peak_pnl = self._peak_unrealized_pnl
+
+        # ── Trail development time: 2 min before trail activates ──────
+        # Exception: 0.30%+ peak → immediate trail (protect meaningful profit)
+        position_age = time.monotonic() - self.entry_time
+        if position_age < self.TRAIL_MIN_AGE_SEC and peak_pnl < self.TRAIL_INSTANT_PROFIT_PCT:
+            return
         side = self.position_side or "long"
 
         # Find best matching tier (iterate reversed = highest first)
@@ -2727,6 +2768,13 @@ class ScalpStrategy(BaseStrategy):
         # ACCEL entries: don't activate trail until peak >= 0.15% — let the move develop
         if self._entry_path == "acceleration" and peak_pnl < 0.15 and not self._trailing_active:
             return
+
+        # ANTIC entries: delay trail by 15s AND require peak >= 0.20%
+        # Gives ANTIC room to develop instead of trailing out at break-even
+        if self._entry_path == "tier1" and not self._trailing_active:
+            antic_hold = time.monotonic() - self.entry_time
+            if antic_hold < self.ANTIC_TRAIL_DELAY_SEC or peak_pnl < self.ANTIC_TRAIL_MIN_PROFIT:
+                return
 
         # ── ACCEL minimum trail distance ──
         # ACCEL entries caught real momentum — don't trail so tight that
@@ -2951,52 +2999,107 @@ class ScalpStrategy(BaseStrategy):
                         return self._do_exit(current_price, pnl_pct, side, "BREAKEVEN", hold_seconds)
                 return signals  # STAY IN — momentum still aligned
 
-            # ── MODE 2: SIGNAL REVERSAL EXIT (last resort, not default) ─
-            # Ratchet floor is the primary profit protector.
-            # Reversal only fires on CONFIRMED momentum death.
+            # ── MODE 2: SIGNAL REVERSAL + PATIENCE EXITS ─────────────────
+            # FAST: REVERSAL (flip/RSI/signals) → 10s confirm, exit regardless of P&L
+            # SLOW: MOMENTUM_FADE → 60s confirm + (losing OR flipped)
+            # SLOW: DEAD_MOMENTUM → 5min age + 3min flat + losing
             reversal_reason = ""
 
-            # Check 1: momentum flipped sign — needs 15s confirmation
-            mom_flipped = (side == "long" and momentum_60s < 0) or \
-                          (side == "short" and momentum_60s > 0)
+            # ── Check 1: momentum flipped SIGNIFICANTLY ──────────────────
+            # Longs: must go below -0.10% (real counter-move, not noise)
+            # Shorts: must go above +0.10%
+            mom_flipped = (
+                (side == "long" and momentum_60s < -self.MOM_FLIP_THRESHOLD_PCT)
+                or (side == "short" and momentum_60s > self.MOM_FLIP_THRESHOLD_PCT)
+            )
             if mom_flipped:
                 if self._mom_flip_since == 0:
-                    # First detection — start timer
                     self._mom_flip_since = time.monotonic()
                     self.logger.info(
-                        "MOM_FLIP_START: %s mom=%.3f%% — confirming for %ds",
-                        self.pair, momentum_60s, self.MOM_FLIP_CONFIRM_SECONDS,
+                        "MOM_FLIP_START: %s mom=%.3f%% (threshold ±%.2f%%) — confirming for %ds",
+                        self.pair, momentum_60s, self.MOM_FLIP_THRESHOLD_PCT,
+                        self.MOM_FLIP_CONFIRM_SECONDS,
                     )
                 elif time.monotonic() - self._mom_flip_since >= self.MOM_FLIP_CONFIRM_SECONDS:
-                    # Confirmed — momentum stayed flipped for 15s+
                     flip_dur = int(time.monotonic() - self._mom_flip_since)
                     reversal_reason = f"mom_flip_confirmed ({momentum_60s:+.3f}%, {flip_dur}s)"
             else:
-                # Momentum re-aligned — reset timer and clear reversal log flag
                 if self._mom_flip_since > 0:
                     self.logger.info(
                         "MOM_FLIP_RESET: %s mom=%.3f%% re-aligned after %.0fs — false alarm",
                         self.pair, momentum_60s, time.monotonic() - self._mom_flip_since,
                     )
                 self._mom_flip_since = 0.0
-                self._reversal_exit_logged = False  # allow fresh log if it flips again
+                self._reversal_exit_logged = False
 
-            # Check 2: momentum dying (below 0.02% absolute — truly dead)
-            if not reversal_reason and abs(momentum_60s) < self.MOMENTUM_DYING_PCT:
-                # MOMENTUM_FADE: dying + in profit → confirm via timer, then exit.
-                # Trail handles winners — MOMENTUM_FADE only fires on un-trailed positions.
-                # Trend-aligned trades get extra patience (pauses are legs, not death).
-                if (self._trailing_active or self._trail_stop_price > 0) and pnl_pct > 0.05:
-                    pass  # trail is managing this trade — don't interfere
-                elif pnl_pct > 0.05:
+            # ── Check 2: RSI extreme cross (overbought/oversold exhaustion) ──
+            if not reversal_reason:
+                if (side == "long" and rsi_now > self.RSI_REVERSAL_LONG
+                        and self._prev_rsi <= self.RSI_REVERSAL_LONG):
+                    reversal_reason = f"rsi_overbought (RSI {rsi_now:.0f} crossed {self.RSI_REVERSAL_LONG})"
+                elif (side == "short" and rsi_now < self.RSI_REVERSAL_SHORT
+                        and self._prev_rsi >= self.RSI_REVERSAL_SHORT):
+                    reversal_reason = f"rsi_oversold (RSI {rsi_now:.0f} crossed {self.RSI_REVERSAL_SHORT})"
+
+            # ── Check 3: 3/4+ cached signals fire in OPPOSITE direction ──
+            if not reversal_reason:
+                _rev_dir = "short" if side == "long" else "long"
+                _rev_cached = ScalpStrategy._cached_signals.get(self._base_asset, {})
+                _rev_age = time.monotonic() - _rev_cached.get("timestamp", 0) if _rev_cached else 999
+                if _rev_cached and _rev_age < 15:
+                    _opp = 0
+                    if _rev_dir == "long":
+                        if _rev_cached.get("rsi", 50) < 45: _opp += 1
+                        if _rev_cached.get("bb_position", 0.5) < 0.30: _opp += 1
+                        if _rev_cached.get("vwap_above", False): _opp += 1
+                        if _rev_cached.get("ema9_above_21", False): _opp += 1
+                    else:
+                        if _rev_cached.get("rsi", 50) > 55: _opp += 1
+                        if _rev_cached.get("bb_position", 0.5) > 0.70: _opp += 1
+                        if not _rev_cached.get("vwap_above", True): _opp += 1
+                        if not _rev_cached.get("ema9_above_21", True): _opp += 1
+                    if _opp >= 3:
+                        reversal_reason = f"signal_reversal ({_opp}/4 opposite)"
+
+            # ── REVERSAL: confirmed → exit IMMEDIATELY regardless of P&L ─
+            # Real reversal = holding longer = bigger loss. Get out.
+            if reversal_reason:
+                if not self._reversal_exit_logged:
+                    self._reversal_exit_logged = True
+                    self.logger.info(
+                        "REVERSAL: %s pnl=%+.2f%% peak=+%.2f%% mom=%.3f%% — "
+                        "exit confirmed (%s)",
+                        self.pair, pnl_pct, self._peak_unrealized_pnl,
+                        momentum_60s, reversal_reason,
+                    )
+                return self._do_exit(current_price, pnl_pct, side, "REVERSAL", hold_seconds)
+
+            # ── PATIENCE EXITS: MOMENTUM_FADE + DEAD_MOMENTUM ────────────
+            # Only when momentum is truly dead (< 0.02% absolute).
+            # Noise, flat periods, small pullbacks are NOT reasons to exit.
+            _fade_mom_flipped = (
+                (side == "long" and momentum_60s < 0)
+                or (side == "short" and momentum_60s > 0)
+            )
+            if abs(momentum_60s) < self.MOMENTUM_DYING_PCT:
+                # Track continuous flat time (for DEAD_MOMENTUM)
+                if self._flat_since == 0:
+                    self._flat_since = time.monotonic()
+                flat_duration = time.monotonic() - self._flat_since
+
+                # MOMENTUM_FADE: 60s fading, exit if losing OR momentum flipped
+                # Trail bypass: profitable + trail active + not flipped → trail handles
+                _trail_managing = (
+                    (self._trailing_active or self._trail_stop_price > 0)
+                    and pnl_pct > 0 and not _fade_mom_flipped
+                )
+                if not _trail_managing:
                     trend_15m = self._get_15m_trend()
                     trend_aligned = (
                         (side == "long" and trend_15m == "bullish")
                         or (side == "short" and trend_15m == "bearish")
                     )
                     min_hold = self.MOM_FADE_TREND_HOLD if trend_aligned else self.MOM_FADE_MIN_HOLD
-                    confirm_req = self.MOM_FADE_TREND_CONFIRM if trend_aligned else self.MOM_FADE_CONFIRM_SECONDS
-
                     if hold_seconds >= min_hold:
                         now_m = time.monotonic()
                         if self._mom_fade_since == 0:
@@ -3005,33 +3108,39 @@ class ScalpStrategy(BaseStrategy):
                                 "MOM_FADE_START: %s pnl=%+.2f%% mom=%.3f%% hold=%ds "
                                 "trend=%s — confirming for %ds",
                                 self.pair, pnl_pct, abs(momentum_60s),
-                                int(hold_seconds), trend_15m, confirm_req,
+                                int(hold_seconds), trend_15m, self.MOM_FADE_CONFIRM_SECONDS,
                             )
-                        elif now_m - self._mom_fade_since >= confirm_req:
-                            confirm_dur = int(now_m - self._mom_fade_since)
-                            self.logger.info(
-                                "MOMENTUM_FADE: %s pnl=%+.2f%% hold=%ds "
-                                "confirmed=%ds trend=%s",
-                                self.pair, pnl_pct, int(hold_seconds),
-                                confirm_dur, trend_15m,
-                            )
-                            return self._do_exit(current_price, pnl_pct, side, "MOMENTUM_FADE", hold_seconds)
+                        elif now_m - self._mom_fade_since >= self.MOM_FADE_CONFIRM_SECONDS:
+                            # Only exit if losing OR momentum direction flipped
+                            if pnl_pct < 0 or _fade_mom_flipped:
+                                confirm_dur = int(now_m - self._mom_fade_since)
+                                self.logger.info(
+                                    "MOMENTUM_FADE: %s pnl=%+.2f%% hold=%ds "
+                                    "confirmed=%ds flipped=%s trend=%s",
+                                    self.pair, pnl_pct, int(hold_seconds),
+                                    confirm_dur, _fade_mom_flipped, trend_15m,
+                                )
+                                return self._do_exit(current_price, pnl_pct, side, "MOMENTUM_FADE", hold_seconds)
 
-                # DEAD_MOMENTUM path: requires MOM_DYING_CONFIRM_SECONDS of sustained dead momentum
-                if self._mom_dying_since == 0:
-                    self._mom_dying_since = time.monotonic()
+                # DEAD_MOMENTUM: losing + old (5 min) + flat (3 min continuous)
+                # Profitable flat positions are fine — momentum can resume.
+                if (pnl_pct < 0
+                        and hold_seconds > self.DEAD_MOM_MIN_HOLD
+                        and flat_duration > self.DEAD_MOM_FLAT_DURATION):
                     self.logger.info(
-                        "MOM_DYING_START: %s abs_mom=%.3f%% — confirming for %ds",
-                        self.pair, abs(momentum_60s), self.MOM_DYING_CONFIRM_SECONDS,
+                        "DEAD_MOMENTUM: %s pnl=%+.2f%% peak=%.2f%% hold=%ds flat=%ds — "
+                        "cutting loss, setup failed",
+                        self.pair, pnl_pct, self._peak_unrealized_pnl,
+                        int(hold_seconds), int(flat_duration),
                     )
-                elif time.monotonic() - self._mom_dying_since >= self.MOM_DYING_CONFIRM_SECONDS:
-                    dying_dur = int(time.monotonic() - self._mom_dying_since)
-                    reversal_reason = f"mom_dying_confirmed ({abs(momentum_60s):.3f}%, {dying_dur}s)"
+                    return self._do_exit(current_price, pnl_pct, side, "DEAD_MOMENTUM", hold_seconds)
             else:
-                # Momentum recovered above threshold — reset ALL dying/fade timers
+                # Momentum recovered — reset flat/fade timers
+                if self._flat_since > 0:
+                    self._flat_since = 0.0
                 if self._mom_dying_since > 0:
                     self.logger.info(
-                        "MOM_DYING_RESET: %s abs_mom=%.3f%% recovered after %.0fs — false alarm",
+                        "MOM_DYING_RESET: %s abs_mom=%.3f%% recovered after %.0fs",
                         self.pair, abs(momentum_60s), time.monotonic() - self._mom_dying_since,
                     )
                 if self._mom_fade_since > 0:
@@ -3041,76 +3150,6 @@ class ScalpStrategy(BaseStrategy):
                     )
                 self._mom_dying_since = 0.0
                 self._mom_fade_since = 0.0
-
-            # RSI cross REMOVED as reversal trigger for futures.
-            # RSI crossing 70 in a long is trend strength, not reversal.
-            # Ratchet floor handles profit protection.
-
-            # DEAD_MOMENTUM: confirmed dead momentum + losing + held >3min → cut losses
-            # Don't wait for SL when the setup has clearly failed.
-            # Skip if: profitable, peak was significant (>0.15%), or trail is active.
-            _dm_trail_active = self._trailing_active or self._trail_stop_price > 0
-            _dm_peak_significant = self._peak_unrealized_pnl >= 0.15
-            if (
-                reversal_reason
-                and pnl_pct <= 0
-                and not _dm_peak_significant
-                and not _dm_trail_active
-                and hold_seconds > self.DEAD_MOM_MIN_HOLD
-            ):
-                if not self._reversal_exit_logged:
-                    self._reversal_exit_logged = True
-                    self.logger.info(
-                        "DEAD_MOMENTUM: %s pnl=%+.2f%% peak=%.2f%% hold=%ds mom=%.3f%% — "
-                        "cutting loss, setup failed (%s)",
-                        self.pair, pnl_pct, self._peak_unrealized_pnl,
-                        int(hold_seconds), momentum_60s, reversal_reason,
-                    )
-                return self._do_exit(current_price, pnl_pct, side, "DEAD_MOMENTUM", hold_seconds)
-            elif reversal_reason and (_dm_peak_significant or _dm_trail_active) and pnl_pct <= 0:
-                if not self._reversal_exit_logged:
-                    self.logger.debug(
-                        "DEAD_MOM_SKIP: %s pnl=%+.2f%% peak=%.2f%% trail=%s — "
-                        "letting trail/ratchet handle exit",
-                        self.pair, pnl_pct, self._peak_unrealized_pnl,
-                        _dm_trail_active,
-                    )
-
-            # If confirmed reversal AND in profit → exit
-            if reversal_reason and pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
-                if not self._reversal_exit_logged:
-                    self._reversal_exit_logged = True
-                    self.logger.info(
-                        "REVERSAL_DETECTED: %s peak=+%.2f%% pnl=%+.2f%% mom=%.3f%% — "
-                        "attempting exit (%s)",
-                        self.pair, self._peak_unrealized_pnl, pnl_pct,
-                        momentum_60s, reversal_reason,
-                    )
-                return self._do_exit(current_price, pnl_pct, side, "REVERSAL", hold_seconds)
-
-            # If reversal signal but NOT in profit — check breakeven
-            if reversal_reason and self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT:
-                fee_adj = (
-                    config.bybit.mixed_round_trip if self._exchange_id == "bybit"
-                    else config.kraken.mixed_round_trip if self._exchange_id == "kraken"
-                    else config.delta.mixed_round_trip
-                )
-                if side == "long":
-                    be_price = self.entry_price * (1 + fee_adj)
-                    at_be = current_price <= be_price
-                else:
-                    be_price = self.entry_price * (1 - fee_adj)
-                    at_be = current_price >= be_price
-                if at_be:
-                    return self._do_exit(current_price, pnl_pct, side, "BREAKEVEN", hold_seconds)
-
-            # Log reversal pending once (suppresses spam while waiting)
-            if reversal_reason and not self._reversal_exit_logged:
-                self._reversal_exit_logged = True
-                self.logger.info(
-                    "REVERSAL_PENDING: %s pnl=%+.2f%% (need +%.2f%% for exit) — %s",
-                    self.pair, pnl_pct, self.REVERSAL_MIN_PROFIT_PCT, reversal_reason,
-                )
 
         else:
             # ── SPOT PROFIT PROTECTION (unchanged) ────────────────────
@@ -3287,11 +3326,15 @@ class ScalpStrategy(BaseStrategy):
             if self.risk_manager.approve_signal(signal):
                 order = await self.executor.execute(signal)
                 if order is not None:
+                    self._pending_exit_restore = None  # exit succeeded
                     self.logger.info("[%s] WS exit order filled", self.pair)
                 else:
-                    self.logger.warning("[%s] WS exit order failed/skipped", self.pair)
+                    # Exit failed — restore position to prevent RESTORE loop
+                    self.on_rejected(signal)
         except Exception:
             self.logger.exception("[%s] WS exit execution error", self.pair)
+            # Restore position on exception too
+            self.on_rejected(signal)
 
     # ── LAYER 1: WS Acceleration entry ──────────────────────────────────
 
@@ -3460,6 +3503,21 @@ class ScalpStrategy(BaseStrategy):
                 )
                 return
 
+        # ── XRP quality bar: higher velocity + more support ────────────
+        if self._base_asset == "XRP":
+            if abs(velocity_current) < self.ACCEL_MIN_VELOCITY_XRP:
+                self.logger.info(
+                    "[%s] ACCEL XRP_VEL_GATE — vel=%.3f%% < %.2f%% minimum",
+                    self.pair, abs(velocity_current), self.ACCEL_MIN_VELOCITY_XRP,
+                )
+                return
+            if support_count < self.ACCEL_MIN_SUPPORT_XRP:
+                self.logger.info(
+                    "[%s] ACCEL XRP_SUPPORT_GATE — %d/4 < %d/4 required",
+                    self.pair, support_count, self.ACCEL_MIN_SUPPORT_XRP,
+                )
+                return
+
         # ── FIRE: acceleration confirmed with signal support ─────────
         self.logger.info(
             "[%s] ACCEL ENTRY: %s vel=%+.3f%%/%.0fs accel=%+.3f ticks=%d support=%d/4",
@@ -3551,6 +3609,16 @@ class ScalpStrategy(BaseStrategy):
                 price, available, signal_strength, total_scalp,
                 momentum_60s=velocity,
             )
+
+            # ── XRP ACCEL sizing: 60% at 3/4 support, full only at 4/4 ──
+            if self._base_asset == "XRP" and amount and support_count == 3:
+                original = amount
+                amount *= self.ACCEL_XRP_WEAK_SIZE_MULT
+                self.logger.info(
+                    "[%s] ACCEL XRP_WEAK_SIZE — 3/4 support, %.0f%% sizing (%.6f → %.6f)",
+                    self.pair, self.ACCEL_XRP_WEAK_SIZE_MULT * 100, original, amount,
+                )
+
             if amount is None:
                 self.logger.warning(
                     "[%s] ACCEL skip — sizing=None (exch_cap=$%.2f avail=$%.2f "
@@ -3597,7 +3665,7 @@ class ScalpStrategy(BaseStrategy):
         # TRAIL/BREAKEVEN/RATCHET protect profit — blocking them turns winners into losers.
         _PROTECTED_EXIT_TYPES = {"SL", "TRAIL", "BREAKEVEN", "PROFIT_LOCK",
                                  "HARD_TP", "HARD_TP_10PCT", "RATCHET", "SAFETY",
-                                 "DEAD_MOMENTUM", "MOMENTUM_FADE"}
+                                 "DEAD_MOMENTUM", "MOMENTUM_FADE", "REVERSAL"}
         clean_type = exit_type.replace("WS-", "")
         if clean_type not in _PROTECTED_EXIT_TYPES and self.entry_price > 0:
             if self.is_futures:
@@ -3629,6 +3697,25 @@ class ScalpStrategy(BaseStrategy):
         # Track exit price for price-level memory guard (GPFC C)
         ScalpStrategy._pair_last_exit_price[self._base_asset] = price
         ScalpStrategy._pair_last_exit_time_any[self._base_asset] = time.monotonic()
+        # ── SAVE position state BEFORE clearing ──────────────────────────
+        # If the exit order fails (executor returns None → on_rejected),
+        # we restore from this to prevent the RESTORE→exit→RESTORE loop.
+        self._pending_exit_restore = {
+            "position_side": self.position_side,
+            "entry_price": self.entry_price,
+            "entry_amount": self.entry_amount,
+            "entry_time": self.entry_time,
+            "peak_pnl": self._peak_unrealized_pnl,
+            "trailing_active": self._trailing_active,
+            "trail_stop_price": self._trail_stop_price,
+            "trail_distance_pct": self._trail_distance_pct,
+            "profit_floor_pct": self._profit_floor_pct,
+            "in_position_tick": self._in_position_tick,
+            "entry_path": self._entry_path,
+            "trade_leverage": self._trade_leverage,
+            "highest_since_entry": self.highest_since_entry,
+            "lowest_since_entry": self.lowest_since_entry,
+        }
         self._record_scalp_result(pnl_pct, exit_type.lower())
         return [self._exit_signal(price, side, reason, peak_pnl)]
 
@@ -3677,12 +3764,12 @@ class ScalpStrategy(BaseStrategy):
             # Momentum fade / dead momentum timer state
             fade_timer_active = self._mom_fade_since > 0
             fade_elapsed = int(time.monotonic() - self._mom_fade_since) if fade_timer_active else 0
-            dead_timer_active = self._mom_dying_since > 0
-            dead_elapsed = int(time.monotonic() - self._mom_dying_since) if dead_timer_active else 0
+            dead_timer_active = self._flat_since > 0
+            dead_elapsed = int(time.monotonic() - self._flat_since) if dead_timer_active else 0
 
             # Determine confirm time needed based on trend alignment
             fade_required = 0
-            dead_required = self.MOM_DYING_CONFIRM_SECONDS
+            dead_required = self.DEAD_MOM_FLAT_DURATION
             if fade_timer_active:
                 trend_15m = self._get_15m_trend()
                 trend_aligned = (
@@ -4360,6 +4447,9 @@ class ScalpStrategy(BaseStrategy):
 
     def on_fill(self, signal: Signal, order: dict) -> None:
         """Called by _run_loop when an order fills."""
+        # Clear pending exit restore — exit succeeded, position is truly closed
+        if signal.reduce_only:
+            self._pending_exit_restore = None
         pending_side = signal.metadata.get("pending_side")
         pending_amount = signal.metadata.get("pending_amount", 0.0)
         if pending_side:
@@ -4375,6 +4465,37 @@ class ScalpStrategy(BaseStrategy):
 
     def on_rejected(self, signal: Signal) -> None:
         """Called by _run_loop when an order fails."""
+        # ── EXIT FAILED: restore position state ──────────────────────────
+        # If an exit order was rejected/failed, the position is still on the
+        # exchange but _record_scalp_result() already cleared in_position.
+        # Restore the saved state to prevent the RESTORE→exit→RESTORE loop.
+        if signal.reduce_only and self._pending_exit_restore:
+            state = self._pending_exit_restore
+            self._pending_exit_restore = None
+            self.in_position = True
+            self.position_side = state["position_side"]
+            self.entry_price = state["entry_price"]
+            self.entry_amount = state["entry_amount"]
+            self.entry_time = state["entry_time"]
+            self._peak_unrealized_pnl = state["peak_pnl"]
+            self._trailing_active = state["trailing_active"]
+            self._trail_stop_price = state["trail_stop_price"]
+            self._trail_distance_pct = state["trail_distance_pct"]
+            self._profit_floor_pct = state["profit_floor_pct"]
+            self._in_position_tick = state["in_position_tick"]
+            self._entry_path = state["entry_path"]
+            self._trade_leverage = state["trade_leverage"]
+            self.highest_since_entry = state["highest_since_entry"]
+            self.lowest_since_entry = state["lowest_since_entry"]
+            self._last_position_exit = 0.0  # undo the exit timestamp
+            ScalpStrategy._live_pnl[self.pair] = self._calc_pnl_pct(signal.price)
+            self.logger.warning(
+                "[%s] EXIT REJECTED — RESTORING position: %s @ $%.2f (%.6f ct). "
+                "Will retry exit on next tick.",
+                self.pair, state["position_side"], state["entry_price"], state["entry_amount"],
+            )
+            return
+        # ── ENTRY REJECTED: normal handling ──────────────────────────────
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
             now = time.monotonic()
@@ -4419,6 +4540,7 @@ class ScalpStrategy(BaseStrategy):
         self._mom_flip_since = 0.0  # reset momentum flip confirmation timer
         self._mom_dying_since = 0.0  # reset momentum dying confirmation timer
         self._mom_fade_since = 0.0   # reset momentum fade confirmation timer
+        self._flat_since = 0.0       # reset continuous flat tracker
         self._reversal_exit_logged = False  # reset reversal log suppression
         self._pending_tier1 = None  # clear any pending T1 on entry
         self._hourly_trades.append(time.time())
@@ -4563,6 +4685,7 @@ class ScalpStrategy(BaseStrategy):
         self._peak_unrealized_pnl = 0.0  # reset for next trade
         self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter
+        self._flat_since = 0.0       # reset continuous flat tracker
         self._reversal_exit_logged = False
         self._last_position_exit = now
         ScalpStrategy._live_pnl.pop(self.pair, None)  # clean up live P&L tracker

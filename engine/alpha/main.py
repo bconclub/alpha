@@ -108,6 +108,14 @@ class AlphaBot:
         self._orphan_gave_up: set[str] = set()  # positions we've given up on
         self.ORPHAN_MAX_RETRIES = 3  # stop trying after N failures
 
+        # Kraken minimum order amounts (coins) — below this, exchange rejects the order
+        self.KRAKEN_MIN_ORDER: dict[str, float] = {
+            "ETH/USD:USD": 0.01,    # ~$20+
+            "BTC/USD:USD": 0.001,   # ~$90+
+            "XRP/USD:USD": 1.0,     # ~$1.40+
+            "SOL/USD:USD": 0.1,     # ~$13+
+        }
+
     @property
     def all_pairs(self) -> list[str]:
         """All tracked pairs across all exchanges."""
@@ -2758,6 +2766,14 @@ class AlphaBot:
                 self._orphan_fail_count.pop(fs_key, None)
                 self._orphan_gave_up.discard(fs_key)
 
+            # ── EXIT-PENDING GUARD: strategy is mid-exit, position will close shortly ──
+            if epos and scalp and getattr(scalp, '_pending_exit_restore', None):
+                self._position_first_seen.pop(f"bybit:{pair}", None)
+                self._orphan_fail_count.pop(f"bybit:{pair}", None)
+                self._orphan_gave_up.discard(f"bybit:{pair}")
+                logger.debug("EXIT_PENDING: %s has pending exit restore — skipping orphan check", pair)
+                continue
+
             if epos and scalp and scalp.in_position:
                 self._position_first_seen.pop(f"bybit:{pair}", None)
                 self._orphan_fail_count.pop(f"bybit:{pair}", None)
@@ -2819,6 +2835,25 @@ class AlphaBot:
                         db_entry_price = float(open_trade.get("entry_price", 0) or 0)
                         restore_price = db_entry_price if db_entry_price > 0 else entry_px
 
+                        # ── SIDE MISMATCH FIX: exchange is truth ──
+                        db_side = open_trade.get("position_type", "")
+                        if db_side and db_side != side:
+                            logger.warning(
+                                "SIDE MISMATCH: %s — DB says %s, exchange says %s. "
+                                "Updating DB to match exchange.",
+                                pair, db_side.upper(), side.upper(),
+                            )
+                            trade_id_db = open_trade.get("id")
+                            if trade_id_db:
+                                try:
+                                    new_order_side = "buy" if side == "long" else "sell"
+                                    await self.db.update_trade(trade_id_db, {
+                                        "position_type": side,
+                                        "side": new_order_side,
+                                    })
+                                except Exception as e:
+                                    logger.warning("Failed to fix side mismatch in DB for %s: %s", pair, e)
+
                         scalp.in_position = True
                         scalp.position_side = side
                         scalp.entry_price = restore_price
@@ -2841,6 +2876,9 @@ class AlphaBot:
                                 scalp.entry_time = time.monotonic()
                         else:
                             scalp.entry_time = time.monotonic()
+
+                        # Set phantom cooldown — protect restored position from phantom detection
+                        scalp._phantom_cooldown_until = time.monotonic() + 120
 
                         current_price = await self._get_current_price(pair, "bybit")
                         if current_price and current_price > 0:
@@ -2992,6 +3030,11 @@ class AlphaBot:
                 continue
             if getattr(scalp, "_exchange_id", "delta") != "bybit":
                 continue  # skip non-Bybit strategies
+            # Phantom cooldown: skip detection during cooldown (prevents RESTORE→PHANTOM cycle)
+            if now < getattr(scalp, '_phantom_cooldown_until', 0):
+                logger.debug("PHANTOM COOLDOWN: %s — %.0fs remaining", scalp.pair,
+                             getattr(scalp, '_phantom_cooldown_until', 0) - now)
+                continue
             epos = exchange_positions.get(scalp.pair)
             if not epos:
                 if scalp.entry_time > 0:
@@ -3135,8 +3178,9 @@ class AlphaBot:
             side = "long" if contracts > 0 else "short"
             entry_px = float(pos.get("entryPrice", 0) or 0)
             notional = abs(contracts) * entry_px if entry_px > 0 else 0
-            # Skip dust/ghost: no entry price, or position worth less than $1
-            if entry_px <= 0 or notional < 1.0:
+            min_order = self.KRAKEN_MIN_ORDER.get(symbol, 0.01)
+            # Skip dust/ghost: no entry price, notional < $1, or below exchange minimum order
+            if entry_px <= 0 or notional < 1.0 or abs(contracts) < min_order:
                 logger.debug(
                     "Skipping dust/ghost position %s: %.8f coins @ $%.2f worth $%.4f",
                     symbol, abs(contracts), entry_px, notional,
@@ -3165,6 +3209,19 @@ class AlphaBot:
                 self._position_first_seen.pop(fs_key, None)
                 self._orphan_fail_count.pop(fs_key, None)
                 self._orphan_gave_up.discard(fs_key)
+
+            # ── EXIT-PENDING GUARD: strategy is mid-exit, position will close shortly ──
+            # _pending_exit_restore means _record_scalp_result already cleared in_position
+            # but the exit order is still in-flight. Don't flag as orphan.
+            if epos and scalp and getattr(scalp, '_pending_exit_restore', None):
+                self._position_first_seen.pop(f"kraken:{pair}", None)
+                self._orphan_fail_count.pop(f"kraken:{pair}", None)
+                self._orphan_gave_up.discard(f"kraken:{pair}")
+                logger.debug(
+                    "EXIT_PENDING: %s has pending exit restore — skipping orphan check",
+                    pair,
+                )
+                continue
 
             if epos and scalp and scalp.in_position:
                 self._position_first_seen.pop(f"kraken:{pair}", None)
@@ -3227,6 +3284,27 @@ class AlphaBot:
                         db_entry_price = float(open_trade.get("entry_price", 0) or 0)
                         restore_price = db_entry_price if db_entry_price > 0 else entry_px
 
+                        # ── SIDE MISMATCH FIX: exchange is truth ──
+                        # If DB says LONG but exchange has SHORT (or vice versa),
+                        # update DB to match exchange — exchange is the source of truth.
+                        db_side = open_trade.get("position_type", "")
+                        if db_side and db_side != side:
+                            logger.warning(
+                                "SIDE MISMATCH: %s — DB says %s, exchange says %s. "
+                                "Updating DB to match exchange.",
+                                pair, db_side.upper(), side.upper(),
+                            )
+                            trade_id = open_trade.get("id")
+                            if trade_id:
+                                try:
+                                    new_order_side = "buy" if side == "long" else "sell"
+                                    await self.db.update_trade(trade_id, {
+                                        "position_type": side,
+                                        "side": new_order_side,
+                                    })
+                                except Exception as e:
+                                    logger.warning("Failed to fix side mismatch in DB for %s: %s", pair, e)
+
                         scalp.in_position = True
                         scalp.position_side = side
                         scalp.entry_price = restore_price
@@ -3249,6 +3327,9 @@ class AlphaBot:
                                 scalp.entry_time = time.monotonic()
                         else:
                             scalp.entry_time = time.monotonic()
+
+                        # Set phantom cooldown — protect restored position from phantom detection
+                        scalp._phantom_cooldown_until = time.monotonic() + 120
 
                         current_price = await self._get_current_price(pair, "kraken")
                         if current_price and current_price > 0:
@@ -3322,11 +3403,11 @@ class AlphaBot:
 
                     try:
                         close_side = "sell" if side == "long" else "buy"
-                        # Kraken: try with reduce_only first, fall back to plain market
+                        # Kraken: try with reduceOnly first, fall back to plain market
                         try:
                             await self.kraken.create_order(
                                 pair, "market", close_side, amount,
-                                params={"reduce_only": True},
+                                params={"reduceOnly": True},
                             )
                         except Exception as e1:
                             logger.warning(
@@ -3371,10 +3452,14 @@ class AlphaBot:
                                     )
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
-                    except Exception:
+                    except Exception as close_err:
                         # ── Failed: increment retry counter ───────────
                         fail_count += 1
                         self._orphan_fail_count[fs_key] = fail_count
+                        logger.error(
+                            "ORPHAN CLOSE ERROR %s (attempt %d/%d): %s",
+                            pair, fail_count, self.ORPHAN_MAX_RETRIES, close_err,
+                        )
 
                         if fail_count >= self.ORPHAN_MAX_RETRIES:
                             # Give up — no more retries, no more alerts
@@ -3414,6 +3499,11 @@ class AlphaBot:
                 continue
             if getattr(scalp, "_exchange_id", "delta") != "kraken":
                 continue  # skip non-Kraken strategies
+            # Phantom cooldown: skip detection during cooldown (prevents RESTORE→PHANTOM cycle)
+            if now < getattr(scalp, '_phantom_cooldown_until', 0):
+                logger.debug("PHANTOM COOLDOWN: %s — %.0fs remaining", scalp.pair,
+                             getattr(scalp, '_phantom_cooldown_until', 0) - now)
+                continue
             epos = exchange_positions.get(scalp.pair)
             if not epos:
                 if scalp.entry_time > 0:
@@ -3611,6 +3701,14 @@ class AlphaBot:
                 self._orphan_fail_count.pop(fs_key, None)
                 self._orphan_gave_up.discard(fs_key)
 
+            # ── EXIT-PENDING GUARD: strategy is mid-exit, position will close shortly ──
+            if epos and scalp and getattr(scalp, '_pending_exit_restore', None):
+                self._position_first_seen.pop(f"delta:{pair}", None)
+                self._orphan_fail_count.pop(f"delta:{pair}", None)
+                self._orphan_gave_up.discard(f"delta:{pair}")
+                logger.debug("EXIT_PENDING: %s has pending exit restore — skipping orphan check", pair)
+                continue
+
             if epos and scalp and scalp.in_position:
                 # ALL GOOD — exchange has it, bot is managing it
                 self._position_first_seen.pop(f"delta:{pair}", None)
@@ -3696,6 +3794,25 @@ class AlphaBot:
                         db_entry_price = float(open_trade.get("entry_price", 0) or 0)
                         restore_price = db_entry_price if db_entry_price > 0 else entry_px
 
+                        # ── SIDE MISMATCH FIX: exchange is truth ──
+                        db_side = open_trade.get("position_type", "")
+                        if db_side and db_side != side:
+                            logger.warning(
+                                "SIDE MISMATCH: %s — DB says %s, exchange says %s. "
+                                "Updating DB to match exchange.",
+                                pair, db_side.upper(), side.upper(),
+                            )
+                            trade_id_db = open_trade.get("id")
+                            if trade_id_db:
+                                try:
+                                    new_order_side = "buy" if side == "long" else "sell"
+                                    await self.db.update_trade(trade_id_db, {
+                                        "position_type": side,
+                                        "side": new_order_side,
+                                    })
+                                except Exception as e:
+                                    logger.warning("Failed to fix side mismatch in DB for %s: %s", pair, e)
+
                         scalp.in_position = True
                         scalp.position_side = side
                         scalp.entry_price = restore_price
@@ -3719,6 +3836,9 @@ class AlphaBot:
                                 scalp.entry_time = time.monotonic()
                         else:
                             scalp.entry_time = time.monotonic()
+
+                        # Set phantom cooldown — protect restored position from phantom detection
+                        scalp._phantom_cooldown_until = time.monotonic() + 120
 
                         # Fetch actual current market price for immediate checks
                         current_price = await self._get_current_price(pair, "delta")
@@ -3823,7 +3943,7 @@ class AlphaBot:
                         close_side = "sell" if side == "long" else "buy"
                         await self.delta.create_order(
                             pair, "market", close_side, int(contracts),
-                            params={"reduce_only": True},
+                            params={"reduceOnly": True},
                         )
                         logger.info(
                             "ORPHAN CLOSED: %s %s %.0f contracts at market",
@@ -3901,6 +4021,11 @@ class AlphaBot:
                 continue
             if getattr(scalp, "_exchange_id", "delta") != "delta":
                 continue  # skip non-Delta strategies
+            # Phantom cooldown: skip detection during cooldown (prevents RESTORE→PHANTOM cycle)
+            if now < getattr(scalp, '_phantom_cooldown_until', 0):
+                logger.debug("PHANTOM COOLDOWN: %s — %.0fs remaining", scalp.pair,
+                             getattr(scalp, '_phantom_cooldown_until', 0) - now)
+                continue
             epos = normalized_positions.get(scalp.pair)
             if not epos:
                 # ── TIME GUARDS: don't phantom-clear legitimate trades ──
@@ -4241,7 +4366,7 @@ class AlphaBot:
 
                     await exchange.create_order(  # type: ignore[union-attr]
                         pair, "market", close_side, contracts,
-                        params={"reduce_only": True},
+                        params={"reduceOnly": True},
                     )
                     logger.info(
                         "Closed orphaned position: %s %s %d contracts at market",

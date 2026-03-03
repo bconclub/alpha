@@ -21,7 +21,7 @@ Entry: 2-of-4+ momentum signals from scalp strategy
 
 Exit:
   - Ratchet floor: lock profit at (10→3, 15→7, 25→15, 40→25, 100→70)%
-  - SL: 30% premium loss (always active, even in Phase 1)
+  - SL: 50% premium loss (always active, even in Phase 1)
   - Momentum Fade: profitable + momentum < 0.02% for 60s → exit (min 60s hold)
   - Dead Momentum: losing + momentum dead 45s + held 3min → exit
   - TP: 30% premium gain
@@ -108,7 +108,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds (tuned for momentum scalps) ────────────────
     TP_PREMIUM_GAIN_PCT = 30.0           # Take profit at +30% premium gain
-    SL_PREMIUM_LOSS_PCT = 30.0           # Stop loss at -30% premium drop (was 20 — noise clips at 50x)
+    SL_PREMIUM_LOSS_PCT = 50.0           # Stop loss at -50% premium drop (was 30 — $20 option SLs at $10, clean/predictable)
     TRAILING_ACTIVATE_PCT = 15.0         # Trail activates at +15% gain (was 10 — too early)
     TRAILING_DISTANCE_PCT = 5.0          # Trail 5% below peak premium
     PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain (was 50 — too aggressive)
@@ -1281,7 +1281,7 @@ class OptionsScalpStrategy(BaseStrategy):
         After Phase 1:
         1. Expiry: Close 2 hours before expiry
         2. Ratchet floor: lock profit floor as premium rises
-        3. SL: -30% premium drop (always active)
+        3. SL: -50% premium drop (always active)
         4. Momentum Fade: profitable + momentum dying → exit
         5. Dead Momentum: losing + momentum dead 45s + held 3min → exit
         6. TP: +30% premium gain
@@ -1397,7 +1397,7 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "OPT_RATCHET")
 
-        # ── 2b. STOP LOSS: -30% premium drop (always active, even Phase 1)
+        # ── 2b. STOP LOSS: -50% premium drop (always active, even Phase 1)
         if premium_change_pct <= -self.SL_PREMIUM_LOSS_PCT:
             self.logger.info(
                 "[%s] OPTION SL — premium %+.1f%% ($%.4f → $%.4f)",
