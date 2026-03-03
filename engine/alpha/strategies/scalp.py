@@ -312,12 +312,13 @@ class ScalpStrategy(BaseStrategy):
     TIER1_VOL_MAX_MOM = 0.10          # max momentum for "volume without move" pattern
     TIER1_RSI_APPROACH_LONG = (32, 38)  # approaching oversold (not yet extreme)
     TIER1_RSI_APPROACH_SHORT = (62, 68) # approaching overbought (not yet extreme)
-    TIER1_MIN_SIGNALS = 2             # need 2+ T1 signals for anticipatory entry
+    TIER1_MIN_SIGNALS = 3             # need 3+ T1 signals for anticipatory entry (was 2 — too loose)
 
     # ── TIER 1 CONFIRMATION WINDOW ─────────────────────────────────
     CONFIRM_MOM_PCT = 0.15            # momentum threshold for tier1 confirmation (was 0.06 → 0.15)
     CONFIRM_COUNTER_PCT = 0.10        # counter-momentum → immediate rejection (was 0.15)
     T1_ACCEL_CONFIRM_VEL = 0.03      # velocity_5s for acceleration-based T1 confirm
+    ANTIC_CONFIRM_VOL_RATIO = 1.0    # volume ratio must be >= 1.0x at confirmation (no low-vol confirms)
     # ── ANTIC stale check: 10s real-time momentum must be alive at execution ─
     ANTIC_STALE_MOM_PCT = 0.08        # 10s momentum >= 0.08% at T1 confirm (was 0.05 — too low)
     # ── ANTIC trail delay: let entries develop before trailing ──
@@ -325,6 +326,10 @@ class ScalpStrategy(BaseStrategy):
     ANTIC_TRAIL_MIN_PROFIT = 0.20     # AND peak must be >= 0.20% (not tiny 0.15%)
 
     # ── TIER-BASED POSITION SIZING ─────────────────────────────────
+    # ── ANTIC per-pair win rate gate ──────────────────────────────
+    ANTIC_WIN_RATE_THRESHOLD = 0.30   # skip ANTIC if pair win rate < 30% over last 5
+    ANTIC_PERF_WINDOW = 5             # look at last 5 ANTIC trades per pair
+
     TIER1_SIZE_3_MULT = 1.0           # 3+ T1 signals → full size
     TIER1_SIZE_2_MULT = 1.0           # 2 T1 signals → full size (was 0.60)
     TIER1_SIZE_1_MULT = 0.80          # 1 T1 + 2 T2 → 80% (was 0.40)
@@ -518,6 +523,7 @@ class ScalpStrategy(BaseStrategy):
     _live_pnl: dict[str, float] = {}           # pair → current unrealized P&L % (updated every tick)
     _pair_trade_history: dict[str, list[bool]] = {}  # base_asset → list of win/loss booleans (last N)
     _pair_dir_trade_history: dict[str, list[bool]] = {}  # "base_asset:long" → last N win/loss for that direction
+    _pair_antic_history: dict[str, list[bool]] = {}  # base_asset → last N ANTIC win/loss booleans
     # ── Per-pair streak/cooldown (BTC losses don't pause XRP) ────────────
     _pair_last_sl_time: dict[str, float] = {}            # base_asset → monotonic time of last SL
     _pair_consecutive_losses: dict[str, int] = {}        # base_asset → streak count
@@ -1300,6 +1306,19 @@ class ScalpStrategy(BaseStrategy):
                 )
                 self._pending_tier1 = None
                 # Zero fees, zero loss — just a skip
+
+            elif vol_ratio < self.ANTIC_CONFIRM_VOL_RATIO and (
+                ((pt1_side == "long" and _t1_vel_5s >= self.T1_ACCEL_CONFIRM_VEL) or
+                 (pt1_side == "short" and _t1_vel_5s <= -self.T1_ACCEL_CONFIRM_VEL)) or
+                ((pt1_side == "long" and momentum_60s >= self.CONFIRM_MOM_PCT) or
+                 (pt1_side == "short" and momentum_60s <= -self.CONFIRM_MOM_PCT))
+            ):
+                # ── ANTIC_LOW_VOL: momentum/velocity confirm but volume too low ──
+                if self._tick_count % 6 == 0:
+                    self.logger.info(
+                        "[%s] ANTIC_LOW_VOL — vol=%.1fx < %.1fx at confirm, staying pending %s",
+                        self.pair, vol_ratio, self.ANTIC_CONFIRM_VOL_RATIO, pt1_side,
+                    )
 
             elif (pt1_side == "long" and _t1_vel_5s >= self.T1_ACCEL_CONFIRM_VEL) or \
                  (pt1_side == "short" and _t1_vel_5s <= -self.T1_ACCEL_CONFIRM_VEL):
@@ -2648,14 +2667,27 @@ class ScalpStrategy(BaseStrategy):
         t2_long_count = len(bull_signals)
         t2_short_count = len(bear_signals)
 
-        # ── Decide entry: 2+ T1, or 1 T1 + 2 T2 ──────────────────────
+        # ── ANTIC win rate gate: skip if pair losing on ANTIC setup ─────
+        antic_hist = ScalpStrategy._pair_antic_history.get(self._base_asset, [])
+        if len(antic_hist) >= self.ANTIC_PERF_WINDOW:
+            antic_wr = sum(antic_hist) / len(antic_hist)
+            if antic_wr < self.ANTIC_WIN_RATE_THRESHOLD:
+                if self._tick_count % 12 == 0:
+                    self.logger.info(
+                        "[%s] ANTIC_LOW_WR — %s ANTIC win rate %.0f%% < %.0f%% over last %d, skipping ANTIC",
+                        self.pair, self._base_asset, antic_wr * 100,
+                        self.ANTIC_WIN_RATE_THRESHOLD * 100, len(antic_hist),
+                    )
+                return None
+
+        # ── Decide entry: 3+ T1, or 2 T1 + 3 T2 ──────────────────────
         long_ok = (
             len(t1_long) >= self.TIER1_MIN_SIGNALS
-            or (len(t1_long) >= 1 and t2_long_count >= 2)
+            or (len(t1_long) >= 2 and t2_long_count >= 3)
         )
         short_ok = (
             len(t1_short) >= self.TIER1_MIN_SIGNALS
-            or (len(t1_short) >= 1 and t2_short_count >= 2)
+            or (len(t1_short) >= 2 and t2_short_count >= 3)
         ) and can_short
 
         # If signals disagree on direction → skip (conflicting order flow)
@@ -4592,6 +4624,15 @@ class ScalpStrategy(BaseStrategy):
         if len(ScalpStrategy._pair_trade_history[self._base_asset]) > self.PERF_WINDOW:
             ScalpStrategy._pair_trade_history[self._base_asset] = \
                 ScalpStrategy._pair_trade_history[self._base_asset][-self.PERF_WINDOW:]
+
+        # Track per-pair ANTIC win/loss history (for ANTIC_LOW_WR gate)
+        if self._entry_path == "tier1":
+            if self._base_asset not in ScalpStrategy._pair_antic_history:
+                ScalpStrategy._pair_antic_history[self._base_asset] = []
+            ScalpStrategy._pair_antic_history[self._base_asset].append(is_win)
+            if len(ScalpStrategy._pair_antic_history[self._base_asset]) > self.ANTIC_PERF_WINDOW:
+                ScalpStrategy._pair_antic_history[self._base_asset] = \
+                    ScalpStrategy._pair_antic_history[self._base_asset][-self.ANTIC_PERF_WINDOW:]
 
         # Track per-pair PER-DIRECTION win/loss history
         dir_key = f"{self._base_asset}:{self.position_side or 'long'}"

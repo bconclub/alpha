@@ -66,6 +66,9 @@ class OptionsScalpStrategy(BaseStrategy):
     name = StrategyName.OPTIONS_SCALP
     check_interval_sec = 5  # 5-second ticks (was 10 — catch fresh signals faster)
 
+    # ── Class-level shared state ──────────────────────────────────────
+    _opt_consecutive_losses: dict[str, int] = {}  # pair → consecutive loss count
+
     # ── Option chain refresh ──────────────────────────────────────
     CHAIN_REFRESH_INTERVAL = 30 * 60     # Refresh every 30 min
     MIN_EXPIRY_HOURS = 4                 # Must be 4+ hours to expiry
@@ -81,9 +84,13 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_PREMIUM_USD = 0.01               # Skip illiquid < $0.01
 
     # ── Entry ─────────────────────────────────────────────────────
-    MIN_SIGNAL_STRENGTH = 2              # 2-of-4 required (was 3 — options are capped-loss, be aggressive)
+    MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
-    MIN_MOMENTUM_PCT = 0.05             # Skip if |momentum_60s| < 0.05% (was 0.15 — capped-loss, just need direction)
+    MIN_MOMENTUM_PCT = 0.15             # Skip if |momentum_60s| < 0.15% (was 0.05 — options need real moves, not drift)
+    OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
+    OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
+    OPT_TRADE_COOLDOWN_SEC = 300        # 5 min between options trades (prevent rapid-fire losing streak)
+    OPT_LOSS_STREAK_LIMIT = 3           # skip options after 3 consecutive losses on pair
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
@@ -208,6 +215,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Cooldown after POSITION_GONE — no new options entry for 60s
         self._position_gone_cooldown_until: float = 0.0
         self._POSITION_GONE_COOLDOWN_SEC = 60
+
+        # Trade cooldown — 5 min between options trades
+        self._last_option_trade_time: float = 0.0
 
         # Regime skip logging throttle (log once per 60s to avoid spam)
         self._last_regime_log: float = 0.0
@@ -711,6 +721,29 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
+        # 0b. Trade cooldown — 5 min between options trades
+        now = time.monotonic()
+        if self._last_option_trade_time > 0:
+            elapsed = now - self._last_option_trade_time
+            if elapsed < self.OPT_TRADE_COOLDOWN_SEC:
+                remaining = self.OPT_TRADE_COOLDOWN_SEC - elapsed
+                if self._tick_count % 6 == 0:
+                    self.logger.info(
+                        "[%s] OPTIONS TRADE_COOLDOWN — %.0fs remaining (5min between trades)",
+                        self.pair, remaining,
+                    )
+                return []
+
+        # 0c. Loss streak skip — 3 consecutive options losses on pair
+        pair_losses = OptionsScalpStrategy._opt_consecutive_losses.get(self.pair, 0)
+        if pair_losses >= self.OPT_LOSS_STREAK_LIMIT:
+            if self._tick_count % 12 == 0:
+                self.logger.info(
+                    "[%s] OPTIONS LOSS_STREAK — %d consecutive losses >= %d, skipping options",
+                    self.pair, pair_losses, self.OPT_LOSS_STREAK_LIMIT,
+                )
+            return []
+
         # 1. Market regime gate — GPFC: trend-aligned only
         # TRENDING_UP → only CALLs. TRENDING_DOWN → only PUTs.
         # SIDEWAYS → both allowed but only MOMENTUM_BURST setup.
@@ -805,7 +838,23 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
                 return []
 
-        # 4b. Range Gate — zone-based filtering for options (soft)
+        # 4b. RSI directional conviction gate — need RSI backing direction
+        rsi_now = signal_state.get("rsi")
+        if rsi_now is not None:
+            if option_type == "call" and rsi_now >= self.OPT_RSI_CALL_MAX:
+                self.logger.info(
+                    "[%s] OPTIONS RSI_GATE: CALL but RSI=%.0f >= %d — need oversold conviction, skipping",
+                    self.pair, rsi_now, self.OPT_RSI_CALL_MAX,
+                )
+                return []
+            if option_type == "put" and rsi_now <= self.OPT_RSI_PUT_MIN:
+                self.logger.info(
+                    "[%s] OPTIONS RSI_GATE: PUT but RSI=%.0f <= %d — need overbought conviction, skipping",
+                    self.pair, rsi_now, self.OPT_RSI_PUT_MIN,
+                )
+                return []
+
+        # 4c. Range Gate — zone-based filtering for options (soft)
         # Counter-zone options (PUTs in low, CALLs in high) log warning
         # but don't block — options have capped loss, let them fire.
         _opt_cached = type(self._scalp)._cached_signals.get(self._base_asset, {}) if self._scalp else {}
@@ -1585,12 +1634,18 @@ class OptionsScalpStrategy(BaseStrategy):
         self._opt_mom_dying_since = None
         self._opt_ratchet_floor = 0.0
 
-        # Stats
+        # Stats + loss streak tracking
         if pnl_pct >= 0:
             self.hourly_wins += 1
+            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = 0
         else:
             self.hourly_losses += 1
+            prev = OptionsScalpStrategy._opt_consecutive_losses.get(self.pair, 0)
+            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = prev + 1
         self.hourly_pnl += pnl_usd
+
+        # Trade cooldown — set 5 min timer
+        self._last_option_trade_time = time.monotonic()
 
         # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
@@ -1771,12 +1826,18 @@ class OptionsScalpStrategy(BaseStrategy):
              "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4)},
         )
 
-        # Stats
+        # Stats + loss streak tracking
         if pnl_pct >= 0:
             self.hourly_wins += 1
+            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = 0
         else:
             self.hourly_losses += 1
+            prev = OptionsScalpStrategy._opt_consecutive_losses.get(self.pair, 0)
+            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = prev + 1
         self.hourly_pnl += pnl_usd
+
+        # Trade cooldown — set 5 min timer
+        self._last_option_trade_time = time.monotonic()
 
         # Clear dashboard + position state
         await self._clear_dashboard_position(exit_reason_detail, pnl_pct, pnl_usd)
