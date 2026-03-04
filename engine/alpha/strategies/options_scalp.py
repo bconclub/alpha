@@ -86,7 +86,10 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
-    MIN_MOMENTUM_PCT = 0.15             # Skip if |momentum_60s| < 0.15% (was 0.05 — options need real moves, not drift)
+    # Candle-based momentum gate (replaces old single-snapshot momentum % check)
+    CANDLE_MOM_STREAK = 3                # min directional candles out of last 5
+    CANDLE_MOM_CUMULATIVE_PCT = 0.10     # min cumulative move over 5 candles (% of price)
+    CANDLE_MOM_LOOKBACK = 5              # number of completed 1m candles to check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
     OPT_TRADE_COOLDOWN_SEC = 300        # 5 min between options trades (prevent rapid-fire losing streak)
@@ -807,38 +810,43 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 3b. Minimum momentum gate — skip weak moves
-        momentum_60s = abs(signal_state.get("momentum_60s", 0) or 0)
-        if momentum_60s < self.MIN_MOMENTUM_PCT:
-            self.logger.info(
-                "[%s] OPTIONS WEAK MOM: |momentum|=%.3f%% < %.2f%% — skipping",
-                self.pair, momentum_60s, self.MIN_MOMENTUM_PCT,
-            )
-            return []
-
         side = signal_state.get("side")
         if side is None:
             self.logger.info("[%s] OPTIONS: 3/4+ but side=None — skipping", self.pair)
             return []
 
+        # 3b. Candle-based momentum gate — replaces old single-snapshot % check
+        candle_pass, candle_reason = await self._check_candle_momentum(side)
+        if not candle_pass:
+            self.logger.info(
+                "[%s] OPTIONS CANDLE_MOM: %s", self.pair, candle_reason,
+            )
+            return []
+        else:
+            self.logger.info(
+                "[%s] OPTIONS CANDLE_MOM: %s", self.pair, candle_reason,
+            )
+
         # 4. Determine option type
         option_type = "call" if side == "long" else "put"
 
-        # 4a. GPFC: Trend alignment — never go counter-trend
-        if self._current_regime == "trending" or self._current_regime == "TRENDING_UP":
-            if option_type == "put":
-                self.logger.info(
-                    "[%s] OPTIONS TREND_BLOCK: no PUTs in TRENDING_UP — skipping",
-                    self.pair,
-                )
-                return []
-        elif self._current_regime == "TRENDING_DOWN":
-            if option_type == "call":
-                self.logger.info(
-                    "[%s] OPTIONS TREND_BLOCK: no CALLs in TRENDING_DOWN — skipping",
-                    self.pair,
-                )
-                return []
+        # 4a. GPFC: Trend alignment — counter-trend blocked for 3/4, allowed for 4/4
+        # Options max loss is premium paid — counter-trend on full confluence is fine.
+        if strength < 4:
+            if self._current_regime == "trending" or self._current_regime == "TRENDING_UP":
+                if option_type == "put":
+                    self.logger.info(
+                        "[%s] OPTIONS TREND_BLOCK: no PUTs in TRENDING_UP (strength=%d < 4) — skipping",
+                        self.pair, strength,
+                    )
+                    return []
+            elif self._current_regime == "TRENDING_DOWN":
+                if option_type == "call":
+                    self.logger.info(
+                        "[%s] OPTIONS TREND_BLOCK: no CALLs in TRENDING_DOWN (strength=%d < 4) — skipping",
+                        self.pair, strength,
+                    )
+                    return []
 
         # 4b. RSI directional conviction gate — need RSI backing direction
         rsi_now = signal_state.get("rsi")
@@ -1306,6 +1314,104 @@ class OptionsScalpStrategy(BaseStrategy):
             collateral_per_contract,
         )
         return contracts
+
+    # ==================================================================
+    # CANDLE-BASED MOMENTUM GATE
+    # ==================================================================
+
+    async def _check_candle_momentum(self, side: str) -> tuple[bool, str]:
+        """Check candle-based momentum for options entry.
+
+        Uses last 5 completed 1m candles from the futures exchange.
+        All three conditions must pass:
+        1. Candle streak: ≥3 of 5 candles in entry direction
+        2. Cumulative move: sum of (close-open) ≥ 0.10% of price
+        3. Fresh candle: last completed candle must be in entry direction
+
+        Args:
+            side: "long" for CALL, "short" for PUT
+
+        Returns:
+            (passed, reason_string) for logging
+        """
+        exchange = self.futures_exchange
+        if not exchange:
+            return True, "no_exchange (skip check)"
+
+        try:
+            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK + 1)
+        except Exception as e:
+            self.logger.debug("[%s] CANDLE_MOM: fetch_ohlcv failed: %s", self.pair, e)
+            return True, f"fetch_failed ({e})"
+
+        if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK + 1:
+            return True, f"insufficient candles ({len(ohlcv) if ohlcv else 0})"
+
+        # Use completed candles only (skip the last/current candle which is still forming)
+        completed = ohlcv[-(self.CANDLE_MOM_LOOKBACK + 1):-1]
+
+        current_price = float(completed[-1][4])  # close of last completed candle
+        if current_price <= 0:
+            return True, "bad price"
+
+        # Classify each candle: bullish (green), bearish (red), or doji (neutral)
+        doji_threshold = current_price * 0.0001  # 0.01% of price
+        directional_count = 0
+        cumulative_move = 0.0
+
+        for candle in completed:
+            o, c = float(candle[1]), float(candle[4])
+            move = c - o
+            cumulative_move += move
+
+            if abs(move) < doji_threshold:
+                continue  # doji — neutral, skip
+
+            if side == "long" and move > 0:
+                directional_count += 1
+            elif side == "short" and move < 0:
+                directional_count += 1
+
+        # Last completed candle direction
+        last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
+        last_move = last_c - last_o
+        last_is_directional = (
+            (side == "long" and last_move > doji_threshold)
+            or (side == "short" and last_move < -doji_threshold)
+        )
+
+        # Cumulative move check (direction-aware)
+        cum_pct = (cumulative_move / current_price) * 100
+        if side == "short":
+            cum_pct = -cum_pct  # for shorts, negative move is bullish for our direction
+
+        # Build result
+        color = "green" if side == "long" else "red"
+        last_color = "green" if last_move > doji_threshold else ("red" if last_move < -doji_threshold else "doji")
+        n = self.CANDLE_MOM_LOOKBACK
+
+        passed = (
+            directional_count >= self.CANDLE_MOM_STREAK
+            and cum_pct >= self.CANDLE_MOM_CUMULATIVE_PCT
+            and last_is_directional
+        )
+
+        if passed:
+            reason = (
+                f"{directional_count}/{n} {color}, cumulative {cum_pct:+.2f}%, "
+                f"last={last_color} → PASS"
+            )
+        else:
+            parts = []
+            if directional_count < self.CANDLE_MOM_STREAK:
+                parts.append(f"{directional_count}/{n} {color} < {self.CANDLE_MOM_STREAK}")
+            if cum_pct < self.CANDLE_MOM_CUMULATIVE_PCT:
+                parts.append(f"cumulative {cum_pct:+.2f}% < {self.CANDLE_MOM_CUMULATIVE_PCT}%")
+            if not last_is_directional:
+                parts.append(f"last={last_color} (need {color})")
+            reason = ", ".join(parts) + " → SKIP"
+
+        return passed, reason
 
     # ==================================================================
     # RATCHET FLOOR
