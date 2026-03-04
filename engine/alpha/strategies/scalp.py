@@ -288,9 +288,9 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     # Layer 3 (momentum safety net) — high gates, only catches big moves
-    MOMENTUM_MIN_PCT = 0.30           # 0.30%+ move in 60s (real momentum, not noise — was 0.20)
+    MOMENTUM_MIN_PCT = 0.20           # 0.20%+ move in 60s (restored — 0.30 blocked gradual moves)
     MOMENTUM_30S_MIN_PCT = 0.12      # 30s window threshold (raised from 0.06)
-    VOL_SPIKE_RATIO = 1.5             # need real institutional volume (was 0.6)
+    VOL_SPIKE_RATIO = 0.8             # 0.8x avg volume (restored — 1.5 too tight, signals.md says 0.8)
     RSI_EXTREME_LONG = 40             # Level 5/10 — RSI < 40 = oversold → long (was 35)
     RSI_EXTREME_SHORT = 60            # Level 5/10 — RSI > 60 = overbought → short (was 60→65→60)
     # BB mean-reversion thresholds (upper = short, lower = long):
@@ -394,8 +394,8 @@ class ScalpStrategy(BaseStrategy):
     SPOT_BREAKEVEN_EXIT_BELOW_PCT = 0.05 # exit if current <= 0.05%
 
     # ── Adaptive widening — 60min idle, 10% loosening (was disabled, was 30min/20%)
-    IDLE_WIDEN_SECONDS = 60 * 60      # 60 min idle before thresholds loosen (was 30 min)
-    IDLE_WIDEN_FACTOR = 0.90          # 10% loosening (was 0.80=20%, then disabled at 1.0)
+    IDLE_WIDEN_SECONDS = 30 * 60      # 30 min idle before thresholds loosen (restored from 60 min)
+    IDLE_WIDEN_FACTOR = 0.80          # 20% loosening (restored — mom 0.20→0.16, vol 0.8→0.64)
 
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
     # NOTE: MIN_EXPECTED_MOVE_PCT fee filter REMOVED — it was blocking 385+
