@@ -3626,14 +3626,6 @@ class ScalpStrategy(BaseStrategy):
                 )
                 return
 
-            # BTC/ETH need significant capital for 1 contract at leverage
-            if self._base_asset in ("BTC", "ETH") and exchange_capital < 50:
-                self.logger.info(
-                    "[%s] ACCEL skip — %s needs $50+ for 1 contract (have $%.2f)",
-                    self.pair, self._base_asset, exchange_capital,
-                )
-                return
-
             # Ensure SL is set (ATR may not be computed yet before first candle scan)
             if self._sl_pct <= 0 or self._last_atr_pct <= 0:
                 fallback_sl = self.PAIR_SL_FLOOR.get(self._base_asset, 0.35)
