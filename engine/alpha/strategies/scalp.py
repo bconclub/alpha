@@ -192,14 +192,14 @@ class ScalpStrategy(BaseStrategy):
     PAIR_SL_FLOOR: dict[str, float] = {
         "BTC": 0.30,   # BTC: 0.30% price = 6% capital at 20x (was 0.25 — noise sweeps)
         "ETH": 0.35,   # ETH: 0.35% price = 7% capital at 20x (was 0.25 — noise sweeps)
-        "XRP": 0.40,   # XRP: 0.40% price = 8% capital at 20x (was 0.25 — noise sweeps)
+        "XRP": 0.50,   # XRP: 0.50% price = 10% capital at 20x (was 0.40 — 4 SL in 20 trades = 70% of losses)
         "SOL": 0.40,   # SOL: 0.40% price = 8% capital at 20x (was 0.25 — noise sweeps)
     }
     # Per-pair SL caps (normal conditions): wider for volatile pairs
     PAIR_SL_CAP: dict[str, float] = {
         "BTC": 0.50,   # BTC/ETH: tighter cap
         "ETH": 0.50,
-        "XRP": 0.60,   # XRP/SOL: wider cap for volatile pairs
+        "XRP": 0.70,   # XRP: wider cap for noisy pair (was 0.60 — noise sweeps)
         "SOL": 0.60,
     }
     PAIR_TP_FLOOR: dict[str, float] = {
@@ -245,10 +245,10 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_LONG = 70            # long exit when RSI crosses above 70
     RSI_REVERSAL_SHORT = 30           # short exit when RSI crosses below 30
     MOMENTUM_DYING_PCT = 0.02         # exit if abs(momentum) drops below 0.02% (was 0.04 — normal oscillation)
-    MOM_FLIP_CONFIRM_SECONDS = 10     # 10s confirm for reversal (was 15 — keep reversals fast)
+    MOM_FLIP_CONFIRM_SECONDS = 60     # 60s sustained confirm for reversal (was 10 — too trigger-happy at 0.05-0.12% peaks)
     MOM_FLIP_THRESHOLD_PCT = 0.10     # momentum must counter by 0.10% for flip (not just < 0)
     MOM_DYING_CONFIRM_SECONDS = 20    # (legacy — kept for compat, no longer triggers reversal)
-    MOM_FADE_CONFIRM_SECONDS = 60     # 60s fading confirm (was 15 — too fast, killed trades)
+    MOM_FADE_CONFIRM_SECONDS = 90     # 90s fading confirm (was 60 — still killing trades at small peaks)
     MOM_FADE_MIN_HOLD = 90            # minimum 90s hold before MOMENTUM_FADE can fire
     MOM_FADE_TREND_HOLD = 120         # if trend-aligned, extend min hold to 120s
     MOM_FADE_TREND_CONFIRM = 60       # if trend-aligned, 60s confirmation (was 20)
@@ -3032,8 +3032,8 @@ class ScalpStrategy(BaseStrategy):
                 return signals  # STAY IN — momentum still aligned
 
             # ── MODE 2: SIGNAL REVERSAL + PATIENCE EXITS ─────────────────
-            # FAST: REVERSAL (flip/RSI/signals) → 10s confirm, exit regardless of P&L
-            # SLOW: MOMENTUM_FADE → 60s confirm + (losing OR flipped)
+            # PATIENT: REVERSAL (flip/RSI/signals) → 60s confirm (immediate at pnl < -0.20%)
+            # SLOW: MOMENTUM_FADE → 90s confirm + losing only (never fade a winner)
             # SLOW: DEAD_MOMENTUM → 5min age + 3min flat + losing
             reversal_reason = ""
 
@@ -3052,9 +3052,18 @@ class ScalpStrategy(BaseStrategy):
                         self.pair, momentum_60s, self.MOM_FLIP_THRESHOLD_PCT,
                         self.MOM_FLIP_CONFIRM_SECONDS,
                     )
-                elif time.monotonic() - self._mom_flip_since >= self.MOM_FLIP_CONFIRM_SECONDS:
-                    flip_dur = int(time.monotonic() - self._mom_flip_since)
-                    reversal_reason = f"mom_flip_confirmed ({momentum_60s:+.3f}%, {flip_dur}s)"
+                else:
+                    elapsed = time.monotonic() - self._mom_flip_since
+                    # Immediate fire if losing badly (real reversal, don't wait)
+                    if pnl_pct < -0.20:
+                        reversal_reason = f"mom_flip_urgent (pnl={pnl_pct:+.2f}%, mom={momentum_60s:+.3f}%, {int(elapsed)}s)"
+                    elif elapsed >= self.MOM_FLIP_CONFIRM_SECONDS:
+                        reversal_reason = f"mom_flip_confirmed ({momentum_60s:+.3f}%, {int(elapsed)}s)"
+                    elif self._tick_count % 6 == 0:
+                        self.logger.info(
+                            "REVERSAL: confirming %ds/%ds, mom=%.3f%%",
+                            int(elapsed), self.MOM_FLIP_CONFIRM_SECONDS, momentum_60s,
+                        )
             else:
                 if self._mom_flip_since > 0:
                     self.logger.info(
@@ -3119,13 +3128,9 @@ class ScalpStrategy(BaseStrategy):
                     self._flat_since = time.monotonic()
                 flat_duration = time.monotonic() - self._flat_since
 
-                # MOMENTUM_FADE: 60s fading, exit if losing OR momentum flipped
-                # Trail bypass: profitable + trail active + not flipped → trail handles
-                _trail_managing = (
-                    (self._trailing_active or self._trail_stop_price > 0)
-                    and pnl_pct > 0 and not _fade_mom_flipped
-                )
-                if not _trail_managing:
+                # MOMENTUM_FADE: 90s fading, exit ONLY if losing (never fade a winner)
+                # Winners are protected by ratchet/trail — fade only cuts dead losers.
+                if pnl_pct < 0:
                     trend_15m = self._get_15m_trend()
                     trend_aligned = (
                         (side == "long" and trend_15m == "bullish")
@@ -3137,22 +3142,25 @@ class ScalpStrategy(BaseStrategy):
                         if self._mom_fade_since == 0:
                             self._mom_fade_since = now_m
                             self.logger.info(
-                                "MOM_FADE_START: %s pnl=%+.2f%% mom=%.3f%% hold=%ds "
+                                "FADE: %s pnl=%+.2f%% mom=%.3f%% hold=%ds "
                                 "trend=%s — confirming for %ds",
                                 self.pair, pnl_pct, abs(momentum_60s),
                                 int(hold_seconds), trend_15m, self.MOM_FADE_CONFIRM_SECONDS,
                             )
                         elif now_m - self._mom_fade_since >= self.MOM_FADE_CONFIRM_SECONDS:
-                            # Only exit if losing OR momentum direction flipped
-                            if pnl_pct < 0 or _fade_mom_flipped:
-                                confirm_dur = int(now_m - self._mom_fade_since)
-                                self.logger.info(
-                                    "MOMENTUM_FADE: %s pnl=%+.2f%% hold=%ds "
-                                    "confirmed=%ds flipped=%s trend=%s",
-                                    self.pair, pnl_pct, int(hold_seconds),
-                                    confirm_dur, _fade_mom_flipped, trend_15m,
-                                )
-                                return self._do_exit(current_price, pnl_pct, side, "MOMENTUM_FADE", hold_seconds)
+                            confirm_dur = int(now_m - self._mom_fade_since)
+                            self.logger.info(
+                                "FADE: %ds/%ds, mom=%.3f%%, pnl=%+.2f%% — confirming",
+                                confirm_dur, self.MOM_FADE_CONFIRM_SECONDS,
+                                abs(momentum_60s), pnl_pct,
+                            )
+                            return self._do_exit(current_price, pnl_pct, side, "MOMENTUM_FADE", hold_seconds)
+                elif pnl_pct >= 0 and self._mom_fade_since > 0:
+                    self.logger.info(
+                        "FADE: %s pnl=%+.2f%% — SKIP (winning)",
+                        self.pair, pnl_pct,
+                    )
+                    self._mom_fade_since = 0.0
 
                 # DEAD_MOMENTUM: losing + old (5 min) + flat (3 min continuous)
                 # Profitable flat positions are fine — momentum can resume.

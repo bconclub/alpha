@@ -4,8 +4,8 @@
 Alpha is a precision momentum-trading bot built by Z at BCON Club. It trades crypto across four exchanges simultaneously — Bybit (primary USDT futures), Delta Exchange India (USD futures + options), Kraken Futures (USD perpetuals), and Binance (1x spot, long-only). The mission: grow capital through quality trades that beat the fees.
 
 ## Current Versions
-- **Engine**: `3.24.6`
-- **Signal Logic**: v6.3 (11-Signal Arsenal — VWAP, BB Squeeze, Liquidity Sweep, FVG, Volume Divergence + setup tracking)
+- **Engine**: `0.4.9`
+- **Signal Logic**: v6.3 (12-Signal Arsenal — VWAP, BB Squeeze, Liquidity Sweep, FVG, Volume Divergence, BPRC + setup tracking)
 - **Exchanges**: Bybit (primary), Delta India, Kraken Futures, Binance Spot
 
 ## Repository Structure
@@ -26,7 +26,7 @@ Alpha/
 │   │   └── strategies/
 │   │       ├── base.py              # BaseStrategy ABC + Signal dataclass
 │   │       ├── scalp.py             # Primary strategy — v6.3 11-signal scalping
-│   │       ├── options_scalp.py     # Options buying on 3/4+ signals (disabled)
+│   │       ├── options_scalp.py     # Options buying on momentum setups (candle-based + ratchet)
 │   │       ├── futures_momentum.py  # Trend-following futures (disabled)
 │   │       ├── momentum.py          # General momentum (disabled)
 │   │       ├── grid.py              # Grid trading (disabled)
@@ -93,45 +93,50 @@ Alpha/
 
 ## Trading Logic
 
-### The 11-Signal Entry Arsenal (v6.3)
+### The 12-Signal Entry Arsenal (v6.3)
 
-Every tick, the engine evaluates 11 independent signals. Each signal fires a bull or bear tag.
+Every tick, the engine evaluates 12 independent signals. Each signal fires a bull or bear tag.
 
 | # | Signal | Tag | Detection Logic |
 |---|--------|-----|----------------|
-| 1 | **Momentum** | `MOM:` | 0.15%+ price move in last 60s |
-| 2 | **Volume Spike** | `VOL:` | 1.2x+ average volume (pair-adjusted) |
-| 3 | **RSI Extreme** | `RSI:` | RSI < 35 (long) or > 65 (short) |
+| 1 | **Momentum** | `MOM:` | 0.20%+ price move in last 60s |
+| 2 | **Volume Spike** | `VOL:` | 0.8x+ average volume (pair-adjusted) |
+| 3 | **RSI Extreme** | `RSI:` | RSI < 40 (long) or > 60 (short) |
 | 4 | **Bollinger Band** | `BB:` | Price outside BB + mean-reversion setup |
 | 5 | **5m Momentum** | `MOM5M:` | Sustained 5-candle trend confirmation |
 | 6 | **Trend Continuation** | `TCONT:` | New 15-candle extreme + volume |
 | 7 | **VWAP Reclaim** | `VWAP:` | Price above VWAP + 9 EMA > 21 EMA ribbon |
 | 8 | **BB Squeeze** | `BBSQZ:` | BB inside Keltner Channel → breakout + volume |
-| 9 | **Liquidity Sweep** | `LIQSWEEP:` | Sweep swing H/L, reclaim + RSI divergence |
+| 9 | ~~**Liquidity Sweep**~~ | ~~`LIQSWEEP:`~~ | **DISABLED** — poor performance |
 | 10 | **Fair Value Gap** | `FVG:` | 3-candle imbalance gap + price filling |
 | 11 | **Volume Divergence** | `VOLDIV:` | Price vs volume trend divergence (hollow moves) |
+| 12 | **BPRC** | `BPRC:` | Breakout Pullback Reload Continue pattern |
 
 ### Entry Rules
-- **Gate**: ALL pairs require **3-of-4+ signals** to enter (no 2/4 coin flips)
+- **Gate**: ALL pairs require **4-of-4 signals** to enter (full confluence required)
 - **RSI Override**: RSI < 30 or > 70 enters immediately regardless of signal count
-- **Max**: 2 concurrent positions. 2nd only if 1st is breakeven+ AND signal is 3/4+
+- **Counter-trend**: 4/4 signals required (allowed, not blocked)
+- **Max**: 3 concurrent positions per exchange. 2nd only if 1st is breakeven+ AND signal is 3/4+
+- **Stale momentum**: 10s momentum must be >= 0.08% in entry direction
 - **Cooldowns**: 2 min after SL, 5 min after 3 consecutive losses
-- **SOL disabled**: 0% win rate, allocation set to 0%
+- **Leverage**: Fixed 20x all futures (dynamic leverage removed)
 
 ### Setup Type Tracking
-Each entry is classified by its dominant signal pattern:
+Each entry is classified by its dominant signal pattern (first-match priority):
 
 | Setup Type | Trigger |
 |-----------|---------|
-| `VWAP_RECLAIM` | VWAP signal present |
+| `RSI_OVERRIDE` | RSI extreme override entry |
+| `TIER1_ANTICIPATORY` | Anticipatory T1 leading signals |
 | `BB_SQUEEZE` | BB Squeeze breakout signal |
-| `LIQ_SWEEP` | Liquidity sweep signal |
-| `FVG_FILL` | Fair Value Gap fill signal |
-| `VOL_DIVERGENCE` | Volume divergence signal |
-| `TREND_CONT` | Trend continuation signal |
 | `MOMENTUM_BURST` | MOM + VOL combo |
 | `MEAN_REVERT` | BB + RSI combo |
-| `RSI_OVERRIDE` | RSI extreme override entry |
+| `TREND_CONT` | Trend continuation signal |
+| `VWAP_RECLAIM` | VWAP signal present |
+| `LIQ_SWEEP` | Liquidity sweep signal (disabled) |
+| `FVG_FILL` | Fair Value Gap fill signal |
+| `VOL_DIVERGENCE` | Volume divergence signal |
+| `BPRC_RELOAD` | Breakout Pullback Reload Continue |
 | `MULTI_SIGNAL` | 4+ different signals fired |
 | `MIXED` | Fallback — no dominant pattern |
 
@@ -141,42 +146,59 @@ Setup type is stored in the `setup_type` column of the trades table and displaye
 
 | Phase | Time | Behavior |
 |-------|------|----------|
-| **Phase 1** | 0-30s | HANDS OFF — only hard SL fires. Skip to Phase 2 if peak PnL >= +0.5% |
-| **Phase 2** | 30s-10min | WATCH — move SL to entry at +0.20%, activate trail at +0.15%, profit pullback, signal reversal |
-| **Phase 3** | 10-30min | CLEANUP — flatline exit (< 0.05% move in 10 min), hard timeout at 30 min |
+| **Phase 1** | 0-30s | HANDS OFF — only hard SL + ratchet floors fire. Skip to Phase 2 if peak PnL >= +0.5% |
+| **Phase 2** | 30s-10min | RIDE — momentum riding + ratchet floor + signal reversal exits |
+| **Phase 3** | 10-30min | CLEANUP — flatline exit (< 0.05% move in 10 min, losers only), hard timeout at 30 min (losers only) |
+
+### Ratchet Floor System
+Locks profit floors as peak PnL grows (only moves UP, never decreases):
+
+| Peak PnL | Floor | Capital at 20x |
+|----------|-------|----------------|
+| +0.20% | +0.08% | +1.6% |
+| +0.30% | +0.15% | +3.0% |
+| +0.50% | +0.30% | +6.0% |
+| +1.00% | +0.60% | +12.0% |
+| +2.00% | +1.20% | +24.0% |
+| +3.00% | +2.00% | +40.0% |
+| +5.00% | +3.50% | +70.0% |
 
 ### Dynamic Trailing Tiers
-Trail activates at +0.15% (any green = trail it). Distance widens with profit, never tightens.
+Trail activates at +0.25% (2 min min hold, instant at +0.30%). Distance widens with profit, never tightens.
 
-| Peak PnL | Trail Distance | Behavior |
+| Peak PnL | Trail Distance | Exits At |
 |----------|---------------|----------|
-| +0.15% | 0.15% | Instant trail — any green locks profit |
-| +0.35% | 0.20% | Tight scalp lock |
-| +0.50% | 0.25% | Standard trail |
-| +1.00% | 0.30% | Moderate trail |
-| +2.00% | 0.40% | Tighter lock |
-| +3.00% | 0.50% | Lock hard |
-| +5.00% | 0.75% | Still tight for scalping |
+| +0.25% | 0.10% | ~+0.15% |
+| +0.35% | 0.12% | ~+0.23% |
+| +0.50% | 0.15% | ~+0.35% |
+| +1.00% | 0.20% | ~+0.80% |
+| +2.00% | 0.30% | ~+1.70% |
+| +3.00% | 0.40% | ~+2.60% |
+| +5.00% | 0.60% | ~+4.40% |
 
 ### Exit Reasons
 - **SL**: Hard stop loss hit (all phases)
+- **RATCHET**: Ratchet floor breached (locked profit dropped below floor)
 - **TRAIL**: Trailing stop hit (phase 2+)
-- **BREAKEVEN**: Price returned to entry after peak >= +0.20%
-- **PROFIT_PULLBACK**: Lost 30%+ of peak profit (peak >= +0.50%)
-- **PROFIT_DECAY**: Profit faded below +0.10% after peaking >= +0.30%
-- **SIGNAL_REVERSAL**: RSI/momentum flipped against position (phase 2+, pnl >= +0.30%)
-- **FLATLINE**: Momentum dead < 0.05% move in 10 min (phase 3)
-- **TIME_LIMIT**: 30 min max hold timeout
+- **BREAKEVEN**: Price returned to entry after peak >= +0.30%
+- **REVERSAL**: Signal reversal exit (momentum flip 60s confirm / instant at pnl < -0.20% / dying < 0.02% / RSI cross)
+- **MOMENTUM_FADE**: Momentum fading 90s+ (losers only — never fade a winner)
+- **DEAD_MOMENTUM**: Momentum flat 3+ min continuous (5 min min hold)
+- **HARD_TP_10PCT**: 10% capital gain safety net
+- **FLAT**: Flatline (no movement 10m, losers only)
+- **TIMEOUT**: 30 min max hold (losers only)
+- **SAFETY**: Losing after timeout
 
 ### Per-Pair Stop Loss
-| Pair | SL Floor | TP Floor |
-|------|----------|----------|
-| BTC | 0.40% | 1.50% |
-| ETH | 0.45% | 1.50% |
-| XRP | 0.50% | 2.00% |
-| Default | 0.35% | 1.50% |
+| Pair | SL Floor | SL Cap | TP Floor |
+|------|----------|--------|----------|
+| BTC | 0.30% | 0.50% | 1.50% |
+| ETH | 0.35% | 0.50% | 1.50% |
+| XRP | 0.50% | 0.70% | 2.00% |
+| SOL | 0.40% | 0.60% | 2.00% |
+| Spot | 2.00% | 3.00% | 3.00% |
 
-SL/TP also adapt dynamically via ATR (SL = 1.5x ATR, TP = 4x ATR), using whichever is wider.
+SL/TP adapt dynamically via ATR (SL = 1.5x ATR, TP = 4x ATR), capped at SL Cap. Max SL loss = 5% of total balance.
 
 ### Indicators Computed Every Tick
 - **RSI** (14-period) — entry signals + exit reversal
@@ -211,9 +233,10 @@ The engine writes position state to the DB every ~10 seconds while a position is
 Dashboard reads via `v_open_positions` view with 3-second live price polling overlay.
 
 ## Active Strategies
-- **scalp** — Primary. v6.3 11-signal momentum scalping on Bybit + Delta + Kraken futures + Binance spot
+- **scalp** — Primary. v6.3 12-signal momentum scalping on Bybit + Delta + Kraken futures + Binance spot
+- **options_scalp** — Options buying on Delta Exchange (MOMENTUM_BURST + BB_SQUEEZE setups, candle-based momentum, ratchet floors)
 
-Inactive/disabled: `options_scalp`, `futures_momentum`, `momentum`, `grid`, `arbitrage`, `strategy_selector`
+Inactive/disabled: `futures_momentum`, `momentum`, `grid`, `arbitrage`, `strategy_selector`
 
 ## Key Protections
 - **Orphan protection**: Per-exchange reconciliation every 60s (Bybit, Delta, Kraken)
@@ -258,10 +281,16 @@ Major milestones:
 - v6.0: Dashboard live prices, engine version display
 - v6.1: Emergency signal fix (OR→AND gate enforcement)
 - v6.2: VWAP Reclaim signal + setup type tracking per trade
-- v6.3: 11-signal arsenal (BB Squeeze, Liquidity Sweep, FVG, Volume Divergence)
+- v6.3: 12-signal arsenal (BB Squeeze, Liquidity Sweep, FVG, Volume Divergence, BPRC)
 - GPFC #20: Bybit exchange integration (primary futures)
 - GPFC #21: Options exit system port + Delta orphan fix
 - GPFC #22: Kraken Futures exchange integration (4th exchange)
+- GPFC: BPRC signal #12 (Breakout Pullback Reload Continue)
+- GPFC: Patient exits, sharp reversals, orphan fixes, Kraken backfill
+- GPFC: Fill reconciliation loop + exchange_fill_id dedup
+- GPFC: Tighten ANTIC entry + options quality gate
+- GPFC: Options ratchet — early breakeven + small-winner floors
+- GPFC: Candle-based options momentum + allow 4/4 counter-trend
 
 ---
 *Born February 14, 2026. Built by Z @ BCON Club.*
