@@ -612,9 +612,11 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 ### Entry Requirements
 - **Primary gate: Candle momentum** — 3+ of last 5 completed 1m candles in one direction, cumulative move >= 0.10%, last candle in direction. Direction (CALL/PUT) comes FROM candles, not from scalp signal.
 - **Setup whitelist:** MOMENTUM_BURST and BB_SQUEEZE only (defaults to MOMENTUM_BURST when scalp context unavailable)
-- **Trend alignment:** TRENDING_UP → CALLs only, TRENDING_DOWN → PUTs only
-- **Counter-trend:** Allowed with 4+/5 strong candle momentum
+- **Counter-trend:** Always allowed — candle momentum ensures direction is real
+- **Regime:** Only CHOPPY blocked. SIDEWAYS and all trends allowed.
 - **RSI conviction (soft):** CALL needs RSI < 40, PUT needs RSI > 60 (from scalp context — skipped if unavailable)
+- **Dynamic sizing:** 5/5 candles + cum > 0.20% → 40% alloc | 4/5 + cum > 0.15% → 30% | 3/5 base → 20%
+- **Delta futures disabled** — Delta is options-only. Kraken/Bybit handle futures.
 
 ### Strike & Premium
 - ATM strikes, max 3 OTM strikes walked

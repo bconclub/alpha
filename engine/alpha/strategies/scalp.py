@@ -961,6 +961,14 @@ class ScalpStrategy(BaseStrategy):
                 return signals  # don't enter
             # If somehow in position (restored), still check exits
 
+        # ── Delta futures disabled — options-only on Delta ────────────
+        if self._exchange_id == "delta" and self.is_futures:
+            if not self.in_position:
+                if self._tick_count % 60 == 0:
+                    self.logger.info("[%s] DELTA FUTURES DISABLED — options only", self.pair)
+                return signals
+            # If in position, still allow exit checks
+
         # ── Dashboard pair disable (pair_config.enabled = false) ──────
         if not self._pair_enabled:
             if not self.in_position:

@@ -174,10 +174,11 @@ I buy CALLs when 3+ of 5 candles are green, PUTs when 3+ are red. Only MOMENTUM_
 
 **My options rules:**
 - Only buy on quality setups (MOMENTUM_BURST, BB_SQUEEZE). Never speculate on weak signals.
-- Trend-aligned: TRENDING_UP → CALLs only, TRENDING_DOWN → PUTs only.
-- Counter-trend allowed with 4+/5 strong candle momentum (was blocked entirely).
+- Counter-trend always allowed — candle momentum already ensures direction is real.
+- Only CHOPPY regime blocked. SIDEWAYS and all trends allowed.
 - ATM strikes for liquidity (max 3 OTM strikes walked).
 - **Candle-based momentum (primary gate):** 3+ directional candles out of last 5, cumulative move >= 0.10%, last candle in direction. Direction comes FROM candles, not from scalp signals.
+- **Dynamic sizing:** 5/5 candles + cum > 0.20% → 40% alloc. 4/5 + cum > 0.15% → 30%. 3/5 base → 20%.
 - TP: 30% premium gain. SL: 50% premium loss.
 - Trailing: activates at +15% premium gain, 5% trail distance.
 - Pullback exit: lost 40% of peak gain.

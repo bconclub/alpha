@@ -276,6 +276,16 @@ export function LiveStatusBar() {
                 <span className="text-[11px] font-bold text-[#f7a600]">BYBIT</span>
               </div>
               <span className="font-mono text-lg font-semibold text-white">{formatCurrency(bybitBalance)}</span>
+              {bybitPnl && bybitPnl.total_trades > 0 && (
+                <>
+                  <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                    {bybitPnl.wins}W / {bybitPnl.losses}L · {bybitPnl.win_rate_pct.toFixed(0)}% WR · {bybitPnl.total_trades} trades
+                  </div>
+                  <div className={cn('text-[10px] font-mono', bybitPnl.total_pnl >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
+                    {bybitPnl.total_pnl >= 0 ? '+' : ''}{formatCurrency(bybitPnl.total_pnl)} P&L
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -286,6 +296,16 @@ export function LiveStatusBar() {
                 <span className="text-[11px] font-bold text-[#00d2ff]">DELTA</span>
               </div>
               <span className="font-mono text-lg font-semibold text-white">{formatCurrency(deltaBalance)}</span>
+              {deltaPnl && deltaPnl.total_trades > 0 && (
+                <>
+                  <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                    {deltaPnl.wins}W / {deltaPnl.losses}L · {deltaPnl.win_rate_pct.toFixed(0)}% WR · {deltaPnl.total_trades} trades
+                  </div>
+                  <div className={cn('text-[10px] font-mono', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
+                    {deltaPnl.total_pnl >= 0 ? '+' : ''}{formatCurrency(deltaPnl.total_pnl)} P&L
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -296,6 +316,16 @@ export function LiveStatusBar() {
                 <span className="text-[11px] font-bold text-[#7B61FF]">KRAKEN</span>
               </div>
               <span className="font-mono text-lg font-semibold text-white">{formatCurrency(krakenBalance)}</span>
+              {krakenPnl && krakenPnl.total_trades > 0 && (
+                <>
+                  <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                    {krakenPnl.wins}W / {krakenPnl.losses}L · {krakenPnl.win_rate_pct.toFixed(0)}% WR · {krakenPnl.total_trades} trades
+                  </div>
+                  <div className={cn('text-[10px] font-mono', krakenPnl.total_pnl >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
+                    {krakenPnl.total_pnl >= 0 ? '+' : ''}{formatCurrency(krakenPnl.total_pnl)} P&L
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -471,6 +501,16 @@ export function LiveStatusBar() {
             <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
               <span className="font-mono text-lg text-white truncate">{formatCurrency(bybitBalance)}</span>
             </div>
+            {bybitPnl && bybitPnl.total_trades > 0 && (
+              <>
+                <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                  {bybitPnl.wins}W / {bybitPnl.losses}L · {bybitPnl.win_rate_pct.toFixed(0)}% WR · {bybitPnl.total_trades} trades
+                </div>
+                <div className={cn('text-[10px] font-mono', bybitPnl.total_pnl >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
+                  {bybitPnl.total_pnl >= 0 ? '+' : ''}{formatCurrency(bybitPnl.total_pnl)} P&L
+                </div>
+              </>
+            )}
           </div>
           )}
 
@@ -492,6 +532,16 @@ export function LiveStatusBar() {
                 <span className="text-[10px] text-zinc-500 shrink-0">~{deltaBalanceInr.toLocaleString()}</span>
               )}
             </div>
+            {deltaPnl && deltaPnl.total_trades > 0 && (
+              <>
+                <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                  {deltaPnl.wins}W / {deltaPnl.losses}L · {deltaPnl.win_rate_pct.toFixed(0)}% WR · {deltaPnl.total_trades} trades
+                </div>
+                <div className={cn('text-[10px] font-mono', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
+                  {deltaPnl.total_pnl >= 0 ? '+' : ''}{formatCurrency(deltaPnl.total_pnl)} P&L
+                </div>
+              </>
+            )}
           </div>
           )}
 
@@ -510,6 +560,16 @@ export function LiveStatusBar() {
             <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
               <span className="font-mono text-lg text-white truncate">{formatCurrency(krakenBalance)}</span>
             </div>
+            {krakenPnl && krakenPnl.total_trades > 0 && (
+              <>
+                <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                  {krakenPnl.wins}W / {krakenPnl.losses}L · {krakenPnl.win_rate_pct.toFixed(0)}% WR · {krakenPnl.total_trades} trades
+                </div>
+                <div className={cn('text-[10px] font-mono', krakenPnl.total_pnl >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
+                  {krakenPnl.total_pnl >= 0 ? '+' : ''}{formatCurrency(krakenPnl.total_pnl)} P&L
+                </div>
+              </>
+            )}
           </div>
           )}
 

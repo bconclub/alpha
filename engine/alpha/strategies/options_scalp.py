@@ -189,6 +189,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.entry_premium: float = 0.0
         self.entry_time: float = 0.0
         self._contracts: int = 1                   # dynamic — set by _calculate_option_contracts
+        self._candle_alloc_pct: float = 20.0       # dynamic — set by candle quality (20/30/40%)
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
         self.strike_price: float = 0.0
@@ -749,9 +750,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 1. Market regime gate — GPFC: trend-aligned only
-        # TRENDING_UP → only CALLs. TRENDING_DOWN → only PUTs.
-        # SIDEWAYS → both allowed but only MOMENTUM_BURST setup.
+        # 1. Market regime gate — only CHOPPY blocked
+        # SIDEWAYS, TRENDING_UP, TRENDING_DOWN all allowed — candle momentum is the gate.
         self._current_regime = None
         if self._market_analyzer:
             analysis = self._market_analyzer.last_analysis_for(self.pair)
@@ -761,42 +761,44 @@ class OptionsScalpStrategy(BaseStrategy):
                 if now - self._last_regime_log >= 120:
                     self._last_regime_log = now
                     self.logger.info(
-                        "[%s] OPTIONS regime: %s (trend-aligned filter active)",
-                        self.pair, self._current_regime,
+                        "[%s] OPTIONS regime: %s", self.pair, self._current_regime,
                     )
+                if self._current_regime and "CHOPPY" in str(self._current_regime).upper():
+                    if self._tick_count % 30 == 0:
+                        self.logger.info(
+                            "[%s] OPTIONS CHOPPY_BLOCK: regime=%s — skipping",
+                            self.pair, self._current_regime,
+                        )
+                    return []
 
         # 2. Candle-based momentum gate — PRIMARY ENTRY GATE
         # Direction determined FROM candles, not from scalp signal strength.
         # 3+ of 5 completed 1m candles in one direction + cumulative >= 0.10%.
-        candle_pass, candle_reason, side = await self._check_candle_momentum()
+        candle_pass, candle_reason, side, candle_count, candle_cum_pct = await self._check_candle_momentum()
         if not candle_pass:
             if self._tick_count % 6 == 0:
                 self.logger.info("[%s] %s", self.pair, candle_reason)
             return []
 
-        self.logger.info("[%s] %s", self.pair, candle_reason)
+        # Dynamic allocation based on candle quality
+        if candle_count >= 5 and candle_cum_pct >= 0.20:
+            self._candle_alloc_pct = 40.0  # 5/5 + strong cum → aggressive
+        elif candle_count >= 4 and candle_cum_pct >= 0.15:
+            self._candle_alloc_pct = 30.0  # 4/5 + moderate cum
+        else:
+            self._candle_alloc_pct = 20.0  # 3/5 base
+
+        self.logger.info(
+            "[%s] %s | OPTIONS SIZE: %d/5 candles, cum=%.2f%%, alloc=%.0f%%",
+            self.pair, candle_reason, candle_count, candle_cum_pct, self._candle_alloc_pct,
+        )
 
         # 3. Determine option type from candle direction
         option_type = "call" if side == "long" else "put"
 
-        # 3a. Trend alignment — counter-trend blocked unless candle momentum is strong
-        # (4+ candles = very strong directional conviction → allow counter-trend)
-        _candle_strong = "4/" in candle_reason or "5/" in candle_reason
-        if not _candle_strong:
-            if self._current_regime == "trending" or self._current_regime == "TRENDING_UP":
-                if option_type == "put":
-                    self.logger.info(
-                        "[%s] OPTIONS TREND_BLOCK: no PUTs in TRENDING_UP (need 4+/5 candles) — skipping",
-                        self.pair,
-                    )
-                    return []
-            elif self._current_regime == "TRENDING_DOWN":
-                if option_type == "call":
-                    self.logger.info(
-                        "[%s] OPTIONS TREND_BLOCK: no CALLs in TRENDING_DOWN (need 4+/5 candles) — skipping",
-                        self.pair,
-                    )
-                    return []
+        # 3a. Counter-trend always allowed — candle momentum already ensures direction is real.
+        # If 4/5 candles are red in TRENDING_UP, that's a reversal signal worth playing.
+        # Options max loss = premium paid, no leverage risk.
 
         # 3b. Soft read scalp context — RSI, range position (don't block if unavailable)
         signal_state = None
@@ -807,22 +809,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 if signal_age > self.SIGNAL_STALENESS_SEC:
                     signal_state = None  # stale — ignore
 
-        # 3c. RSI directional conviction gate (only if scalp data available)
-        if signal_state is not None:
-            rsi_now = signal_state.get("rsi")
-            if rsi_now is not None:
-                if option_type == "call" and rsi_now >= self.OPT_RSI_CALL_MAX:
-                    self.logger.info(
-                        "[%s] OPTIONS RSI_GATE: CALL but RSI=%.0f >= %d — need oversold conviction, skipping",
-                        self.pair, rsi_now, self.OPT_RSI_CALL_MAX,
-                    )
-                    return []
-                if option_type == "put" and rsi_now <= self.OPT_RSI_PUT_MIN:
-                    self.logger.info(
-                        "[%s] OPTIONS RSI_GATE: PUT but RSI=%.0f <= %d — need overbought conviction, skipping",
-                        self.pair, rsi_now, self.OPT_RSI_PUT_MIN,
-                    )
-                    return []
+        # 3c. RSI — informational only (candle momentum is the gate)
+        # PUT with RSI=30 = strong downtrend. CALL with RSI=70 = strong uptrend.
 
         # 3d. Range Gate — zone-based filtering for options (soft warning, no block)
         _opt_cached = type(self._scalp)._cached_signals.get(self._base_asset, {}) if self._scalp else {}
@@ -998,14 +986,8 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 10b. GPFC: Sideways regime — only MOMENTUM_BURST allowed
-        if self._current_regime and "SIDEWAYS" in str(self._current_regime).upper():
-            if setup_type != "MOMENTUM_BURST":
-                self.logger.info(
-                    "[%s] OPTIONS SIDEWAYS_BLOCK: only MOMENTUM_BURST in sideways, got %s",
-                    self.pair, setup_type,
-                )
-                return []
+        # 10b. SIDEWAYS regime — all setups allowed (candle momentum is the gate)
+        # Only CHOPPY is blocked (at regime gate above)
 
         # 10c. GPFC: Premium too expensive — low gamma, more to lose
         if premium > self.MAX_PREMIUM_USD:
@@ -1019,21 +1001,13 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 10d. GPFC: Winner-weighted sizing adjustment
-        # MOMENTUM_BURST in trending regime: full allocation
-        # BB_SQUEEZE: 60% allocation
-        # SIDEWAYS regime: 50% allocation
-        sizing_factor = 1.0
-        if setup_type == "BB_SQUEEZE":
-            sizing_factor = 0.60
-        if self._current_regime and "SIDEWAYS" in str(self._current_regime).upper():
-            sizing_factor = min(sizing_factor, 0.50)
-        if sizing_factor < 1.0 and opt_contracts > 1:
-            adjusted = max(1, int(opt_contracts * sizing_factor))
+        # 10d. Sizing already handled by dynamic candle alloc (20/30/40%)
+        # BB_SQUEEZE gets 60% factor applied on top
+        if setup_type == "BB_SQUEEZE" and opt_contracts > 1:
+            adjusted = max(1, int(opt_contracts * 0.60))
             self.logger.info(
-                "[%s] OPTIONS SIZING: %s in %s → factor=%.0f%% → %d→%d contracts",
-                self.pair, setup_type, self._current_regime,
-                sizing_factor * 100, opt_contracts, adjusted,
+                "[%s] OPTIONS SIZING: BB_SQUEEZE → 60%% factor → %d→%d contracts",
+                self.pair, opt_contracts, adjusted,
             )
             opt_contracts = adjusted
 
@@ -1261,7 +1235,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if exchange_capital <= 0 or premium <= 0:
             return 0
 
-        alloc_pct = self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 20.0)
+        alloc_pct = self._candle_alloc_pct  # dynamic: 20/30/40% based on candle quality
 
         # Survival mode: low balance → cap allocation
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
@@ -1293,7 +1267,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # CANDLE-BASED MOMENTUM GATE
     # ==================================================================
 
-    async def _check_candle_momentum(self) -> tuple[bool, str, str | None]:
+    async def _check_candle_momentum(self) -> tuple[bool, str, str | None, int, float]:
         """Check candle-based momentum for options entry — PRIMARY GATE.
 
         Determines direction AND momentum from last 5 completed 1m candles.
@@ -1305,27 +1279,27 @@ class OptionsScalpStrategy(BaseStrategy):
         3. Fresh candle: last completed candle must be in that direction
 
         Returns:
-            (passed, reason_string, side) where side is "long" or "short" or None
+            (passed, reason_string, side, directional_count, cum_pct)
         """
         exchange = self.futures_exchange
         if not exchange:
-            return False, "no_exchange", None
+            return False, "no_exchange", None, 0, 0.0
 
         try:
-            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK + 1)
+            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK)
         except Exception as e:
             self.logger.debug("[%s] CANDLE_MOM: fetch_ohlcv failed: %s", self.pair, e)
-            return False, f"fetch_failed ({e})", None
+            return False, f"fetch_failed ({e})", None, 0, 0.0
 
-        if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK + 1:
-            return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None
+        if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK:
+            return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None, 0, 0.0
 
-        # Use completed candles only (skip the last/current candle which is still forming)
-        completed = ohlcv[-(self.CANDLE_MOM_LOOKBACK + 1):-1]
+        # Use last N completed candles (Delta returns exactly 5, no incomplete to skip)
+        completed = ohlcv[-self.CANDLE_MOM_LOOKBACK:]
 
         current_price = float(completed[-1][4])  # close of last completed candle
         if current_price <= 0:
-            return False, "bad price", None
+            return False, "bad price", None, 0, 0.0
 
         # Classify each candle: bullish (green), bearish (red), or doji (neutral)
         doji_threshold = current_price * 0.0001  # 0.01% of price
@@ -1355,7 +1329,7 @@ class OptionsScalpStrategy(BaseStrategy):
             directional_count = red_count
         else:
             n = self.CANDLE_MOM_LOOKBACK
-            return False, f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP", None
+            return False, f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP", None, 0, 0.0
 
         # Last completed candle direction
         last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
@@ -1393,7 +1367,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 parts.append(f"last={last_color} (need {color})")
             reason = "OPTIONS CANDLE_ENTRY: " + ", ".join(parts) + " → SKIP"
 
-        return passed, reason, side if passed else None
+        return passed, reason, side if passed else None, directional_count, cum_pct
 
     # ==================================================================
     # RATCHET FLOOR

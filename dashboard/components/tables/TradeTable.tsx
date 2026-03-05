@@ -148,6 +148,8 @@ const LAST_STICKY_COL = 'price';
 
 // Setup type badge colors
 const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
+  ACCEL_ENTRY:    { bg: 'bg-amber-500/10',   text: 'text-amber-400' },
+  ANTIC:          { bg: 'bg-violet-500/10',  text: 'text-violet-400' },
   VWAP_RECLAIM:   { bg: 'bg-blue-500/10',   text: 'text-blue-400' },
   RSI_OVERRIDE:   { bg: 'bg-purple-500/10',  text: 'text-purple-400' },
   MOMENTUM_BURST: { bg: 'bg-orange-500/10',  text: 'text-orange-400' },
@@ -156,7 +158,8 @@ const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
   BB_SQUEEZE:     { bg: 'bg-red-500/10',     text: 'text-red-400' },
   LIQ_SWEEP:      { bg: 'bg-pink-500/10',    text: 'text-pink-400' },
   FVG_FILL:       { bg: 'bg-indigo-500/10',  text: 'text-indigo-400' },
-  VOL_DIVERGENCE:  { bg: 'bg-teal-500/10',    text: 'text-teal-400' },
+  BPRC_RELOAD:    { bg: 'bg-lime-500/10',    text: 'text-lime-400' },
+  VOL_DIVERGENCE: { bg: 'bg-teal-500/10',    text: 'text-teal-400' },
   MULTI_SIGNAL:   { bg: 'bg-yellow-500/10',  text: 'text-yellow-400' },
   MIXED:          { bg: 'bg-zinc-500/10',    text: 'text-zinc-400' },
 };
@@ -164,6 +167,8 @@ const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
 function getSetupLabel(setup?: string): string {
   if (!setup) return '—';
   const labels: Record<string, string> = {
+    ACCEL_ENTRY: 'ACCEL',
+    ANTIC: 'ANTIC',
     VWAP_RECLAIM: 'VWAP',
     RSI_OVERRIDE: 'RSI OVR',
     MOMENTUM_BURST: 'MOM',
@@ -172,6 +177,7 @@ function getSetupLabel(setup?: string): string {
     BB_SQUEEZE: 'SQUEEZE',
     LIQ_SWEEP: 'SWEEP',
     FVG_FILL: 'FVG',
+    BPRC_RELOAD: 'BPRC',
     VOL_DIVERGENCE: 'VOL DIV',
     MULTI_SIGNAL: 'MULTI',
     MIXED: 'MIXED',

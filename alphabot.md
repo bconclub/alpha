@@ -1,7 +1,7 @@
 # Alphabot — Build Truth
 
 ## What Is Alpha
-Alpha is a precision momentum-trading bot built by Z at BCON Club. It trades crypto across four exchanges simultaneously — Bybit (primary USDT futures), Delta Exchange India (USD futures + options), Kraken Futures (USD perpetuals), and Binance (1x spot, long-only). The mission: grow capital through quality trades that beat the fees.
+Alpha is a precision momentum-trading bot built by Z at BCON Club. It trades crypto across four exchanges simultaneously — Bybit (primary USDT futures), Delta Exchange India (options only — futures disabled), Kraken Futures (USD perpetuals), and Binance (1x spot, long-only). The mission: grow capital through quality trades that beat the fees.
 
 ## Current Versions
 - **Engine**: `0.4.9`
@@ -233,8 +233,8 @@ The engine writes position state to the DB every ~10 seconds while a position is
 Dashboard reads via `v_open_positions` view with 3-second live price polling overlay.
 
 ## Active Strategies
-- **scalp** — Primary. v6.3 12-signal momentum scalping on Bybit + Delta + Kraken futures + Binance spot
-- **options_scalp** — Options buying on Delta Exchange (candle-based momentum primary gate, MOMENTUM_BURST + BB_SQUEEZE setups, ratchet floors)
+- **scalp** — Primary. v6.3 12-signal momentum scalping on Bybit + Kraken futures + Binance spot (Delta futures disabled)
+- **options_scalp** — Aggressive options buying on Delta Exchange (candle momentum gate, dynamic 20-40% alloc, counter-trend allowed, ratchet floors)
 
 Inactive/disabled: `futures_momentum`, `momentum`, `grid`, `arbitrage`, `strategy_selector`
 
