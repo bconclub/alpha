@@ -3388,6 +3388,10 @@ class ScalpStrategy(BaseStrategy):
 
     def _check_acceleration_entry(self, key: str, now: float, price: float) -> None:
         """Detect price acceleration from WS ticks and fire entry if confirmed."""
+        # Delta futures disabled — options only
+        if self._exchange_id == "delta" and self.is_futures:
+            return
+
         # ── Exchange-aware tick-rate tuning ─────────────────────────
         if self._exchange_id == "delta":
             min_ticks = self.ACCEL_MIN_TICKS_SLOW
@@ -3565,6 +3569,23 @@ class ScalpStrategy(BaseStrategy):
                     self.pair, support_count, self.ACCEL_MIN_SUPPORT_XRP,
                 )
                 return
+
+        # ── CONTEXT ALIGNMENT: ACCEL direction must not contradict RSI + BB ──
+        _ctx = ScalpStrategy._cached_signals.get(key, {})
+        _ctx_rsi = _ctx.get("rsi", 50)
+        _ctx_bb = _ctx.get("bb_position", 0.5)
+        if direction == "long" and _ctx_rsi < 40 and _ctx_bb < 0.30:
+            self.logger.info(
+                "[%s] ACCEL CONTEXT_BLOCK: long vs RSI=%.0f BB=%.2f — counter to indicators",
+                self.pair, _ctx_rsi, _ctx_bb,
+            )
+            return
+        if direction == "short" and _ctx_rsi > 60 and _ctx_bb > 0.70:
+            self.logger.info(
+                "[%s] ACCEL CONTEXT_BLOCK: short vs RSI=%.0f BB=%.2f — counter to indicators",
+                self.pair, _ctx_rsi, _ctx_bb,
+            )
+            return
 
         # ── FIRE: acceleration confirmed with signal support ─────────
         self.logger.info(

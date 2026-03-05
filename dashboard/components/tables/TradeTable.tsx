@@ -524,6 +524,20 @@ export default function TradeTable({ trades }: TradeTableProps) {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [search, setSearch] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  // Count active filters for badge
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (strategyFilter !== 'All') count++;
+    if (exchangeFilterLocal !== 'All') count++;
+    if (positionTypeFilter !== 'All') count++;
+    if (pnlFilter !== 'all') count++;
+    if (dateFrom) count++;
+    if (dateTo) count++;
+    if (search.trim()) count++;
+    return count;
+  }, [strategyFilter, exchangeFilterLocal, positionTypeFilter, pnlFilter, dateFrom, dateTo, search]);
 
   // -- Sort state -----------------------------------------------------------
   const [sortKey, setSortKey] = useState<string>('timestamp');
@@ -762,133 +776,167 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {/* ----------------------------------------------------------------- */}
       {/* Filters                                                           */}
       {/* ----------------------------------------------------------------- */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        {/* Left side filters */}
-        <div className="flex flex-wrap items-end gap-3 md:gap-4">
-          {/* Strategy filter */}
+
+      {/* Mobile: collapsible filter toggle */}
+      <div className="lg:hidden">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setFiltersOpen((v) => !v)}
+            className="flex h-9 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+              <path fillRule="evenodd" d="M2.628 1.601C5.028 1.206 7.49 1 10 1s4.973.206 7.372.601a.75.75 0 0 1 .628.74v2.288a2.25 2.25 0 0 1-.659 1.59l-4.682 4.683a2.25 2.25 0 0 0-.659 1.59v3.037c0 .684-.31 1.33-.844 1.757l-1.937 1.55A.75.75 0 0 1 8 18.25v-5.757a2.25 2.25 0 0 0-.659-1.591L2.659 6.22A2.25 2.25 0 0 1 2 4.629V2.34a.75.75 0 0 1 .628-.74Z" clipRule="evenodd" />
+            </svg>
+            Filters
+            {activeFilterCount > 0 && (
+              <span className="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">
+                {activeFilterCount}
+              </span>
+            )}
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className={cn('h-3 w-3 transition-transform', filtersOpen && 'rotate-180')}>
+              <path fillRule="evenodd" d="M4.22 6.22a.75.75 0 0 1 1.06 0L8 8.94l2.72-2.72a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 7.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <button
+            onClick={exportCSV}
+            disabled={filteredTrades.length === 0}
+            className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+              <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H12.5A1.5 1.5 0 0 1 14 5.5v1.382a1.5 1.5 0 0 1-.44 1.06l-.293.294a1 1 0 0 0-.293.707V12.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 12.5v-9Z" />
+            </svg>
+          </button>
+        </div>
+        {filtersOpen && (
+          <div className="mt-2 space-y-3 rounded-lg border border-zinc-700/50 bg-zinc-800/50 p-3">
+            {/* Strategy */}
+            <div className="space-y-1.5">
+              <span className="text-xs font-medium text-zinc-400">Strategy</span>
+              <div className="flex gap-1 overflow-x-auto">
+                {(['All', ...STRATEGIES] as const).map((s) => (
+                  <button key={s} onClick={() => handleStrategyFilter(s)} className={cn(filterBtnBase, strategyFilter === s ? filterBtnActive : filterBtnInactive)}>
+                    {s === 'All' ? 'All' : getStrategyLabel(s)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Exchange + Position + P&L in a row */}
+            <div className="flex flex-wrap gap-3">
+              <div className="space-y-1.5">
+                <span className="text-xs font-medium text-zinc-400">Exchange</span>
+                <div className="flex gap-1">
+                  {EXCHANGES.map((ex) => (
+                    <button key={ex.value} onClick={() => handleExchangeFilter(ex.value)} className={cn(filterBtnBase, exchangeFilterLocal === ex.value ? filterBtnActive : filterBtnInactive)}>
+                      {ex.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <span className="text-xs font-medium text-zinc-400">Position</span>
+                <div className="flex gap-1">
+                  {POSITION_TYPES.map((pt) => (
+                    <button key={pt.value} onClick={() => handlePositionTypeFilter(pt.value)} className={cn(filterBtnBase, positionTypeFilter === pt.value ? filterBtnActive : filterBtnInactive)}>
+                      {pt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <span className="text-xs font-medium text-zinc-400">P&L</span>
+                <div className="flex gap-1">
+                  {PNL_OPTIONS.map((opt) => (
+                    <button key={opt.value} onClick={() => handlePnlFilter(opt.value)} className={cn(filterBtnBase, pnlFilter === opt.value ? filterBtnActive : filterBtnInactive)}>
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {/* Date range + Search */}
+            <div className="flex flex-wrap gap-3">
+              <div className="space-y-1.5 flex-1 min-w-[200px]">
+                <span className="text-xs font-medium text-zinc-400">Date Range</span>
+                <div className="flex items-center gap-2">
+                  <input type="date" value={dateFrom} onChange={(e) => handleDateFrom(e.target.value)} className="h-9 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500" />
+                  <span className="text-zinc-500">&ndash;</span>
+                  <input type="date" value={dateTo} onChange={(e) => handleDateTo(e.target.value)} className="h-9 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500" />
+                </div>
+              </div>
+              <div className="space-y-1.5 flex-1 min-w-[120px]">
+                <span className="text-xs font-medium text-zinc-400">Search</span>
+                <input type="text" value={search} onChange={(e) => handleSearch(e.target.value)} placeholder="Search pair..." className="h-9 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-zinc-500" />
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Desktop: filters always visible */}
+      <div className="hidden lg:flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div className="flex flex-wrap items-end gap-4">
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">Strategy</span>
             <div className="flex gap-1 overflow-x-auto">
               {(['All', ...STRATEGIES] as const).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => handleStrategyFilter(s)}
-                  className={cn(
-                    filterBtnBase,
-                    strategyFilter === s ? filterBtnActive : filterBtnInactive,
-                  )}
-                >
+                <button key={s} onClick={() => handleStrategyFilter(s)} className={cn(filterBtnBase, strategyFilter === s ? filterBtnActive : filterBtnInactive)}>
                   {s === 'All' ? 'All' : getStrategyLabel(s)}
                 </button>
               ))}
             </div>
           </div>
-
-          {/* Exchange filter */}
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">Exchange</span>
             <div className="flex gap-1">
               {EXCHANGES.map((ex) => (
-                <button
-                  key={ex.value}
-                  onClick={() => handleExchangeFilter(ex.value)}
-                  className={cn(
-                    filterBtnBase,
-                    exchangeFilterLocal === ex.value ? filterBtnActive : filterBtnInactive,
-                  )}
-                >
+                <button key={ex.value} onClick={() => handleExchangeFilter(ex.value)} className={cn(filterBtnBase, exchangeFilterLocal === ex.value ? filterBtnActive : filterBtnInactive)}>
                   {ex.label}
                 </button>
               ))}
             </div>
           </div>
-
-          {/* Position Type filter */}
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">Position</span>
             <div className="flex gap-1">
               {POSITION_TYPES.map((pt) => (
-                <button
-                  key={pt.value}
-                  onClick={() => handlePositionTypeFilter(pt.value)}
-                  className={cn(
-                    filterBtnBase,
-                    positionTypeFilter === pt.value ? filterBtnActive : filterBtnInactive,
-                  )}
-                >
+                <button key={pt.value} onClick={() => handlePositionTypeFilter(pt.value)} className={cn(filterBtnBase, positionTypeFilter === pt.value ? filterBtnActive : filterBtnInactive)}>
                   {pt.label}
                 </button>
               ))}
             </div>
           </div>
-
-          {/* P&L filter */}
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">P&L</span>
             <div className="flex gap-1">
               {PNL_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => handlePnlFilter(opt.value)}
-                  className={cn(
-                    filterBtnBase,
-                    pnlFilter === opt.value ? filterBtnActive : filterBtnInactive,
-                  )}
-                >
+                <button key={opt.value} onClick={() => handlePnlFilter(opt.value)} className={cn(filterBtnBase, pnlFilter === opt.value ? filterBtnActive : filterBtnInactive)}>
                   {opt.label}
                 </button>
               ))}
             </div>
           </div>
-
-          {/* Date range */}
-          <div className="space-y-1.5 w-full sm:w-auto">
+          <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">Date Range</span>
             <div className="flex items-center gap-2">
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => handleDateFrom(e.target.value)}
-                className="h-9 md:h-8 flex-1 sm:flex-none rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500"
-              />
+              <input type="date" value={dateFrom} onChange={(e) => handleDateFrom(e.target.value)} className="h-8 rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500" />
               <span className="text-zinc-500">&ndash;</span>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => handleDateTo(e.target.value)}
-                className="h-9 md:h-8 flex-1 sm:flex-none rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500"
-              />
+              <input type="date" value={dateTo} onChange={(e) => handleDateTo(e.target.value)} className="h-8 rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 outline-none focus:border-zinc-500" />
             </div>
           </div>
-
-          {/* Search */}
-          <div className="space-y-1.5 w-full sm:w-auto">
+          <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">Search</span>
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => handleSearch(e.target.value)}
-              placeholder="Search pair..."
-              className="h-9 md:h-8 w-full sm:w-40 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-zinc-500"
-            />
+            <input type="text" value={search} onChange={(e) => handleSearch(e.target.value)} placeholder="Search pair..." className="h-8 w-40 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-zinc-500" />
           </div>
         </div>
-
-        {/* Export CSV */}
         <button
           onClick={exportCSV}
           disabled={filteredTrades.length === 0}
-          className="flex h-9 md:h-8 shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 16 16"
-            fill="currentColor"
-            className="h-3.5 w-3.5"
-          >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
             <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H12.5A1.5 1.5 0 0 1 14 5.5v1.382a1.5 1.5 0 0 1-.44 1.06l-.293.294a1 1 0 0 0-.293.707V12.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 12.5v-9Z" />
           </svg>
-          <span className="hidden sm:inline">Export CSV</span>
+          Export CSV
         </button>
       </div>
 
