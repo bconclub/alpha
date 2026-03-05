@@ -99,7 +99,7 @@ Every tick, the engine evaluates 12 independent signals. Each signal fires a bul
 
 | # | Signal | Tag | Detection Logic |
 |---|--------|-----|----------------|
-| 1 | **Momentum** | `MOM:` | 0.20%+ price move in last 60s |
+| 1 | **Momentum** | `MOM:` | 0.12%+ price move in last 60s |
 | 2 | **Volume Spike** | `VOL:` | 0.8x+ average volume (pair-adjusted) |
 | 3 | **RSI Extreme** | `RSI:` | RSI < 40 (long) or > 60 (short) |
 | 4 | **Bollinger Band** | `BB:` | Price outside BB + mean-reversion setup |

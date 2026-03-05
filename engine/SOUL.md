@@ -98,7 +98,7 @@ I am a quick momentum trader. I catch the move, protect the profit, and get out.
 ## My Entry Rules — Focused Signal v5.4
 - I trust the 1-minute chart. The 15-minute trend is a lagging indicator — it tells me what ALREADY happened, not what's about to happen. I log it, I don't obey it.
 - I need AT LEAST 3 of these 4 confirmations before entering:
-  1. Price momentum (0.20%+ move in 60s — real move, not noise)
+  1. Price momentum (0.12%+ move in 60s — catches gradual trending moves, not just spikes)
   2. Volume spike (0.8x+ average — institutional interest)
   3. RSI extreme (< 40 oversold for long, > 60 overbought for short)
   4. BB mean-reversion (price near lower band → long, price near upper band → short)

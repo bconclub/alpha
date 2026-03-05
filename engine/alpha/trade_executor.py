@@ -369,6 +369,34 @@ class TradeExecutor:
             )
             return signal.amount
 
+    async def _get_kraken_position_size(self, signal: Signal) -> float | None:
+        """Fetch actual position size from Kraken Futures for exit validation.
+
+        Returns the coin amount open on the exchange, or None if
+        no position exists (already closed/liquidated).
+        Kraken uses coin-denominated amounts like Bybit.
+        """
+        if not self.kraken_exchange:
+            return None
+        try:
+            positions = await self.kraken_exchange.fetch_positions([signal.pair])
+            for pos in positions:
+                symbol = pos.get("symbol", "")
+                contracts = abs(float(pos.get("contracts", 0) or 0))
+                if symbol == signal.pair and contracts > 0:
+                    logger.info(
+                        "[%s] Kraken position found: %.6f coins (%s)",
+                        signal.pair, contracts, pos.get("side", "?"),
+                    )
+                    return contracts
+            return None
+        except Exception as e:
+            logger.warning(
+                "[%s] Could not fetch Kraken position: %s — using stored amount",
+                signal.pair, e,
+            )
+            return signal.amount
+
     async def _mark_position_gone(self, signal: Signal) -> None:
         """Mark a trade as closed in DB when the position no longer exists on exchange.
 
@@ -464,35 +492,43 @@ class TradeExecutor:
         the real fill price is in the exchange's recent trades — not signal.price
         (which is just the current market price when the bot noticed).
 
+        Retries once after 2s if no fills found (exchange may need time to settle).
         Falls back to ticker last price, then signal.price if all else fails.
         NOTE: fetch_my_trades may not return the right fills for many reasons
         (pagination, timing, API limits). Absence of fills does NOT mean ghost.
         """
         try:
             exchange = self._get_exchange(signal)
-            # Fetch recent fills for this pair
-            recent_trades = await exchange.fetch_my_trades(signal.pair, limit=20)
-            if recent_trades:
-                # The closing trade is the opposite side of our position
-                close_side = "sell" if position_type in ("long", "spot") else "buy"
-                closing_fills = [
-                    t for t in recent_trades
-                    if t.get("side") == close_side
-                ]
-                if closing_fills:
-                    # Most recent closing fill is our exit
-                    last_fill = closing_fills[-1]
-                    fill_price = float(last_fill.get("price", 0) or 0)
-                    if fill_price > 0:
-                        logger.info(
-                            "[%s] Found actual exit fill: $%.4f (vs signal price $%.4f)",
-                            signal.pair, fill_price, signal.price,
-                        )
-                        return fill_price
+            close_side = "sell" if position_type in ("long", "spot") else "buy"
 
-            # No closing fills found — fall back to ticker
+            # Try up to 2 times — exchange fills may lag 1-3s after position close
+            for attempt in range(2):
+                recent_trades = await exchange.fetch_my_trades(signal.pair, limit=20)
+                if recent_trades:
+                    closing_fills = [
+                        t for t in recent_trades
+                        if t.get("side") == close_side
+                    ]
+                    if closing_fills:
+                        last_fill = closing_fills[-1]
+                        fill_price = float(last_fill.get("price", 0) or 0)
+                        if fill_price > 0:
+                            logger.info(
+                                "[%s] Found actual exit fill: $%.4f (vs signal price $%.4f, attempt %d)",
+                                signal.pair, fill_price, signal.price, attempt + 1,
+                            )
+                            return fill_price
+
+                if attempt == 0:
+                    logger.info(
+                        "[%s] No closing fills found (attempt 1) — retrying in 2s",
+                        signal.pair,
+                    )
+                    await asyncio.sleep(2)
+
+            # No closing fills after retry — fall back to ticker
             logger.info(
-                "[%s] No closing fills found — falling back to ticker price",
+                "[%s] No closing fills found after retry — falling back to ticker price",
                 signal.pair,
             )
             try:
@@ -853,6 +889,32 @@ class TradeExecutor:
                     reduce_only=signal.reduce_only, exchange_id=signal.exchange_id,
                 )
 
+        # Kraken exit verification (coin amounts, like Bybit)
+        if is_exit and signal.exchange_id == "kraken" and signal.reduce_only:
+            actual_amount = await self._get_kraken_position_size(signal)
+            if actual_amount is None:
+                logger.warning(
+                    "[%s] No position found on Kraken — marking closed in DB",
+                    signal.pair,
+                )
+                await self._mark_position_gone(signal)
+                return None
+            elif abs(actual_amount - signal.amount) > 1e-8:
+                logger.info(
+                    "[%s] Kraken exit: stored=%.8f, actual=%.8f — using actual",
+                    signal.pair, signal.amount, actual_amount,
+                )
+                signal = Signal(
+                    side=signal.side, price=signal.price,
+                    amount=float(actual_amount),
+                    order_type=signal.order_type, reason=signal.reason,
+                    strategy=signal.strategy, pair=signal.pair,
+                    stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                    metadata=signal.metadata,
+                    leverage=signal.leverage, position_type=signal.position_type,
+                    reduce_only=signal.reduce_only, exchange_id=signal.exchange_id,
+                )
+
         # Enforce Binance $6.01 minimum notional for ENTRY orders only
         if not is_exit:
             signal = self._enforce_binance_min(signal)
@@ -971,6 +1033,8 @@ class TradeExecutor:
                     # or the order status might be stale.
                     if signal.exchange_id == "bybit":
                         pos_check = await self._get_bybit_position_size(signal)
+                    elif signal.exchange_id == "kraken":
+                        pos_check = await self._get_kraken_position_size(signal)
                     else:
                         pos_check = await self._get_delta_position_size(signal)
                     if pos_check is None:

@@ -12,11 +12,11 @@ The bot has **two entry paths** — the traditional momentum path and the antici
 
 ### Momentum Path (existing)
 
-Every 5 seconds the bot computes all 11 indicators from 30 x 1m candles. If momentum >= 0.20% fires (Gate 0), direction is locked by momentum sign and entry requires **3/4 signals minimum** aligned in that direction. Order is placed immediately.
+Every 5 seconds the bot computes all 11 indicators from 30 x 1m candles. If momentum >= 0.12% fires (Gate 0), direction is locked by momentum sign and entry requires **3/4 signals minimum** aligned in that direction. Order is placed immediately.
 
 ### Tier 1 Path (anticipatory — confirm before order)
 
-When Gate 0 blocks (momentum < 0.20%), the bot checks for **leading signals** that precede the move. These are TIER 1 signals — institutional loading patterns detected before price moves. Direction comes from **order flow** (BB position + EMA ribbon), not past momentum.
+When Gate 0 blocks (momentum < 0.12%), the bot checks for **leading signals** that precede the move. These are TIER 1 signals — institutional loading patterns detected before price moves. Direction comes from **order flow** (BB position + EMA ribbon), not past momentum.
 
 If 2+ T1 signals fire (or 1 T1 + 2 T2), the signals are stored as **PENDING** — **no order is placed**. On each subsequent 5s tick, the bot checks if momentum confirms (0.10%+ in the pending direction). Only when confirmed does the order execute. This means zero fees and zero loss on unconfirmed setups.
 
@@ -34,7 +34,7 @@ If 2+ T1 signals fire (or 1 T1 + 2 T2), the signals are stored as **PENDING** �
 
 | # | Signal | Tag | Long Condition | Short Condition |
 |---|--------|-----|---------------|-----------------|
-| 1 | **Momentum 60s** | MOM | momentum_60s >= +0.20% | momentum_60s <= -0.20% |
+| 1 | **Momentum 60s** | MOM | momentum_60s >= +0.12% | momentum_60s <= -0.12% |
 | 2 | **Volume Spike** | VOL | vol_ratio >= 0.8x AND mom > 0 | vol_ratio >= 0.8x AND mom < 0 |
 | 3 | **RSI Extremes** | RSI | RSI(14) < 40 | RSI(14) > 60 |
 | 4 | **Bollinger Band** | BB | bb_position <= 0.15 (bottom 15%) | bb_position >= 0.85 (top 15%) |
@@ -75,7 +75,7 @@ If 2+ T1 signals fire (or 1 T1 + 2 T2), the signals are stored as **PENDING** �
 
 ### Momentum Path — Gate 0
 
-Momentum must be above the **0.20% minimum** (Gate 0). Direction is locked:
+Momentum must be above the **0.12% minimum** (Gate 0). Direction is locked:
 - `momentum_60s > 0` → `mom_direction = "long"` — only long entries allowed
 - `momentum_60s < 0` → `mom_direction = "short"` — only short entries allowed
 
@@ -83,7 +83,7 @@ If Gate 0 blocks, the bot **falls through to Tier 1** detection instead of stopp
 
 ### Tier 1 Path — Entry Requirements
 
-When Gate 0 blocks (no momentum), the bot checks for leading signals:
+When Gate 0 blocks (momentum < 0.12%), the bot checks for leading signals:
 - **3+ T1 signals** in the same direction → enter (anticipatory, raised from 2)
 - **1 T1 + 2 T2 signals** in the same direction → enter (confluence)
 - Entry path set to `"tier1"`, confirmation required during Phase 1
@@ -93,9 +93,9 @@ When Gate 0 blocks (no momentum), the bot checks for leading signals:
 | Tier | Momentum | Required Signals | Meaning |
 |------|----------|-----------------|---------|
 | **STRONG** | >= 0.20% | 3/4 | High conviction, standard entry |
-| **MODERATE** | 0.12% - 0.20% | 3/4 | Above old gate, standard entry |
+| **MODERATE** | 0.12% - 0.20% | 3/4 | Above gate, standard entry |
 | **WEAK** | < 0.12% | 4/4 | Requires full signal confluence |
-| Below gate | < 0.20% | — | Falls through to Tier 1 path |
+| Below gate | < 0.12% | — | Falls through to Tier 1 path |
 
 ### RSI Override
 
@@ -120,9 +120,9 @@ Large positions (per-pair thresholds below) require **0.12%+ momentum**:
 
 ```
 MOMENTUM PATH:
-  Standard:    4/4 signals + momentum >= 0.20% + direction match (all pairs)
-  RSI <30:     immediate long entry (still needs mom >= 0.20% + direction match)
-  RSI >70:     immediate short entry (still needs mom >= 0.20% + direction match)
+  Standard:    4/4 signals + momentum >= 0.12% + direction match (all pairs)
+  RSI <30:     immediate long entry (still needs mom >= 0.12% + direction match)
+  RSI >70:     immediate short entry (still needs mom >= 0.12% + direction match)
   >50 contracts: 4/4 signals required (BIG_SIZE_GATE)
   Large pos:   momentum >= 0.12% required (LARGE_POS_GATE)
   Counter-trend: 4/4 signals (longing in TRENDING_DOWN or shorting in TRENDING_UP)
@@ -160,7 +160,7 @@ All futures entries use **fixed 20x leverage**. Dynamic leverage (50x/30x tiers)
 ### Idle Threshold Widening
 
 After 30 minutes with no entry, thresholds loosen by 20%:
-- Momentum: 0.20% → 0.16%
+- Momentum: 0.12% → 0.096%
 - Volume: 0.8x → 0.64x
 - RSI thresholds widen proportionally
 
@@ -417,7 +417,7 @@ SCANNING (every 5s)
   |
   +-- Fetch 30x 1m candles
   +-- Compute all 12 indicators (RSI, BB, KC, EMA, VWAP, momentum, volume, BPRC)
-  +-- Gate 0: momentum >= 0.20%?
+  +-- Gate 0: momentum >= 0.12%?
   |     |
   |     +-- YES (Momentum Path):
   |     |     +-- Direction locked by momentum sign
@@ -520,7 +520,7 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 
 | Code | Meaning |
 |------|---------|
-| `NO_MOMENTUM` | abs(momentum_60s) < 0.20% AND no tier 1 signals |
+| `NO_MOMENTUM` | abs(momentum_60s) < 0.12% AND no tier 1 signals |
 | `STRENGTH_GATE` | Signal count below minimum (e.g., 2/4 < 3/4) |
 | `DIRECTION_BLOCK` | Signals fire against momentum direction |
 | `INSUFFICIENT_CAPITAL` | Can't afford 1 contract with current allocation |
@@ -552,7 +552,7 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 |-----------|---------|------|
 | Entry gate (momentum path) | 4/4 signals all pairs (4/4 if >50 contracts) | 4/4 |
 | Entry gate (tier1 path) | 3+ T1 or 1 T1 + 2 T2 | same |
-| Momentum minimum (Gate 0) | **0.20%** (60s) | same |
+| Momentum minimum (Gate 0) | **0.12%** (60s) | same |
 | T1 pending confirm threshold | 0.15% momentum in direction (pre-order check) | same |
 | T1 pending reject threshold | 0.10% counter-momentum (pre-order check) | same |
 | T1 pending timeout | 30s (no order placed, zero cost) | same |

@@ -288,7 +288,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     # Layer 3 (momentum safety net) — high gates, only catches big moves
-    MOMENTUM_MIN_PCT = 0.20           # 0.20%+ move in 60s (restored — 0.30 blocked gradual moves)
+    MOMENTUM_MIN_PCT = 0.12           # 0.12%+ move in 60s (was 0.20 — gradual trending moves on Kraken/Delta never hit 0.20%, 3/4 signal gate still filters noise)
     MOMENTUM_30S_MIN_PCT = 0.12      # 30s window threshold (raised from 0.06)
     VOL_SPIKE_RATIO = 0.8             # 0.8x avg volume (restored — 1.5 too tight, signals.md says 0.8)
     RSI_EXTREME_LONG = 40             # Level 5/10 — RSI < 40 = oversold → long (was 35)
@@ -395,7 +395,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Adaptive widening — 60min idle, 10% loosening (was disabled, was 30min/20%)
     IDLE_WIDEN_SECONDS = 30 * 60      # 30 min idle before thresholds loosen (restored from 60 min)
-    IDLE_WIDEN_FACTOR = 0.80          # 20% loosening (restored — mom 0.20→0.16, vol 0.8→0.64)
+    IDLE_WIDEN_FACTOR = 0.80          # 20% loosening (mom 0.12→0.096, vol 0.8→0.64)
 
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
     # NOTE: MIN_EXPECTED_MOVE_PCT fee filter REMOVED — it was blocking 385+
@@ -2356,8 +2356,8 @@ class ScalpStrategy(BaseStrategy):
                 _mom_vel_5s = (_mom_recent[-1][1] - _mom_recent[0][1]) / _mom_recent[0][1] * 100
         if _mom_vel_5s != 0:
             # If momentum says long but velocity is negative (or vice versa), move is reversing
-            if (mom_direction == "long" and _mom_vel_5s < -0.005) or \
-               (mom_direction == "short" and _mom_vel_5s > 0.005):
+            if (mom_direction == "long" and _mom_vel_5s < -0.05) or \
+               (mom_direction == "short" and _mom_vel_5s > 0.05):
                 self.logger.info(
                     "[%s] MOM_VELOCITY_CHECK: 60s=%+.3f%% but 5s_vel=%+.3f%% — move reversing, skip",
                     self.pair, momentum_60s, _mom_vel_5s,
