@@ -765,108 +765,66 @@ class OptionsScalpStrategy(BaseStrategy):
                         self.pair, self._current_regime,
                     )
 
-        # 2. Read scalp strategy's latest signal
-        if not self._scalp or not hasattr(self._scalp, "last_signal_state"):
-            if self._tick_count % 30 == 0:
-                self.logger.info("[%s] OPTIONS: no scalp ref (scalp=%s)", self.pair, bool(self._scalp))
-            return []
-
-        signal_state = self._scalp.last_signal_state
-
-        if signal_state is None:
-            if self._tick_count % 6 == 0:
-                self.logger.info("[%s] OPTIONS: signal_state is None", self.pair)
-            return []
-
-        # 2. Check signal freshness
-        signal_age = time.monotonic() - signal_state.get("timestamp", 0)
-        strength = signal_state.get("strength", 0)
-
-        # Only log OPTIONS CHECK when strength >= 1 (reduce spam)
-        if strength >= 1:
-            self.logger.info(
-                "[%s] OPTIONS CHECK: strength=%d side=%s age=%.1fs reason=%s",
-                self.pair, strength,
-                signal_state.get("side"),
-                signal_age,
-                (signal_state.get("reason", "") or "")[:60],
-            )
-
-        if signal_age > self.SIGNAL_STALENESS_SEC:
-            if strength >= 1:
-                self.logger.info(
-                    "[%s] OPTIONS STALE: age=%.1fs > %ds — skipping",
-                    self.pair, signal_age, self.SIGNAL_STALENESS_SEC,
-                )
-            return []
-
-        # 3. Check signal strength (3-of-4 required)
-        if strength < self.MIN_SIGNAL_STRENGTH:
-            # Log WEAK every ~60s (6 ticks × 10s = 60s), not every 10s
-            if strength >= 1 and self._tick_count % 6 == 0:
-                self.logger.info(
-                    "[%s] OPTIONS WEAK: strength=%d < %d — waiting",
-                    self.pair, strength, self.MIN_SIGNAL_STRENGTH,
-                )
-            return []
-
-        side = signal_state.get("side")
-        if side is None:
-            self.logger.info("[%s] OPTIONS: 3/4+ but side=None — skipping", self.pair)
-            return []
-
-        # 3b. Candle-based momentum gate — replaces old single-snapshot % check
-        candle_pass, candle_reason = await self._check_candle_momentum(side)
+        # 2. Candle-based momentum gate — PRIMARY ENTRY GATE
+        # Direction determined FROM candles, not from scalp signal strength.
+        # 3+ of 5 completed 1m candles in one direction + cumulative >= 0.10%.
+        candle_pass, candle_reason, side = await self._check_candle_momentum()
         if not candle_pass:
-            self.logger.info(
-                "[%s] OPTIONS CANDLE_MOM: %s", self.pair, candle_reason,
-            )
+            if self._tick_count % 6 == 0:
+                self.logger.info("[%s] %s", self.pair, candle_reason)
             return []
-        else:
-            self.logger.info(
-                "[%s] OPTIONS CANDLE_MOM: %s", self.pair, candle_reason,
-            )
 
-        # 4. Determine option type
+        self.logger.info("[%s] %s", self.pair, candle_reason)
+
+        # 3. Determine option type from candle direction
         option_type = "call" if side == "long" else "put"
 
-        # 4a. GPFC: Trend alignment — counter-trend blocked for 3/4, allowed for 4/4
-        # Options max loss is premium paid — counter-trend on full confluence is fine.
-        if strength < 4:
+        # 3a. Trend alignment — counter-trend blocked unless candle momentum is strong
+        # (4+ candles = very strong directional conviction → allow counter-trend)
+        _candle_strong = "4/" in candle_reason or "5/" in candle_reason
+        if not _candle_strong:
             if self._current_regime == "trending" or self._current_regime == "TRENDING_UP":
                 if option_type == "put":
                     self.logger.info(
-                        "[%s] OPTIONS TREND_BLOCK: no PUTs in TRENDING_UP (strength=%d < 4) — skipping",
-                        self.pair, strength,
+                        "[%s] OPTIONS TREND_BLOCK: no PUTs in TRENDING_UP (need 4+/5 candles) — skipping",
+                        self.pair,
                     )
                     return []
             elif self._current_regime == "TRENDING_DOWN":
                 if option_type == "call":
                     self.logger.info(
-                        "[%s] OPTIONS TREND_BLOCK: no CALLs in TRENDING_DOWN (strength=%d < 4) — skipping",
-                        self.pair, strength,
+                        "[%s] OPTIONS TREND_BLOCK: no CALLs in TRENDING_DOWN (need 4+/5 candles) — skipping",
+                        self.pair,
                     )
                     return []
 
-        # 4b. RSI directional conviction gate — need RSI backing direction
-        rsi_now = signal_state.get("rsi")
-        if rsi_now is not None:
-            if option_type == "call" and rsi_now >= self.OPT_RSI_CALL_MAX:
-                self.logger.info(
-                    "[%s] OPTIONS RSI_GATE: CALL but RSI=%.0f >= %d — need oversold conviction, skipping",
-                    self.pair, rsi_now, self.OPT_RSI_CALL_MAX,
-                )
-                return []
-            if option_type == "put" and rsi_now <= self.OPT_RSI_PUT_MIN:
-                self.logger.info(
-                    "[%s] OPTIONS RSI_GATE: PUT but RSI=%.0f <= %d — need overbought conviction, skipping",
-                    self.pair, rsi_now, self.OPT_RSI_PUT_MIN,
-                )
-                return []
+        # 3b. Soft read scalp context — RSI, range position (don't block if unavailable)
+        signal_state = None
+        if self._scalp and hasattr(self._scalp, "last_signal_state"):
+            signal_state = self._scalp.last_signal_state
+            if signal_state is not None:
+                signal_age = time.monotonic() - signal_state.get("timestamp", 0)
+                if signal_age > self.SIGNAL_STALENESS_SEC:
+                    signal_state = None  # stale — ignore
 
-        # 4c. Range Gate — zone-based filtering for options (soft)
-        # Counter-zone options (PUTs in low, CALLs in high) log warning
-        # but don't block — options have capped loss, let them fire.
+        # 3c. RSI directional conviction gate (only if scalp data available)
+        if signal_state is not None:
+            rsi_now = signal_state.get("rsi")
+            if rsi_now is not None:
+                if option_type == "call" and rsi_now >= self.OPT_RSI_CALL_MAX:
+                    self.logger.info(
+                        "[%s] OPTIONS RSI_GATE: CALL but RSI=%.0f >= %d — need oversold conviction, skipping",
+                        self.pair, rsi_now, self.OPT_RSI_CALL_MAX,
+                    )
+                    return []
+                if option_type == "put" and rsi_now <= self.OPT_RSI_PUT_MIN:
+                    self.logger.info(
+                        "[%s] OPTIONS RSI_GATE: PUT but RSI=%.0f <= %d — need overbought conviction, skipping",
+                        self.pair, rsi_now, self.OPT_RSI_PUT_MIN,
+                    )
+                    return []
+
+        # 3d. Range Gate — zone-based filtering for options (soft warning, no block)
         _opt_cached = type(self._scalp)._cached_signals.get(self._base_asset, {}) if self._scalp else {}
         _opt_range_pos = _opt_cached.get("range_position")
         if _opt_range_pos is not None:
@@ -878,15 +836,29 @@ class OptionsScalpStrategy(BaseStrategy):
             if _zone_warning:
                 self.logger.info("[%s] OPT_RANGE note: %s — entering anyway", self.pair, _zone_warning)
 
+        # Extract scalp strength for metadata/logging (not gating)
+        strength = 0
+        if signal_state is not None:
+            strength = signal_state.get("strength", 0)
+
         self.logger.info(
-            "[%s] OPTIONS SIGNAL READY: %s %d/4 — checking chain/premium",
-            self.pair, option_type.upper(), strength,
+            "[%s] OPTIONS CANDLE_READY: %s — checking chain/premium",
+            self.pair, option_type.upper(),
         )
 
-        # 5. Get current underlying price
-        current_price = signal_state.get("current_price", 0)
+        # 4. Get current underlying price (from scalp state or ticker)
+        current_price = 0
+        if signal_state is not None:
+            current_price = signal_state.get("current_price", 0)
         if current_price <= 0:
-            self.logger.info("[%s] OPTIONS: no current_price in signal", self.pair)
+            # Fallback: fetch ticker directly
+            try:
+                ticker = await self.futures_exchange.fetch_ticker(self.pair)
+                current_price = float(ticker.get("last", 0) or 0)
+            except Exception:
+                pass
+        if current_price <= 0:
+            self.logger.info("[%s] OPTIONS: no current_price available", self.pair)
             return []
 
         # 6. Check expiry validity
@@ -1001,9 +973,11 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 10. Classify setup_type from scalp signal reason
-        signals_str = signal_state.get("reason", "")
-        setup_type = "unknown"
+        # 10. Classify setup_type from scalp signal reason (soft — default MOMENTUM_BURST)
+        signals_str = ""
+        if signal_state is not None:
+            signals_str = signal_state.get("reason", "")
+        setup_type = "MOMENTUM_BURST"  # candle momentum IS a momentum burst
         if self._scalp and signals_str:
             try:
                 candidates = self._scalp._classify_setups(signals_str)
@@ -1191,7 +1165,7 @@ class OptionsScalpStrategy(BaseStrategy):
         await self._log_activity(
             "options_entry",
             f"{self.pair} — OPTIONS: {option_type.upper()} {strike_label} ${selected_strike:.0f} | "
-            f"premium=${entry_premium:.4f} | expiry={expiry_str} | signals={strength}/4 {signals_str}",
+            f"premium=${entry_premium:.4f} | expiry={expiry_str} | candle_entry {signals_str or 'candle_momentum'}",
             {"option_type": option_type, "strike": selected_strike, "premium": entry_premium,
              "strike_label": strike_label,
              "expiry": self._selected_expiry.isoformat() if self._selected_expiry else "",
@@ -1233,8 +1207,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._contracts = contracts
 
         reason = (
-            f"OPTIONS {option_type.upper()} | {strength}/4 signals "
-            f"({signals_str}) | "
+            f"OPTIONS {option_type.upper()} | candle_entry "
+            f"({signals_str or 'candle_momentum'}) | "
             f"{strike_label} Strike=${selected_strike:.0f} "
             f"Exp={expiry_str} "
             f"Premium=${premium:.4f} x{contracts}"
@@ -1319,44 +1293,44 @@ class OptionsScalpStrategy(BaseStrategy):
     # CANDLE-BASED MOMENTUM GATE
     # ==================================================================
 
-    async def _check_candle_momentum(self, side: str) -> tuple[bool, str]:
-        """Check candle-based momentum for options entry.
+    async def _check_candle_momentum(self) -> tuple[bool, str, str | None]:
+        """Check candle-based momentum for options entry — PRIMARY GATE.
 
-        Uses last 5 completed 1m candles from the futures exchange.
+        Determines direction AND momentum from last 5 completed 1m candles.
+        Direction comes FROM candles (not from scalp signal).
+
         All three conditions must pass:
-        1. Candle streak: ≥3 of 5 candles in entry direction
-        2. Cumulative move: sum of (close-open) ≥ 0.10% of price
-        3. Fresh candle: last completed candle must be in entry direction
-
-        Args:
-            side: "long" for CALL, "short" for PUT
+        1. Candle streak: ≥3 of 5 candles in one direction (green=long, red=short)
+        2. Cumulative move: sum of (close-open) ≥ 0.10% of price in that direction
+        3. Fresh candle: last completed candle must be in that direction
 
         Returns:
-            (passed, reason_string) for logging
+            (passed, reason_string, side) where side is "long" or "short" or None
         """
         exchange = self.futures_exchange
         if not exchange:
-            return True, "no_exchange (skip check)"
+            return False, "no_exchange", None
 
         try:
             ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK + 1)
         except Exception as e:
             self.logger.debug("[%s] CANDLE_MOM: fetch_ohlcv failed: %s", self.pair, e)
-            return True, f"fetch_failed ({e})"
+            return False, f"fetch_failed ({e})", None
 
         if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK + 1:
-            return True, f"insufficient candles ({len(ohlcv) if ohlcv else 0})"
+            return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None
 
         # Use completed candles only (skip the last/current candle which is still forming)
         completed = ohlcv[-(self.CANDLE_MOM_LOOKBACK + 1):-1]
 
         current_price = float(completed[-1][4])  # close of last completed candle
         if current_price <= 0:
-            return True, "bad price"
+            return False, "bad price", None
 
         # Classify each candle: bullish (green), bearish (red), or doji (neutral)
         doji_threshold = current_price * 0.0001  # 0.01% of price
-        directional_count = 0
+        green_count = 0
+        red_count = 0
         cumulative_move = 0.0
 
         for candle in completed:
@@ -1367,10 +1341,21 @@ class OptionsScalpStrategy(BaseStrategy):
             if abs(move) < doji_threshold:
                 continue  # doji — neutral, skip
 
-            if side == "long" and move > 0:
-                directional_count += 1
-            elif side == "short" and move < 0:
-                directional_count += 1
+            if move > 0:
+                green_count += 1
+            else:
+                red_count += 1
+
+        # Determine direction from candle majority
+        if green_count >= self.CANDLE_MOM_STREAK:
+            side = "long"
+            directional_count = green_count
+        elif red_count >= self.CANDLE_MOM_STREAK:
+            side = "short"
+            directional_count = red_count
+        else:
+            n = self.CANDLE_MOM_LOOKBACK
+            return False, f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP", None
 
         # Last completed candle direction
         last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
@@ -1383,7 +1368,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # Cumulative move check (direction-aware)
         cum_pct = (cumulative_move / current_price) * 100
         if side == "short":
-            cum_pct = -cum_pct  # for shorts, negative move is bullish for our direction
+            cum_pct = -cum_pct  # for shorts, negative move is positive for our direction
 
         # Build result
         color = "green" if side == "long" else "red"
@@ -1391,27 +1376,24 @@ class OptionsScalpStrategy(BaseStrategy):
         n = self.CANDLE_MOM_LOOKBACK
 
         passed = (
-            directional_count >= self.CANDLE_MOM_STREAK
-            and cum_pct >= self.CANDLE_MOM_CUMULATIVE_PCT
+            cum_pct >= self.CANDLE_MOM_CUMULATIVE_PCT
             and last_is_directional
         )
 
         if passed:
             reason = (
-                f"{directional_count}/{n} {color}, cumulative {cum_pct:+.2f}%, "
-                f"last={last_color} → PASS"
+                f"OPTIONS CANDLE_ENTRY: {directional_count}/{n} {color}, "
+                f"cum={cum_pct:+.2f}%, last={last_color} → ENTER"
             )
         else:
-            parts = []
-            if directional_count < self.CANDLE_MOM_STREAK:
-                parts.append(f"{directional_count}/{n} {color} < {self.CANDLE_MOM_STREAK}")
+            parts = [f"{directional_count}/{n} {color}"]
             if cum_pct < self.CANDLE_MOM_CUMULATIVE_PCT:
-                parts.append(f"cumulative {cum_pct:+.2f}% < {self.CANDLE_MOM_CUMULATIVE_PCT}%")
+                parts.append(f"cum={cum_pct:+.2f}% < {self.CANDLE_MOM_CUMULATIVE_PCT}%")
             if not last_is_directional:
                 parts.append(f"last={last_color} (need {color})")
-            reason = ", ".join(parts) + " → SKIP"
+            reason = "OPTIONS CANDLE_ENTRY: " + ", ".join(parts) + " → SKIP"
 
-        return passed, reason
+        return passed, reason, side if passed else None
 
     # ==================================================================
     # RATCHET FLOOR

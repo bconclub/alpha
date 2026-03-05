@@ -164,8 +164,8 @@ I trade the same signals across multiple exchanges simultaneously. Each exchange
 - Diversifies risk: if futures gets stopped out, spot may still be running.
 
 ## Options — My Safest Momentum Play
-When I see a strong momentum signal (2/4+ from futures scalp), options give me another weapon.
-I buy CALLs on bullish signals, PUTs on bearish signals. Only MOMENTUM_BURST and BB_SQUEEZE setups qualify.
+When I see candle momentum building, options give me another weapon.
+I buy CALLs when 3+ of 5 candles are green, PUTs when 3+ are red. Only MOMENTUM_BURST and BB_SQUEEZE setups qualify.
 
 **Why options:**
 - Max loss = premium paid. No leverage, no liquidation. Safest way to play momentum.
@@ -175,9 +175,9 @@ I buy CALLs on bullish signals, PUTs on bearish signals. Only MOMENTUM_BURST and
 **My options rules:**
 - Only buy on quality setups (MOMENTUM_BURST, BB_SQUEEZE). Never speculate on weak signals.
 - Trend-aligned: TRENDING_UP → CALLs only, TRENDING_DOWN → PUTs only.
-- Counter-trend allowed at 4/4 signal strength (new — was blocked entirely).
+- Counter-trend allowed with 4+/5 strong candle momentum (was blocked entirely).
 - ATM strikes for liquidity (max 3 OTM strikes walked).
-- **Candle-based momentum:** 3+ directional candles out of last 5, cumulative move >= 0.10%.
+- **Candle-based momentum (primary gate):** 3+ directional candles out of last 5, cumulative move >= 0.10%, last candle in direction. Direction comes FROM candles, not from scalp signals.
 - TP: 30% premium gain. SL: 50% premium loss.
 - Trailing: activates at +15% premium gain, 5% trail distance.
 - Pullback exit: lost 40% of peak gain.

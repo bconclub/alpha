@@ -610,11 +610,11 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 ## Options Scalp (Delta Exchange)
 
 ### Entry Requirements
-- **Signal source:** 2-of-4+ momentum signals from futures scalp strategy
-- **Setup whitelist:** MOMENTUM_BURST and BB_SQUEEZE only
+- **Primary gate: Candle momentum** — 3+ of last 5 completed 1m candles in one direction, cumulative move >= 0.10%, last candle in direction. Direction (CALL/PUT) comes FROM candles, not from scalp signal.
+- **Setup whitelist:** MOMENTUM_BURST and BB_SQUEEZE only (defaults to MOMENTUM_BURST when scalp context unavailable)
 - **Trend alignment:** TRENDING_UP → CALLs only, TRENDING_DOWN → PUTs only
-- **Counter-trend:** Allowed at 4/4 signal strength (new)
-- **Candle-based momentum:** 3+ directional candles out of last 5, cumulative move >= 0.10%
+- **Counter-trend:** Allowed with 4+/5 strong candle momentum
+- **RSI conviction (soft):** CALL needs RSI < 40, PUT needs RSI > 60 (from scalp context — skipped if unavailable)
 
 ### Strike & Premium
 - ATM strikes, max 3 OTM strikes walked

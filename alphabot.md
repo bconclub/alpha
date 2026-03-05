@@ -234,7 +234,7 @@ Dashboard reads via `v_open_positions` view with 3-second live price polling ove
 
 ## Active Strategies
 - **scalp** — Primary. v6.3 12-signal momentum scalping on Bybit + Delta + Kraken futures + Binance spot
-- **options_scalp** — Options buying on Delta Exchange (MOMENTUM_BURST + BB_SQUEEZE setups, candle-based momentum, ratchet floors)
+- **options_scalp** — Options buying on Delta Exchange (candle-based momentum primary gate, MOMENTUM_BURST + BB_SQUEEZE setups, ratchet floors)
 
 Inactive/disabled: `futures_momentum`, `momentum`, `grid`, `arbitrage`, `strategy_selector`
 
