@@ -1286,7 +1286,7 @@ class OptionsScalpStrategy(BaseStrategy):
             return False, "no_exchange", None, 0, 0.0
 
         try:
-            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK)
+            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK + 2)
         except Exception as e:
             self.logger.debug("[%s] CANDLE_MOM: fetch_ohlcv failed: %s", self.pair, e)
             return False, f"fetch_failed ({e})", None, 0, 0.0
@@ -1294,7 +1294,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK:
             return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None, 0, 0.0
 
-        # Use last N completed candles (Delta returns exactly 5, no incomplete to skip)
+        # Fetch 7, Delta may return 6 — take last 5 completed
         completed = ohlcv[-self.CANDLE_MOM_LOOKBACK:]
 
         current_price = float(completed[-1][4])  # close of last completed candle
