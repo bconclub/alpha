@@ -67,7 +67,7 @@ class OptionsScalpStrategy(BaseStrategy):
     check_interval_sec = 5  # 5-second ticks (was 10 — catch fresh signals faster)
 
     # ── Class-level shared state ──────────────────────────────────────
-    _opt_consecutive_losses: dict[str, int] = {}  # pair → consecutive loss count
+    # (loss streak tracking removed — candle momentum is the quality gate)
 
     # ── Option chain refresh ──────────────────────────────────────
     CHAIN_REFRESH_INTERVAL = 30 * 60     # Refresh every 30 min
@@ -93,7 +93,7 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
     OPT_TRADE_COOLDOWN_SEC = 300        # 5 min between options trades (prevent rapid-fire losing streak)
-    OPT_LOSS_STREAK_LIMIT = 3           # skip options after 3 consecutive losses on pair
+    # OPT_LOSS_STREAK_LIMIT removed — candle momentum gates entry quality
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
@@ -189,7 +189,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.entry_premium: float = 0.0
         self.entry_time: float = 0.0
         self._contracts: int = 1                   # dynamic — set by _calculate_option_contracts
-        self._candle_alloc_pct: float = 20.0       # dynamic — set by candle quality (20/30/40%)
+        self._candle_alloc_pct: float = 30.0       # dynamic — set by candle quality (30/40/60%)
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
         self.strike_price: float = 0.0
@@ -521,11 +521,12 @@ class OptionsScalpStrategy(BaseStrategy):
         return min(self._available_strikes, key=lambda s: abs(s - current_price))
 
     def _get_otm_candidates(
-        self, atm_strike: float, option_type: str,
+        self, atm_strike: float, option_type: str, extra: int = 0,
     ) -> list[float]:
         """Get sorted OTM strikes away from ATM (up for calls, down for puts).
 
-        Returns up to MAX_OTM_STRIKES candidates.
+        Returns up to MAX_OTM_STRIKES candidates (+ extra for fallback walk).
+        When extra=1, returns only the (MAX_OTM+1)th strike (the next one beyond normal range).
         """
         if option_type == "call":
             candidates = sorted(s for s in self._available_strikes if s > atm_strike)
@@ -533,6 +534,10 @@ class OptionsScalpStrategy(BaseStrategy):
             candidates = sorted(
                 (s for s in self._available_strikes if s < atm_strike), reverse=True,
             )
+        if extra > 0:
+            # Return only the strikes beyond the normal MAX_OTM range
+            start = self.MAX_OTM_STRIKES
+            return candidates[start:start + extra]
         return candidates[:self.MAX_OTM_STRIKES]
 
     def _build_option_symbol(
@@ -740,16 +745,6 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                 return []
 
-        # 0c. Loss streak skip — 3 consecutive options losses on pair
-        pair_losses = OptionsScalpStrategy._opt_consecutive_losses.get(self.pair, 0)
-        if pair_losses >= self.OPT_LOSS_STREAK_LIMIT:
-            if self._tick_count % 12 == 0:
-                self.logger.info(
-                    "[%s] OPTIONS LOSS_STREAK — %d consecutive losses >= %d, skipping options",
-                    self.pair, pair_losses, self.OPT_LOSS_STREAK_LIMIT,
-                )
-            return []
-
         # 1. Market regime gate — only CHOPPY blocked
         # SIDEWAYS, TRENDING_UP, TRENDING_DOWN all allowed — candle momentum is the gate.
         self._current_regime = None
@@ -782,11 +777,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Dynamic allocation based on candle quality
         if candle_count >= 5 and candle_cum_pct >= 0.20:
-            self._candle_alloc_pct = 40.0  # 5/5 + strong cum → aggressive
+            self._candle_alloc_pct = 60.0  # 5/5 + strong cum → max conviction
         elif candle_count >= 4 and candle_cum_pct >= 0.15:
-            self._candle_alloc_pct = 30.0  # 4/5 + moderate cum
+            self._candle_alloc_pct = 40.0  # 4/5 + moderate cum
         else:
-            self._candle_alloc_pct = 20.0  # 3/5 base
+            self._candle_alloc_pct = 30.0  # 3/5 base
 
         self.logger.info(
             "[%s] %s | OPTIONS SIZE: %d/5 candles, cum=%.2f%%, alloc=%.0f%%",
@@ -943,17 +938,42 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.pair, strike, prem, collateral,
             )
 
+        # Fallback: if 0 contracts after MAX_OTM, try 1 more OTM strike (cheaper premium)
+        if selected_strike is None:
+            extra_otm = self._get_otm_candidates(atm_strike, option_type, extra=1)
+            if extra_otm:
+                strike = extra_otm[0]
+                symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
+                if symbol:
+                    try:
+                        ticker = await self.options_exchange.fetch_ticker(symbol)
+                        prem = ticker.get("last") or ticker.get("ask") or 0
+                    except Exception:
+                        prem = 0
+                    if prem >= self.MIN_PREMIUM_USD:
+                        n = self._calculate_option_contracts(prem)
+                        if n >= 1:
+                            selected_strike = strike
+                            selected_symbol = symbol
+                            premium = prem
+                            opt_contracts = n
+                            self.logger.info(
+                                "[%s] %s %s: 4th OTM fallback $%.0f ($%.4f premium, %d contracts)",
+                                self.pair, self._base_asset, option_type.upper(),
+                                strike, prem, n,
+                            )
+
         if selected_strike is None or selected_symbol is None:
             if self._tick_count % 30 == 0:
                 self.logger.info(
-                    "[%s] No affordable strike within %d OTM — skipping "
+                    "[%s] No affordable strike within %d+1 OTM — skipping "
                     "(ATM=$%.0f collateral=$%.4f)",
                     self.pair, self.MAX_OTM_STRIKES, atm_strike,
                     atm_collateral or 0,
                 )
             await self._log_skip(
                 f"{self.pair} — OPTIONS SKIP: no affordable strike within "
-                f"{self.MAX_OTM_STRIKES} OTM (ATM=${atm_strike:.0f} "
+                f"{self.MAX_OTM_STRIKES}+1 OTM (ATM=${atm_strike:.0f} "
                 f"collateral=${atm_collateral or 0:.4f})",
                 {"option_type": option_type, "atm_strike": atm_strike,
                  "atm_collateral": atm_collateral,
@@ -1698,14 +1718,11 @@ class OptionsScalpStrategy(BaseStrategy):
         self._opt_mom_dying_since = None
         self._opt_ratchet_floor = 0.0
 
-        # Stats + loss streak tracking
+        # Stats tracking
         if pnl_pct >= 0:
             self.hourly_wins += 1
-            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = 0
         else:
             self.hourly_losses += 1
-            prev = OptionsScalpStrategy._opt_consecutive_losses.get(self.pair, 0)
-            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = prev + 1
         self.hourly_pnl += pnl_usd
 
         # Trade cooldown — set 5 min timer
@@ -1890,14 +1907,11 @@ class OptionsScalpStrategy(BaseStrategy):
              "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4)},
         )
 
-        # Stats + loss streak tracking
+        # Stats tracking
         if pnl_pct >= 0:
             self.hourly_wins += 1
-            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = 0
         else:
             self.hourly_losses += 1
-            prev = OptionsScalpStrategy._opt_consecutive_losses.get(self.pair, 0)
-            OptionsScalpStrategy._opt_consecutive_losses[self.pair] = prev + 1
         self.hourly_pnl += pnl_usd
 
         # Trade cooldown — set 5 min timer
