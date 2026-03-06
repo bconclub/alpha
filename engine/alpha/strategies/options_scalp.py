@@ -87,9 +87,9 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
     # Candle-based momentum gate (replaces old single-snapshot momentum % check)
-    CANDLE_MOM_STREAK = 3                # min directional candles out of last 5
-    CANDLE_MOM_CUMULATIVE_PCT = 0.10     # min cumulative move over 5 candles (% of price)
-    CANDLE_MOM_LOOKBACK = 5              # number of completed 1m candles to check
+    CANDLE_MOM_STREAK = 2                # min directional candles out of last 3
+    CANDLE_MOM_CUMULATIVE_PCT = 0.06     # min cumulative move over 3 candles (% of price)
+    CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
     OPT_TRADE_COOLDOWN_SEC = 300        # 5 min between options trades (prevent rapid-fire losing streak)
@@ -189,7 +189,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.entry_premium: float = 0.0
         self.entry_time: float = 0.0
         self._contracts: int = 1                   # dynamic — set by _calculate_option_contracts
-        self._candle_alloc_pct: float = 30.0       # dynamic — set by candle quality (30/40/60%)
+        self._candle_alloc_pct: float = 25.0       # dynamic — set by candle quality (25/40%)
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
         self.strike_price: float = 0.0
@@ -776,15 +776,13 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         # Dynamic allocation based on candle quality
-        if candle_count >= 5 and candle_cum_pct >= 0.20:
-            self._candle_alloc_pct = 60.0  # 5/5 + strong cum → max conviction
-        elif candle_count >= 4 and candle_cum_pct >= 0.15:
-            self._candle_alloc_pct = 40.0  # 4/5 + moderate cum
+        if candle_count >= 3:
+            self._candle_alloc_pct = 40.0  # 3/3 candles → strong
         else:
-            self._candle_alloc_pct = 30.0  # 3/5 base
+            self._candle_alloc_pct = 25.0  # 2/3 candles → moderate
 
         self.logger.info(
-            "[%s] %s | OPTIONS SIZE: %d/5 candles, cum=%.2f%%, alloc=%.0f%%",
+            "[%s] %s | OPTIONS SIZE: %d/3 candles, cum=%.2f%%, alloc=%.0f%%",
             self.pair, candle_reason, candle_count, candle_cum_pct, self._candle_alloc_pct,
         )
 
@@ -792,7 +790,7 @@ class OptionsScalpStrategy(BaseStrategy):
         option_type = "call" if side == "long" else "put"
 
         # 3a. Counter-trend always allowed — candle momentum already ensures direction is real.
-        # If 4/5 candles are red in TRENDING_UP, that's a reversal signal worth playing.
+        # If 2/3 candles are red in TRENDING_UP, that's a reversal signal worth playing.
         # Options max loss = premium paid, no leverage risk.
 
         # 3b. Soft read scalp context — RSI, range position (don't block if unavailable)
@@ -1021,7 +1019,7 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 10d. Sizing already handled by dynamic candle alloc (20/30/40%)
+        # 10d. Sizing already handled by dynamic candle alloc (25/40%)
         # BB_SQUEEZE gets 60% factor applied on top
         if setup_type == "BB_SQUEEZE" and opt_contracts > 1:
             adjusted = max(1, int(opt_contracts * 0.60))
@@ -1255,7 +1253,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if exchange_capital <= 0 or premium <= 0:
             return 0
 
-        alloc_pct = self._candle_alloc_pct  # dynamic: 20/30/40% based on candle quality
+        alloc_pct = self._candle_alloc_pct  # dynamic: 25/40% based on candle quality
 
         # Survival mode: low balance → cap allocation
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
@@ -1290,12 +1288,12 @@ class OptionsScalpStrategy(BaseStrategy):
     async def _check_candle_momentum(self) -> tuple[bool, str, str | None, int, float]:
         """Check candle-based momentum for options entry — PRIMARY GATE.
 
-        Determines direction AND momentum from last 5 completed 1m candles.
+        Determines direction AND momentum from last 3 completed 1m candles.
         Direction comes FROM candles (not from scalp signal).
 
         All three conditions must pass:
-        1. Candle streak: ≥3 of 5 candles in one direction (green=long, red=short)
-        2. Cumulative move: sum of (close-open) ≥ 0.10% of price in that direction
+        1. Candle streak: ≥2 of 3 candles in one direction (green=long, red=short)
+        2. Cumulative move: sum of (close-open) ≥ 0.06% of price in that direction
         3. Fresh candle: last completed candle must be in that direction
 
         Returns:
