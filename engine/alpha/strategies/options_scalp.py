@@ -747,13 +747,13 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                 return []
 
-        # 0c. Skip BTC options when balance < $100 — premiums too expensive
+        # 0c. Skip BTC options when balance < $50 — premiums too expensive, ETH only
         if self._base_asset == "BTC":
             exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-            if exchange_capital < 100:
+            if exchange_capital < 50:
                 if self._tick_count % 12 == 0:
                     self.logger.info(
-                        "[%s] BTC OPTIONS SKIP — balance $%.2f < $100, premiums too expensive",
+                        "[%s] BTC OPTIONS SKIP — balance $%.2f < $50, ETH only",
                         self.pair, exchange_capital,
                     )
                 return []

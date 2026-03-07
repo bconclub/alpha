@@ -3579,13 +3579,13 @@ class ScalpStrategy(BaseStrategy):
         _ctx = ScalpStrategy._cached_signals.get(key, {})
         _ctx_rsi = _ctx.get("rsi", 50)
         _ctx_bb = _ctx.get("bb_position", 0.5)
-        if direction == "long" and _ctx_rsi < 40 and _ctx_bb < 0.30:
+        if direction == "long" and _ctx_rsi < 35 and _ctx_bb < 0.25:
             self.logger.info(
                 "[%s] ACCEL CONTEXT_BLOCK: long vs RSI=%.0f BB=%.2f — counter to indicators",
                 self.pair, _ctx_rsi, _ctx_bb,
             )
             return
-        if direction == "short" and _ctx_rsi > 60 and _ctx_bb > 0.70:
+        if direction == "short" and _ctx_rsi > 65 and _ctx_bb > 0.75:
             self.logger.info(
                 "[%s] ACCEL CONTEXT_BLOCK: short vs RSI=%.0f BB=%.2f — counter to indicators",
                 self.pair, _ctx_rsi, _ctx_bb,
