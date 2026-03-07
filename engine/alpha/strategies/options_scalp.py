@@ -240,6 +240,11 @@ class OptionsScalpStrategy(BaseStrategy):
         # Ratchet profit floor
         self._opt_ratchet_floor: float = 0.0
 
+        # Dashboard chain panel cached state (set during check, read by _write_dashboard_state)
+        self._cached_candle_momentum: dict | None = None
+        self._cached_bot_state: str = "scanning"
+        self._cached_target_strike: float | None = None
+
     # ==================================================================
     # ACTIVITY LOGGING
     # ==================================================================
@@ -644,6 +649,56 @@ class OptionsScalpStrategy(BaseStrategy):
                 except Exception:
                     pass
 
+        # ── Chain data: top 5 calls + puts near ATM ──
+        chain_calls: list[dict] = []
+        chain_puts: list[dict] = []
+
+        if (
+            self._available_strikes
+            and atm_strike is not None
+            and spot_price > 0
+            and self._selected_expiry
+            and self.options_exchange
+        ):
+            # Call strikes: ATM and 4 above (ascending)
+            call_strikes = sorted(s for s in self._available_strikes if s >= atm_strike)[:5]
+            for strike in call_strikes:
+                try:
+                    sym = self._build_option_symbol(strike, "call", self._selected_expiry)
+                    if sym:
+                        t = await self.options_exchange.fetch_ticker(sym)
+                        chain_calls.append({
+                            "strike": strike,
+                            "bid": t.get("bid") or 0,
+                            "ask": t.get("ask") or 0,
+                        })
+                except Exception:
+                    chain_calls.append({"strike": strike, "bid": 0, "ask": 0})
+
+            # Put strikes: ATM and 4 below (descending)
+            put_strikes = sorted(
+                (s for s in self._available_strikes if s <= atm_strike), reverse=True,
+            )[:5]
+            for strike in put_strikes:
+                try:
+                    sym = self._build_option_symbol(strike, "put", self._selected_expiry)
+                    if sym:
+                        t = await self.options_exchange.fetch_ticker(sym)
+                        chain_puts.append({
+                            "strike": strike,
+                            "bid": t.get("bid") or 0,
+                            "ask": t.get("ask") or 0,
+                        })
+                except Exception:
+                    chain_puts.append({"strike": strike, "bid": 0, "ask": 0})
+
+        # ── Balance ──
+        balance: float | None = None
+        try:
+            balance = self.risk_manager.get_exchange_capital(self._exchange_id)
+        except Exception:
+            pass
+
         # ── Position info ──
         position_side: str | None = None
         position_strike: float | None = None
@@ -693,6 +748,12 @@ class OptionsScalpStrategy(BaseStrategy):
             "pnl_usd": round(pnl_usd, 4) if pnl_usd is not None else None,
             "trailing_active": trailing_active,
             "highest_premium": highest_prem,
+            "chain_calls": chain_calls,
+            "chain_puts": chain_puts,
+            "candle_momentum": self._cached_candle_momentum,
+            "bot_state": self._cached_bot_state,
+            "target_strike": self._cached_target_strike,
+            "balance": round(balance, 2) if balance is not None else None,
         }
 
         await self._db.upsert_options_state(self.pair, state)
@@ -713,6 +774,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # In position: manage exit
         if self.in_position:
+            self._cached_bot_state = "in_position"
             return await self._check_option_exit()
 
         # Not in position: look for entry from scalp signals
@@ -724,6 +786,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
     async def _check_option_entry(self) -> list[Signal]:
         """Check scalp's signal state for 2/4+ momentum, buy option."""
+        self._cached_bot_state = "scanning"
+        self._cached_target_strike = None
+
         # 0. POSITION_GONE cooldown — no new entries for 60s after position disappeared
         if time.monotonic() < self._position_gone_cooldown_until:
             remaining = self._position_gone_cooldown_until - time.monotonic()
@@ -732,6 +797,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] OPTIONS COOLDOWN after POSITION_GONE — %.0fs remaining",
                     self.pair, remaining,
                 )
+            self._cached_bot_state = "blocked:position_gone_cooldown"
             return []
 
         # 0b. Trade cooldown — 5 min between options trades
@@ -745,6 +811,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         "[%s] OPTIONS TRADE_COOLDOWN — %.0fs remaining (5min between trades)",
                         self.pair, remaining,
                     )
+                self._cached_bot_state = "blocked:trade_cooldown"
                 return []
 
         # 0c. Skip BTC options when balance < $50 — premiums too expensive, ETH only
@@ -756,6 +823,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         "[%s] BTC OPTIONS SKIP — balance $%.2f < $50, ETH only",
                         self.pair, exchange_capital,
                     )
+                self._cached_bot_state = "blocked:btc_low_balance"
                 return []
 
         # 1. Market regime gate — only CHOPPY blocked
@@ -777,12 +845,17 @@ class OptionsScalpStrategy(BaseStrategy):
                             "[%s] OPTIONS CHOPPY_BLOCK: regime=%s — skipping",
                             self.pair, self._current_regime,
                         )
+                    self._cached_bot_state = "blocked:choppy_regime"
                     return []
 
         # 2. Candle-based momentum gate — PRIMARY ENTRY GATE
         # Direction determined FROM candles, not from scalp signal strength.
         # 2+ of 3 completed 1m candles in one direction + cumulative >= 0.06%.
         candle_pass, candle_reason, side, candle_count, candle_cum_pct = await self._check_candle_momentum()
+        self._cached_candle_momentum = {
+            "count": candle_count, "total": self.CANDLE_MOM_LOOKBACK,
+            "cum_pct": round(candle_cum_pct, 4), "direction": side, "passed": candle_pass,
+        }
         if not candle_pass:
             if self._tick_count % 6 == 0:
                 self.logger.info("[%s] %s", self.pair, candle_reason)
@@ -835,6 +908,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if signal_state is not None:
             strength = signal_state.get("strength", 0)
 
+        self._cached_bot_state = "ready"
         self.logger.info(
             "[%s] OPTIONS CANDLE_READY: %s — checking chain/premium",
             self.pair, option_type.upper(),
@@ -853,6 +927,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 pass
         if current_price <= 0:
             self.logger.info("[%s] OPTIONS: no current_price available", self.pair)
+            self._cached_bot_state = "blocked:no_price"
             return []
 
         # 6. Check expiry validity
@@ -863,6 +938,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"{self.pair} — OPTIONS SKIP: no valid expiry available",
                 {"option_type": option_type, "strength": strength},
             )
+            self._cached_bot_state = "blocked:no_expiry"
             return []
 
         hours_to_expiry = (
@@ -878,6 +954,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"{self.pair} — OPTIONS SKIP: expiry only {hours_to_expiry:.1f}h away (need {self.MIN_EXPIRY_HOURS}h+)",
                 {"option_type": option_type, "strength": strength, "hours_to_expiry": round(hours_to_expiry, 1)},
             )
+            self._cached_bot_state = "blocked:expiry_close"
             return []
 
         # 7. Find ATM strike
@@ -889,6 +966,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"{self.pair} — OPTIONS SKIP: no valid strikes for {option_type.upper()}",
                 {"option_type": option_type, "strength": strength, "price": current_price},
             )
+            self._cached_bot_state = "blocked:no_strikes"
             return []
 
         # 8-9. Start 1 OTM (2 OTM for 3/3 conviction), walk further for affordability
@@ -949,6 +1027,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 selected_symbol = symbol
                 premium = prem
                 opt_contracts = n
+                self._cached_target_strike = strike
                 otm_n = _otm_offset(strike)
                 otm_label = f"{otm_n} OTM" if otm_n > 0 else "ATM"
                 self.logger.info(
@@ -981,6 +1060,7 @@ class OptionsScalpStrategy(BaseStrategy):
                             selected_symbol = symbol
                             premium = prem
                             opt_contracts = n
+                            self._cached_target_strike = strike
                             self.logger.info(
                                 "[%s] %s %s: 4th OTM fallback $%.0f ($%.4f premium, %d contracts)",
                                 self.pair, self._base_asset, option_type.upper(),
@@ -1003,6 +1083,7 @@ class OptionsScalpStrategy(BaseStrategy):
                  "first_collateral": first_collateral,
                  "strength": strength},
             )
+            self._cached_bot_state = "blocked:no_affordable_strike"
             return []
 
         # 10. Classify setup_type from scalp signal reason (soft — default MOMENTUM_BURST)
@@ -1028,6 +1109,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"{self.pair} — OPTIONS SETUP_BLOCK: {setup_type} not in whitelist",
                 {"option_type": option_type, "setup_type": setup_type, "strength": strength},
             )
+            self._cached_bot_state = "blocked:setup_not_allowed"
             return []
 
         # 10b. SIDEWAYS regime — all setups allowed (candle momentum is the gate)
@@ -1043,6 +1125,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"{self.pair} — OPTIONS PREMIUM_HIGH: ${premium:.2f} > ${self.MAX_PREMIUM_USD:.0f}",
                 {"option_type": option_type, "premium": premium, "setup_type": setup_type},
             )
+            self._cached_bot_state = "blocked:premium_high"
             return []
 
         # 10d. Sizing already handled by dynamic candle alloc (25/40%)

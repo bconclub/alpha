@@ -17,9 +17,6 @@ const BB_TREND_LOWER = 0.15;
 // Only show our 4 active trading pairs (filter out stale BNB/DOGE/etc.)
 const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
 
-// BTC + ETH are options-eligible (options_scalp only runs on these)
-const OPTIONS_ELIGIBLE = new Set(['BTC', 'ETH']);
-
 // Options symbol pattern: date-strike-C/P
 const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
 
@@ -59,11 +56,6 @@ interface TriggerInfo {
   skipReason: string | null;
   // Active position on this pair (if any)
   activePosition: OpenPosition | null;
-  // Options data (only populated for BTC + ETH)
-  optionsState: OptionsState | null;
-  optionsOpenTrade: OpenPosition | null;
-  optionsRecentEvents: ActivityLogRow[];
-  optionsStale: boolean;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -129,13 +121,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const hasData = rsi != null;
   const trend = deriveTrend(log);
 
-  // Default options fields (set later in useMemo for eligible assets)
-  const optDefaults = {
-    optionsState: null as OptionsState | null,
-    optionsOpenTrade: null as OpenPosition | null,
-    optionsRecentEvents: [] as ActivityLogRow[],
-    optionsStale: false,
-  };
+
 
   // ── PRIMARY: use bot-written signal state if available ──────────────
   const hasBotSignals = log.signal_count != null;
@@ -234,7 +220,6 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
       overallStatus, statusColor,
       skipReason,
       activePosition: null,
-      ...optDefaults,
     };
   }
 
@@ -319,7 +304,6 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     overallStatus, statusColor,
     skipReason: null,
     activePosition: null,
-    ...optDefaults,
   };
 }
 
@@ -401,22 +385,28 @@ function ExchangeBadge({ exchange }: { exchange: string }) {
   );
 }
 
-// ── Options inline section (BTC + ETH only) ──────────────────────────
+// ── Options entry signal card (BTC or ETH) ──────────────────────────
 
-function OptionsInlineSection({
+function OptionsEntryCard({
   optionsState: s,
   openTrade,
+  recentEvents,
 }: {
   optionsState: OptionsState;
   openTrade: OpenPosition | null;
+  recentEvents: ActivityLogRow[];
 }) {
-  // Derive position info (same logic from OptionsTracker PairCard)
+  const asset = extractBaseAsset(s.pair);
+  const stale = isStale(s.updated_at);
+  const momentum = s.candle_momentum;
+  const botState = s.bot_state ?? 'scanning';
+
+  // Position info
   const positionSideSet = s.position_side != null;
   const dataAge = Date.now() - new Date(s.updated_at).getTime();
   const hasPositionFromState = positionSideSet && dataAge < 5 * 60 * 1000;
   const hasPositionFromTrades = openTrade != null;
   const hasPosition = hasPositionFromState || hasPositionFromTrades;
-
   const positionSide = s.position_side ?? (
     hasPositionFromTrades
       ? (openTrade!.pair.endsWith('-C') ? 'call' : openTrade!.pair.endsWith('-P') ? 'put' : 'call')
@@ -428,99 +418,131 @@ function OptionsInlineSection({
   const pnlUsd = s.pnl_usd ?? null;
   const positionStrike = s.position_strike ?? null;
   const trailingActive = s.trailing_active ?? (hasPositionFromTrades && openTrade!.position_state === 'trailing');
-  const highestPremium = s.highest_premium ?? null;
 
-  const strength = s.signal_strength ?? 0;
-  const isReady = strength >= 3;
-  const stale = isStale(s.updated_at);
+  // Target strike premium from chain data
+  const targetStrike = s.target_strike ?? null;
+  let targetPremium: number | null = null;
+  let targetCollateral: number | null = null;
+  if (targetStrike != null) {
+    const allChain = [...(s.chain_calls ?? []), ...(s.chain_puts ?? [])];
+    const match = allChain.find(c => c.strike === targetStrike);
+    if (match && match.ask > 0) {
+      targetPremium = match.ask;
+      targetCollateral = match.ask / 50;
+    }
+  }
+
+  // Recent trades (last 3 options events with W/L)
+  const recentTrades = recentEvents
+    .filter(e => e.event_type === 'option_close' || e.event_type === 'option_exit')
+    .slice(0, 3);
+
+  // Bot state display
+  let stateLabel: string;
+  let stateColor: string;
+  if (hasPosition) {
+    stateLabel = `In Position: ${positionSide?.toUpperCase()} ${fmtStrike(positionStrike)} @ ${fmtPrem(entryPremium)}`;
+    stateColor = 'text-[#7c4dff]';
+  } else if (botState === 'ready') {
+    stateLabel = 'Candle PASS — entering';
+    stateColor = 'text-[#00c853]';
+  } else if (botState.startsWith('blocked:')) {
+    const reason = botState.replace('blocked:', '').replace(/_/g, ' ');
+    stateLabel = `Blocked: ${reason}`;
+    stateColor = 'text-[#ff1744]/80';
+  } else {
+    stateLabel = 'Scanning';
+    stateColor = 'text-zinc-500';
+  }
 
   return (
-    <div className="mt-2.5 pt-2.5 border-t border-[#7c4dff]/20">
-      {/* Options header */}
+    <div className={cn(
+      'bg-zinc-900/40 border rounded-lg p-3',
+      hasPosition ? 'border-[#7c4dff]/30' : 'border-zinc-800/50',
+    )}>
+      {/* Header */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <span className="text-[9px] font-mono font-medium text-[#7c4dff] uppercase">Options</span>
+          <span className="text-sm font-medium text-white">{asset}</span>
           <ExchangeBadge exchange="delta" />
         </div>
-        <div className="flex items-center gap-1.5">
-          {hasPosition && (
-            <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-[#7c4dff] bg-[#7c4dff]/10 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#7c4dff] animate-pulse" />
-              {positionSide?.toUpperCase()} OPEN
+        {stale ? (
+          <span className="text-[8px] text-zinc-600 font-mono">STALE</span>
+        ) : s.updated_at ? (
+          <span className="text-[8px] text-zinc-600 font-mono flex items-center gap-1">
+            <span className="w-1 h-1 rounded-full bg-[#00c853]" />
+            {formatTimeAgo(s.updated_at)}
+          </span>
+        ) : null}
+      </div>
+
+      {/* Candle Momentum */}
+      {momentum ? (
+        <div className="flex items-center gap-2 mb-2">
+          <div className={cn('flex gap-0.5', momentum.passed && 'animate-pulse')}>
+            {Array.from({ length: momentum.total }, (_, i) => (
+              <div key={i} className={cn(
+                'w-4 h-3 rounded-sm',
+                i < momentum.count
+                  ? (momentum.direction === 'long' ? 'bg-[#00c853]' : 'bg-[#ff1744]')
+                  : 'bg-zinc-700',
+              )} />
+            ))}
+          </div>
+          <span className="text-[9px] font-mono text-zinc-500">
+            {momentum.count}/{momentum.total} {momentum.direction === 'long' ? 'green' : momentum.direction === 'short' ? 'red' : '—'}
+          </span>
+          <span className={cn(
+            'text-[9px] font-mono',
+            momentum.cum_pct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+          )}>
+            {momentum.cum_pct >= 0 ? '+' : ''}{momentum.cum_pct.toFixed(2)}%
+          </span>
+          <span className={cn(
+            'px-1.5 py-0.5 rounded text-[8px] font-bold uppercase',
+            momentum.passed
+              ? 'bg-[#00c853]/15 text-[#00c853] border border-[#00c853]/30'
+              : 'bg-zinc-800 text-zinc-500 border border-zinc-700',
+          )}>
+            {momentum.passed ? 'PASS' : 'FAIL'}
+          </span>
+          {/* Direction arrow */}
+          {momentum.passed && momentum.direction && (
+            <span className={cn(
+              'text-sm font-bold',
+              momentum.direction === 'long' ? 'text-[#00c853]' : 'text-[#ff1744]',
+            )}>
+              {momentum.direction === 'long' ? 'CALL \u2191' : 'PUT \u2193'}
             </span>
           )}
-          {stale ? (
-            <span className="text-[8px] text-zinc-600 font-mono">STALE</span>
-          ) : s.updated_at ? (
-            <span className="text-[8px] text-zinc-600 font-mono flex items-center gap-1">
-              <span className="w-1 h-1 rounded-full bg-[#00c853]" />
-              {formatTimeAgo(s.updated_at)}
-            </span>
-          ) : null}
         </div>
-      </div>
+      ) : (
+        <div className="text-[9px] font-mono text-zinc-600 mb-2">Candles: waiting...</div>
+      )}
 
-      {/* Expiry + Strike + Premiums — compact row */}
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[9px] font-mono text-zinc-400 mb-2">
-        <span><span className="text-zinc-600">Exp </span>{s.expiry_label ?? '—'}</span>
-        <span><span className="text-zinc-600">ATM </span>{fmtStrike(s.atm_strike)}</span>
-        <span className="text-[#00c853]"><span className="text-zinc-600">C </span>{fmtPrem(s.call_premium)}</span>
-        <span className="text-[#ff1744]"><span className="text-zinc-600">P </span>{fmtPrem(s.put_premium)}</span>
-      </div>
-
-      {/* Options signal bar */}
-      <div className="flex items-center gap-2 mb-1.5">
-        <span className="text-[9px] text-zinc-500 uppercase w-8 shrink-0">Opt</span>
-        <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all duration-700"
-            style={{
-              width: `${(strength / 4) * 100}%`,
-              backgroundColor: strength >= 3 ? '#7c4dff' : strength >= 1 ? '#ffd600' : '#71717a',
-            }}
-          />
+      {/* Target strike + premium */}
+      {!hasPosition && targetStrike != null && (
+        <div className="flex flex-wrap gap-x-3 text-[9px] font-mono text-zinc-400 mb-2">
+          <span><span className="text-zinc-600">Target </span><span className="text-amber-400">{fmtStrike(targetStrike)}</span></span>
+          {targetPremium != null && (
+            <span><span className="text-zinc-600">Ask </span>{fmtPrem(targetPremium)}</span>
+          )}
+          {targetCollateral != null && (
+            <span><span className="text-zinc-600">Col </span>${targetCollateral.toFixed(2)}</span>
+          )}
         </div>
-        <span className={cn(
-          'text-[10px] font-mono w-8 text-right',
-          strength >= 3 ? 'text-[#7c4dff]' : strength >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
-        )}>
-          {strength}/4
-        </span>
+      )}
+
+      {/* Bot State */}
+      <div className={cn('text-[9px] font-mono mb-2', stateColor)}>
+        {stateLabel}
       </div>
 
-      {/* Signal status text */}
-      <div className="text-[9px] font-mono mb-1.5">
-        {isReady ? (
-          <span className={s.signal_side === 'long' ? 'text-[#00c853]' : 'text-[#ff1744]'}>
-            OPT SIGNAL: {s.signal_side === 'long' ? 'CALL' : 'PUT'} {strength}/4 ✔
-          </span>
-        ) : strength > 0 ? (
-          <span className="text-[#ffd600]">
-            {s.signal_side === 'long' ? 'CALL' : s.signal_side === 'short' ? 'PUT' : '...'} building ({strength}/4)
-          </span>
-        ) : (
-          <span className="text-zinc-600">Waiting for 3/4+ signal...</span>
-        )}
-      </div>
-
-      {/* Active options position inline */}
+      {/* Active position details */}
       {hasPosition && (
-        <div className="bg-[#7c4dff]/5 border border-[#7c4dff]/20 rounded p-2 mb-1.5">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[9px] font-medium text-[#7c4dff] uppercase">
-              {positionSide?.toUpperCase()} Position
-            </span>
-            {trailingActive && (
-              <span className="flex items-center gap-1 text-[8px] font-mono text-[#00c853]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
-                TRAILING
-              </span>
-            )}
-          </div>
+        <div className="bg-[#7c4dff]/5 border border-[#7c4dff]/20 rounded p-2 mb-2">
           <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] font-mono text-zinc-400">
-            {positionStrike != null && <span><span className="text-zinc-600">Strike </span>{fmtStrike(positionStrike)}</span>}
-            <span><span className="text-zinc-600">Entry </span>{fmtPrem(entryPremium)}</span>
-            <span><span className="text-zinc-600">Now </span>{currentPremium != null ? fmtPrem(currentPremium) : 'updating...'}</span>
+            <span><span className="text-zinc-600">Now </span>{currentPremium != null ? fmtPrem(currentPremium) : '...'}</span>
             <span>
               <span className="text-zinc-600">P&L </span>
               <span className={cn('font-medium', (pnlPct ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
@@ -528,26 +550,38 @@ function OptionsInlineSection({
                 {pnlUsd != null && ` ($${pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(4)})`}
               </span>
             </span>
+            {trailingActive && (
+              <span className="flex items-center gap-1 text-[#00c853]">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
+                TRAILING
+              </span>
+            )}
           </div>
-          {highestPremium != null && entryPremium != null && entryPremium > 0 && (
-            <div className="text-[8px] font-mono text-zinc-600 mt-1">
-              Peak ${highestPremium.toFixed(4)} ({((highestPremium - entryPremium) / entryPremium * 100).toFixed(1)}%)
-            </div>
-          )}
         </div>
       )}
 
-      {/* Last exit (when no position) */}
-      {!hasPosition && s.last_exit_type && (
-        <div className="text-[8px] font-mono text-zinc-600">
-          Last: {s.last_exit_type}
-          {s.last_exit_pnl_pct != null && (
-            <span className={cn('ml-1', s.last_exit_pnl_pct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-              {s.last_exit_pnl_pct >= 0 ? '+' : ''}{s.last_exit_pnl_pct.toFixed(1)}%
-            </span>
-          )}
-        </div>
-      )}
+      {/* Expiry */}
+      <div className="text-[8px] font-mono text-zinc-600 flex items-center justify-between">
+        <span>Exp: {s.expiry_label ?? '—'}</span>
+        {/* Last 3 trades mini-summary */}
+        {recentTrades.length > 0 && (
+          <div className="flex items-center gap-1">
+            {recentTrades.map((ev, i) => {
+              const meta = ev.metadata;
+              const pnl = (meta?.pnl_pct as number) ?? null;
+              const isWin = pnl != null && pnl >= 0;
+              return (
+                <span key={i} className={cn(
+                  'px-1 py-px rounded text-[7px] font-bold',
+                  isWin ? 'bg-[#00c853]/15 text-[#00c853]' : 'bg-[#ff1744]/15 text-[#ff1744]',
+                )}>
+                  {isWin ? 'W' : 'L'}{pnl != null ? ` ${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}%` : ''}
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -575,33 +609,11 @@ export function EntrySignals() {
 
     // Build lookup of open SCALP positions by base asset + exchange
     const positionMap = new Map<string, OpenPosition>();
-    const optionTrades = new Map<string, OpenPosition>();
     for (const pos of (openPositions ?? [])) {
+      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) continue;
       const asset = extractBaseAsset(pos.pair);
-      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) {
-        // Options positions — tracked separately
-        optionTrades.set(asset, pos);
-      } else {
-        // Futures/scalp positions
-        const key = `${asset}-${pos.exchange}`;
-        positionMap.set(key, pos);
-      }
-    }
-
-    // Options state by asset
-    const optionsStateMap = new Map<string, OptionsState>();
-    for (const os of optionsState) {
-      const asset = extractBaseAsset(os.pair);
-      optionsStateMap.set(asset, os);
-    }
-
-    // Options recent events by asset
-    const optionsEventsByAsset = new Map<string, ActivityLogRow[]>();
-    for (const ev of optionsLog) {
-      const asset = extractBaseAsset(ev.pair);
-      const arr = optionsEventsByAsset.get(asset) ?? [];
-      arr.push(ev);
-      optionsEventsByAsset.set(asset, arr);
+      const key = `${asset}-${pos.exchange}`;
+      positionMap.set(key, pos);
     }
 
     const results: TriggerInfo[] = [];
@@ -613,21 +625,13 @@ export function EntrySignals() {
       const posKey = `${asset}-${trigger.exchange}`;
       trigger.activePosition = positionMap.get(posKey) ?? null;
 
-      // Options data (only for BTC + ETH)
-      if (OPTIONS_ELIGIBLE.has(asset)) {
-        trigger.optionsState = optionsStateMap.get(asset) ?? null;
-        trigger.optionsOpenTrade = optionTrades.get(asset) ?? null;
-        trigger.optionsRecentEvents = (optionsEventsByAsset.get(asset) ?? []).slice(0, 5);
-        trigger.optionsStale = isStale(trigger.optionsState?.updated_at ?? null);
-      }
-
       results.push(trigger);
     }
 
     // Priority: 1) in-trade pairs first, 2) highest signal count, 3) has data
     results.sort((a, b) => {
-      const aInTrade = (a.activePosition != null || a.optionsOpenTrade != null) ? 1 : 0;
-      const bInTrade = (b.activePosition != null || b.optionsOpenTrade != null) ? 1 : 0;
+      const aInTrade = a.activePosition != null ? 1 : 0;
+      const bInTrade = b.activePosition != null ? 1 : 0;
       if (aInTrade !== bInTrade) return bInTrade - aInTrade;
       if (a.signalCount !== b.signalCount) return b.signalCount - a.signalCount;
       if (a.hasData && !b.hasData) return -1;
@@ -636,198 +640,231 @@ export function EntrySignals() {
     });
 
     return results;
-  }, [strategyLog, openPositions, optionsState, optionsLog]);
+  }, [strategyLog, openPositions]);
+
+  // Separate options data for the OPTIONS section
+  const optionsCards = useMemo(() => {
+    const cards: { asset: string; state: OptionsState; openTrade: OpenPosition | null; recentEvents: ActivityLogRow[] }[] = [];
+    for (const asset of ['BTC', 'ETH']) {
+      const state = optionsState.find(s => extractBaseAsset(s.pair) === asset);
+      if (!state) continue;
+      // Find open options trade for this asset
+      const optTrade = (openPositions ?? []).find(p => {
+        const a = extractBaseAsset(p.pair);
+        return a === asset && (p.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(p.pair));
+      }) ?? null;
+      // Recent events
+      const events = optionsLog.filter(ev => extractBaseAsset(ev.pair) === asset).slice(0, 5);
+      cards.push({ asset, state, openTrade: optTrade, recentEvents: events });
+    }
+    return cards;
+  }, [optionsState, openPositions, optionsLog]);
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
-          Entry Signals
-        </h3>
-        <span className="text-[9px] text-zinc-600 font-mono">need 3/4</span>
-      </div>
+    <div className="space-y-3">
+      {/* ── FUTURES SECTION ────────────────────────────────── */}
+      <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-medium text-[#00d2ff] uppercase tracking-wider">
+            Entry Signals — Futures
+          </h3>
+          <span className="text-[9px] text-zinc-600 font-mono">need 3/4</span>
+        </div>
 
-      {triggers.length === 0 ? (
-        <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
-      ) : (
-        <div className="space-y-3 max-h-none md:max-h-[800px] overflow-y-auto overflow-x-hidden pr-1">
-          {triggers.map((t) => {
-            const hasActivePos = t.activePosition != null;
-            const posPnl = t.activePosition?.current_pnl ?? null;
-            const peakPnl = t.activePosition?.peak_pnl ?? 0;
-            // Only trust trailing if peak P&L confirms it (match LivePositions logic)
-            const isTrailing = (
-              t.activePosition?.position_state === 'trailing'
-              && peakPnl >= 0.30
-            );
-            const isNegative = posPnl != null && posPnl < 0;
-            const posLabel = isTrailing ? 'TRAILING'
-              : isNegative ? 'AT RISK'
-              : 'HOLDING';
-            const posColor = isTrailing ? 'bg-[#00c853]/10 text-[#00c853]'
-              : isNegative ? 'bg-[#ff1744]/10 text-[#ff1744]'
-              : 'bg-amber-400/10 text-amber-400';
+        {triggers.length === 0 ? (
+          <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
+        ) : (
+          <div className="space-y-3 max-h-none md:max-h-[600px] overflow-y-auto overflow-x-hidden pr-1">
+            {triggers.map((t) => {
+              const hasActivePos = t.activePosition != null;
+              const posPnl = t.activePosition?.current_pnl ?? null;
+              const peakPnl = t.activePosition?.peak_pnl ?? 0;
+              const isTrailing = (
+                t.activePosition?.position_state === 'trailing'
+                && peakPnl >= 0.30
+              );
+              const isNegative = posPnl != null && posPnl < 0;
+              const posLabel = isTrailing ? 'TRAILING'
+                : isNegative ? 'AT RISK'
+                : 'HOLDING';
+              const posColor = isTrailing ? 'bg-[#00c853]/10 text-[#00c853]'
+                : isNegative ? 'bg-[#ff1744]/10 text-[#ff1744]'
+                : 'bg-amber-400/10 text-amber-400';
+              const borderClr = hasActivePos
+                ? (isTrailing ? 'border-[#00c853]/30' : isNegative ? 'border-[#ff1744]/20' : 'border-amber-400/30')
+                : 'border-zinc-800/50';
 
-            // Options position border takes precedence if no futures position
-            const hasOptionsPos = t.optionsOpenTrade != null;
-            const borderClr = hasActivePos
-              ? (isTrailing ? 'border-[#00c853]/30' : isNegative ? 'border-[#ff1744]/20' : 'border-amber-400/30')
-              : hasOptionsPos ? 'border-[#7c4dff]/30'
-              : 'border-zinc-800/50';
-
-            return (
-            <div
-              key={`${t.pair}-${t.exchange}`}
-              className={cn(
-                'bg-zinc-900/40 border rounded-lg p-3',
-                borderClr,
-              )}
-            >
-              {/* Header */}
-              <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-white">{extractBaseAsset(t.pair)}</span>
-                  {t.currentPrice != null && (
-                    <span className="text-[10px] font-mono text-zinc-500">
-                      ${t.currentPrice.toLocaleString()}
-                    </span>
-                  )}
-                  <ExchangeBadge exchange={t.exchange} />
-                </div>
-                <div className="flex items-center gap-2">
-                  {t.hasData && <TrendBadge trend={t.trend} />}
-                  {hasActivePos ? (
-                    <span className={cn(
-                      'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
-                      posColor,
-                    )}>
-                      {isTrailing && <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />}
-                      IN TRADE — {posLabel}
-                      {posPnl != null && ` ${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%`}
-                    </span>
-                  ) : (
-                    <div className="flex flex-col items-end gap-0.5">
-                      <span className={cn('text-[11px] font-medium', t.statusColor)}>
-                        {t.overallStatus}
+              return (
+              <div
+                key={`${t.pair}-${t.exchange}`}
+                className={cn(
+                  'bg-zinc-900/40 border rounded-lg p-3',
+                  borderClr,
+                )}
+              >
+                {/* Header */}
+                <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-white">{extractBaseAsset(t.pair)}</span>
+                    {t.currentPrice != null && (
+                      <span className="text-[10px] font-mono text-zinc-500">
+                        ${t.currentPrice.toLocaleString()}
                       </span>
-                      {t.skipReason && (
-                        <span className="text-[9px] font-mono text-amber-400/70 max-w-[280px]" title={t.skipReason.replace(/_/g, ' ')}>
-                          ⚠ {t.skipReason.replace(/_/g, ' ')}
+                    )}
+                    <ExchangeBadge exchange={t.exchange} />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {t.hasData && <TrendBadge trend={t.trend} />}
+                    {hasActivePos ? (
+                      <span className={cn(
+                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
+                        posColor,
+                      )}>
+                        {isTrailing && <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />}
+                        IN TRADE — {posLabel}
+                        {posPnl != null && ` ${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%`}
+                      </span>
+                    ) : (
+                      <div className="flex flex-col items-end gap-0.5">
+                        <span className={cn('text-[11px] font-medium', t.statusColor)}>
+                          {t.overallStatus}
                         </span>
-                      )}
-                    </div>
-                  )}
+                        {t.skipReason && (
+                          <span className="text-[9px] font-mono text-amber-400/70 max-w-[280px]" title={t.skipReason.replace(/_/g, ' ')}>
+                            {t.skipReason.replace(/_/g, ' ')}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
 
-              {t.hasData ? (
-                <div className={cn('space-y-2.5', hasActivePos && 'opacity-40')}>
-                  {/* Dual signal rows: bull + bear, with inline dots */}
-                  <div className="space-y-2">
-                    {/* Bull row: bar + dots */}
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className={cn(
-                          'text-[10px] font-mono w-8 shrink-0',
-                          t.signalSide === 'long' ? 'text-[#00c853] font-bold' : 'text-zinc-600',
-                        )}>
-                          Bull
-                        </span>
-                        <SignalBar count={t.bullCount} />
-                        <span className={cn(
-                          'text-[10px] font-mono w-8 text-right',
-                          t.bullCount >= 3 ? 'text-[#00c853]' : t.bullCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
-                        )}>
-                          {t.bullCount}/4
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-3 ml-8">
-                        {t.bullIndicators.map((ind, i) => (
-                          <Dot key={`bull-${i}`} active={ind.active} label={ind.label} direction="bull" />
-                        ))}
-                      </div>
-                    </div>
-                    {/* Bear row: bar + dots */}
-                    {t.isFutures && (
+                {t.hasData ? (
+                  <div className={cn('space-y-2.5', hasActivePos && 'opacity-40')}>
+                    {/* Dual signal rows: bull + bear, with inline dots */}
+                    <div className="space-y-2">
+                      {/* Bull row */}
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
                           <span className={cn(
                             'text-[10px] font-mono w-8 shrink-0',
-                            t.signalSide === 'short' ? 'text-[#ff1744] font-bold' : 'text-zinc-600',
+                            t.signalSide === 'long' ? 'text-[#00c853] font-bold' : 'text-zinc-600',
                           )}>
-                            Bear
+                            Bull
                           </span>
-                          <SignalBar count={t.bearCount} variant="bear" />
+                          <SignalBar count={t.bullCount} />
                           <span className={cn(
                             'text-[10px] font-mono w-8 text-right',
-                            t.bearCount >= 3 ? 'text-[#ff1744]' : t.bearCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
+                            t.bullCount >= 3 ? 'text-[#00c853]' : t.bullCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
                           )}>
-                            {t.bearCount}/4
+                            {t.bullCount}/4
                           </span>
                         </div>
                         <div className="flex items-center gap-3 ml-8">
-                          {t.bearIndicators.map((ind, i) => (
-                            <Dot key={`bear-${i}`} active={ind.active} label={ind.label} direction="bear" />
+                          {t.bullIndicators.map((ind, i) => (
+                            <Dot key={`bull-${i}`} active={ind.active} label={ind.label} direction="bull" />
                           ))}
                         </div>
                       </div>
-                    )}
+                      {/* Bear row */}
+                      {t.isFutures && (
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              'text-[10px] font-mono w-8 shrink-0',
+                              t.signalSide === 'short' ? 'text-[#ff1744] font-bold' : 'text-zinc-600',
+                            )}>
+                              Bear
+                            </span>
+                            <SignalBar count={t.bearCount} variant="bear" />
+                            <span className={cn(
+                              'text-[10px] font-mono w-8 text-right',
+                              t.bearCount >= 3 ? 'text-[#ff1744]' : t.bearCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
+                            )}>
+                              {t.bearCount}/4
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 ml-8">
+                            {t.bearIndicators.map((ind, i) => (
+                              <Dot key={`bear-${i}`} active={ind.active} label={ind.label} direction="bear" />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {/* Compact values */}
+                    <div className="flex gap-3 pt-1 border-t border-zinc-800/50">
+                      {t.rsi != null && (
+                        <span className={cn(
+                          'text-[9px] font-mono',
+                          t.rsi < RSI_LONG_THRESHOLD ? 'text-[#00c853]' :
+                          t.rsi > RSI_SHORT_THRESHOLD ? 'text-[#ff1744]' :
+                          'text-zinc-500',
+                        )}>
+                          RSI {t.rsi.toFixed(0)}
+                        </span>
+                      )}
+                      {t.volumeRatio != null && (
+                        <span className={cn(
+                          'text-[9px] font-mono',
+                          t.volumeRatio >= VOL_SPIKE_RATIO ? 'text-[#00c853]' : 'text-zinc-500',
+                        )}>
+                          Vol {t.volumeRatio.toFixed(1)}x
+                        </span>
+                      )}
+                      {t.priceChangePct != null && (
+                        <span className={cn(
+                          'text-[9px] font-mono',
+                          Math.abs(t.priceChangePct) >= MOMENTUM_MIN_PCT ? 'text-[#00c853]' : 'text-zinc-500',
+                        )}>
+                          Mom {t.priceChangePct >= 0 ? '+' : ''}{t.priceChangePct.toFixed(2)}%
+                        </span>
+                      )}
+                      {t.bbUpper != null && t.bbLower != null && t.currentPrice != null && (
+                        <span className={cn(
+                          'text-[9px] font-mono',
+                          t.currentPrice > t.bbUpper || t.currentPrice < t.bbLower
+                            ? 'text-[#00c853]' : 'text-zinc-500',
+                        )}>
+                          BB {t.currentPrice > t.bbUpper ? 'Above' : t.currentPrice < t.bbLower ? 'Below' : 'In'}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  {/* Compact values */}
-                  <div className="flex gap-3 pt-1 border-t border-zinc-800/50">
-                    {t.rsi != null && (
-                      <span className={cn(
-                        'text-[9px] font-mono',
-                        t.rsi < RSI_LONG_THRESHOLD ? 'text-[#00c853]' :
-                        t.rsi > RSI_SHORT_THRESHOLD ? 'text-[#ff1744]' :
-                        'text-zinc-500',
-                      )}>
-                        RSI {t.rsi.toFixed(0)}
-                      </span>
-                    )}
-                    {t.volumeRatio != null && (
-                      <span className={cn(
-                        'text-[9px] font-mono',
-                        t.volumeRatio >= VOL_SPIKE_RATIO ? 'text-[#00c853]' : 'text-zinc-500',
-                      )}>
-                        Vol {t.volumeRatio.toFixed(1)}x
-                      </span>
-                    )}
-                    {t.priceChangePct != null && (
-                      <span className={cn(
-                        'text-[9px] font-mono',
-                        Math.abs(t.priceChangePct) >= MOMENTUM_MIN_PCT ? 'text-[#00c853]' : 'text-zinc-500',
-                      )}>
-                        Mom {t.priceChangePct >= 0 ? '+' : ''}{t.priceChangePct.toFixed(2)}%
-                      </span>
-                    )}
-                    {t.bbUpper != null && t.bbLower != null && t.currentPrice != null && (
-                      <span className={cn(
-                        'text-[9px] font-mono',
-                        t.currentPrice > t.bbUpper || t.currentPrice < t.bbLower
-                          ? 'text-[#00c853]' : 'text-zinc-500',
-                      )}>
-                        BB {t.currentPrice > t.bbUpper ? 'Above' : t.currentPrice < t.bbLower ? 'Below' : 'In'}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <p className="text-[11px] text-zinc-600">Awaiting indicator data from bot...</p>
-              )}
+                ) : (
+                  <p className="text-[11px] text-zinc-600">Awaiting indicator data from bot...</p>
+                )}
+              </div>
+            );
+            })}
+          </div>
+        )}
+      </div>
 
-              {/* ── OPTIONS SECTION (BTC + ETH only) ───────────────── */}
-              {t.optionsState != null && (
-                <OptionsInlineSection
-                  optionsState={t.optionsState}
-                  openTrade={t.optionsOpenTrade}
-                />
-              )}
-            </div>
-          );
-          })}
+      {/* ── OPTIONS SECTION ────────────────────────────────── */}
+      <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
+            Entry Signals — Options
+          </h3>
+          <ExchangeBadge exchange="delta" />
         </div>
-      )}
+
+        {optionsCards.length === 0 ? (
+          <p className="text-sm text-zinc-500 text-center py-4">No options data yet</p>
+        ) : (
+          <div className="space-y-3">
+            {optionsCards.map(card => (
+              <OptionsEntryCard
+                key={card.asset}
+                optionsState={card.state}
+                openTrade={card.openTrade}
+                recentEvents={card.recentEvents}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

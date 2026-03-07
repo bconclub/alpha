@@ -343,6 +343,20 @@ export interface OptionsState {
   last_exit_type?: string | null;
   last_exit_pnl_pct?: number | null;
   last_exit_pnl_usd?: number | null;
+  // Chain data (5 strikes near ATM with bid/ask)
+  chain_calls?: { strike: number; bid: number; ask: number }[];
+  chain_puts?: { strike: number; bid: number; ask: number }[];
+  // Candle momentum (last check result)
+  candle_momentum?: {
+    count: number;
+    total: number;
+    cum_pct: number;
+    direction: string | null;
+    passed: boolean;
+  } | null;
+  bot_state?: string | null;
+  target_strike?: number | null;
+  balance?: number | null;
   updated_at: string;
 }
 

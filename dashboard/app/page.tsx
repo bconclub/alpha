@@ -6,6 +6,7 @@ import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { EntrySignals } from '@/components/dashboard/TriggerProximity';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
+import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
 
 function LiveInfoBar() {
   const { isConnected, trades, botStatus } = useSupabase();
@@ -91,6 +92,9 @@ export default function DashboardPage() {
           <EntrySignals />
         </div>
       </div>
+
+      {/* Options Chain — full width */}
+      <OptionsChainPanel />
 
       {/* 5. Performance — full width, collapsible */}
       <PerformancePanel />
