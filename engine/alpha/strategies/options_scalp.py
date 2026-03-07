@@ -81,7 +81,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Premium limits ────────────────────────────────────────────
     OPTIONS_LEVERAGE = 50                # Delta options are 50x leveraged
-    MIN_PREMIUM_USD = 0.01               # Skip illiquid < $0.01
+    MIN_PREMIUM_USD = 5.00               # Skip strikes < $5 — too little delta, premium doesn't respond
 
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
@@ -90,6 +90,8 @@ class OptionsScalpStrategy(BaseStrategy):
     CANDLE_MOM_STREAK = 2                # min directional candles out of last 3
     CANDLE_MOM_CUMULATIVE_PCT = 0.06     # min cumulative move over 3 candles (% of price)
     CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
+    MIN_UNDERLYING_MOVE_PCT = 0.15       # underlying must move >= 0.15% in last 60s
+    MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
     OPT_TRADE_COOLDOWN_SEC = 120        # 2 min between options trades
@@ -901,6 +903,24 @@ class OptionsScalpStrategy(BaseStrategy):
             self.pair, candle_reason, candle_count, candle_cum_pct, self._candle_alloc_pct,
         )
 
+        # 2b. Underlying move check — confirm price is actually moving, not just candle noise
+        try:
+            ohlcv_1s = await self.futures_exchange.fetch_ohlcv(self.pair, "1m", limit=2)
+            if ohlcv_1s and len(ohlcv_1s) >= 2:
+                price_now = float(ohlcv_1s[-1][4])  # latest close
+                price_ago = float(ohlcv_1s[-2][1])  # open of previous candle (~60s ago)
+                if price_ago > 0:
+                    underlying_move_pct = abs(price_now - price_ago) / price_ago * 100
+                    if underlying_move_pct < self.MIN_UNDERLYING_MOVE_PCT:
+                        if self._tick_count % 6 == 0:
+                            self.logger.info(
+                                "[%s] OPTIONS UNDERLYING_MOVE: %.3f%% < %.2f%% in ~60s — SKIP",
+                                self.pair, underlying_move_pct, self.MIN_UNDERLYING_MOVE_PCT,
+                            )
+                        return []
+        except Exception as e:
+            self.logger.debug("[%s] Underlying move check failed: %s", self.pair, e)
+
         # 3. Determine option type from candle direction
         option_type = "call" if side == "long" else "put"
 
@@ -998,14 +1018,11 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_strikes"
             return []
 
-        # 8-9. Start 1 OTM (2 OTM for 3/3 conviction), walk further for affordability
+        # 8-9. Try 1 OTM first, fall back to ATM only. Don't walk further OTM — cheap strikes are traps.
         otm_candidates = self._get_otm_candidates(atm_strike, option_type)
-        if candle_count >= 3 and len(otm_candidates) >= 2:
-            # 3/3 conviction → start 2 OTM for max leverage
-            strikes_to_try = otm_candidates[1:] + [otm_candidates[0], atm_strike]
-        elif otm_candidates:
-            # 2/3 base → start 1 OTM
-            strikes_to_try = otm_candidates + [atm_strike]
+        if otm_candidates:
+            # 1 OTM first, ATM fallback if premium < $5
+            strikes_to_try = [otm_candidates[0], atm_strike]
         else:
             strikes_to_try = [atm_strike]
         selected_strike: float | None = None
@@ -1070,44 +1087,17 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.pair, strike, prem, collateral,
             )
 
-        # Fallback: if 0 contracts after MAX_OTM, try 1 more OTM strike (cheaper premium)
-        if selected_strike is None:
-            extra_otm = self._get_otm_candidates(atm_strike, option_type, extra=1)
-            if extra_otm:
-                strike = extra_otm[0]
-                symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
-                if symbol:
-                    try:
-                        ticker = await self.options_exchange.fetch_ticker(symbol)
-                        prem = ticker.get("last") or ticker.get("ask") or 0
-                    except Exception:
-                        prem = 0
-                    if prem >= self.MIN_PREMIUM_USD:
-                        n = self._calculate_option_contracts(prem)
-                        if n >= 1:
-                            selected_strike = strike
-                            selected_symbol = symbol
-                            premium = prem
-                            opt_contracts = n
-                            self._cached_target_strike = strike
-                            self.logger.info(
-                                "[%s] %s %s: 4th OTM fallback $%.0f ($%.4f premium, %d contracts)",
-                                self.pair, self._base_asset, option_type.upper(),
-                                strike, prem, n,
-                            )
-
         if selected_strike is None or selected_symbol is None:
             if self._tick_count % 30 == 0:
                 self.logger.info(
-                    "[%s] No affordable strike within %d+1 OTM — skipping "
+                    "[%s] No affordable strike (1 OTM + ATM) — skipping "
                     "(ATM=$%.0f collateral=$%.4f)",
-                    self.pair, self.MAX_OTM_STRIKES, atm_strike,
+                    self.pair, atm_strike,
                     first_collateral or 0,
                 )
             await self._log_skip(
-                f"{self.pair} — OPTIONS SKIP: no affordable strike within "
-                f"{self.MAX_OTM_STRIKES}+1 OTM (ATM=${atm_strike:.0f} "
-                f"collateral=${first_collateral or 0:.4f})",
+                f"{self.pair} — OPTIONS SKIP: no affordable strike "
+                f"(ATM=${atm_strike:.0f} collateral=${first_collateral or 0:.4f})",
                 {"option_type": option_type, "atm_strike": atm_strike,
                  "first_collateral": first_collateral,
                  "strength": strength},
