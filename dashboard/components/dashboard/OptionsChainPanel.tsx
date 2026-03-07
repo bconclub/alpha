@@ -87,8 +87,10 @@ function BotStateBadge({ state }: { state: string }) {
     label = 'IN POSITION';
     colorClass = 'bg-[#7c4dff]/15 text-[#7c4dff] border-[#7c4dff]/30';
   } else if (state.startsWith('blocked:')) {
-    const reason = state.replace('blocked:', '').replace(/_/g, ' ');
-    label = `BLOCKED: ${reason}`;
+    const parts = state.replace('blocked:', '').split(':');
+    const reason = parts[0].replace(/_/g, ' ');
+    const timer = parts[1] ?? null;
+    label = timer ? `BLOCKED: ${reason} (${timer})` : `BLOCKED: ${reason}`;
     colorClass = 'bg-[#ff1744]/10 text-[#ff1744]/80 border-[#ff1744]/20';
   }
 

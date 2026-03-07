@@ -92,7 +92,7 @@ class OptionsScalpStrategy(BaseStrategy):
     CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
-    OPT_TRADE_COOLDOWN_SEC = 300        # 5 min between options trades (prevent rapid-fire losing streak)
+    OPT_TRADE_COOLDOWN_SEC = 120        # 2 min between options trades
     # OPT_LOSS_STREAK_LIMIT removed — candle momentum gates entry quality
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
@@ -797,10 +797,10 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] OPTIONS COOLDOWN after POSITION_GONE — %.0fs remaining",
                     self.pair, remaining,
                 )
-            self._cached_bot_state = "blocked:position_gone_cooldown"
+            self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return []
 
-        # 0b. Trade cooldown — 5 min between options trades
+        # 0b. Trade cooldown — 2 min between options trades
         now = time.monotonic()
         if self._last_option_trade_time > 0:
             elapsed = now - self._last_option_trade_time
@@ -808,10 +808,10 @@ class OptionsScalpStrategy(BaseStrategy):
                 remaining = self.OPT_TRADE_COOLDOWN_SEC - elapsed
                 if self._tick_count % 6 == 0:
                     self.logger.info(
-                        "[%s] OPTIONS TRADE_COOLDOWN — %.0fs remaining (5min between trades)",
+                        "[%s] OPTIONS TRADE_COOLDOWN — %.0fs remaining (2min between trades)",
                         self.pair, remaining,
                     )
-                self._cached_bot_state = "blocked:trade_cooldown"
+                self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
                 return []
 
         # 0c. Skip BTC options when balance < $50 — premiums too expensive, ETH only
@@ -1585,6 +1585,13 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Track peak premium
         self.highest_premium = max(self.highest_premium, current_premium)
+
+        # Update ratchet floor immediately on every premium fetch
+        # (don't wait for exit check — short spikes could be missed)
+        self._update_opt_ratchet_floor(
+            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+            if self.entry_premium > 0 else 0
+        )
 
         # Write position state to trades table every tick (~10s)
         # so dashboard shows live P&L for options positions

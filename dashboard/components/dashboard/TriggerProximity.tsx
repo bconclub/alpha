@@ -447,8 +447,11 @@ function OptionsEntryCard({
     stateLabel = 'Candle PASS — entering';
     stateColor = 'text-[#00c853]';
   } else if (botState.startsWith('blocked:')) {
-    const reason = botState.replace('blocked:', '').replace(/_/g, ' ');
-    stateLabel = `Blocked: ${reason}`;
+    // Parse "blocked:trade_cooldown:45s" → reason="trade cooldown", timer="45s"
+    const parts = botState.replace('blocked:', '').split(':');
+    const reason = parts[0].replace(/_/g, ' ');
+    const timer = parts[1] ?? null; // e.g. "45s"
+    stateLabel = timer ? `Blocked: ${reason} (${timer})` : `Blocked: ${reason}`;
     stateColor = 'text-[#ff1744]/80';
   } else {
     stateLabel = 'Scanning';
