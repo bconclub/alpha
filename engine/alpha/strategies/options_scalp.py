@@ -140,9 +140,11 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_DEAD_MOM_MIN_HOLD = 120          # min 2min hold before dead fires (was 180)
 
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
-    # GPFC: Wider ratchet floors — don't activate until +10%, let winners run
+    # GPFC: Lower entry floors — protect small peaks that reverse
     OPT_RATCHET_FLOOR_TABLE = [
-        (3.0, 0.0),      # breakeven lock — +3% peak → never let it become a loss
+        (1.0, -1.0),     # +1% peak → floor -1% (limit bleed on small movers)
+        (2.0, 0.0),      # +2% peak → breakeven lock
+        (3.0, 1.0),      # +3% peak → lock +1%
         (5.0, 2.0),      # small winner lock — +5% peak → floor at +2%
         (10.0, 3.0),     # first major floor at 10% peak
         (15.0, 7.0),     # mid-tier
@@ -1589,7 +1591,11 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._opt_mom_fade_since = None
 
         # ── 4. DEAD MOMENTUM: losing + momentum dead + held too long ──
-        if hold_seconds >= self.OPT_DEAD_MOM_MIN_HOLD and premium_change_pct < 0:
+        # If peak was never green (highest_premium <= entry_premium), cut faster (90s hold)
+        # If peak > 0%, keep full 120s — it moved once, might move again
+        peak_was_green = self.highest_premium > self.entry_premium if self.entry_premium > 0 else False
+        dead_min_hold = self.OPT_DEAD_MOM_MIN_HOLD if peak_was_green else 90
+        if hold_seconds >= dead_min_hold and premium_change_pct < 0:
             if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
                 now_m = time.monotonic()
                 if self._opt_mom_dying_since is None:
@@ -1597,8 +1603,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 dead_elapsed = now_m - self._opt_mom_dying_since
                 if dead_elapsed >= self.OPT_DEAD_MOM_CONFIRM_SEC:
                     self.logger.info(
-                        "[%s] OPT_DEAD_MOMENTUM — losing %.1f%% + mom dead %.0fs + held %ds",
-                        self.option_symbol, premium_change_pct, dead_elapsed, int(hold_seconds),
+                        "[%s] OPT_DEAD_MOMENTUM — losing %.1f%% + mom dead %.0fs + held %ds (peak_green=%s)",
+                        self.option_symbol, premium_change_pct, dead_elapsed, int(hold_seconds), peak_was_green,
                     )
                     return await self._do_option_exit(current_premium, premium_change_pct, "OPT_DEAD_MOMENTUM")
             else:

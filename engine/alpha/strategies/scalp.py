@@ -570,7 +570,7 @@ class ScalpStrategy(BaseStrategy):
         if self._exchange_id == "bybit":
             self.leverage: int = min(config.bybit.leverage, 20) if is_futures else 1
         elif self._exchange_id == "kraken":
-            self.leverage: int = min(config.kraken.leverage, 20) if is_futures else 1
+            self.leverage: int = min(config.kraken.leverage, 30) if is_futures else 1
         else:
             self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.SPOT_CAPITAL_PCT
@@ -751,9 +751,9 @@ class ScalpStrategy(BaseStrategy):
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
-        if self.is_futures:
+        if self._exchange_id == "delta" and self.is_futures:
             self.logger.info(
-                "[%s] FUTURES DISABLED — options-only mode until capital > $100",
+                "[%s] DELTA FUTURES DISABLED — options-only mode",
                 self.pair,
             )
 
@@ -960,11 +960,11 @@ class ScalpStrategy(BaseStrategy):
         exchange = self.trade_exchange or self.executor.exchange
         now = time.monotonic()
 
-        # ── ALL FUTURES DISABLED — options-only mode until capital > $100 ──
-        if self.is_futures:
+        # ── Delta futures disabled — options-only on Delta ────────────
+        if self._exchange_id == "delta" and self.is_futures:
             if not self.in_position:
                 if self._tick_count % 120 == 0:
-                    self.logger.info("[%s] FUTURES DISABLED — options-only mode until capital > $100", self.pair)
+                    self.logger.info("[%s] DELTA FUTURES DISABLED — options only", self.pair)
                 return signals
             # If in position, still allow exit checks
 
@@ -3393,8 +3393,9 @@ class ScalpStrategy(BaseStrategy):
 
     def _check_acceleration_entry(self, key: str, now: float, price: float) -> None:
         """Detect price acceleration from WS ticks and fire entry if confirmed."""
-        # All futures disabled — options-only mode
-        return
+        # Delta futures disabled — options only
+        if self._exchange_id == "delta" and self.is_futures:
+            return
 
         # ── Exchange-aware tick-rate tuning ─────────────────────────
         if self._exchange_id == "delta":
