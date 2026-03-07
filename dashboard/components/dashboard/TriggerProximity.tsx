@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatTimeAgo, cn } from '@/lib/utils';
 import type { StrategyLog, Exchange, OpenPosition, OptionsState, ActivityLogRow } from '@/lib/types';
@@ -642,6 +642,20 @@ export function EntrySignals() {
     return results;
   }, [strategyLog, openPositions]);
 
+  // Mobile collapse state — futures starts collapsed, options open
+  const [futuresOpen, setFuturesOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(true);
+
+  // Count active futures trades for the collapsed summary
+  const futuresInTrade = useMemo(
+    () => triggers.filter(t => t.activePosition != null).length,
+    [triggers],
+  );
+  const bestFuturesSignal = useMemo(
+    () => triggers.reduce((max, t) => Math.max(max, t.signalCount), 0),
+    [triggers],
+  );
+
   // Separate options data for the OPTIONS section
   const optionsCards = useMemo(() => {
     const cards: { asset: string; state: OptionsState; openTrade: OpenPosition | null; recentEvents: ActivityLogRow[] }[] = [];
@@ -664,13 +678,42 @@ export function EntrySignals() {
     <div className="space-y-3">
       {/* ── FUTURES SECTION ────────────────────────────────── */}
       <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-medium text-[#00d2ff] uppercase tracking-wider">
-            Entry Signals — Futures
-          </h3>
-          <span className="text-[9px] text-zinc-600 font-mono">need 3/4</span>
-        </div>
+        {/* Mobile: collapsible header */}
+        <button
+          type="button"
+          className="flex items-center justify-between w-full mb-0 md:mb-4 lg:pointer-events-none"
+          onClick={() => setFuturesOpen(o => !o)}
+        >
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-medium text-[#00d2ff] uppercase tracking-wider">
+              Entry Signals — Futures
+            </h3>
+            {/* Collapsed summary badge (mobile only) */}
+            {!futuresOpen && (
+              <span className="lg:hidden text-[9px] font-mono text-zinc-500">
+                {futuresInTrade > 0
+                  ? `${futuresInTrade} in trade`
+                  : `best ${bestFuturesSignal}/4`}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-zinc-600 font-mono">need 3/4</span>
+            {/* Chevron (mobile only) */}
+            <svg
+              className={cn(
+                'w-4 h-4 text-zinc-500 transition-transform lg:hidden',
+                futuresOpen && 'rotate-180',
+              )}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </button>
 
+        {/* Content: always visible on desktop, toggle on mobile */}
+        <div className={cn(!futuresOpen && 'hidden lg:block', futuresOpen && 'mt-4 lg:mt-0')}>
         {triggers.length === 0 ? (
           <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
         ) : (
@@ -839,17 +882,42 @@ export function EntrySignals() {
             })}
           </div>
         )}
+        </div>{/* end futures content wrapper */}
       </div>
 
       {/* ── OPTIONS SECTION ────────────────────────────────── */}
       <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
-            Entry Signals — Options
-          </h3>
-          <ExchangeBadge exchange="delta" />
-        </div>
+        {/* Mobile: collapsible header */}
+        <button
+          type="button"
+          className="flex items-center justify-between w-full mb-0 md:mb-4 lg:pointer-events-none"
+          onClick={() => setOptionsOpen(o => !o)}
+        >
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
+              Entry Signals — Options
+            </h3>
+            {!optionsOpen && (
+              <span className="lg:hidden text-[9px] font-mono text-zinc-500">
+                {optionsCards.length} assets
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <ExchangeBadge exchange="delta" />
+            <svg
+              className={cn(
+                'w-4 h-4 text-zinc-500 transition-transform lg:hidden',
+                optionsOpen && 'rotate-180',
+              )}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </button>
 
+        <div className={cn(!optionsOpen && 'hidden lg:block', optionsOpen && 'mt-4 lg:mt-0')}>
         {optionsCards.length === 0 ? (
           <p className="text-sm text-zinc-500 text-center py-4">No options data yet</p>
         ) : (
@@ -864,6 +932,7 @@ export function EntrySignals() {
             ))}
           </div>
         )}
+        </div>{/* end options content wrapper */}
       </div>
     </div>
   );
