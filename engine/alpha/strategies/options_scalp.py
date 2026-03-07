@@ -769,6 +769,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Periodic chain refresh
         await self._refresh_option_chain()
 
+        # Pre-compute bot state BEFORE dashboard write so timers are fresh
+        self._precompute_bot_state()
+
         # Write dashboard state every 30 seconds
         await self._write_dashboard_state()
 
@@ -779,6 +782,32 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Not in position: look for entry from scalp signals
         return await self._check_option_entry()
+
+    def _precompute_bot_state(self) -> None:
+        """Set _cached_bot_state for cooldown timers before dashboard write."""
+        if self.in_position:
+            self._cached_bot_state = "in_position"
+            return
+
+        # Position-gone cooldown
+        if time.monotonic() < self._position_gone_cooldown_until:
+            remaining = self._position_gone_cooldown_until - time.monotonic()
+            self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
+            return
+
+        # Trade cooldown
+        if self._last_option_trade_time > 0:
+            elapsed = time.monotonic() - self._last_option_trade_time
+            if elapsed < self.OPT_TRADE_COOLDOWN_SEC:
+                remaining = self.OPT_TRADE_COOLDOWN_SEC - elapsed
+                self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
+                return
+
+        # Will be overwritten by _check_option_entry() with the real state
+        # but this ensures dashboard write has at least "scanning"
+        if self._cached_bot_state.startswith("blocked:trade_cooldown") or \
+           self._cached_bot_state.startswith("blocked:position_gone_cooldown"):
+            self._cached_bot_state = "scanning"
 
     # ==================================================================
     # ENTRY LOGIC
