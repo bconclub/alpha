@@ -136,8 +136,8 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_MOM_FADE_TREND_CONFIRM = 20      # trend-aligned: need 20s confirm
 
     # ── Dead momentum — momentum dead + losing + held too long ───────
-    OPT_DEAD_MOM_CONFIRM_SEC = 45        # 45s of dead momentum
-    OPT_DEAD_MOM_MIN_HOLD = 180          # min 3min hold before dead fires
+    OPT_DEAD_MOM_CONFIRM_SEC = 30        # 30s of dead momentum (was 45)
+    OPT_DEAD_MOM_MIN_HOLD = 120          # min 2min hold before dead fires (was 180)
 
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
     # GPFC: Wider ratchet floors — don't activate until +10%, let winners run
@@ -745,6 +745,17 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                 return []
 
+        # 0c. Skip BTC options when balance < $100 — premiums too expensive
+        if self._base_asset == "BTC":
+            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+            if exchange_capital < 100:
+                if self._tick_count % 12 == 0:
+                    self.logger.info(
+                        "[%s] BTC OPTIONS SKIP — balance $%.2f < $100, premiums too expensive",
+                        self.pair, exchange_capital,
+                    )
+                return []
+
         # 1. Market regime gate — only CHOPPY blocked
         # SIDEWAYS, TRENDING_UP, TRENDING_DOWN all allowed — candle momentum is the gate.
         self._current_regime = None
@@ -768,7 +779,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # 2. Candle-based momentum gate — PRIMARY ENTRY GATE
         # Direction determined FROM candles, not from scalp signal strength.
-        # 3+ of 5 completed 1m candles in one direction + cumulative >= 0.10%.
+        # 2+ of 3 completed 1m candles in one direction + cumulative >= 0.06%.
         candle_pass, candle_reason, side, candle_count, candle_cum_pct = await self._check_candle_momentum()
         if not candle_pass:
             if self._tick_count % 6 == 0:
@@ -777,9 +788,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Dynamic allocation based on candle quality
         if candle_count >= 3:
-            self._candle_alloc_pct = 40.0  # 3/3 candles → strong
+            self._candle_alloc_pct = 40.0  # 3/3 full conviction
         else:
-            self._candle_alloc_pct = 25.0  # 2/3 candles → moderate
+            self._candle_alloc_pct = 25.0  # 2/3 base
 
         self.logger.info(
             "[%s] %s | OPTIONS SIZE: %d/3 candles, cum=%.2f%%, alloc=%.0f%%",

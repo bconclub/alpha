@@ -751,6 +751,11 @@ class ScalpStrategy(BaseStrategy):
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
+        if self.is_futures:
+            self.logger.info(
+                "[%s] FUTURES DISABLED — options-only mode until capital > $100",
+                self.pair,
+            )
 
     def get_tick_interval(self) -> int:
         """Dynamic tick: 1s when holding a position, 3s when scanning."""
@@ -955,19 +960,19 @@ class ScalpStrategy(BaseStrategy):
         exchange = self.trade_exchange or self.executor.exchange
         now = time.monotonic()
 
+        # ── ALL FUTURES DISABLED — options-only mode until capital > $100 ──
+        if self.is_futures:
+            if not self.in_position:
+                if self._tick_count % 120 == 0:
+                    self.logger.info("[%s] FUTURES DISABLED — options-only mode until capital > $100", self.pair)
+                return signals
+            # If in position, still allow exit checks
+
         # ── DISABLED PAIRS — skip entirely (SOL = 0% win rate) ─────────
         if self._base_asset in self.DISABLED_PAIRS:
             if not self.in_position:
                 return signals  # don't enter
             # If somehow in position (restored), still check exits
-
-        # ── Delta futures disabled — options-only on Delta ────────────
-        if self._exchange_id == "delta" and self.is_futures:
-            if not self.in_position:
-                if self._tick_count % 60 == 0:
-                    self.logger.info("[%s] DELTA FUTURES DISABLED — options only", self.pair)
-                return signals
-            # If in position, still allow exit checks
 
         # ── Dashboard pair disable (pair_config.enabled = false) ──────
         if not self._pair_enabled:
@@ -3388,9 +3393,8 @@ class ScalpStrategy(BaseStrategy):
 
     def _check_acceleration_entry(self, key: str, now: float, price: float) -> None:
         """Detect price acceleration from WS ticks and fire entry if confirmed."""
-        # Delta futures disabled — options only
-        if self._exchange_id == "delta" and self.is_futures:
-            return
+        # All futures disabled — options-only mode
+        return
 
         # ── Exchange-aware tick-rate tuning ─────────────────────────
         if self._exchange_id == "delta":
