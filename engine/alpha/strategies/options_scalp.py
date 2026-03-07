@@ -891,13 +891,27 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 8-9. Try ATM first, then walk OTM strikes — dynamic sizing
-        strikes_to_try = [atm_strike] + self._get_otm_candidates(atm_strike, option_type)
+        # 8-9. Start 1 OTM (2 OTM for 3/3 conviction), walk further for affordability
+        otm_candidates = self._get_otm_candidates(atm_strike, option_type)
+        if candle_count >= 3 and len(otm_candidates) >= 2:
+            # 3/3 conviction → start 2 OTM for max leverage
+            strikes_to_try = otm_candidates[1:] + [otm_candidates[0], atm_strike]
+        elif otm_candidates:
+            # 2/3 base → start 1 OTM
+            strikes_to_try = otm_candidates + [atm_strike]
+        else:
+            strikes_to_try = [atm_strike]
         selected_strike: float | None = None
         selected_symbol: str | None = None
         premium: float = 0.0
         opt_contracts: int = 0
-        atm_collateral: float | None = None  # track ATM cost for logging
+        first_collateral: float | None = None  # track first-tried strike cost for logging
+
+        # Calculate OTM offset for each strike relative to ATM
+        def _otm_offset(s: float) -> int:
+            if option_type == "call":
+                return len([x for x in self._available_strikes if atm_strike < x <= s])
+            return len([x for x in self._available_strikes if s <= x < atm_strike])
 
         for i, strike in enumerate(strikes_to_try):
             symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
@@ -916,9 +930,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
             collateral = prem / self.OPTIONS_LEVERAGE
 
-            # Track ATM collateral for logging
+            # Track first-tried strike collateral for logging
             if i == 0:
-                atm_collateral = collateral
+                first_collateral = collateral
 
             # Check premium not too small (illiquid)
             if prem < self.MIN_PREMIUM_USD:
@@ -935,13 +949,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 selected_symbol = symbol
                 premium = prem
                 opt_contracts = n
-                if i > 0:
-                    self.logger.info(
-                        "[%s] %s %s: ATM=$%.0f too expensive, "
-                        "selected $%.0f OTM ($%.4f premium, %d contracts)",
-                        self.pair, self._base_asset, option_type.upper(),
-                        atm_strike, strike, prem, n,
-                    )
+                otm_n = _otm_offset(strike)
+                otm_label = f"{otm_n} OTM" if otm_n > 0 else "ATM"
+                self.logger.info(
+                    "[%s] OPT STRIKE: %s $%.0f (%s), premium=$%.4f, col=$%.4f, %d contracts",
+                    self.pair, option_type.upper(), strike, otm_label, prem, collateral, n,
+                )
                 break
 
             self.logger.debug(
@@ -980,14 +993,14 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] No affordable strike within %d+1 OTM — skipping "
                     "(ATM=$%.0f collateral=$%.4f)",
                     self.pair, self.MAX_OTM_STRIKES, atm_strike,
-                    atm_collateral or 0,
+                    first_collateral or 0,
                 )
             await self._log_skip(
                 f"{self.pair} — OPTIONS SKIP: no affordable strike within "
                 f"{self.MAX_OTM_STRIKES}+1 OTM (ATM=${atm_strike:.0f} "
-                f"collateral=${atm_collateral or 0:.4f})",
+                f"collateral=${first_collateral or 0:.4f})",
                 {"option_type": option_type, "atm_strike": atm_strike,
-                 "atm_collateral": atm_collateral,
+                 "first_collateral": first_collateral,
                  "strength": strength},
             )
             return []
