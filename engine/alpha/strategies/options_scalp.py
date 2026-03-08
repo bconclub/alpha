@@ -72,8 +72,8 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Option chain refresh ──────────────────────────────────────
     CHAIN_REFRESH_INTERVAL = 30 * 60     # Refresh every 30 min
-    MIN_EXPIRY_HOURS = 4                 # Must be 4+ hours to expiry
-    CLOSE_BEFORE_EXPIRY_HOURS = 2        # Close 2 hours before expiry
+    MIN_EXPIRY_HOURS = 1                 # Must be 1+ hour to expiry — prefer today's expiry (10-100x more volume)
+    CLOSE_BEFORE_EXPIRY_HOURS = 0.5      # Close 30 min before expiry
 
     # ── Strike selection ──────────────────────────────────────────
     BTC_STRIKE_ROUND = 200               # BTC: nearest $200
@@ -866,17 +866,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = f"blocked:dead_market_cooldown:{int(remaining)}s"
             return []
 
-        # 0c. Skip BTC options when balance < $50 — premiums too expensive, ETH only
-        if self._base_asset == "BTC":
-            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-            if exchange_capital < 50:
-                if self._tick_count % 12 == 0:
-                    self.logger.info(
-                        "[%s] BTC OPTIONS SKIP — balance $%.2f < $50, ETH only",
-                        self.pair, exchange_capital,
-                    )
-                self._cached_bot_state = "blocked:btc_low_balance"
-                return []
+        # 0c. BTC balance skip REMOVED — at 50x leverage, BTC OTM collateral is tiny ($0.60-1.12)
 
         # 1. Market regime gate — only CHOPPY blocked
         # SIDEWAYS, TRENDING_UP, TRENDING_DOWN all allowed — candle momentum is the gate.
@@ -1039,11 +1029,37 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_strikes"
             return []
 
-        # 8-9. Try 1 OTM first, fall back to ATM only. Don't walk further OTM — cheap strikes are traps.
+        # 8-9. Pick the highest-OI strike within ATM + 1-2 OTM.
+        # High OI = liquidity = premium moves when underlying moves.
         otm_candidates = self._get_otm_candidates(atm_strike, option_type)
-        if otm_candidates:
-            # 1 OTM first, ATM fallback if premium < $5
-            strikes_to_try = [otm_candidates[0], atm_strike]
+        near_atm_strikes = [atm_strike] + otm_candidates[:2]  # ATM + up to 2 OTM
+
+        # Fetch OI for each candidate, pick highest
+        oi_ranked: list[tuple[float, float]] = []  # (strike, open_interest)
+        for s in near_atm_strikes:
+            sym = self._build_option_symbol(s, option_type, self._selected_expiry)
+            if not sym:
+                continue
+            try:
+                t = await self.options_exchange.fetch_ticker(sym)
+                oi = float(t.get("info", {}).get("open_interest", 0) or
+                           t.get("openInterest", 0) or 0)
+                oi_ranked.append((s, oi))
+            except Exception:
+                oi_ranked.append((s, 0))
+
+        if oi_ranked:
+            # Sort by OI descending, fall back to ATM-proximity if tied at 0
+            oi_ranked.sort(key=lambda x: (-x[1], abs(x[0] - atm_strike)))
+            best_strike, best_oi = oi_ranked[0]
+            self.logger.info(
+                "[%s] OI STRIKE SELECT: %s — %s",
+                self.pair,
+                ", ".join(f"${s:.0f}(OI={oi:.0f})" for s, oi in oi_ranked),
+                f"best=${best_strike:.0f} OI={best_oi:.0f}",
+            )
+            # Try best OI strike first, then others by OI rank
+            strikes_to_try = [s for s, _ in oi_ranked]
         else:
             strikes_to_try = [atm_strike]
         selected_strike: float | None = None
