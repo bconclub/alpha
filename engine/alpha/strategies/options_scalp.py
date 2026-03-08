@@ -1,28 +1,39 @@
 """Alpha Options Scalp — Buy CALLs/PUTs on strong momentum signals.
 
-PHILOSOPHY: Trade what works, kill what doesn't. Based on 109 historical trades.
-The ONLY profitable pattern: MOMENTUM_BURST CALLs during uptrends.
+═══════════════════════════════════════════════════════════════
+ OPTION ENTRY SIGNAL — CURRENT FLOW (all gates must pass)
+═══════════════════════════════════════════════════════════════
 
-GPFC OVERHAUL — Data-driven changes:
-  - Setup whitelist: ONLY MOMENTUM_BURST + BB_SQUEEZE allowed
-  - Trend-aligned: TRENDING_UP→CALLs only, TRENDING_DOWN→PUTs only
-  - Sideways: only MOMENTUM_BURST (no BB_SQUEEZE)
-  - Premium cap: skip if all premiums > $40 (low gamma, more to lose)
-  - Wider ratchets: first floor at +10% (was +5%), let winners run
-  - Longer timeout: 10min (was 5) + only timeout if premium decaying
-  - Momentum fade patience: 60s confirm (was 15s — premium lags spot)
-  - Winner-weighted sizing: MOMENTUM_BURST full, BB_SQUEEZE 60%, sideways 50%
+ 1. REGIME GATE        CHOPPY blocked, all others allowed
+ 2. CANDLE MOMENTUM    4 of 5 candles directional + cumulative >= 0.15%
+                       Last candle must be in entry direction (freshness)
+ 3. UNDERLYING MOVE    Price must move >= 0.10% in last ~60s
+ 4. EXPIRY             Nearest expiry (today preferred, min 1h to expiry)
+ 5. STRIKE SELECTION   Highest OI within ATM + 1-2 OTM (liquidity = premium moves)
+ 6. PREMIUM FLOOR      Min $5 premium (kills dead low-delta strikes)
+ 7. PREMIUM CAP        Max $40 premium (avoid low-gamma expensive options)
+ 8. PREMIUM CONFIRM    Wait 10s, re-check ask — must rise (premium alive)
+ 9. LIMIT ENTRY        Place limit buy at ORIGINAL price, wait 15s for fill
+                       If not filled → cancel and skip (no overpaying)
+10. PULLBACK WAIT      Wait up to 15s for 3% premium dip before buying
 
-Entry: 2-of-4+ momentum signals from scalp strategy
-       Setup must be MOMENTUM_BURST or BB_SQUEEZE
-       Must be trend-aligned (no counter-trend options)
-       Premium < $40
-       Pullback entry: wait up to 15s for 3% premium dip
+ COOLDOWNS:
+   - Trade cooldown: 2 min between trades
+   - Dead market: 10 min after exit with 0% peak
+   - Position gone: 60s after position disappears
 
-Exit:
+ SIZING:
+   - 5/5 candles → 50% allocation | 4/5 → 35%
+   - BB_SQUEEZE → 60% factor on top
+   - Survival mode: balance < $5 → max 5 contracts
+   - BTC + ETH both enabled (50x leverage = tiny collateral)
+
+═══════════════════════════════════════════════════════════════
+
+Exit (DO NOT TOUCH):
   - Ratchet floor: lock profit at (10→3, 15→7, 25→15, 40→25, 100→70)%
   - SL: 50% premium loss (always active, even in Phase 1)
-  - Momentum Fade: profitable + momentum < 0.02% for 60s → exit (min 60s hold)
+  - Momentum Fade: profitable + momentum < 0.02% for 60s → exit
   - Dead Momentum: losing + momentum dead 45s + held 3min → exit
   - TP: 30% premium gain
   - Trailing: activates at +15%, trails 5% behind peak
