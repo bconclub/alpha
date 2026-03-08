@@ -749,136 +749,171 @@ export function EntrySignals() {
                 )}
               >
                 {/* Header */}
-                <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
+                <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-white">{extractBaseAsset(t.pair)}</span>
+                    <ExchangeBadge exchange={t.exchange} />
+                  </div>
+                  <div className="flex items-center gap-2">
                     {t.currentPrice != null && (
                       <span className="text-[10px] font-mono text-zinc-500">
                         ${t.currentPrice.toLocaleString()}
                       </span>
                     )}
-                    <ExchangeBadge exchange={t.exchange} />
-                  </div>
-                  <div className="flex items-center gap-2">
                     {t.hasData && <TrendBadge trend={t.trend} />}
-                    {hasActivePos ? (
-                      <span className={cn(
-                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
-                        posColor,
-                      )}>
-                        {isTrailing && <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />}
-                        IN TRADE — {posLabel}
-                        {posPnl != null && ` ${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%`}
-                      </span>
-                    ) : (
-                      <div className="flex flex-col items-end gap-0.5">
-                        <span className={cn('text-[11px] font-medium', t.statusColor)}>
-                          {t.overallStatus}
-                        </span>
-                        {t.skipReason && (
-                          <span className="text-[9px] font-mono text-amber-400/70 max-w-[280px]" title={t.skipReason.replace(/_/g, ' ')}>
-                            {t.skipReason.replace(/_/g, ' ')}
-                          </span>
-                        )}
-                      </div>
-                    )}
                   </div>
                 </div>
 
                 {t.hasData ? (
-                  <div className={cn('space-y-2.5', hasActivePos && 'opacity-40')}>
-                    {/* Dual signal rows: bull + bear, with inline dots */}
-                    <div className="space-y-2">
-                      {/* Bull row */}
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className={cn(
-                            'text-[10px] font-mono w-8 shrink-0',
-                            t.signalSide === 'long' ? 'text-[#00c853] font-bold' : 'text-zinc-600',
-                          )}>
-                            Bull
-                          </span>
-                          <SignalBar count={t.bullCount} />
-                          <span className={cn(
-                            'text-[10px] font-mono w-8 text-right',
-                            t.bullCount >= 3 ? 'text-[#00c853]' : t.bullCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
-                          )}>
-                            {t.bullCount}/4
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-3 ml-8">
-                          {t.bullIndicators.map((ind, i) => (
-                            <Dot key={`bull-${i}`} active={ind.active} label={ind.label} direction="bull" />
-                          ))}
-                        </div>
+                  <>
+                    {/* Bull Signal Blocks */}
+                    <div className={cn('flex items-center gap-2 mb-1.5', hasActivePos && 'opacity-50')}>
+                      <div className={cn('flex gap-0.5', t.bullCount >= 3 && 'animate-pulse')}>
+                        {t.bullIndicators.map((ind, i) => (
+                          <div key={i} className={cn(
+                            'w-4 h-3 rounded-sm',
+                            ind.active ? 'bg-[#00c853]' : 'bg-zinc-700',
+                          )} />
+                        ))}
                       </div>
-                      {/* Bear row */}
-                      {t.isFutures && (
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span className={cn(
-                              'text-[10px] font-mono w-8 shrink-0',
-                              t.signalSide === 'short' ? 'text-[#ff1744] font-bold' : 'text-zinc-600',
-                            )}>
-                              Bear
-                            </span>
-                            <SignalBar count={t.bearCount} variant="bear" />
-                            <span className={cn(
-                              'text-[10px] font-mono w-8 text-right',
-                              t.bearCount >= 3 ? 'text-[#ff1744]' : t.bearCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
-                            )}>
-                              {t.bearCount}/4
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-3 ml-8">
-                            {t.bearIndicators.map((ind, i) => (
-                              <Dot key={`bear-${i}`} active={ind.active} label={ind.label} direction="bear" />
-                            ))}
-                          </div>
-                        </div>
+                      <span className="text-[9px] font-mono text-zinc-500">
+                        {t.bullCount}/4
+                      </span>
+                      <span className={cn(
+                        'px-1.5 py-0.5 rounded text-[8px] font-bold uppercase',
+                        t.bullCount >= 3
+                          ? 'bg-[#00c853]/15 text-[#00c853] border border-[#00c853]/30'
+                          : 'bg-zinc-800 text-zinc-500 border border-zinc-700',
+                      )}>
+                        {t.bullCount >= 3 ? 'READY' : 'WAIT'}
+                      </span>
+                      {t.signalSide === 'long' && t.bullCount >= 3 && (
+                        <span className="text-sm font-bold text-[#00c853]">LONG &#8593;</span>
                       )}
                     </div>
-                    {/* Compact values */}
-                    <div className="flex gap-3 pt-1 border-t border-zinc-800/50">
+
+                    {/* Bear Signal Blocks */}
+                    {t.isFutures && (
+                      <div className={cn('flex items-center gap-2 mb-2', hasActivePos && 'opacity-50')}>
+                        <div className={cn('flex gap-0.5', t.bearCount >= 3 && 'animate-pulse')}>
+                          {t.bearIndicators.map((ind, i) => (
+                            <div key={i} className={cn(
+                              'w-4 h-3 rounded-sm',
+                              ind.active ? 'bg-[#ff1744]' : 'bg-zinc-700',
+                            )} />
+                          ))}
+                        </div>
+                        <span className="text-[9px] font-mono text-zinc-500">
+                          {t.bearCount}/4
+                        </span>
+                        <span className={cn(
+                          'px-1.5 py-0.5 rounded text-[8px] font-bold uppercase',
+                          t.bearCount >= 3
+                            ? 'bg-[#ff1744]/15 text-[#ff1744] border border-[#ff1744]/30'
+                            : 'bg-zinc-800 text-zinc-500 border border-zinc-700',
+                        )}>
+                          {t.bearCount >= 3 ? 'READY' : 'WAIT'}
+                        </span>
+                        {t.signalSide === 'short' && t.bearCount >= 3 && (
+                          <span className="text-sm font-bold text-[#ff1744]">SHORT &#8595;</span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Status */}
+                    {hasActivePos ? (
+                      <div className={cn('text-[9px] font-mono mb-2',
+                        isTrailing ? 'text-[#00c853]' : isNegative ? 'text-[#ff1744]' : 'text-amber-400',
+                      )}>
+                        <span className="flex items-center gap-1">
+                          {isTrailing && <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />}
+                          In Trade &mdash; {posLabel}
+                          {posPnl != null && ` ${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%`}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className={cn('text-[9px] font-mono mb-2', t.statusColor)}>
+                        {t.overallStatus}
+                      </div>
+                    )}
+                    {!hasActivePos && t.skipReason && (
+                      <div className="text-[8px] font-mono text-amber-400/70 mb-2">
+                        {t.skipReason.replace(/_/g, ' ')}
+                      </div>
+                    )}
+
+                    {/* Active position details */}
+                    {hasActivePos && t.activePosition && (
+                      <div className={cn(
+                        'rounded p-2 mb-2',
+                        isTrailing ? 'bg-[#00c853]/5 border border-[#00c853]/20'
+                          : isNegative ? 'bg-[#ff1744]/5 border border-[#ff1744]/20'
+                          : 'bg-amber-400/5 border border-amber-400/20',
+                      )}>
+                        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] font-mono text-zinc-400">
+                          <span>
+                            <span className="text-zinc-600">Side </span>
+                            <span className={cn('font-medium',
+                              t.activePosition.side === 'buy' ? 'text-[#00c853]' : 'text-[#ff1744]',
+                            )}>
+                              {t.activePosition.side === 'buy' ? 'LONG' : 'SHORT'}
+                            </span>
+                          </span>
+                          <span>
+                            <span className="text-zinc-600">Entry </span>
+                            ${t.activePosition.entry_price?.toLocaleString() ?? '—'}
+                          </span>
+                          <span>
+                            <span className="text-zinc-600">Now </span>
+                            ${t.activePosition.current_price?.toLocaleString() ?? '—'}
+                          </span>
+                          <span>
+                            <span className="text-zinc-600">P&L </span>
+                            <span className={cn('font-medium', (posPnl ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                              {posPnl != null ? `${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%` : '—'}
+                            </span>
+                          </span>
+                          {isTrailing && (
+                            <span className="flex items-center gap-1 text-[#00c853]">
+                              <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
+                              TRAILING
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Compact indicator values */}
+                    <div className="flex gap-3 text-[8px] font-mono text-zinc-600">
                       {t.rsi != null && (
                         <span className={cn(
-                          'text-[9px] font-mono',
                           t.rsi < RSI_LONG_THRESHOLD ? 'text-[#00c853]' :
-                          t.rsi > RSI_SHORT_THRESHOLD ? 'text-[#ff1744]' :
-                          'text-zinc-500',
+                          t.rsi > RSI_SHORT_THRESHOLD ? 'text-[#ff1744]' : '',
                         )}>
                           RSI {t.rsi.toFixed(0)}
                         </span>
                       )}
                       {t.volumeRatio != null && (
-                        <span className={cn(
-                          'text-[9px] font-mono',
-                          t.volumeRatio >= VOL_SPIKE_RATIO ? 'text-[#00c853]' : 'text-zinc-500',
-                        )}>
+                        <span className={cn(t.volumeRatio >= VOL_SPIKE_RATIO ? 'text-[#00c853]' : '')}>
                           Vol {t.volumeRatio.toFixed(1)}x
                         </span>
                       )}
                       {t.priceChangePct != null && (
-                        <span className={cn(
-                          'text-[9px] font-mono',
-                          Math.abs(t.priceChangePct) >= MOMENTUM_MIN_PCT ? 'text-[#00c853]' : 'text-zinc-500',
-                        )}>
+                        <span className={cn(Math.abs(t.priceChangePct) >= MOMENTUM_MIN_PCT ? 'text-[#00c853]' : '')}>
                           Mom {t.priceChangePct >= 0 ? '+' : ''}{t.priceChangePct.toFixed(2)}%
                         </span>
                       )}
                       {t.bbUpper != null && t.bbLower != null && t.currentPrice != null && (
                         <span className={cn(
-                          'text-[9px] font-mono',
-                          t.currentPrice > t.bbUpper || t.currentPrice < t.bbLower
-                            ? 'text-[#00c853]' : 'text-zinc-500',
+                          t.currentPrice > t.bbUpper || t.currentPrice < t.bbLower ? 'text-[#00c853]' : '',
                         )}>
-                          BB {t.currentPrice > t.bbUpper ? 'Above' : t.currentPrice < t.bbLower ? 'Below' : 'In'}
+                          BB {t.currentPrice > t.bbUpper ? 'Above' : t.currentPrice < t.bbLower ? 'Below' : 'Mid'}
                         </span>
                       )}
                     </div>
-                  </div>
+                  </>
                 ) : (
-                  <p className="text-[11px] text-zinc-600">Awaiting indicator data from bot...</p>
+                  <div className="text-[9px] font-mono text-zinc-600">Awaiting data...</div>
                 )}
               </div>
             );
