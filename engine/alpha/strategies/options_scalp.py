@@ -35,6 +35,7 @@ Risk: Max loss = premium paid. No liquidation. Safest momentum play.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
@@ -87,14 +88,15 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
     # Candle-based momentum gate (replaces old single-snapshot momentum % check)
-    CANDLE_MOM_STREAK = 2                # min directional candles out of last 3
-    CANDLE_MOM_CUMULATIVE_PCT = 0.06     # min cumulative move over 3 candles (% of price)
-    CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
-    MIN_UNDERLYING_MOVE_PCT = 0.15       # underlying must move >= 0.15% in last 60s
+    CANDLE_MOM_STREAK = 4                # min directional candles out of last 5
+    CANDLE_MOM_CUMULATIVE_PCT = 0.15     # min cumulative move over 5 candles (% of price)
+    CANDLE_MOM_LOOKBACK = 5              # number of completed 1m candles to check
+    MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
     OPT_TRADE_COOLDOWN_SEC = 120        # 2 min between options trades
+    OPT_DEAD_COOLDOWN_SEC = 600         # 10 min cooldown after dead momentum exit (0% peak = dead market)
     # OPT_LOSS_STREAK_LIMIT removed — candle momentum gates entry quality
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
@@ -193,7 +195,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.entry_premium: float = 0.0
         self.entry_time: float = 0.0
         self._contracts: int = 1                   # dynamic — set by _calculate_option_contracts
-        self._candle_alloc_pct: float = 25.0       # dynamic — set by candle quality (25/40%)
+        self._candle_alloc_pct: float = 35.0       # dynamic — set by candle quality (35/50%)
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
         self.strike_price: float = 0.0
@@ -225,6 +227,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # Cooldown after POSITION_GONE — no new options entry for 60s
         self._position_gone_cooldown_until: float = 0.0
         self._POSITION_GONE_COOLDOWN_SEC = 60
+        # Cooldown after dead market (OPT_DEAD_MOMENTUM with 0% peak)
+        self._dead_market_cooldown_until: float = 0.0
 
         # Trade cooldown — 5 min between options trades
         self._last_option_trade_time: float = 0.0
@@ -805,6 +809,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
                 return
 
+        # Dead market cooldown
+        if time.monotonic() < self._dead_market_cooldown_until:
+            remaining = self._dead_market_cooldown_until - time.monotonic()
+            self._cached_bot_state = f"blocked:dead_market_cooldown:{int(remaining)}s"
+            return
+
         # Will be overwritten by _check_option_entry() with the real state
         # but this ensures dashboard write has at least "scanning"
         if self._cached_bot_state.startswith("blocked:trade_cooldown") or \
@@ -845,6 +855,17 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
                 return []
 
+        # 0b2. Dead market cooldown — 10 min after OPT_DEAD_MOMENTUM exit with 0% peak
+        if time.monotonic() < self._dead_market_cooldown_until:
+            remaining = self._dead_market_cooldown_until - time.monotonic()
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] DEAD_MARKET_COOLDOWN — %.0fs remaining (10min after 0%% peak exit)",
+                    self.pair, remaining,
+                )
+            self._cached_bot_state = f"blocked:dead_market_cooldown:{int(remaining)}s"
+            return []
+
         # 0c. Skip BTC options when balance < $50 — premiums too expensive, ETH only
         if self._base_asset == "BTC":
             exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
@@ -881,7 +902,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # 2. Candle-based momentum gate — PRIMARY ENTRY GATE
         # Direction determined FROM candles, not from scalp signal strength.
-        # 2+ of 3 completed 1m candles in one direction + cumulative >= 0.06%.
+        # 4+ of 5 completed 1m candles in one direction + cumulative >= 0.15%.
         candle_pass, candle_reason, side, candle_count, candle_cum_pct = await self._check_candle_momentum()
         self._cached_candle_momentum = {
             "count": candle_count, "total": self.CANDLE_MOM_LOOKBACK,
@@ -893,13 +914,13 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         # Dynamic allocation based on candle quality
-        if candle_count >= 3:
-            self._candle_alloc_pct = 40.0  # 3/3 full conviction
+        if candle_count >= 5:
+            self._candle_alloc_pct = 50.0  # 5/5 candles → max conviction
         else:
-            self._candle_alloc_pct = 25.0  # 2/3 base
+            self._candle_alloc_pct = 35.0  # 4/5 candles → strong
 
         self.logger.info(
-            "[%s] %s | OPTIONS SIZE: %d/3 candles, cum=%.2f%%, alloc=%.0f%%",
+            "[%s] %s | OPTIONS SIZE: %d/5 candles, cum=%.2f%%, alloc=%.0f%%",
             self.pair, candle_reason, candle_count, candle_cum_pct, self._candle_alloc_pct,
         )
 
@@ -925,7 +946,7 @@ class OptionsScalpStrategy(BaseStrategy):
         option_type = "call" if side == "long" else "put"
 
         # 3a. Counter-trend always allowed — candle momentum already ensures direction is real.
-        # If 2/3 candles are red in TRENDING_UP, that's a reversal signal worth playing.
+        # If 4/5 candles are red in TRENDING_UP, that's a reversal signal worth playing.
         # Options max loss = premium paid, no leverage risk.
 
         # 3b. Soft read scalp context — RSI, range position (don't block if unavailable)
@@ -1105,6 +1126,31 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_affordable_strike"
             return []
 
+        # 9b. PREMIUM CONFIRMATION — wait 10s, re-check ask. Premium must be rising.
+        first_ask = premium
+        await asyncio.sleep(10)
+        try:
+            ticker2 = await self.options_exchange.fetch_ticker(selected_symbol)
+            second_ask = ticker2.get("ask") or ticker2.get("last") or 0
+        except Exception as e:
+            self.logger.debug("[%s] Premium confirm fetch failed: %s", self.pair, e)
+            second_ask = 0
+
+        if second_ask <= 0 or second_ask < first_ask:
+            pct_chg = ((second_ask - first_ask) / first_ask * 100) if first_ask > 0 else 0
+            self.logger.info(
+                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%.2f%%) — SKIP",
+                self.pair, first_ask, second_ask, pct_chg,
+            )
+            return []
+        else:
+            pct_chg = (second_ask - first_ask) / first_ask * 100
+            self.logger.info(
+                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (+%.2f%%) — ENTER",
+                self.pair, first_ask, second_ask, pct_chg,
+            )
+            premium = second_ask  # use confirmed price for entry
+
         # 10. Classify setup_type from scalp signal reason (soft — default MOMENTUM_BURST)
         signals_str = ""
         if signal_state is not None:
@@ -1147,7 +1193,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:premium_high"
             return []
 
-        # 10d. Sizing already handled by dynamic candle alloc (25/40%)
+        # 10d. Sizing already handled by dynamic candle alloc (35/50%)
         # BB_SQUEEZE gets 60% factor applied on top
         if setup_type == "BB_SQUEEZE" and opt_contracts > 1:
             adjusted = max(1, int(opt_contracts * 0.60))
@@ -1381,7 +1427,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if exchange_capital <= 0 or premium <= 0:
             return 0
 
-        alloc_pct = self._candle_alloc_pct  # dynamic: 25/40% based on candle quality
+        alloc_pct = self._candle_alloc_pct  # dynamic: 35/50% based on candle quality
 
         # Survival mode: low balance → cap allocation
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
@@ -1400,6 +1446,14 @@ class OptionsScalpStrategy(BaseStrategy):
         contracts = math.floor(collateral_available / collateral_per_contract)
         contracts = max(contracts, 0)
 
+        # Survival mode: balance < $5 → hard cap at 1 contract to limit damage
+        if exchange_capital < 5.0 and contracts > 1:
+            self.logger.info(
+                "[%s] SURVIVAL_MODE: bal=$%.2f < $5 — capping %d → 1 contract",
+                self.pair, exchange_capital, contracts,
+            )
+            contracts = 1
+
         self.logger.info(
             "[%s] OPT_SIZING: %d contracts @ $%.4f "
             "(collateral=$%.2f, alloc=%.0f%%, bal=$%.2f, per_ct=$%.4f)",
@@ -1416,12 +1470,12 @@ class OptionsScalpStrategy(BaseStrategy):
     async def _check_candle_momentum(self) -> tuple[bool, str, str | None, int, float]:
         """Check candle-based momentum for options entry — PRIMARY GATE.
 
-        Determines direction AND momentum from last 3 completed 1m candles.
+        Determines direction AND momentum from last 5 completed 1m candles.
         Direction comes FROM candles (not from scalp signal).
 
         All three conditions must pass:
-        1. Candle streak: ≥2 of 3 candles in one direction (green=long, red=short)
-        2. Cumulative move: sum of (close-open) ≥ 0.06% of price in that direction
+        1. Candle streak: ≥4 of 5 candles in one direction (green=long, red=short)
+        2. Cumulative move: sum of (close-open) ≥ 0.15% of price in that direction
         3. Fresh candle: last completed candle must be in that direction
 
         Returns:
@@ -1862,8 +1916,15 @@ class OptionsScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
         self.hourly_pnl += pnl_usd
 
-        # Trade cooldown — set 5 min timer
+        # Trade cooldown — extended to 10 min for dead momentum exits where peak was 0%
         self._last_option_trade_time = time.monotonic()
+        if exit_type == "OPT_DEAD_MOMENTUM" and self.highest_premium <= self.entry_premium:
+            # Peak never went green → dead market, use 10 min cooldown
+            self._dead_market_cooldown_until = time.monotonic() + self.OPT_DEAD_COOLDOWN_SEC
+            self.logger.info(
+                "[%s] DEAD MARKET — peak was 0%%, setting 10-min cooldown",
+                self.option_symbol,
+            )
 
         # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
