@@ -1446,13 +1446,13 @@ class OptionsScalpStrategy(BaseStrategy):
         contracts = math.floor(collateral_available / collateral_per_contract)
         contracts = max(contracts, 0)
 
-        # Survival mode: balance < $5 → hard cap at 1 contract to limit damage
-        if exchange_capital < 5.0 and contracts > 1:
+        # Survival mode: balance < $5 → cap at 5 contracts (collateral is tiny at 50x leverage)
+        if exchange_capital < 5.0 and contracts > 5:
             self.logger.info(
-                "[%s] SURVIVAL_MODE: bal=$%.2f < $5 — capping %d → 1 contract",
+                "[%s] SURVIVAL_MODE: bal=$%.2f < $5 — capping %d → 5 contracts",
                 self.pair, exchange_capital, contracts,
             )
-            contracts = 1
+            contracts = 5
 
         self.logger.info(
             "[%s] OPT_SIZING: %d contracts @ $%.4f "
