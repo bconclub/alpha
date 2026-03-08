@@ -985,6 +985,26 @@ class TradeExecutor:
         order: dict | None = None
         last_error: Exception | None = None
 
+        # ── ALREADY FILLED: strategy placed limit order directly (e.g. premium confirmation) ──
+        if signal.metadata and signal.metadata.get("already_filled"):
+            logger.info(
+                "[%s] Order already filled by strategy (limit entry) — skipping order placement, "
+                "recording fill at $%.4f x%.0f",
+                signal.pair, signal.price, order_amount,
+            )
+            # Build a synthetic order dict so downstream fill tracking works
+            order = {
+                "id": "strategy_prefilled",
+                "status": "closed",
+                "filled": order_amount,
+                "average": signal.price,
+                "price": signal.price,
+                "amount": order_amount,
+                "side": signal.side,
+                "type": "limit",
+                "symbol": signal.pair,
+            }
+
         # ── LIMIT EXIT OPTIMIZATION: Non-urgent Delta futures exits use limit-then-market ──
         # Saves ~60% on exit fees (maker 0.024% vs taker 0.059%)
         # Place limit at current price, wait 3s, cancel & market if unfilled

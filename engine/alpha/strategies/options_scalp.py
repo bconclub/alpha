@@ -1126,7 +1126,10 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_affordable_strike"
             return []
 
-        # 9b. PREMIUM CONFIRMATION — wait 10s, re-check ask. Premium must be rising.
+        # 9b. PREMIUM CONFIRMATION + LIMIT ENTRY at original price.
+        # Wait 10s, re-check ask. If premium rose → it's alive.
+        # Place limit buy at ORIGINAL price (better entry). Wait 15s for fill.
+        # If not filled → cancel and skip (move happened without us).
         first_ask = premium
         await asyncio.sleep(10)
         try:
@@ -1139,17 +1142,87 @@ class OptionsScalpStrategy(BaseStrategy):
         if second_ask <= 0 or second_ask < first_ask:
             pct_chg = ((second_ask - first_ask) / first_ask * 100) if first_ask > 0 else 0
             self.logger.info(
-                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%.2f%%) — SKIP",
+                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%.2f%%) — premium dead, SKIP",
                 self.pair, first_ask, second_ask, pct_chg,
             )
             return []
-        else:
-            pct_chg = (second_ask - first_ask) / first_ask * 100
-            self.logger.info(
-                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (+%.2f%%) — ENTER",
-                self.pair, first_ask, second_ask, pct_chg,
+
+        pct_chg = (second_ask - first_ask) / first_ask * 100
+        self.logger.info(
+            "[%s] PREMIUM_LIMIT: placing limit at $%.4f (confirmed $%.4f, +%.2f%%) — waiting 15s",
+            self.pair, first_ask, second_ask, pct_chg,
+        )
+
+        # Place limit buy at original (lower) price
+        limit_order_id = None
+        try:
+            limit_order = await self.options_exchange.create_order(
+                symbol=selected_symbol,
+                type="limit",
+                side="buy",
+                amount=float(opt_contracts),
+                price=first_ask,
             )
-            premium = second_ask  # use confirmed price for entry
+            limit_order_id = limit_order.get("id")
+            self.logger.info(
+                "[%s] PREMIUM_LIMIT: order %s placed — %d contracts @ $%.4f",
+                self.pair, limit_order_id, opt_contracts, first_ask,
+            )
+        except Exception as e:
+            self.logger.info("[%s] PREMIUM_LIMIT: order placement failed: %s — SKIP", self.pair, e)
+            return []
+
+        # Poll for fill over 15 seconds
+        limit_filled = False
+        fill_price = first_ask
+        for _poll in range(5):  # 5 × 3s = 15s
+            await asyncio.sleep(3)
+            try:
+                updated = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
+                status = updated.get("status", "")
+                filled_qty = float(updated.get("filled", 0) or 0)
+                if status == "closed" or filled_qty >= opt_contracts:
+                    fill_price = float(updated.get("average", 0) or updated.get("price", 0) or first_ask)
+                    limit_filled = True
+                    self.logger.info(
+                        "[%s] PREMIUM_LIMIT: FILLED @ $%.4f (%d contracts)",
+                        self.pair, fill_price, opt_contracts,
+                    )
+                    break
+            except Exception as e:
+                self.logger.debug("[%s] PREMIUM_LIMIT: poll failed: %s", self.pair, e)
+
+        if not limit_filled:
+            # Cancel unfilled order — move happened without us
+            try:
+                await self.options_exchange.cancel_order(limit_order_id, selected_symbol)
+                self.logger.info(
+                    "[%s] PREMIUM_LIMIT: NOT filled in 15s — cancelled, SKIP (move happened without us)",
+                    self.pair,
+                )
+            except Exception as e:
+                # Cancel failed — check if it actually filled
+                try:
+                    final_check = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
+                    if final_check.get("status") == "closed" or float(final_check.get("filled", 0) or 0) >= opt_contracts:
+                        fill_price = float(final_check.get("average", 0) or final_check.get("price", 0) or first_ask)
+                        limit_filled = True
+                        self.logger.info(
+                            "[%s] PREMIUM_LIMIT: cancel failed but order FILLED @ $%.4f",
+                            self.pair, fill_price,
+                        )
+                except Exception:
+                    pass
+                if not limit_filled:
+                    self.logger.info("[%s] PREMIUM_LIMIT: cancel failed: %s — SKIP", self.pair, e)
+                    return []
+
+        if not limit_filled:
+            return []
+
+        # Use fill price for entry — order already executed, signal is informational
+        premium = fill_price
+        self._limit_entry_filled = True  # flag for executor to skip order placement
 
         # 10. Classify setup_type from scalp signal reason (soft — default MOMENTUM_BURST)
         signals_str = ""
@@ -1371,6 +1444,9 @@ class OptionsScalpStrategy(BaseStrategy):
         """Build the entry Signal for an option trade."""
         # Store contracts for exit sizing
         self._contracts = contracts
+        # Capture and reset limit entry flag
+        already_filled = getattr(self, "_limit_entry_filled", False)
+        self._limit_entry_filled = False
 
         reason = (
             f"OPTIONS {option_type.upper()} | candle_entry "
@@ -1405,6 +1481,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "sl_price": premium * (1 - self.SL_PREMIUM_LOSS_PCT / 100),
                 "setup_type": setup_type,
                 "contracts": contracts,
+                "already_filled": already_filled,
             },
         )]
 
