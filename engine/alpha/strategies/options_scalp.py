@@ -12,7 +12,7 @@
  5. STRIKE SELECTION   Highest OI within ATM + 1-2 OTM (liquidity = premium moves)
  6. PREMIUM FLOOR      Min $5 premium (kills dead low-delta strikes)
  7. PREMIUM CAP        Max $40 premium (avoid low-gamma expensive options)
- 8. PREMIUM CONFIRM    Wait 10s, re-check ask — must rise (premium alive)
+ 8. PREMIUM CONFIRM    Dynamic wait (3s fast / 10s standard), must rise or hold ±0.5%
  9. LIMIT ENTRY        Place limit buy at ORIGINAL price, wait 15s for fill
                        If not filled → cancel and skip (no overpaying)
 10. PULLBACK WAIT      Wait up to 15s for 3% premium dip before buying
@@ -1166,11 +1166,17 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         # 9b. PREMIUM CONFIRMATION + LIMIT ENTRY at original price.
-        # Wait 10s, re-check ask. If premium rose → it's alive.
-        # Place limit buy at ORIGINAL price (better entry). Wait 15s for fill.
-        # If not filled → cancel and skip (move happened without us).
+        # Dynamic wait: strong moves get fast confirm, weaker ones standard.
+        # Premium must rise (or hold flat ±0.5%) during the window.
         first_ask = premium
-        await asyncio.sleep(10)
+        fast_confirm = candle_count >= 3 or candle_cum_pct >= 0.40
+        confirm_wait = 3 if fast_confirm else 10
+        confirm_mode = "fast" if fast_confirm else "standard"
+        self.logger.info(
+            "[%s] PREMIUM_CONFIRM: %s mode (%ds) — %d/3 candles, cum=%.2f%%",
+            self.pair, confirm_mode, confirm_wait, candle_count, candle_cum_pct,
+        )
+        await asyncio.sleep(confirm_wait)
         try:
             ticker2 = await self.options_exchange.fetch_ticker(selected_symbol)
             second_ask = ticker2.get("ask") or ticker2.get("last") or 0
@@ -1178,17 +1184,17 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.debug("[%s] Premium confirm fetch failed: %s", self.pair, e)
             second_ask = 0
 
-        if second_ask <= 0 or second_ask < first_ask:
-            pct_chg = ((second_ask - first_ask) / first_ask * 100) if first_ask > 0 else 0
+        # Premium must rise or hold flat (within -0.5%) — skip if dropped more
+        pct_chg = ((second_ask - first_ask) / first_ask * 100) if first_ask > 0 else 0
+        if second_ask <= 0 or pct_chg < -0.5:
             self.logger.info(
-                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%.2f%%) — premium dead, SKIP",
+                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%+.2f%%) — premium dead, SKIP",
                 self.pair, first_ask, second_ask, pct_chg,
             )
             return []
 
-        pct_chg = (second_ask - first_ask) / first_ask * 100
         self.logger.info(
-            "[%s] PREMIUM_LIMIT: placing limit at $%.4f (confirmed $%.4f, +%.2f%%) — waiting 15s",
+            "[%s] PREMIUM_LIMIT: placing limit at $%.4f (confirmed $%.4f, %+.2f%%) — waiting 15s",
             self.pair, first_ask, second_ask, pct_chg,
         )
 
