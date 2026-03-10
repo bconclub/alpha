@@ -1840,7 +1840,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._update_opt_ratchet_floor(peak_pnl_pct)
 
         # ── 2a. RATCHET EXIT: premium fell below locked floor ─────────
-        if self._opt_ratchet_floor > 0 and premium_change_pct < self._opt_ratchet_floor:
+        if self._opt_ratchet_floor != 0.0 and premium_change_pct < self._opt_ratchet_floor:
             self.logger.info(
                 "[%s] OPT_RATCHET — pnl +%.1f%% fell below floor +%.1f%%",
                 self.option_symbol, premium_change_pct, self._opt_ratchet_floor,
@@ -2014,6 +2014,22 @@ class OptionsScalpStrategy(BaseStrategy):
         self, current_premium: float, pnl_pct: float, exit_type: str,
     ) -> list[Signal]:
         """Build exit signal for option position."""
+        # Fetch fresh live bid before exit — use for P&L and Signal price
+        try:
+            ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
+            live_bid = ticker.get("bid") or ticker.get("last") or 0
+            if live_bid > 0:
+                self.logger.info(
+                    "[%s] LIVE_BID: $%.4f (cached=$%.4f, diff=%+.2f%%)",
+                    self.option_symbol, live_bid, current_premium,
+                    (live_bid - current_premium) / current_premium * 100 if current_premium > 0 else 0,
+                )
+                current_premium = live_bid
+                if self.entry_premium > 0:
+                    pnl_pct = (current_premium - self.entry_premium) / self.entry_premium * 100
+        except Exception as e:
+            self.logger.debug("[%s] Live bid fetch failed, using cached: %s", self.option_symbol, e)
+
         pnl_usd = (current_premium - self.entry_premium) * self._contracts
         reason = (
             f"Option {exit_type} {self.option_side} | "
@@ -2059,6 +2075,11 @@ class OptionsScalpStrategy(BaseStrategy):
         # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
 
+        # Peak P&L for DB — executor writes it to peak_pnl column
+        peak_pnl_pct = (
+            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+        ) if self.entry_premium > 0 else 0
+
         return [Signal(
             side="sell",
             price=current_premium,
@@ -2071,6 +2092,7 @@ class OptionsScalpStrategy(BaseStrategy):
             position_type="long",
             reduce_only=True,
             exchange_id="delta",
+            metadata={"peak_pnl": round(peak_pnl_pct, 4)},
         )]
 
     async def _verify_option_position(self) -> list[Signal] | None:
@@ -2173,12 +2195,21 @@ class OptionsScalpStrategy(BaseStrategy):
                         "delta", self.option_symbol or self.pair,
                     )
 
+                    # Peak P&L from tracked highest premium
+                    peak_pnl_val = (
+                        (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+                    ) if self.entry_premium > 0 else 0
+
                     await self._db.update_trade(open_trade["id"], {
                         "status": "closed",
                         "exit_price": exit_premium,
                         "closed_at": iso_now(),
                         "pnl": round(result.net_pnl, 8),
                         "pnl_pct": round(result.pnl_pct, 4),
+                        "gross_pnl": round(result.gross_pnl, 8),
+                        "entry_fee": round(result.entry_fee, 8),
+                        "exit_fee": round(result.exit_fee, 8),
+                        "peak_pnl": round(peak_pnl_val, 4),
                         "reason": exit_reason_detail.lower(),
                         "exit_reason": exit_reason,
                         "position_state": None,
