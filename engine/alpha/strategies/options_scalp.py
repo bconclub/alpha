@@ -89,7 +89,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Strike selection ──────────────────────────────────────────
     BTC_STRIKE_ROUND = 200               # BTC: nearest $200
     ETH_STRIKE_ROUND = 20                # ETH: nearest $20
-    MAX_OTM_STRIKES = 3                  # Max strikes to walk OTM for affordability
+    MAX_OTM_STRIKES = 1                  # ATM or 1 OTM only — further OTM is dead money
 
     # ── Premium limits ────────────────────────────────────────────
     OPTIONS_LEVERAGE = 50                # Delta options are 50x leveraged
@@ -121,7 +121,7 @@ class OptionsScalpStrategy(BaseStrategy):
         "ETH": 30.0,
         "BTC": 20.0,
     }
-    OPT_MAX_COLLATERAL_PCT = 80.0        # never use >80% of balance on 1 option
+    OPT_MAX_COLLATERAL_PCT = 20.0        # never use >20% of balance on 1 option
     OPT_SURVIVAL_BALANCE = 20.0          # below this, cap allocation at 30%
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
@@ -1040,39 +1040,15 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_strikes"
             return []
 
-        # 8-9. Pick the highest-OI strike within ATM + 1-2 OTM.
-        # High OI = liquidity = premium moves when underlying moves.
+        # 8-9. Try 1 OTM first (cheaper), then ATM. No further OTM walks.
         otm_candidates = self._get_otm_candidates(atm_strike, option_type)
-        near_atm_strikes = [atm_strike] + otm_candidates[:2]  # ATM + up to 2 OTM
-
-        # Fetch OI for each candidate, pick highest
-        oi_ranked: list[tuple[float, float]] = []  # (strike, open_interest)
-        for s in near_atm_strikes:
-            sym = self._build_option_symbol(s, option_type, self._selected_expiry)
-            if not sym:
-                continue
-            try:
-                t = await self.options_exchange.fetch_ticker(sym)
-                oi = float(t.get("info", {}).get("open_interest", 0) or
-                           t.get("openInterest", 0) or 0)
-                oi_ranked.append((s, oi))
-            except Exception:
-                oi_ranked.append((s, 0))
-
-        if oi_ranked:
-            # Sort by OI descending, fall back to ATM-proximity if tied at 0
-            oi_ranked.sort(key=lambda x: (-x[1], abs(x[0] - atm_strike)))
-            best_strike, best_oi = oi_ranked[0]
-            self.logger.info(
-                "[%s] OI STRIKE SELECT: %s — %s",
-                self.pair,
-                ", ".join(f"${s:.0f}(OI={oi:.0f})" for s, oi in oi_ranked),
-                f"best=${best_strike:.0f} OI={best_oi:.0f}",
-            )
-            # Try best OI strike first, then others by OI rank
-            strikes_to_try = [s for s, _ in oi_ranked]
-        else:
-            strikes_to_try = [atm_strike]
+        # Order: 1 OTM (if exists) → ATM. Skip if neither affordable.
+        strikes_to_try = otm_candidates[:1] + [atm_strike]
+        self.logger.info(
+            "[%s] STRIKE CANDIDATES: %s (1 OTM → ATM)",
+            self.pair,
+            ", ".join(f"${s:.0f}" for s in strikes_to_try),
+        )
         selected_strike: float | None = None
         selected_symbol: str | None = None
         premium: float = 0.0
@@ -1520,7 +1496,7 @@ class OptionsScalpStrategy(BaseStrategy):
         """Dynamic sizing: contracts based on balance, pair allocation, leverage.
 
         Formula:
-          collateral_available = balance × alloc_pct × 80% safety cap
+          collateral_available = balance × alloc_pct × 20% safety cap
           collateral_per_contract = premium / leverage
           contracts = floor(collateral_available / collateral_per_contract)
           Minimum 1, returns 0 if can't afford 1.
@@ -1537,7 +1513,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
             alloc_pct = min(alloc_pct, self.OPT_SURVIVAL_MAX_ALLOC)
 
-        # Collateral budget (capped at 80% of total balance)
+        # Collateral budget (capped at 20% of total balance)
         collateral_available = exchange_capital * (alloc_pct / 100)
         max_collateral = exchange_capital * (self.OPT_MAX_COLLATERAL_PCT / 100)
         collateral_available = min(collateral_available, max_collateral)
@@ -1557,6 +1533,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.pair, exchange_capital, contracts,
             )
             contracts = 5
+
+        # Hard cap: never exceed 15 contracts per trade
+        if contracts > 15:
+            self.logger.info(
+                "[%s] SIZE_CAP: %d → 15 contracts (hard cap)",
+                self.pair, contracts,
+            )
+            contracts = 15
 
         self.logger.info(
             "[%s] OPT_SIZING: %d contracts @ $%.4f "
