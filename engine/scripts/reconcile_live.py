@@ -120,43 +120,64 @@ async def create_delta_exchange() -> ccxt.delta:
 async def fetch_all_option_fills(exchange: ccxt.delta) -> list[Fill]:
     """Fetch all historical fills from Delta, keep only options."""
     all_fills: list[Fill] = []
+    seen_ids: set[str] = set()
     page = 0
 
     print("Fetching fills from Delta Exchange...")
     await exchange.load_markets()
 
-    # Find all option symbols we've ever traded
-    # Try fetching with no symbol first (all fills)
-    last_id: str | None = None
-    empty_pages = 0
+    # Walk backwards in time using 'since' — Delta returns newest first
+    # with limit, so we use end_time and walk backwards
+    from datetime import datetime, timezone, timedelta
+    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+    # Go back to Feb 1 2026 to cover all historical trades
+    start_time = int(datetime(2026, 2, 1, tzinfo=timezone.utc).timestamp() * 1000)
 
-    while True:
+    # Strategy: fetch page by page, using the oldest timestamp from each
+    # batch as the new 'end' for the next request (walk backwards)
+    cursor_end = end_time
+
+    while cursor_end > start_time:
         page += 1
         try:
-            params: dict = {}
-            if last_id:
-                params["after"] = last_id
-
+            # Try multiple pagination strategies
             trades = await exchange.fetch_my_trades(
-                symbol=None, limit=100, params=params,
+                symbol=None, since=start_time, limit=500,
+                params={"end_time": str(cursor_end // 1000)},
             )
-        except Exception as e:
-            print(f"  fetch_my_trades failed: {e}")
-            print("  Trying privateGetFills fallback...")
-            trades = await _fetch_fills_fallback(exchange, last_id)
+        except Exception as e1:
+            # Fallback: try without end_time
+            try:
+                trades = await exchange.fetch_my_trades(
+                    symbol=None, limit=500,
+                    params={"page_num": str(page)},
+                )
+            except Exception as e2:
+                print(f"  Page {page} failed: {e1} / {e2}")
+                break
 
         if not trades:
-            empty_pages += 1
-            if empty_pages >= 2:
-                break
-            await asyncio.sleep(1)
-            continue
+            break
 
-        empty_pages = 0
-        option_count = 0
+        # Deduplicate (pagination may overlap)
+        new_trades = []
         for t in trades:
+            tid = str(t.get("id", ""))
+            if tid and tid not in seen_ids:
+                seen_ids.add(tid)
+                new_trades.append(t)
+
+        if not new_trades:
+            break
+
+        option_count = 0
+        oldest_ts = cursor_end
+        for t in new_trades:
+            ts = int(t.get("timestamp", 0) or 0)
+            if ts > 0 and ts < oldest_ts:
+                oldest_ts = ts
+
             symbol = t.get("symbol", "")
-            # Only keep options fills
             if not _OPTION_RE.search(symbol):
                 continue
 
@@ -169,22 +190,32 @@ async def fetch_all_option_fills(exchange: ccxt.delta) -> list[Fill]:
                 price=float(t.get("price", 0) or 0),
                 amount=float(t.get("amount", 0) or 0),
                 fee=abs(fee_cost),
-                timestamp=int(t.get("timestamp", 0) or 0),
+                timestamp=ts,
                 order_id=str(t.get("order", "")),
                 trade_id=str(t.get("id", "")),
                 raw=t,
             ))
             option_count += 1
 
-        # Use the last trade's id for pagination
-        if trades:
-            last_id = str(trades[-1].get("id", ""))
+        oldest_dt = datetime.fromtimestamp(oldest_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        print(f"  Page {page}: {len(new_trades)} new fills, {option_count} options "
+              f"(total: {len(all_fills)}, oldest: {oldest_dt})")
 
-        print(f"  Page {page}: {len(trades)} fills, {option_count} options (total options: {len(all_fills)})")
+        # Move cursor back — subtract 1ms to avoid re-fetching the same oldest
+        if oldest_ts >= cursor_end:
+            # Didn't move backwards — we're stuck, break
+            break
+        cursor_end = oldest_ts - 1
+
         await asyncio.sleep(1)
 
     print(f"\nTotal option fills: {len(all_fills)}")
     if all_fills:
+        # Sort by timestamp
+        all_fills.sort(key=lambda f: f.timestamp)
+        oldest = datetime.fromtimestamp(all_fills[0].timestamp / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        newest = datetime.fromtimestamp(all_fills[-1].timestamp / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        print(f"  Date range: {oldest} to {newest}")
         print(f"  Sample fill symbols:")
         for f in all_fills[:5]:
             print(f"    {f.symbol} | {f.side} {f.amount}x @ ${f.price} | fee=${f.fee}")
@@ -280,20 +311,25 @@ def build_round_trips(fills: list[Fill]) -> list[RoundTrip]:
 # ── Normalize symbol for DB matching ──────────────────────────────────
 
 def normalize_symbol(symbol: str) -> str:
-    """Normalize option symbol to a canonical form for matching.
+    """Normalize option symbol to canonical form: ASSET-YYMMDD-STRIKE-C/P
 
-    DB stores full ccxt symbols: 'ETH/USD:USD-260311-2040-C'
-    Delta fills also return:    'ETH/USD:USD-260311-2040-C'
-    But some DB rows may have:  'ETH-260311-2040-C' (older trades)
-
-    Canonical form: 'ETH-260311-2040-C' (short form for matching)
+    ETH/USD:USD-260311-2040-C   → ETH-260311-2040-C
+    ETH/USDT:USDT-260310-2040-C → ETH-260310-2040-C
+    BTC/USD:USD-260311-69400-P  → BTC-260311-69400-P
+    ETH-260311-2040-C           → ETH-260311-2040-C  (already short)
     """
-    m = _OPTION_RE.search(symbol)
+    # Extract base asset from "ETH/USD:..." or "BTC/USDT:..."
+    base = symbol.split("/")[0] if "/" in symbol else None
+
+    # Find the date-strike-C/P part
+    m = re.search(r"(\d{6})-(\d+)-([CP])", symbol)
     if m:
-        asset = m.group(1)
-        if "/" in asset:
-            asset = asset.split("/")[0]
-        return f"{asset}-{m.group(2)}-{m.group(3)}-{m.group(4)}"
+        if base:
+            return f"{base}-{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        # No slash — infer asset from strike (BTC strikes > 10000)
+        strike = int(m.group(2))
+        asset = "BTC" if strike >= 10000 else "ETH"
+        return f"{asset}-{m.group(1)}-{m.group(2)}-{m.group(3)}"
     return symbol
 
 
