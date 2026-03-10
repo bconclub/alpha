@@ -124,20 +124,18 @@ def calc_pnl(
     exit_fee_dollars = exit_notional * exit_fee_rate
     net_pnl = gross_pnl - entry_fee_dollars - exit_fee_dollars
 
-    # P&L % against collateral (margin posted)
     lev = max(int(leverage or 1), 1)
-    collateral = entry_notional / lev if lev > 1 else entry_notional
-    pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
 
-    # Options: convert notional P&L to REAL wallet P&L (÷ leverage).
-    # At 50x, you only posted 1/50th of premium as collateral.
-    # Notional: (68-95)*1 = -$27.  Real wallet loss: -$27/50 = -$0.54.
-    # pnl_pct stays the same (-28.52%) — it's already vs collateral.
-    if is_option and lev > 1:
-        gross_pnl /= lev
-        entry_fee_dollars /= lev
-        exit_fee_dollars /= lev
-        net_pnl = gross_pnl - entry_fee_dollars - exit_fee_dollars
+    if is_option:
+        # Options: P&L is the full premium difference × contracts.
+        # Leverage only determines margin requirement, not actual P&L.
+        # gross_pnl and net_pnl stay at notional (no ÷ leverage).
+        # pnl_pct: simple premium % change, not capital-based.
+        pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+    else:
+        # Futures / spot: P&L % against collateral (margin posted)
+        collateral = entry_notional / lev if lev > 1 else entry_notional
+        pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
 
     return PnLResult(
         round(net_pnl, 8), round(pnl_pct, 4), round(gross_pnl, 8),
@@ -1496,6 +1494,11 @@ class TradeExecutor:
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
+
+            # Options: use signal.price (live bid from _do_option_exit) as
+            # single source of truth — matches the reason string exit price.
+            if is_option_symbol(signal.pair) and signal.price and signal.price > 0:
+                fill_price = signal.price
 
             # ── SAFETY: never close with exit_price=0 ──
             if not fill_price or float(fill_price) <= 0:
