@@ -1289,6 +1289,15 @@ class OptionsScalpStrategy(BaseStrategy):
         if not limit_filled:
             return []
 
+        # Re-fetch order for Delta's actual fill price (average field)
+        try:
+            final = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
+            actual_avg = float(final.get("average") or final.get("price") or limit_price)
+            if actual_avg > 0:
+                fill_price = actual_avg
+        except Exception:
+            pass  # keep fill_price from polling loop
+
         # Use fill price for entry — order already executed, signal is informational
         premium = fill_price
         self._limit_entry_filled = True  # flag for executor to skip order placement
@@ -2043,13 +2052,22 @@ class OptionsScalpStrategy(BaseStrategy):
 
     async def _close_option_trade_in_db(
         self, exit_premium: float, exit_type: str,
+        *, option_symbol: str | None = None,
+        entry_premium: float = 0.0, highest_premium: float = 0.0,
+        contracts: int = 0,
     ) -> bool:
         """Close the option trade in DB with correct options P&L.
 
-        Called from _do_option_exit BEFORE returning the Signal so that
-        trade_executor doesn't overwrite with futures math.
-        Returns True if the trade was found and closed, False otherwise.
+        Called from on_fill() after exchange confirms the exit.
+        Volatile state (option_symbol, entry_premium, etc.) is passed
+        explicitly since on_fill clears self.* after scheduling this task.
+        Falls back to self.* when called from _handle_position_gone.
         """
+        sym = option_symbol or self.option_symbol or self.pair
+        ep = entry_premium or self.entry_premium
+        hp = highest_premium or self.highest_premium
+        ct = contracts or self._contracts
+
         if not self._db or not self._db.is_connected:
             return False
 
@@ -2057,29 +2075,24 @@ class OptionsScalpStrategy(BaseStrategy):
             from alpha.utils import iso_now
 
             open_trade = await self._db.get_open_trade(
-                pair=self.option_symbol or self.pair,
-                exchange="delta",
-                strategy="options_scalp",
+                pair=sym, exchange="delta", strategy="options_scalp",
             )
             if not open_trade:
                 self.logger.warning(
-                    "[%s] _close_option_trade_in_db: no open trade found",
-                    self.option_symbol,
+                    "[%s] _close_option_trade_in_db: no open trade found", sym,
                 )
                 return False
 
-            entry_price = float(open_trade.get("entry_price", self.entry_premium) or self.entry_premium)
-            contracts = int(open_trade.get("contracts") or open_trade.get("amount") or self._contracts)
+            db_entry = float(open_trade.get("entry_price", ep) or ep)
+            db_contracts = int(open_trade.get("contracts") or open_trade.get("amount") or ct)
             entry_fee = float(open_trade.get("entry_fee") or 0)
             exit_fee = float(open_trade.get("exit_fee") or 0)
 
-            gross_pnl = self._calc_options_pnl(entry_price, exit_premium, contracts)
-            pnl_pct = (exit_premium - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
+            gross_pnl = self._calc_options_pnl(db_entry, exit_premium, db_contracts)
+            pnl_pct = (exit_premium - db_entry) / db_entry * 100 if db_entry > 0 else 0.0
             net_pnl = gross_pnl - entry_fee - exit_fee
 
-            peak_pnl_pct = (
-                (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-            ) if self.entry_premium > 0 else 0
+            peak_pnl_pct = (hp - ep) / ep * 100 if ep > 0 else 0
 
             from alpha.trade_executor import _extract_exit_reason
             await self._db.update_trade(open_trade["id"], {
@@ -2098,14 +2111,14 @@ class OptionsScalpStrategy(BaseStrategy):
 
             self.logger.info(
                 "[%s] OPTIONS DB CLOSE: id=%s exit=$%.4f gross=$%.6f net=$%.6f (%.2f%%)",
-                self.option_symbol, open_trade["id"], exit_premium,
+                sym, open_trade["id"], exit_premium,
                 gross_pnl, net_pnl, pnl_pct,
             )
             return True
 
         except Exception:
             self.logger.exception(
-                "[%s] _close_option_trade_in_db failed", self.option_symbol,
+                "[%s] _close_option_trade_in_db failed", sym,
             )
             return False
 
@@ -2178,14 +2191,12 @@ class OptionsScalpStrategy(BaseStrategy):
         # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
 
-        # Close trade in DB NOW (before trade_executor gets the signal)
-        db_closed = await self._close_option_trade_in_db(current_premium, exit_type)
-
         # Peak P&L for DB — executor writes it to peak_pnl column
         peak_pnl_pct = (
             (self.highest_premium - self.entry_premium) / self.entry_premium * 100
         ) if self.entry_premium > 0 else 0
 
+        # DB close happens in on_fill() AFTER exchange fills with actual price
         return [Signal(
             side="sell",
             price=current_premium,
@@ -2200,7 +2211,8 @@ class OptionsScalpStrategy(BaseStrategy):
             exchange_id="delta",
             metadata={
                 "peak_pnl": round(peak_pnl_pct, 4),
-                "db_already_closed": db_closed,
+                "exit_type": exit_type,
+                "db_already_closed": False,
             },
         )]
 
@@ -2477,8 +2489,8 @@ class OptionsScalpStrategy(BaseStrategy):
         """Track option position state on fill."""
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
-            # Entry fill
-            fill_price = order.get("average") or order.get("price") or signal.price
+            # Entry fill — prefer Delta's actual average over signal.price (which is the limit price)
+            fill_price = order.get("average") or order.get("price") or self.entry_premium or signal.price
             self.in_position = True
             self.option_side = pending_side
             self.option_symbol = signal.pair
@@ -2504,11 +2516,28 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
         else:
-            # Exit fill
+            # Exit fill — close trade in DB with actual fill price from exchange
+            exit_fill = float(order.get("average") or order.get("price") or signal.price or 0)
+            exit_type = signal.metadata.get("exit_type", "UNKNOWN")
             self.logger.info(
-                "[%s] OPTION EXIT FILLED — %s closed",
-                self.option_symbol or self.pair, self.option_side,
+                "[%s] OPTION EXIT FILLED — %s closed @ $%.4f",
+                self.option_symbol or self.pair, self.option_side, exit_fill,
             )
+
+            # Overwrite DB with correct options P&L using actual fill price.
+            # Snapshot volatile state — create_task runs after we clear self.*
+            if exit_fill > 0:
+                import asyncio
+                asyncio.get_event_loop().create_task(
+                    self._close_option_trade_in_db(
+                        exit_fill, exit_type,
+                        option_symbol=self.option_symbol or self.pair,
+                        entry_premium=self.entry_premium,
+                        highest_premium=self.highest_premium,
+                        contracts=self._contracts,
+                    )
+                )
+
             self.in_position = False
             self.option_side = None
             self.option_symbol = None
