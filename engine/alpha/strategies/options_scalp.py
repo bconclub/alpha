@@ -103,7 +103,7 @@ class OptionsScalpStrategy(BaseStrategy):
     CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
     # Per-asset cumulative thresholds
     CANDLE_MOM_CUM_PCT_BTC = 0.15        # BTC: min cumulative move over 3 candles
-    CANDLE_MOM_CUM_PCT_ETH = 0.20        # ETH: tighter — ATM only, need stronger signal
+    CANDLE_MOM_CUM_PCT_ETH = 0.10        # ETH: lower — 0.20 was too high for ETH volatility
     MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
@@ -1694,7 +1694,8 @@ class OptionsScalpStrategy(BaseStrategy):
             if cum_pct < cum_threshold:
                 parts.append(f"cum={cum_pct:+.2f}% < {cum_threshold}%")
             if not last_is_directional:
-                parts.append(f"last={last_color} (need {color})")
+                direction_label = "CALL" if side == "long" else "PUT"
+                parts.append(f"last candle {last_color} but need {color} for {direction_label}")
             reason = "EARLY_GATE: " + ", ".join(parts) + " → SKIP"
 
         return passed, reason, side if passed else None, directional_count, cum_pct
