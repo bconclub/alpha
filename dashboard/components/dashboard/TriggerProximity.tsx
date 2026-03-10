@@ -518,6 +518,12 @@ function OptionsEntryCard({
               {momentum.direction === 'long' ? 'CALL \u2191' : 'PUT \u2193'}
             </span>
           )}
+          {/* Fail reason */}
+          {!momentum.passed && momentum.reason && (
+            <span className="text-[8px] font-mono text-zinc-500 truncate max-w-[180px]">
+              {momentum.reason.replace(/^EARLY_GATE:\s*/, '').replace(/\s*→\s*SKIP$/, '')}
+            </span>
+          )}
         </div>
       ) : (
         <div className="text-[9px] font-mono text-zinc-600 mb-2">Candles: waiting...</div>

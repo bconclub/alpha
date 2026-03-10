@@ -353,6 +353,7 @@ export interface OptionsState {
     cum_pct: number;
     direction: string | null;
     passed: boolean;
+    reason?: string | null;
   } | null;
   bot_state?: string | null;
   target_strike?: number | null;

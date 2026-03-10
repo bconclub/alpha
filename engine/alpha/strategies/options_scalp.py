@@ -934,6 +934,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_candle_momentum = {
             "count": candle_count, "total": self.CANDLE_MOM_LOOKBACK,
             "cum_pct": round(candle_cum_pct, 4), "direction": side, "passed": candle_pass,
+            "reason": candle_reason,
         }
         if not candle_pass:
             if self._tick_count % 6 == 0:
