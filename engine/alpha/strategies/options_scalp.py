@@ -1193,12 +1193,21 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        self.logger.info(
-            "[%s] PREMIUM_LIMIT: placing limit at $%.4f (confirmed $%.4f, %+.2f%%) — waiting 15s",
-            self.pair, first_ask, second_ask, pct_chg,
-        )
+        # Dynamic limit price: chase the move if premium rose significantly
+        if pct_chg >= 5.0:
+            limit_price = second_ask
+            self.logger.info(
+                "[%s] PREMIUM_LIMIT: chasing at confirmed $%.4f (+%.2f%% vs original) — strong move",
+                self.pair, second_ask, pct_chg,
+            )
+        else:
+            limit_price = first_ask
+            self.logger.info(
+                "[%s] PREMIUM_LIMIT: placing limit at $%.4f (confirmed $%.4f, %+.2f%%) — waiting 15s",
+                self.pair, first_ask, second_ask, pct_chg,
+            )
 
-        # Place limit buy at original (lower) price
+        # Place limit buy
         limit_order_id = None
         try:
             limit_order = await self.options_exchange.create_order(
@@ -1206,12 +1215,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 type="limit",
                 side="buy",
                 amount=float(opt_contracts),
-                price=first_ask,
+                price=limit_price,
             )
             limit_order_id = limit_order.get("id")
             self.logger.info(
                 "[%s] PREMIUM_LIMIT: order %s placed — %d contracts @ $%.4f",
-                self.pair, limit_order_id, opt_contracts, first_ask,
+                self.pair, limit_order_id, opt_contracts, limit_price,
             )
         except Exception as e:
             self.logger.info("[%s] PREMIUM_LIMIT: order placement failed: %s — SKIP", self.pair, e)
@@ -1219,7 +1228,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Poll for fill over 15 seconds
         limit_filled = False
-        fill_price = first_ask
+        fill_price = limit_price
         for _poll in range(5):  # 5 × 3s = 15s
             await asyncio.sleep(3)
             try:
@@ -1227,7 +1236,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 status = updated.get("status", "")
                 filled_qty = float(updated.get("filled", 0) or 0)
                 if status == "closed" or filled_qty >= opt_contracts:
-                    fill_price = float(updated.get("average", 0) or updated.get("price", 0) or first_ask)
+                    fill_price = float(updated.get("average", 0) or updated.get("price", 0) or limit_price)
                     limit_filled = True
                     self.logger.info(
                         "[%s] PREMIUM_LIMIT: FILLED @ $%.4f (%d contracts)",
@@ -1250,7 +1259,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 try:
                     final_check = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
                     if final_check.get("status") == "closed" or float(final_check.get("filled", 0) or 0) >= opt_contracts:
-                        fill_price = float(final_check.get("average", 0) or final_check.get("price", 0) or first_ask)
+                        fill_price = float(final_check.get("average", 0) or final_check.get("price", 0) or limit_price)
                         limit_filled = True
                         self.logger.info(
                             "[%s] PREMIUM_LIMIT: cancel failed but order FILLED @ $%.4f",
