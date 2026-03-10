@@ -5,8 +5,8 @@
 ═══════════════════════════════════════════════════════════════
 
  1. REGIME GATE        CHOPPY blocked, all others allowed
- 2. CANDLE MOMENTUM    4 of 5 candles directional + cumulative >= 0.15%
-                       Last candle must be in entry direction (freshness)
+ 2. EARLY DIRECTION    2 of 3 candles directional + cumulative move threshold
+                       BTC >= 0.15% | ETH >= 0.20% | last candle must match
  3. UNDERLYING MOVE    Price must move >= 0.10% in last ~60s
  4. EXPIRY             Nearest expiry (today preferred, min 1h to expiry)
  5. STRIKE SELECTION   Highest OI within ATM + 1-2 OTM (liquidity = premium moves)
@@ -23,7 +23,7 @@
    - Position gone: 60s after position disappears
 
  SIZING:
-   - 5/5 candles → 50% allocation | 4/5 → 35%
+   - 3/3 candles → 50% allocation | 2/3 → 35%
    - BB_SQUEEZE → 60% factor on top
    - Survival mode: balance < $5 → max 5 contracts
    - BTC + ETH both enabled (50x leverage = tiny collateral)
@@ -98,10 +98,12 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
-    # Candle-based momentum gate (replaces old single-snapshot momentum % check)
-    CANDLE_MOM_STREAK = 4                # min directional candles out of last 5
-    CANDLE_MOM_CUMULATIVE_PCT = 0.15     # min cumulative move over 5 candles (% of price)
-    CANDLE_MOM_LOOKBACK = 5              # number of completed 1m candles to check
+    # Candle-based early-direction gate (2/3 candles = early entry)
+    CANDLE_MOM_STREAK = 2                # min directional candles out of last 3
+    CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
+    # Per-asset cumulative thresholds
+    CANDLE_MOM_CUM_PCT_BTC = 0.15        # BTC: min cumulative move over 3 candles
+    CANDLE_MOM_CUM_PCT_ETH = 0.20        # ETH: tighter — ATM only, need stronger signal
     MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
@@ -862,7 +864,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 remaining = self.OPT_TRADE_COOLDOWN_SEC - elapsed
                 # Momentum override: strong fresh momentum bypasses cooldown
                 _, _, _, _ov_count, _ov_cum = await self._check_candle_momentum()
-                if _ov_count >= 4 and _ov_cum >= self.COOLDOWN_OVERRIDE_CUM_PCT:
+                if _ov_count >= 2 and _ov_cum >= self.COOLDOWN_OVERRIDE_CUM_PCT:
                     self.logger.info(
                         "[%s] COOLDOWN_OVERRIDE: trade cooldown bypassed — "
                         "%d/5 candles, cum=%.2f%% >= %.2f%% (%.0fs remaining)",
@@ -883,7 +885,7 @@ class OptionsScalpStrategy(BaseStrategy):
             remaining = self._dead_market_cooldown_until - time.monotonic()
             # Momentum override: stronger threshold for dead-market cooldown
             _, _, _, _ov_count, _ov_cum = await self._check_candle_momentum()
-            if _ov_count >= 4 and _ov_cum >= self.DEAD_COOLDOWN_OVERRIDE_CUM_PCT:
+            if _ov_count >= 2 and _ov_cum >= self.DEAD_COOLDOWN_OVERRIDE_CUM_PCT:
                 self.logger.info(
                     "[%s] COOLDOWN_OVERRIDE: dead-market cooldown bypassed — "
                     "%d/5 candles, cum=%.2f%% >= %.2f%% (%.0fs remaining)",
@@ -925,9 +927,9 @@ class OptionsScalpStrategy(BaseStrategy):
                     self._cached_bot_state = "blocked:choppy_regime"
                     return []
 
-        # 2. Candle-based momentum gate — PRIMARY ENTRY GATE
-        # Direction determined FROM candles, not from scalp signal strength.
-        # 4+ of 5 completed 1m candles in one direction + cumulative >= 0.15%.
+        # 2. Early-direction gate — PRIMARY ENTRY GATE
+        # Direction determined FROM candles (2/3 completed 1m candles).
+        # Per-asset cumulative: BTC >= 0.15%, ETH >= 0.20%.
         candle_pass, candle_reason, side, candle_count, candle_cum_pct = await self._check_candle_momentum()
         self._cached_candle_momentum = {
             "count": candle_count, "total": self.CANDLE_MOM_LOOKBACK,
@@ -939,14 +941,14 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         # Dynamic allocation based on candle quality
-        if candle_count >= 5:
-            self._candle_alloc_pct = 50.0  # 5/5 candles → max conviction
+        if candle_count >= 3:
+            self._candle_alloc_pct = 50.0  # 3/3 candles → max conviction
         else:
-            self._candle_alloc_pct = 35.0  # 4/5 candles → strong
+            self._candle_alloc_pct = 35.0  # 2/3 candles → strong
 
         self.logger.info(
-            "[%s] %s | OPTIONS SIZE: %d/5 candles, cum=%.2f%%, alloc=%.0f%%",
-            self.pair, candle_reason, candle_count, candle_cum_pct, self._candle_alloc_pct,
+            "[%s] EARLY_GATE: %d/3 candles %s, cum=%.2f%% → premium check | alloc=%.0f%%",
+            self.pair, candle_count, side, candle_cum_pct, self._candle_alloc_pct,
         )
 
         # 2b. Underlying move check — confirm price is actually moving, not just candle noise
@@ -971,7 +973,7 @@ class OptionsScalpStrategy(BaseStrategy):
         option_type = "call" if side == "long" else "put"
 
         # 3a. Counter-trend always allowed — candle momentum already ensures direction is real.
-        # If 4/5 candles are red in TRENDING_UP, that's a reversal signal worth playing.
+        # If 2/3 candles are red in TRENDING_UP, that's a reversal signal worth playing.
         # Options max loss = premium paid, no leverage risk.
 
         # 3b. Soft read scalp context — RSI, range position (don't block if unavailable)
@@ -1589,15 +1591,15 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
 
     async def _check_candle_momentum(self) -> tuple[bool, str, str | None, int, float]:
-        """Check candle-based momentum for options entry — PRIMARY GATE.
+        """Early-direction gate for options entry — PRIMARY GATE.
 
-        Determines direction AND momentum from last 5 completed 1m candles.
+        Determines direction AND momentum from last 3 completed 1m candles.
         Direction comes FROM candles (not from scalp signal).
 
         All three conditions must pass:
-        1. Candle streak: ≥4 of 5 candles in one direction (green=long, red=short)
-        2. Cumulative move: sum of (close-open) ≥ 0.15% of price in that direction
-        3. Fresh candle: last completed candle must be in that direction
+        1. Direction gate: ≥2 of 3 candles in same direction (green=long, red=short)
+        2. Cumulative move: sum of (close-open) ≥ threshold (BTC 0.15%, ETH 0.20%)
+        3. Last candle: must match direction (no reversal at end)
 
         Returns:
             (passed, reason_string, side, directional_count, cum_pct)
@@ -1615,12 +1617,18 @@ class OptionsScalpStrategy(BaseStrategy):
         if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK:
             return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None, 0, 0.0
 
-        # Fetch 7, Delta may return 6 — take last 5 completed
+        # Take last 3 completed candles
         completed = ohlcv[-self.CANDLE_MOM_LOOKBACK:]
 
         current_price = float(completed[-1][4])  # close of last completed candle
         if current_price <= 0:
             return False, "bad price", None, 0, 0.0
+
+        # Per-asset cumulative threshold
+        cum_threshold = (
+            self.CANDLE_MOM_CUM_PCT_ETH if self._base_asset == "ETH"
+            else self.CANDLE_MOM_CUM_PCT_BTC
+        )
 
         # Classify each candle: bullish (green), bearish (red), or doji (neutral)
         doji_threshold = current_price * 0.0001  # 0.01% of price
@@ -1641,7 +1649,7 @@ class OptionsScalpStrategy(BaseStrategy):
             else:
                 red_count += 1
 
-        # Determine direction from candle majority
+        # Determine direction from candle majority (2/3 minimum)
         if green_count >= self.CANDLE_MOM_STREAK:
             side = "long"
             directional_count = green_count
@@ -1652,7 +1660,7 @@ class OptionsScalpStrategy(BaseStrategy):
             n = self.CANDLE_MOM_LOOKBACK
             return False, f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP", None, 0, 0.0
 
-        # Last completed candle direction
+        # Last completed candle must match direction (no reversal)
         last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
         last_move = last_c - last_o
         last_is_directional = (
@@ -1671,22 +1679,22 @@ class OptionsScalpStrategy(BaseStrategy):
         n = self.CANDLE_MOM_LOOKBACK
 
         passed = (
-            cum_pct >= self.CANDLE_MOM_CUMULATIVE_PCT
+            cum_pct >= cum_threshold
             and last_is_directional
         )
 
         if passed:
             reason = (
-                f"OPTIONS CANDLE_ENTRY: {directional_count}/{n} {color}, "
-                f"cum={cum_pct:+.2f}%, last={last_color} → ENTER"
+                f"EARLY_GATE: {directional_count}/{n} {color}, "
+                f"cum={cum_pct:+.2f}% (≥{cum_threshold}%), last={last_color} → ENTER"
             )
         else:
             parts = [f"{directional_count}/{n} {color}"]
-            if cum_pct < self.CANDLE_MOM_CUMULATIVE_PCT:
-                parts.append(f"cum={cum_pct:+.2f}% < {self.CANDLE_MOM_CUMULATIVE_PCT}%")
+            if cum_pct < cum_threshold:
+                parts.append(f"cum={cum_pct:+.2f}% < {cum_threshold}%")
             if not last_is_directional:
                 parts.append(f"last={last_color} (need {color})")
-            reason = "OPTIONS CANDLE_ENTRY: " + ", ".join(parts) + " → SKIP"
+            reason = "EARLY_GATE: " + ", ".join(parts) + " → SKIP"
 
         return passed, reason, side if passed else None, directional_count, cum_pct
 
