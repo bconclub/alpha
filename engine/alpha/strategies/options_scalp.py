@@ -81,6 +81,9 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Class-level shared state ──────────────────────────────────────
     # (loss streak tracking removed — candle momentum is the quality gate)
 
+    # ── Delta Exchange contract multiplier (options) ─────────────
+    CONTRACT_MULTIPLIER: dict[str, float] = {"ETH": 0.01, "BTC": 0.001}
+
     # ── Option chain refresh ──────────────────────────────────────
     CHAIN_REFRESH_INTERVAL = 30 * 60     # Refresh every 30 min
     MIN_EXPIRY_HOURS = 1                 # Must be 1+ hour to expiry — prefer today's expiry (10-100x more volume)
@@ -443,12 +446,10 @@ class OptionsScalpStrategy(BaseStrategy):
                 pair=self.option_symbol, exchange="delta", strategy="options_scalp",
             )
             if open_trade:
-                # Live dollar P&L (gross, pre-fee — keeps pnl column fresh for dashboard)
-                live_pnl = (current_premium - self.entry_premium) * self._contracts
-                # Options at leverage: real wallet P&L = notional / leverage
-                opt_lev = max(int(self.OPTIONS_LEVERAGE or 1), 1)
-                if opt_lev > 1:
-                    live_pnl /= opt_lev
+                # Live dollar P&L using contract multiplier (no leverage division)
+                live_pnl = self._calc_options_pnl(
+                    self.entry_premium, current_premium, self._contracts,
+                )
 
                 await self._db.update_trade(open_trade["id"], {
                     "position_state": state,
@@ -460,6 +461,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 })
         except Exception as e:
             self.logger.debug("[%s] position state DB update failed: %s", self.pair, e)
+
+    # ==================================================================
+    # OPTIONS P&L HELPER
+    # ==================================================================
+
+    def _calc_options_pnl(
+        self, entry_premium: float, exit_premium: float, contracts: int,
+    ) -> float:
+        """Calculate gross P&L for an options trade using contract multiplier.
+
+        Returns gross_pnl in USD. Never divides by leverage.
+        """
+        multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+        return (exit_premium - entry_premium) * contracts * multiplier
 
     # ==================================================================
     # OPTION CHAIN MANAGEMENT
@@ -2023,6 +2038,78 @@ class OptionsScalpStrategy(BaseStrategy):
         return []
 
     # ==================================================================
+    # OPTIONS DB CLOSE (bypasses trade_executor P&L)
+    # ==================================================================
+
+    async def _close_option_trade_in_db(
+        self, exit_premium: float, exit_type: str,
+    ) -> bool:
+        """Close the option trade in DB with correct options P&L.
+
+        Called from _do_option_exit BEFORE returning the Signal so that
+        trade_executor doesn't overwrite with futures math.
+        Returns True if the trade was found and closed, False otherwise.
+        """
+        if not self._db or not self._db.is_connected:
+            return False
+
+        try:
+            from alpha.utils import iso_now
+
+            open_trade = await self._db.get_open_trade(
+                pair=self.option_symbol or self.pair,
+                exchange="delta",
+                strategy="options_scalp",
+            )
+            if not open_trade:
+                self.logger.warning(
+                    "[%s] _close_option_trade_in_db: no open trade found",
+                    self.option_symbol,
+                )
+                return False
+
+            entry_price = float(open_trade.get("entry_price", self.entry_premium) or self.entry_premium)
+            contracts = int(open_trade.get("contracts") or open_trade.get("amount") or self._contracts)
+            entry_fee = float(open_trade.get("entry_fee") or 0)
+            exit_fee = float(open_trade.get("exit_fee") or 0)
+
+            gross_pnl = self._calc_options_pnl(entry_price, exit_premium, contracts)
+            pnl_pct = (exit_premium - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
+            net_pnl = gross_pnl - entry_fee - exit_fee
+
+            peak_pnl_pct = (
+                (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+            ) if self.entry_premium > 0 else 0
+
+            from alpha.trade_executor import _extract_exit_reason
+            await self._db.update_trade(open_trade["id"], {
+                "status": "closed",
+                "exit_price": round(exit_premium, 8),
+                "closed_at": iso_now(),
+                "pnl": round(net_pnl, 8),
+                "pnl_pct": round(pnl_pct, 4),
+                "gross_pnl": round(gross_pnl, 8),
+                "entry_fee": round(entry_fee, 8),
+                "exit_fee": round(exit_fee, 8),
+                "peak_pnl": round(peak_pnl_pct, 4),
+                "exit_reason": _extract_exit_reason(exit_type),
+                "position_state": None,
+            })
+
+            self.logger.info(
+                "[%s] OPTIONS DB CLOSE: id=%s exit=$%.4f gross=$%.6f net=$%.6f (%.2f%%)",
+                self.option_symbol, open_trade["id"], exit_premium,
+                gross_pnl, net_pnl, pnl_pct,
+            )
+            return True
+
+        except Exception:
+            self.logger.exception(
+                "[%s] _close_option_trade_in_db failed", self.option_symbol,
+            )
+            return False
+
+    # ==================================================================
     # EXIT SIGNAL BUILDER
     # ==================================================================
 
@@ -2046,7 +2133,7 @@ class OptionsScalpStrategy(BaseStrategy):
         except Exception as e:
             self.logger.debug("[%s] Live bid fetch failed, using cached: %s", self.option_symbol, e)
 
-        pnl_usd = (current_premium - self.entry_premium) * self._contracts
+        pnl_usd = self._calc_options_pnl(self.entry_premium, current_premium, self._contracts)
         reason = (
             f"Option {exit_type} {self.option_side} | "
             f"${self.entry_premium:.4f} → ${current_premium:.4f} "
@@ -2091,6 +2178,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
 
+        # Close trade in DB NOW (before trade_executor gets the signal)
+        db_closed = await self._close_option_trade_in_db(current_premium, exit_type)
+
         # Peak P&L for DB — executor writes it to peak_pnl column
         peak_pnl_pct = (
             (self.highest_premium - self.entry_premium) / self.entry_premium * 100
@@ -2108,7 +2198,10 @@ class OptionsScalpStrategy(BaseStrategy):
             position_type="long",
             reduce_only=True,
             exchange_id="delta",
-            metadata={"peak_pnl": round(peak_pnl_pct, 4)},
+            metadata={
+                "peak_pnl": round(peak_pnl_pct, 4),
+                "db_already_closed": db_closed,
+            },
         )]
 
     async def _verify_option_position(self) -> list[Signal] | None:
@@ -2183,12 +2276,12 @@ class OptionsScalpStrategy(BaseStrategy):
             exit_premium, self._last_known_premium, self.entry_premium,
         )
 
-        # Calculate P&L
+        # Calculate P&L using contract multiplier (never use trade_executor's calc_pnl)
         pnl_pct = 0.0
         pnl_usd = 0.0
         if self.entry_premium > 0:
             pnl_pct = (exit_premium - self.entry_premium) / self.entry_premium * 100
-            pnl_usd = (exit_premium - self.entry_premium) * self._contracts
+            pnl_usd = self._calc_options_pnl(self.entry_premium, exit_premium, self._contracts)
 
         # Mark trade closed in DB directly (no exchange order needed)
         if self._db:
@@ -2200,16 +2293,14 @@ class OptionsScalpStrategy(BaseStrategy):
                     strategy="options_scalp",
                 )
                 if open_trade:
-                    from alpha.trade_executor import calc_pnl
                     entry_price = float(open_trade.get("entry_price", self.entry_premium) or self.entry_premium)
-                    amount = open_trade.get("amount", self._contracts)
-                    leverage = open_trade.get("leverage", self.OPTIONS_LEVERAGE) or 1
+                    contracts = int(open_trade.get("contracts") or open_trade.get("amount") or self._contracts)
+                    entry_fee = float(open_trade.get("entry_fee") or 0)
+                    exit_fee = float(open_trade.get("exit_fee") or 0)
 
-                    result = calc_pnl(
-                        entry_price, exit_premium, amount,
-                        "long", leverage,
-                        "delta", self.option_symbol or self.pair,
-                    )
+                    gross_pnl = self._calc_options_pnl(entry_price, exit_premium, contracts)
+                    net_pnl = gross_pnl - entry_fee - exit_fee
+                    db_pnl_pct = (exit_premium - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
 
                     # Peak P&L from tracked highest premium
                     peak_pnl_val = (
@@ -2220,22 +2311,22 @@ class OptionsScalpStrategy(BaseStrategy):
                         "status": "closed",
                         "exit_price": exit_premium,
                         "closed_at": iso_now(),
-                        "pnl": round(result.net_pnl, 8),
-                        "pnl_pct": round(result.pnl_pct, 4),
-                        "gross_pnl": round(result.gross_pnl, 8),
-                        "entry_fee": round(result.entry_fee, 8),
-                        "exit_fee": round(result.exit_fee, 8),
+                        "pnl": round(net_pnl, 8),
+                        "pnl_pct": round(db_pnl_pct, 4),
+                        "gross_pnl": round(gross_pnl, 8),
+                        "entry_fee": round(entry_fee, 8),
+                        "exit_fee": round(exit_fee, 8),
                         "peak_pnl": round(peak_pnl_val, 4),
                         "reason": exit_reason_detail.lower(),
                         "exit_reason": exit_reason,
                         "position_state": None,
                     })
-                    pnl_pct = result.pnl_pct
-                    pnl_usd = result.net_pnl
+                    pnl_pct = db_pnl_pct
+                    pnl_usd = net_pnl
                     self.logger.info(
                         "[%s] Trade %s closed as %s — exit=$%.4f P&L=$%.4f (%.2f%%)",
                         self.option_symbol, open_trade["id"], exit_reason,
-                        exit_premium, result.net_pnl, result.pnl_pct,
+                        exit_premium, net_pnl, db_pnl_pct,
                     )
                 else:
                     self.logger.info(

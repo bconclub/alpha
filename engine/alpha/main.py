@@ -2623,90 +2623,123 @@ class AlphaBot:
             logger.exception("Ghost sweep failed")
 
         # ── DB ORPHAN SWEEP ────────────────────────────────────────────
-        # Close DB records stuck as 'open' when no strategy and no exchange
-        # position exists. This catches phantom rows from backfill SQL,
-        # duplicate inserts, or failed close_trade_in_db calls.
         try:
             all_open = await self.db.get_all_open_trades()
-            for trade in all_open:
-                pair = trade.get("pair", "")
-                exchange = trade.get("exchange", "")
-                trade_id = trade.get("id")
-                strategy_name = trade.get("strategy", "")
-                if not pair or not trade_id:
-                    continue
-
-                # Check if any strategy is actively managing this position
-                fs_key = f"{exchange}:{pair}"
-                if strategy_name == "options_scalp":
-                    opts = self._options_strategies.get(
-                        trade.get("pair", "").split("-")[0] if "-" in trade.get("pair", "") else pair
-                    )
-                    if opts and opts.in_position:
-                        self._position_first_seen.pop(fs_key, None)
-                        continue
-                else:
-                    scalp = self._get_scalp(pair, exchange=exchange)
-                    if scalp and scalp.in_position:
-                        self._position_first_seen.pop(fs_key, None)
-                        continue
-
-                # No strategy owns this — check grace period before closing
-                if fs_key not in self._position_first_seen:
-                    self._position_first_seen[fs_key] = time.monotonic()
-                age = time.monotonic() - self._position_first_seen[fs_key]
-                if age < self.ORPHAN_GRACE_S:
-                    logger.info(
-                        "ORPHAN_GRACE: skipping DB trade id=%s %s/%s (age %.0fs < %ds)",
-                        trade_id, pair, exchange, age, self.ORPHAN_GRACE_S,
-                    )
-                    continue
-                self._position_first_seen.pop(fs_key, None)
-
-                logger.warning(
-                    "DB ORPHAN SWEEP: closing trade id=%s %s/%s "
-                    "(no strategy tracking, no exchange position)",
-                    trade_id, pair, exchange,
-                )
-                entry_price = float(trade.get("entry_price", 0) or 0)
-                position_type = trade.get("position_type", "spot")
-                leverage = trade.get("leverage", 1) or 1
-                amount = float(trade.get("amount", 0) or 0)
-
-                # Try to get current price for P&L calculation
-                exit_price = entry_price
-                try:
-                    ex = {"delta": self.delta, "bybit": self.bybit,
-                          "kraken": self.kraken, "binance": self.binance}.get(exchange)
-                    if ex:
-                        ticker = await ex.fetch_ticker(pair)
-                        exit_price = float(ticker.get("last", 0) or 0) or entry_price
-                except Exception:
-                    pass  # use entry_price as fallback (0 P&L)
-
-                result = calc_pnl(
-                    entry_price, exit_price, amount,
-                    position_type, leverage,
-                    exchange, pair,
-                )
-                await self.db.update_trade(trade_id, {
-                    "status": "closed",
-                    "exit_price": exit_price,
-                    "closed_at": iso_now(),
-                    "pnl": round(result.net_pnl, 8),
-                    "pnl_pct": round(result.pnl_pct, 4),
-                    "gross_pnl": round(result.gross_pnl, 8),
-                    "entry_fee": round(result.entry_fee, 8),
-                    "exit_fee": round(result.exit_fee, 8),
-                    "exit_reason": "ORPHAN_SWEEP",
-                    "position_state": None,
-                })
-                logger.info(
-                    "DB ORPHAN closed: id=%s %s exit=$%.4f pnl=$%.4f (%.2f%%)",
-                    trade_id, pair, exit_price, result.net_pnl, result.pnl_pct,
-                )
+            await self._orphan_sweep_futures(all_open)
+            await self._orphan_sweep_options(all_open)
         except Exception:
             logger.exception("DB orphan sweep failed")
+
+    async def _orphan_sweep_futures(self, all_open: list[dict]) -> None:
+        """Close DB records for futures trades with no strategy and no exchange position."""
+        for trade in all_open:
+            pair = trade.get("pair", "")
+            exchange = trade.get("exchange", "")
+            trade_id = trade.get("id")
+            strategy_name = trade.get("strategy", "")
+            if not pair or not trade_id:
+                continue
+
+            # Skip options trades — handled by _orphan_sweep_options
+            if strategy_name == "options_scalp" or is_option_symbol(pair):
+                continue
+
+            # Check if any strategy is actively managing this position
+            fs_key = f"{exchange}:{pair}"
+            scalp = self._get_scalp(pair, exchange=exchange)
+            if scalp and scalp.in_position:
+                self._position_first_seen.pop(fs_key, None)
+                continue
+
+            # No strategy owns this — check grace period before closing
+            if fs_key not in self._position_first_seen:
+                self._position_first_seen[fs_key] = time.monotonic()
+            age = time.monotonic() - self._position_first_seen[fs_key]
+            if age < self.ORPHAN_GRACE_S:
+                logger.info(
+                    "ORPHAN_GRACE: skipping DB trade id=%s %s/%s (age %.0fs < %ds)",
+                    trade_id, pair, exchange, age, self.ORPHAN_GRACE_S,
+                )
+                continue
+            self._position_first_seen.pop(fs_key, None)
+
+            logger.warning(
+                "DB ORPHAN SWEEP (futures): closing trade id=%s %s/%s "
+                "(no strategy tracking, no exchange position)",
+                trade_id, pair, exchange,
+            )
+            entry_price = float(trade.get("entry_price", 0) or 0)
+            position_type = trade.get("position_type", "spot")
+            leverage = trade.get("leverage", 1) or 1
+            amount = float(trade.get("amount", 0) or 0)
+            pnl = 0.0
+
+            # Try to get current price for P&L calculation
+            exit_price = entry_price
+            try:
+                ex = {"delta": self.delta, "bybit": self.bybit,
+                      "kraken": self.kraken, "binance": self.binance}.get(exchange)
+                if ex:
+                    ticker = await ex.fetch_ticker(pair)
+                    exit_price = float(ticker.get("last", 0) or 0) or entry_price
+            except Exception:
+                pass  # use entry_price as fallback (0 P&L)
+
+            result = calc_pnl(
+                entry_price, exit_price, amount,
+                position_type, leverage,
+                exchange, pair,
+            )
+            await self.db.update_trade(trade_id, {
+                "status": "closed",
+                "exit_price": exit_price,
+                "closed_at": iso_now(),
+                "pnl": round(result.net_pnl, 8),
+                "pnl_pct": round(result.pnl_pct, 4),
+                "gross_pnl": round(result.gross_pnl, 8),
+                "entry_fee": round(result.entry_fee, 8),
+                "exit_fee": round(result.exit_fee, 8),
+                "exit_reason": "ORPHAN_SWEEP",
+                "position_state": None,
+            })
+            logger.info(
+                "DB ORPHAN closed (futures): id=%s %s exit=$%.4f pnl=$%.4f (%.2f%%)",
+                trade_id, pair, exit_price, result.net_pnl, result.pnl_pct,
+            )
+
+    async def _orphan_sweep_options(self, all_open: list[dict]) -> None:
+        """Log orphan options trades but do NOT auto-close them.
+
+        Options positions are managed by options_scalp.py's
+        _restore_position_from_db() on restart. Never close them here.
+        """
+        for trade in all_open:
+            pair = trade.get("pair", "")
+            exchange = trade.get("exchange", "")
+            trade_id = trade.get("id")
+            strategy_name = trade.get("strategy", "")
+            if not pair or not trade_id:
+                continue
+
+            # Only handle options trades
+            if strategy_name != "options_scalp" and not is_option_symbol(pair):
+                continue
+
+            # Check if the options strategy is actively managing it
+            base_asset = pair.split("-")[0] if "-" in pair else pair
+            opts = self._options_strategies.get(base_asset)
+            if opts and opts.in_position:
+                fs_key = f"{exchange}:{pair}"
+                self._position_first_seen.pop(fs_key, None)
+                continue
+
+            # Not actively managed — LOG only, do NOT close.
+            # options_scalp._restore_position_from_db() will pick it up on restart.
+            logger.info(
+                "DB ORPHAN SWEEP (options): SKIP id=%s %s/%s — "
+                "options positions are restored on restart, not auto-closed",
+                trade_id, pair, exchange,
+            )
 
     async def _reconcile_bybit_positions(self) -> None:
         """Reconcile Bybit positions with bot memory.
@@ -4347,6 +4380,10 @@ class AlphaBot:
                 strategy_name, pair, position_type, amount, entry_price, strategy_name,
             )
 
+            pnl = 0.0
+            pnl_pct = 0.0
+            trade_lev = trade.get("leverage", 1) or 1
+
             try:
                 # Determine close side
                 close_side = "sell" if position_type == "long" else "buy"
@@ -4380,7 +4417,6 @@ class AlphaBot:
                         )
 
                 # Calculate P&L (leveraged, contract-aware)
-                trade_lev = trade.get("leverage", 1) or 1
                 pnl, pnl_pct = calc_pnl(
                     entry_price, current_price, amount,
                     position_type, trade_lev,
@@ -4409,6 +4445,7 @@ class AlphaBot:
             except Exception:
                 logger.exception("Failed to close orphaned position %s", pair)
                 # Try to at least mark it in DB — use current price if possible
+                fallback_pnl = 0.0
                 try:
                     if order_id:
                         # Try to get current price for accurate P&L
