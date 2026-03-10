@@ -123,7 +123,7 @@ class OptionsScalpStrategy(BaseStrategy):
         "ETH": 30.0,
         "BTC": 20.0,
     }
-    OPT_MAX_COLLATERAL_PCT = 20.0        # never use >20% of balance on 1 option
+    OPT_MAX_COLLATERAL_PCT = 40.0        # never use >40% of balance on 1 option
     OPT_SURVIVAL_BALANCE = 20.0          # below this, cap allocation at 30%
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
@@ -1064,15 +1064,23 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_strikes"
             return []
 
-        # 8-9. Try 1 OTM first (cheaper), then ATM. No further OTM walks.
-        otm_candidates = self._get_otm_candidates(atm_strike, option_type)
-        # Order: 1 OTM (if exists) → ATM. Skip if neither affordable.
-        strikes_to_try = otm_candidates[:1] + [atm_strike]
-        self.logger.info(
-            "[%s] STRIKE CANDIDATES: %s (1 OTM → ATM)",
-            self.pair,
-            ", ".join(f"${s:.0f}" for s in strikes_to_try),
-        )
+        # 8-9. Per-asset strike selection:
+        #   ETH: ATM only — OTM ETH options have poor delta response
+        #   BTC: 1 OTM first (cheaper), then ATM fallback
+        if self._base_asset == "ETH":
+            strikes_to_try = [atm_strike]
+            self.logger.info(
+                "[%s] STRIKE CANDIDATES: $%.0f (ETH ATM only)",
+                self.pair, atm_strike,
+            )
+        else:
+            otm_candidates = self._get_otm_candidates(atm_strike, option_type)
+            strikes_to_try = otm_candidates[:1] + [atm_strike]
+            self.logger.info(
+                "[%s] STRIKE CANDIDATES: %s (BTC 1 OTM → ATM)",
+                self.pair,
+                ", ".join(f"${s:.0f}" for s in strikes_to_try),
+            )
         selected_strike: float | None = None
         selected_symbol: str | None = None
         premium: float = 0.0
@@ -1137,10 +1145,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if selected_strike is None or selected_symbol is None:
             if self._tick_count % 30 == 0:
+                label = "ATM only" if self._base_asset == "ETH" else "1 OTM + ATM"
                 self.logger.info(
-                    "[%s] No affordable strike (1 OTM + ATM) — skipping "
+                    "[%s] No affordable strike (%s) — skipping "
                     "(ATM=$%.0f collateral=$%.4f)",
-                    self.pair, atm_strike,
+                    self.pair, label, atm_strike,
                     first_collateral or 0,
                 )
             await self._log_skip(
@@ -1520,7 +1529,7 @@ class OptionsScalpStrategy(BaseStrategy):
         """Dynamic sizing: contracts based on balance, pair allocation, leverage.
 
         Formula:
-          collateral_available = balance × alloc_pct × 20% safety cap
+          collateral_available = balance × alloc_pct × 40% safety cap
           collateral_per_contract = premium / leverage
           contracts = floor(collateral_available / collateral_per_contract)
           Minimum 1, returns 0 if can't afford 1.
@@ -1537,7 +1546,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
             alloc_pct = min(alloc_pct, self.OPT_SURVIVAL_MAX_ALLOC)
 
-        # Collateral budget (capped at 20% of total balance)
+        # Collateral budget (capped at 40% of total balance)
         collateral_available = exchange_capital * (alloc_pct / 100)
         max_collateral = exchange_capital * (self.OPT_MAX_COLLATERAL_PCT / 100)
         collateral_available = min(collateral_available, max_collateral)
