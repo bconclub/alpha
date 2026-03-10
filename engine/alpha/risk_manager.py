@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 
 from alpha.config import config
-from alpha.strategies.base import Signal
+from alpha.strategies.base import Signal, StrategyName
 from alpha.utils import setup_logger, utcnow
 
 _OPTION_SYMBOL_RE = re.compile(r'\d{6}-\d+-[CP]')
@@ -255,6 +255,19 @@ class RiskManager:
             logger.info(
                 "Max concurrent positions (%d) reached -- rejecting %s %s",
                 self.max_concurrent, signal.pair, signal.position_type,
+            )
+            return False
+
+        # 3a. Options priority — reserve last slot for options signals.
+        # Non-options signals are rejected when only 1 slot remains so
+        # options always has room to enter.
+        is_options = signal.strategy == StrategyName.OPTIONS_SCALP
+        if not is_options and len(self.open_positions) >= self.max_concurrent - 1:
+            logger.info(
+                "OPTIONS_PRIORITY: %d/%d slots used — reserving last slot for options, "
+                "rejecting futures %s %s",
+                len(self.open_positions), self.max_concurrent,
+                signal.pair, signal.position_type,
             )
             return False
 
