@@ -2703,7 +2703,7 @@ class AlphaBot:
                 })
                 logger.info(
                     "DB ORPHAN closed: id=%s %s exit=$%.4f pnl=$%.4f (%.2f%%)",
-                    trade_id, pair, exit_price, pnl, pnl_pct,
+                    trade_id, pair, exit_price, result.net_pnl, result.pnl_pct,
                 )
         except Exception:
             logger.exception("DB orphan sweep failed")
