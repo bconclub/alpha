@@ -679,6 +679,56 @@ export function EntrySignals() {
 
   return (
     <div className="space-y-3">
+      {/* ── OPTIONS SECTION ────────────────────────────────── */}
+      <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
+        {/* Mobile: collapsible header */}
+        <button
+          type="button"
+          className="flex items-center justify-between w-full mb-0 md:mb-4 lg:pointer-events-none"
+          onClick={() => setOptionsOpen(o => !o)}
+        >
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
+              Entry Signals — Options
+            </h3>
+            {!optionsOpen && (
+              <span className="lg:hidden text-[9px] font-mono text-zinc-500">
+                {optionsCards.length} assets
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <ExchangeBadge exchange="delta" />
+            <svg
+              className={cn(
+                'w-4 h-4 text-zinc-500 transition-transform lg:hidden',
+                optionsOpen && 'rotate-180',
+              )}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </button>
+
+        <div className={cn(!optionsOpen && 'hidden lg:block', optionsOpen && 'mt-4 lg:mt-0')}>
+        {optionsCards.length === 0 ? (
+          <p className="text-sm text-zinc-500 text-center py-4">No options data yet</p>
+        ) : (
+          <div className="space-y-3">
+            {optionsCards.map(card => (
+              <OptionsEntryCard
+                key={card.asset}
+                optionsState={card.state}
+                openTrade={card.openTrade}
+                recentEvents={card.recentEvents}
+              />
+            ))}
+          </div>
+        )}
+        </div>{/* end options content wrapper */}
+      </div>
+
       {/* ── FUTURES SECTION ────────────────────────────────── */}
       <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
         {/* Mobile: collapsible header */}
@@ -921,56 +971,6 @@ export function EntrySignals() {
           </div>
         )}
         </div>{/* end futures content wrapper */}
-      </div>
-
-      {/* ── OPTIONS SECTION ────────────────────────────────── */}
-      <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-        {/* Mobile: collapsible header */}
-        <button
-          type="button"
-          className="flex items-center justify-between w-full mb-0 md:mb-4 lg:pointer-events-none"
-          onClick={() => setOptionsOpen(o => !o)}
-        >
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
-              Entry Signals — Options
-            </h3>
-            {!optionsOpen && (
-              <span className="lg:hidden text-[9px] font-mono text-zinc-500">
-                {optionsCards.length} assets
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <ExchangeBadge exchange="delta" />
-            <svg
-              className={cn(
-                'w-4 h-4 text-zinc-500 transition-transform lg:hidden',
-                optionsOpen && 'rotate-180',
-              )}
-              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-            </svg>
-          </div>
-        </button>
-
-        <div className={cn(!optionsOpen && 'hidden lg:block', optionsOpen && 'mt-4 lg:mt-0')}>
-        {optionsCards.length === 0 ? (
-          <p className="text-sm text-zinc-500 text-center py-4">No options data yet</p>
-        ) : (
-          <div className="space-y-3">
-            {optionsCards.map(card => (
-              <OptionsEntryCard
-                key={card.asset}
-                optionsState={card.state}
-                openTrade={card.openTrade}
-                recentEvents={card.recentEvents}
-              />
-            ))}
-          </div>
-        )}
-        </div>{/* end options content wrapper */}
       </div>
     </div>
   );
