@@ -184,6 +184,10 @@ async def fetch_all_option_fills(exchange: ccxt.delta) -> list[Fill]:
         await asyncio.sleep(1)
 
     print(f"\nTotal option fills: {len(all_fills)}")
+    if all_fills:
+        print(f"  Sample fill symbols:")
+        for f in all_fills[:5]:
+            print(f"    {f.symbol} | {f.side} {f.amount}x @ ${f.price} | fee=${f.fee}")
     return all_fills
 
 
@@ -275,23 +279,22 @@ def build_round_trips(fills: list[Fill]) -> list[RoundTrip]:
 
 # ── Normalize symbol for DB matching ──────────────────────────────────
 
-def normalize_symbol(ccxt_symbol: str) -> str:
-    """Convert ccxt unified symbol to DB pair format.
+def normalize_symbol(symbol: str) -> str:
+    """Normalize option symbol to a canonical form for matching.
 
-    ccxt: 'BTC/USD:USD-260311-86000-C'  or  'ETH/USD:USD-260311-2100-P'
-    DB:   'BTC-260311-86000-C'          or  'ETH-260311-2100-P'
+    DB stores full ccxt symbols: 'ETH/USD:USD-260311-2040-C'
+    Delta fills also return:    'ETH/USD:USD-260311-2040-C'
+    But some DB rows may have:  'ETH-260311-2040-C' (older trades)
+
+    Canonical form: 'ETH-260311-2040-C' (short form for matching)
     """
-    # Try extracting from ccxt format
-    m = _OPTION_RE.search(ccxt_symbol)
+    m = _OPTION_RE.search(symbol)
     if m:
         asset = m.group(1)
-        # ccxt may have BTC/USD in asset
         if "/" in asset:
             asset = asset.split("/")[0]
         return f"{asset}-{m.group(2)}-{m.group(3)}-{m.group(4)}"
-
-    # Already in DB format or unknown
-    return ccxt_symbol
+    return symbol
 
 
 # ── Main reconciliation ──────────────────────────────────────────────
@@ -357,6 +360,21 @@ async def main():
         db_trades = resp.data or []
         print(f"\nDB: {len(db_trades)} closed options_scalp trades")
 
+        # Debug: show sample pairs from both sides
+        db_pairs_set = set()
+        for t in db_trades[:10]:
+            raw = t.get("pair", "")
+            norm = normalize_symbol(raw)
+            db_pairs_set.add(norm)
+            print(f"  DB sample: id={t['id']} raw='{raw}' norm='{norm}'")
+        rt_pairs_set = set(rt_by_pair.keys())
+        overlap = db_pairs_set & rt_pairs_set
+        print(f"\n  DB pairs (first 10 normalized): {sorted(db_pairs_set)}")
+        print(f"  RT pairs: {sorted(rt_pairs_set)}")
+        print(f"  Overlap: {sorted(overlap)} ({len(overlap)} pairs)")
+        if not overlap:
+            print("  WARNING: ZERO overlap — pair formats don't match!")
+
         # ── 6. FIFO match DB trades to round trips ───────────────────
         matched = 0
         unmatched_db = 0
@@ -375,7 +393,8 @@ async def main():
 
         for t in db_trades:
             tid = t["id"]
-            db_pair = t.get("pair", "")
+            db_pair_raw = t.get("pair", "")
+            db_pair = normalize_symbol(db_pair_raw)  # canonical form for matching
             old_entry = float(t.get("entry_price") or 0)
             old_exit = float(t.get("exit_price") or 0)
             old_net = float(t.get("pnl") or 0)
