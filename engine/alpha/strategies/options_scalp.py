@@ -108,6 +108,8 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
     OPT_TRADE_COOLDOWN_SEC = 120        # 2 min between options trades
     OPT_DEAD_COOLDOWN_SEC = 600         # 10 min cooldown after dead momentum exit (0% peak = dead market)
+    COOLDOWN_OVERRIDE_CUM_PCT = 0.20    # bypass trade cooldown if candle cum move >= 0.20%
+    DEAD_COOLDOWN_OVERRIDE_CUM_PCT = 0.25  # bypass dead-market cooldown if cum move >= 0.25%
     # OPT_LOSS_STREAK_LIMIT removed — candle momentum gates entry quality
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
@@ -858,24 +860,46 @@ class OptionsScalpStrategy(BaseStrategy):
             elapsed = now - self._last_option_trade_time
             if elapsed < self.OPT_TRADE_COOLDOWN_SEC:
                 remaining = self.OPT_TRADE_COOLDOWN_SEC - elapsed
-                if self._tick_count % 6 == 0:
+                # Momentum override: strong fresh momentum bypasses cooldown
+                _, _, _, _ov_count, _ov_cum = await self._check_candle_momentum()
+                if _ov_count >= 4 and _ov_cum >= self.COOLDOWN_OVERRIDE_CUM_PCT:
                     self.logger.info(
-                        "[%s] OPTIONS TRADE_COOLDOWN — %.0fs remaining (2min between trades)",
-                        self.pair, remaining,
+                        "[%s] COOLDOWN_OVERRIDE: trade cooldown bypassed — "
+                        "%d/5 candles, cum=%.2f%% >= %.2f%% (%.0fs remaining)",
+                        self.pair, _ov_count, _ov_cum,
+                        self.COOLDOWN_OVERRIDE_CUM_PCT, remaining,
                     )
-                self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
-                return []
+                else:
+                    if self._tick_count % 6 == 0:
+                        self.logger.info(
+                            "[%s] OPTIONS TRADE_COOLDOWN — %.0fs remaining (2min between trades)",
+                            self.pair, remaining,
+                        )
+                    self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
+                    return []
 
         # 0b2. Dead market cooldown — 10 min after OPT_DEAD_MOMENTUM exit with 0% peak
         if time.monotonic() < self._dead_market_cooldown_until:
             remaining = self._dead_market_cooldown_until - time.monotonic()
-            if self._tick_count % 6 == 0:
+            # Momentum override: stronger threshold for dead-market cooldown
+            _, _, _, _ov_count, _ov_cum = await self._check_candle_momentum()
+            if _ov_count >= 4 and _ov_cum >= self.DEAD_COOLDOWN_OVERRIDE_CUM_PCT:
                 self.logger.info(
-                    "[%s] DEAD_MARKET_COOLDOWN — %.0fs remaining (10min after 0%% peak exit)",
-                    self.pair, remaining,
+                    "[%s] COOLDOWN_OVERRIDE: dead-market cooldown bypassed — "
+                    "%d/5 candles, cum=%.2f%% >= %.2f%% (%.0fs remaining)",
+                    self.pair, _ov_count, _ov_cum,
+                    self.DEAD_COOLDOWN_OVERRIDE_CUM_PCT, remaining,
                 )
-            self._cached_bot_state = f"blocked:dead_market_cooldown:{int(remaining)}s"
-            return []
+                # Clear the dead-market cooldown so it doesn't re-block next tick
+                self._dead_market_cooldown_until = 0.0
+            else:
+                if self._tick_count % 6 == 0:
+                    self.logger.info(
+                        "[%s] DEAD_MARKET_COOLDOWN — %.0fs remaining (10min after 0%% peak exit)",
+                        self.pair, remaining,
+                    )
+                self._cached_bot_state = f"blocked:dead_market_cooldown:{int(remaining)}s"
+                return []
 
         # 0c. BTC balance skip REMOVED — at 50x leverage, BTC OTM collateral is tiny ($0.60-1.12)
 
