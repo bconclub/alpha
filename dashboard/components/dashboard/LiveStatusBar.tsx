@@ -2,8 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
-import { formatCurrency, formatPnL, cn } from '@/lib/utils';
-import type { Deposit } from '@/lib/types';
+import { formatCurrency, cn } from '@/lib/utils';
 
 function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -84,11 +83,9 @@ function MiniSparkline({ data, color }: { data: number[]; color: string }) {
 type CardView = 'pnl' | 'deposits';
 
 export function LiveStatusBar() {
-  const { botStatus, isConnected, pnlByExchange, trades, dailyPnL, deposits } = useSupabase();
+  const { botStatus, isConnected, trades, dailyPnL, deposits } = useSupabase();
 
-  const bybitConnected = botStatus?.bybit_connected || (Number(botStatus?.bybit_balance ?? 0) > 0);
   const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0);
-  const krakenConnected = botStatus?.kraken_connected || (Number(botStatus?.kraken_balance ?? 0) > 0);
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
 
   // ── Market Regime ──────────────────────────────────────────────
@@ -114,17 +111,10 @@ export function LiveStatusBar() {
     return `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
   }, [regimeSince]);
 
-  const bybitPnl = pnlByExchange.find((e) => e.exchange === 'bybit');
-  const deltaPnl = pnlByExchange.find((e) => e.exchange === 'delta');
-  const krakenPnl = pnlByExchange.find((e) => e.exchange === 'kraken');
-
-  const bybitBalance = Number(botStatus?.bybit_balance ?? 0);
   const deltaBalance = Number(botStatus?.delta_balance ?? 0);
-  const krakenBalance = Number(botStatus?.kraken_balance ?? 0);
   const deltaBalanceInr = botStatus?.delta_balance_inr;
 
-  const exchangeSum = bybitBalance + deltaBalance + krakenBalance;
-  const totalCapital = exchangeSum > 0 ? exchangeSum : (botStatus?.capital || 0);
+  const totalCapital = deltaBalance > 0 ? deltaBalance : (botStatus?.capital || 0);
   const inrRate = botStatus?.inr_usd_rate ?? 86.5;
   const capitalInr = Math.round(totalCapital * inrRate);
 
@@ -224,7 +214,7 @@ export function LiveStatusBar() {
       if (!s || s.total === 0) return null;
       return { pnl: s.pnl, total: s.total, wins: s.wins, losses: s.total - s.wins, wr: (s.wins / s.total) * 100, fees: s.fees, grossPnl: s.grossPnl };
     };
-    return { bybit: build('bybit'), delta: build('delta'), kraken: build('kraken') };
+    return { delta: build('delta') };
   }, [trades, exchRange]);
 
   // Build sparkline data: cumulative PnL from dailyPnL for selected range
@@ -302,7 +292,7 @@ export function LiveStatusBar() {
           </div>
         </div>
 
-        {/* Row 2 — Exchange balance cards */}
+        {/* Row 2 — Delta exchange balance card */}
         <div className="space-y-2">
           <div className="flex items-center gap-1">
             {(['24h', '7d', '14d', '30d'] as const).map((range) => (
@@ -320,79 +310,33 @@ export function LiveStatusBar() {
               </button>
             ))}
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            {bybitConnected && bybitBalance > 0 && (
-              <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
-                <div className="flex items-center gap-1.5 mb-1.5">
-                  <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
-                  <span className="text-[11px] font-bold text-[#f7a600]">BYBIT</span>
-                </div>
-                <span className="font-mono text-lg font-semibold text-white">{formatCurrency(bybitBalance)}</span>
-                {exchStats.bybit && (
-                  <>
-                    <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                      {exchStats.bybit.wins}W / {exchStats.bybit.losses}L · {exchStats.bybit.wr.toFixed(0)}% WR · {exchStats.bybit.total} trades
-                    </div>
-                    <div className="text-[10px] font-mono">
-                      <span className={exchStats.bybit.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                        {exchStats.bybit.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.bybit.grossPnl)} P&L
-                      </span>
-                      <span className="text-zinc-600"> · </span>
-                      <span className="text-zinc-500">${exchStats.bybit.fees.toFixed(2)} fees</span>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
 
-            {deltaConnected && deltaBalance > 0 && (
-              <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
-                <div className="flex items-center gap-1.5 mb-1.5">
-                  <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
-                  <span className="text-[11px] font-bold text-[#00d2ff]">DELTA</span>
-                </div>
-                <span className="font-mono text-lg font-semibold text-white">{formatCurrency(deltaBalance)}</span>
-                {exchStats.delta && (
-                  <>
-                    <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                      {exchStats.delta.wins}W / {exchStats.delta.losses}L · {exchStats.delta.wr.toFixed(0)}% WR · {exchStats.delta.total} trades
-                    </div>
-                    <div className="text-[10px] font-mono">
-                      <span className={exchStats.delta.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                        {exchStats.delta.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.delta.grossPnl)} P&L
-                      </span>
-                      <span className="text-zinc-600"> · </span>
-                      <span className="text-zinc-500">${exchStats.delta.fees.toFixed(2)} fees</span>
-                    </div>
-                  </>
-                )}
+          {deltaConnected && deltaBalance > 0 && (
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
+                <span className="text-[11px] font-bold text-[#00d2ff]">DELTA</span>
               </div>
-            )}
-
-            {krakenConnected && krakenBalance > 0 && (
-              <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
-                <div className="flex items-center gap-1.5 mb-1.5">
-                  <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
-                  <span className="text-[11px] font-bold text-[#7B61FF]">KRAKEN</span>
-                </div>
-                <span className="font-mono text-lg font-semibold text-white">{formatCurrency(krakenBalance)}</span>
-                {exchStats.kraken && (
-                  <>
-                    <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                      {exchStats.kraken.wins}W / {exchStats.kraken.losses}L · {exchStats.kraken.wr.toFixed(0)}% WR · {exchStats.kraken.total} trades
-                    </div>
-                    <div className="text-[10px] font-mono">
-                      <span className={exchStats.kraken.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                        {exchStats.kraken.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.kraken.grossPnl)} P&L
-                      </span>
-                      <span className="text-zinc-600"> · </span>
-                      <span className="text-zinc-500">${exchStats.kraken.fees.toFixed(2)} fees</span>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+              <span className="font-mono text-lg font-semibold text-white">{formatCurrency(deltaBalance)}</span>
+              {deltaBalanceInr != null && (
+                <span className="text-[10px] text-zinc-500 ml-2">~{deltaBalanceInr.toLocaleString()}</span>
+              )}
+              {exchStats.delta && (
+                <>
+                  <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                    {exchStats.delta.wins}W / {exchStats.delta.losses}L · {exchStats.delta.wr.toFixed(0)}% WR · {exchStats.delta.total} trades
+                  </div>
+                  <div className="text-[10px] font-mono">
+                    <span className={exchStats.delta.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
+                      {exchStats.delta.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.delta.grossPnl)} P&L
+                    </span>
+                    <span className="text-zinc-600"> · </span>
+                    <span className="text-zinc-500">${exchStats.delta.fees.toFixed(2)} fees</span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Row 2 — PnL / Deposits toggled card */}
@@ -569,38 +513,6 @@ export function LiveStatusBar() {
             ))}
           </div>
 
-          {/* Bybit Card */}
-          {bybitConnected && bybitBalance > 0 && (
-          <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className={cn(
-                  'w-2 h-2 rounded-full',
-                  bybitConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-                )}
-              />
-              <span className="text-sm font-semibold text-[#f7a600]">BYBIT</span>
-            </div>
-            <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-              <span className="font-mono text-lg text-white truncate">{formatCurrency(bybitBalance)}</span>
-            </div>
-            {exchStats.bybit && (
-              <>
-                <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                  {exchStats.bybit.wins}W / {exchStats.bybit.losses}L · {exchStats.bybit.wr.toFixed(0)}% WR · {exchStats.bybit.total} trades
-                </div>
-                <div className="text-[10px] font-mono">
-                  <span className={exchStats.bybit.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                    {exchStats.bybit.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.bybit.grossPnl)} P&L
-                  </span>
-                  <span className="text-zinc-600"> · </span>
-                  <span className="text-zinc-500">${exchStats.bybit.fees.toFixed(2)} fees</span>
-                </div>
-              </>
-            )}
-          </div>
-          )}
-
           {/* Delta Card */}
           {deltaConnected && deltaBalance > 0 && (
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
@@ -630,38 +542,6 @@ export function LiveStatusBar() {
                   </span>
                   <span className="text-zinc-600"> · </span>
                   <span className="text-zinc-500">${exchStats.delta.fees.toFixed(2)} fees</span>
-                </div>
-              </>
-            )}
-          </div>
-          )}
-
-          {/* Kraken Card */}
-          {krakenConnected && krakenBalance > 0 && (
-          <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className={cn(
-                  'w-2 h-2 rounded-full',
-                  krakenConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-                )}
-              />
-              <span className="text-sm font-semibold text-[#7B61FF]">KRAKEN</span>
-            </div>
-            <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-              <span className="font-mono text-lg text-white truncate">{formatCurrency(krakenBalance)}</span>
-            </div>
-            {exchStats.kraken && (
-              <>
-                <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                  {exchStats.kraken.wins}W / {exchStats.kraken.losses}L · {exchStats.kraken.wr.toFixed(0)}% WR · {exchStats.kraken.total} trades
-                </div>
-                <div className="text-[10px] font-mono">
-                  <span className={exchStats.kraken.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                    {exchStats.kraken.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.kraken.grossPnl)} P&L
-                  </span>
-                  <span className="text-zinc-600"> · </span>
-                  <span className="text-zinc-500">${exchStats.kraken.fees.toFixed(2)} fees</span>
                 </div>
               </>
             )}
@@ -800,7 +680,7 @@ export function LiveStatusBar() {
               <span className="text-[10px] text-zinc-500 font-mono">{'\u20B9'}{capitalInr.toLocaleString('en-IN')}</span>
             )}
           </div>
-          {(bybitBalance > 0 || deltaBalance > 0) && openPositionCount > 0 && (
+          {deltaBalance > 0 && openPositionCount > 0 && (
             <span className="text-[10px] font-mono text-amber-400">{openPositionCount} open</span>
           )}
           <div className="flex items-center gap-3 mt-1">

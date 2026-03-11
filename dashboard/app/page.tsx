@@ -3,7 +3,6 @@
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { LiveStatusBar } from '@/components/dashboard/LiveStatusBar';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
-import { EntrySignals } from '@/components/dashboard/TriggerProximity';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
@@ -81,16 +80,10 @@ export default function DashboardPage() {
       {/* 1. Live Status Bar — full width */}
       <LiveStatusBar />
 
-      {/* 2 & 3. Market Overview (60%) + Trigger Proximity (40%) */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-        <div className="lg:col-span-3 space-y-2">
-          <MarketOverview />
-          {/* Live Positions — docked under market overview, no gap */}
-          <LivePositions />
-        </div>
-        <div className="lg:col-span-2">
-          <EntrySignals />
-        </div>
+      {/* 2. Market Overview + Live Positions */}
+      <div className="space-y-2">
+        <MarketOverview />
+        <LivePositions />
       </div>
 
       {/* Options Chain — full width */}

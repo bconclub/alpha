@@ -1374,6 +1374,11 @@ class TradeExecutor:
             signal.position_type == "spot" and signal.side == "sell"
         )
 
+        # Options: skip DB writes — options_scalp handles its own via on_fill
+        if signal.strategy == StrategyName.OPTIONS_SCALP:
+            logger.info("[%s] Options trade — DB handled by strategy", signal.pair)
+            return order
+
         # DB write FIRST — P&L is calculated here.
         # For exits, the computed P&L is passed directly to the Telegram
         # notification so both DB and Telegram show the EXACT same numbers.
@@ -1492,29 +1497,6 @@ class TradeExecutor:
                 self.risk_manager.record_close(signal.pair, 0.0)
             return None
         try:
-            # Options already closed in DB by _close_option_trade_in_db()
-            if signal.metadata.get("db_already_closed"):
-                logger.info(
-                    "[%s] DB already closed by options strategy — skipping P&L recalc",
-                    signal.pair,
-                )
-                # Still clean up risk manager
-                if self.risk_manager is not None:
-                    self.risk_manager.record_close(signal.pair, 0.0)
-                # Fetch the just-closed trade for Telegram notification values
-                closed_trade = await self.db.get_latest_closed_trade(
-                    pair=signal.pair, exchange=signal.exchange_id,
-                )
-                if closed_trade:
-                    return {
-                        "entry_price": closed_trade.get("entry_price"),
-                        "exit_price": closed_trade.get("exit_price"),
-                        "pnl": closed_trade.get("pnl", 0.0),
-                        "pnl_pct": closed_trade.get("pnl_pct", 0.0),
-                        "opened_at": closed_trade.get("opened_at") or closed_trade.get("created_at"),
-                    }
-                return None
-
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
 

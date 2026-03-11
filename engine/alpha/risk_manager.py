@@ -1,8 +1,7 @@
 """Risk manager — position sizing, exposure limits, win-rate circuit breakers.
 
-Multi-pair + multi-exchange aware: tracks positions per pair, enforces total
-exposure cap (accounting for leverage), and monitors liquidation risk on
-futures positions.
+Delta-only: tracks positions per pair, enforces total exposure cap,
+and monitors options positions (1 per asset).
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ class Position:
     amount: float
     strategy: str
     opened_at: str
-    exchange: str = "binance"
+    exchange: str = "delta"
     leverage: int = 1
     position_type: str = "spot"  # "spot", "long", or "short"
 
@@ -37,12 +36,12 @@ class RiskManager:
     """
     Enforces risk rules before any trade is executed.
 
+    Delta-only mode (options + futures on Delta Exchange India).
     Rules:
-    - Max position per trade: check COLLATERAL (margin) against 80% of exchange capital
-    - Max 3 concurrent positions across ALL pairs/exchanges (3 per exchange)
+    - Max position per trade: check COLLATERAL against 80% of Delta capital
+    - Max 1 position per asset for options
     - Max 1 position per pair at a time
-    - Total exposure capped at 90% of capital (collateral-based for futures)
-    - Per-trade stop-loss: 2%
+    - Total exposure capped at 90% of capital
     - Win-rate circuit breaker: if < 40% over last 20 trades -> pause
     """
 
@@ -53,11 +52,8 @@ class RiskManager:
         self.max_concurrent = config.trading.max_concurrent_positions
         self.per_trade_sl_pct = config.trading.per_trade_stop_loss_pct
 
-        # Per-exchange capital: strategies size off their own exchange balance
-        self.binance_capital: float = 0.0
+        # Delta capital: strategies size off Delta balance
         self.delta_capital: float = 0.0
-        self.bybit_capital: float = 0.0
-        self.kraken_capital: float = 0.0
 
         self.open_positions: list[Position] = []
         self._pair_entry_ts: dict[str, float] = {}  # pair -> last entry approval time
@@ -71,33 +67,17 @@ class RiskManager:
         self._force_resumed = False  # bypass win-rate breaker until next win
 
     def update_exchange_balances(
-        self, binance: float | None, delta: float | None,
-        bybit: float | None = None, kraken: float | None = None,
+        self, delta: float | None = None, **_kwargs: float | None,
     ) -> None:
-        """Update per-exchange capital from live balance fetches."""
-        if binance is not None:
-            self.binance_capital = binance
+        """Update Delta capital from live balance fetch."""
         if delta is not None:
             self.delta_capital = delta
-        if bybit is not None:
-            self.bybit_capital = bybit
-        if kraken is not None:
-            self.kraken_capital = kraken
-        self.capital = self.binance_capital + self.delta_capital + self.bybit_capital + self.kraken_capital
-        logger.info(
-            "Balances updated: Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Kraken=$%.2f, Total=$%.2f",
-            self.binance_capital, self.delta_capital, self.bybit_capital, self.kraken_capital, self.capital,
-        )
+        self.capital = self.delta_capital
+        logger.info("Balance updated: Delta=$%.2f", self.delta_capital)
 
     def get_exchange_capital(self, exchange_id: str) -> float:
-        """Return total capital for a specific exchange."""
-        if exchange_id == "delta":
-            return self.delta_capital
-        if exchange_id == "bybit":
-            return self.bybit_capital
-        if exchange_id == "kraken":
-            return self.kraken_capital
-        return self.binance_capital
+        """Return total capital (Delta only)."""
+        return self.delta_capital
 
     def get_available_capital(self, exchange_id: str) -> float:
         """Return available (unlocked) capital for an exchange.
@@ -129,8 +109,9 @@ class RiskManager:
         """Count open positions on a specific exchange."""
         return sum(1 for p in self.open_positions if p.exchange == exchange_id)
 
-    # Per-exchange position limits
-    MAX_POSITIONS_PER_EXCHANGE = 3  # match scalp MAX_POSITIONS
+    # Position limits — options: 1 per asset
+    MAX_POSITIONS_PER_EXCHANGE = 3  # overall Delta limit
+    MAX_OPTIONS_PER_ASSET = 1       # 1 option position per base asset (ETH, BTC)
 
     # -- Properties ------------------------------------------------------------
 
@@ -285,6 +266,20 @@ class RiskManager:
             logger.info("Already have open position on %s -- rejecting", signal.pair)
             return False
 
+        # 4a. Options: max 1 position per base asset (e.g., only 1 ETH option at a time)
+        is_options = signal.strategy == StrategyName.OPTIONS_SCALP
+        if is_options:
+            base_asset = signal.pair.split("/")[0] if "/" in signal.pair else signal.pair[:3]
+            for p in self.open_positions:
+                if _OPTION_SYMBOL_RE.search(p.pair):
+                    existing_base = p.pair.split("/")[0] if "/" in p.pair else p.pair[:3]
+                    if existing_base == base_asset:
+                        logger.info(
+                            "Already have options position on %s (%s) — max 1 per asset, rejecting %s",
+                            base_asset, p.pair, signal.pair,
+                        )
+                        return False
+
         # 4b. Per-pair entry cooldown — prevent duplicate entries from racing scan cycles
         now = time.monotonic()
         last_entry = self._pair_entry_ts.get(signal.pair, 0.0)
@@ -306,8 +301,8 @@ class RiskManager:
         collateral = notional / signal.leverage if is_futures else notional
         available = self.get_available_capital(signal.exchange_id)
 
-        # Minimum balance thresholds
-        min_balance = 5.50 if signal.exchange_id == "binance" else 1.00
+        # Minimum balance threshold
+        min_balance = 1.00
         if available < min_balance:
             logger.info(
                 "Insufficient available %s balance: $%.2f < $%.2f — rejecting %s",
@@ -474,8 +469,6 @@ class RiskManager:
             "is_paused": self.is_paused,
             "pause_reason": self._pause_reason,
             "pairs_with_positions": list(self.pairs_with_positions()),
-            "binance_available": self.get_available_capital("binance"),
             "delta_available": self.get_available_capital("delta"),
-            "binance_positions": self.exchange_position_count("binance"),
             "delta_positions": self.exchange_position_count("delta"),
         }

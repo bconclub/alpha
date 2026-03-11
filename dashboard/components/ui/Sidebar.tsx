@@ -46,50 +46,13 @@ const navItems = [
       </svg>
     ),
   },
-  {
-    name: 'Analytics',
-    href: '/analytics',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M2 17C2 16.4477 2.44772 16 3 16H4C4.55228 16 5 16.4477 5 17V18H2V17Z" fill="currentColor" />
-        <path d="M6 13C6 12.4477 6.44772 12 7 12H8C8.55228 12 9 12.4477 9 13V18H6V13Z" fill="currentColor" />
-        <path d="M10 9C10 8.44772 10.4477 8 11 8H12C12.5523 8 13 8.44772 13 9V18H10V9Z" fill="currentColor" />
-        <path d="M14 5C14 4.44772 14.4477 4 15 4H16C16.5523 4 17 4.44772 17 5V18H14V5Z" fill="currentColor" />
-        <path d="M2 3L6 7.5L10 5L14 2L18 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    ),
-  },
-  {
-    name: 'Brain',
-    href: '/brain',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M10 2C7.5 2 5.5 3.5 5 5.5C3.5 6 2 7.5 2 9.5C2 11 3 12.5 4 13V16C4 17 5 18 6 18H8C8 18 8.5 17.5 8.5 17V14H11.5V17C11.5 17.5 12 18 12 18H14C15 18 16 17 16 16V13C17 12.5 18 11 18 9.5C18 7.5 16.5 6 15 5.5C14.5 3.5 12.5 2 10 2Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx="7.5" cy="9" r="1" fill="currentColor" />
-        <circle cx="12.5" cy="9" r="1" fill="currentColor" />
-        <path d="M7 11.5C7 11.5 8.5 13 10 13C11.5 13 13 11.5 13 11.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    name: 'Status',
-    href: '/status',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M10 2C5.58 2 2 5.58 2 10s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8zm0 14.5c-3.58 0-6.5-2.92-6.5-6.5S6.42 3.5 10 3.5s6.5 2.92 6.5 6.5-2.92 6.5-6.5 6.5z" fill="currentColor" />
-        <path d="M10.5 6H9v5l4.28 2.54.72-1.21-3.5-2.08V6z" fill="currentColor" />
-      </svg>
-    ),
-  },
 ];
 
-// Bottom nav items — subset for mobile (5 max for mobile bar)
+// Bottom nav items — subset for mobile (matches desktop)
 const bottomNavItems = [
   { name: 'Dashboard', href: '/', icon: navItems[0].icon },
   { name: 'Trades', href: '/trades', icon: navItems[1].icon },
-  { name: 'Brain', href: '/brain', icon: navItems[4].icon },
-  { name: 'Analytics', href: '/analytics', icon: navItems[3].icon },
-  { name: 'Status', href: '/status', icon: navItems[5].icon },
+  { name: 'Strategy', href: '/strategies', icon: navItems[2].icon },
 ];
 
 export function Sidebar() {

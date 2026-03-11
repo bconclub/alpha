@@ -37,44 +37,27 @@ class AlphaBot:
 
     def __init__(self) -> None:
         # Core components (initialized in start())
-        self.binance: ccxt.Exchange | None = None
-        self.kucoin: ccxt.Exchange | None = None
         self.delta: ccxt.Exchange | None = None
         self.delta_options: ccxt.Exchange | None = None  # Delta options exchange
-        self.bybit: ccxt.Exchange | None = None          # Bybit futures exchange
-        self.kraken: ccxt.Exchange | None = None        # Kraken futures exchange
         self.db = Database()
         self.alerts = AlertManager()
         self.risk_manager = RiskManager()
         self.executor: TradeExecutor | None = None
-        self.analyzer: MarketAnalyzer | None = None
         self.delta_analyzer: MarketAnalyzer | None = None
-        self.bybit_analyzer: MarketAnalyzer | None = None
-        self.kraken_analyzer: MarketAnalyzer | None = None
-        # strategy_selector DISABLED — all pairs use scalp only
 
-        # Multi-pair: Binance spot
-        self.pairs: list[str] = config.trading.pairs
-        # Delta futures pairs (options only now)
+        # Delta futures pairs (used for market analysis → options signals)
         self.delta_pairs: list[str] = config.delta.pairs
-        # Bybit futures pairs (primary)
-        self.bybit_pairs: list[str] = config.bybit.pairs
-        # Kraken futures pairs
-        self.kraken_pairs: list[str] = config.kraken.pairs
 
-        # Scalp overlay strategies: pair -> ScalpStrategy (run independently)
+        # Scalp strategies: pair -> ScalpStrategy (provides signals to options)
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
         # Options overlay strategies: pair -> OptionsScalpStrategy
         self._options_strategies: dict[str, OptionsScalpStrategy] = {}
 
         # Strategy enable/disable flags (toggled from dashboard)
-        self._scalp_enabled: bool = True
         self._options_enabled: bool = True
 
-        # Exchange enable/disable flags (toggled from dashboard)
-        self._bybit_enabled: bool = True
+        # Exchange enable/disable flags
         self._delta_enabled: bool = True
-        self._kraken_enabled: bool = True
 
         # WebSocket price feed for real-time exit checks
         self._price_feed: PriceFeed | None = None
@@ -108,39 +91,16 @@ class AlphaBot:
         self._orphan_gave_up: set[str] = set()  # positions we've given up on
         self.ORPHAN_MAX_RETRIES = 3  # stop trying after N failures
 
-        # Kraken minimum order amounts (coins) — below this, exchange rejects the order
-        self.KRAKEN_MIN_ORDER: dict[str, float] = {
-            "ETH/USD:USD": 0.01,    # ~$20+
-            "BTC/USD:USD": 0.001,   # ~$90+
-            "XRP/USD:USD": 1.0,     # ~$1.40+
-            "SOL/USD:USD": 0.1,     # ~$13+
-        }
-
     @property
     def all_pairs(self) -> list[str]:
-        """All tracked pairs across all exchanges."""
-        return (
-            self.pairs
-            + (self.bybit_pairs if self.bybit else [])
-            + (self.delta_pairs if self.delta else [])
-            + (self.kraken_pairs if self.kraken else [])
-        )
+        """All tracked pairs (Delta only)."""
+        return self.delta_pairs if self.delta else []
 
     def _get_scalp(self, pair: str, exchange: str | None = None) -> ScalpStrategy | None:
-        """Look up a scalp strategy by bare pair name.
-
-        With exchange-prefixed keys (e.g. "delta:BTC/USD:USD"), callers
-        that only have a bare pair need this helper.  If *exchange* is
-        given, only that prefix is checked; otherwise tries delta, kraken,
-        then unprefixed (for any future non-prefixed entries).
-        """
+        """Look up a scalp strategy by bare pair name (Delta only)."""
         if exchange:
             return self._scalp_strategies.get(f"{exchange}:{pair}")
-        for prefix in ("delta:", "kraken:", ""):
-            s = self._scalp_strategies.get(f"{prefix}{pair}")
-            if s is not None:
-                return s
-        return None
+        return self._scalp_strategies.get(f"delta:{pair}")
 
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
@@ -157,14 +117,11 @@ class AlphaBot:
                     logger.info("  %s", line.strip().lstrip("#").strip())
 
         logger.info("=" * 60)
-        logger.info("  ALPHA v%s — Multi-Exchange Scalping Agent", version)
-        logger.info("  BINANCE (spot): %s (1x, long-only, SL=2%%, TP=3%%, Trail@1.5%%/0.8%%)",
-                     ", ".join(self.pairs))
-        logger.info("  BYBIT (futures): %s, %dx leverage",
-                     ", ".join(self.bybit_pairs), config.bybit.leverage)
+        logger.info("  ALPHA v%s — Delta Options Agent", version)
         logger.info("  DELTA (options): %s",
                      ", ".join(config.delta.options_pairs) if config.delta.options_enabled else "disabled")
-        logger.info("  Entry: 11-signal arsenal Gate=3/4 RSI=35/65 Override=30/70 +VWAP+BBSQZ+LIQSWEEP+FVG+VOLDIV")
+        logger.info("  DELTA (futures/signals): %s, %dx leverage",
+                     ", ".join(self.delta_pairs), config.delta.leverage)
         logger.info("  Soul: Momentum is everything. Speed wins. Never idle.")
         logger.info("=" * 60)
 
@@ -204,62 +161,28 @@ class AlphaBot:
 
         self.risk_manager.record_close = _tracked_record_close  # type: ignore[assignment]
 
-        # Build components — Binance (spot) + Bybit/Kraken (futures) + Delta (options)
+        # Build components — Delta only (futures for signals + options for trading)
         self.executor = TradeExecutor(
-            self.binance,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]  # no Binance
             db=self.db,
             alerts=self.alerts,
             delta_exchange=self.delta,
             risk_manager=self.risk_manager,
             options_exchange=self.delta_options,
-            bybit_exchange=self.bybit,
-            kraken_exchange=self.kraken,
         )
-
-        # Binance analyzer for spot pairs
-        if self.binance and self.pairs:
-            self.analyzer = MarketAnalyzer(
-                self.binance, pair=self.pairs[0],
-            )
 
         if self.delta:
             self.delta_analyzer = MarketAnalyzer(
                 self.delta, pair=self.delta_pairs[0] if self.delta_pairs else None,
             )
 
-        if self.bybit and self.bybit_pairs:
-            self.bybit_analyzer = MarketAnalyzer(
-                self.bybit, pair=self.bybit_pairs[0],
-            )
-
-        if self.kraken and self.kraken_pairs:
-            self.kraken_analyzer = MarketAnalyzer(
-                self.kraken, pair=self.kraken_pairs[0],
-            )
-        # strategy_selector DISABLED — scalp-only, no dynamic strategy switching
-
-        # Load market limits for all exchanges
+        # Load market limits for Delta only
         await self.executor.load_market_limits(
-            self.pairs,  # Binance spot pairs
+            [],  # no Binance spot pairs
             delta_pairs=self.delta_pairs if self.delta else None,
-            bybit_pairs=self.bybit_pairs if self.bybit else None,
-            kraken_pairs=self.kraken_pairs if self.kraken else None,
         )
 
-        # Register scalp strategies — Bybit futures — DISABLED FOR NOW
-        # if self.bybit:
-        #     for pair in self.bybit_pairs:
-        #         self._scalp_strategies[pair] = ScalpStrategy(
-        #             pair, self.executor, self.risk_manager,
-        #             exchange=self.bybit,
-        #             is_futures=True,
-        #             market_analyzer=self.bybit_analyzer,
-        #             exchange_id="bybit",
-        #         )
-
-        # Register scalp strategies — Delta futures (primary)
-        # Keys are exchange-prefixed ("delta:BTC/USD:USD") so Delta and
-        # Kraken instances for the same pair coexist without collision.
+        # Register Delta scalp strategies (provide market signals to options)
         if self.delta:
             for pair in self.delta_pairs:
                 self._scalp_strategies[f"delta:{pair}"] = ScalpStrategy(
@@ -269,27 +192,6 @@ class AlphaBot:
                     market_analyzer=self.delta_analyzer,
                     exchange_id="delta",
                 )
-
-        # Register scalp strategies — Kraken futures
-        if self.kraken:
-            for pair in self.kraken_pairs:
-                self._scalp_strategies[f"kraken:{pair}"] = ScalpStrategy(
-                    pair, self.executor, self.risk_manager,
-                    exchange=self.kraken,
-                    is_futures=True,
-                    market_analyzer=self.kraken_analyzer,
-                    exchange_id="kraken",
-                )
-
-        # Register scalp strategies — Binance spot — DISABLED FOR NOW
-        # if self.binance and self.pairs:
-        #     for pair in self.pairs:
-        #         self._scalp_strategies[pair] = ScalpStrategy(
-        #             pair, self.executor, self.risk_manager,
-        #             exchange=self.binance,
-        #             is_futures=False,
-        #             market_analyzer=self.analyzer,
-        #         )
 
         # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals
         # Options use Delta exchange, signals come from Delta scalp strategies
@@ -327,17 +229,15 @@ class AlphaBot:
         # ── ORPHAN PROTECTION: close any exchange positions not in bot memory ──
         await self._reconcile_exchange_positions()
 
-        # Start all scalp strategies (gated by exchange enabled flags)
-        _ex_enabled = {"bybit": self._bybit_enabled, "delta": self._delta_enabled, "kraken": self._kraken_enabled}
+        # Start Delta scalp strategies (signal generation for options)
         started = 0
         for pair, scalp in self._scalp_strategies.items():
-            ex_id = getattr(scalp, "_exchange_id", "delta")
-            if not _ex_enabled.get(ex_id, True):
-                logger.info("Skipping %s — %s exchange disabled", pair, ex_id)
+            if not self._delta_enabled:
+                logger.info("Skipping %s — delta exchange disabled", pair)
                 continue
             await scalp.start()
             started += 1
-        logger.info("Scalp overlay started on %d/%d pairs", started, len(self._scalp_strategies))
+        logger.info("Delta scalp (signal gen) started on %d/%d pairs", started, len(self._scalp_strategies))
 
         # Load pair/setup configs from DB → apply to scalp strategies
         await self._load_pair_setup_configs()
@@ -351,36 +251,13 @@ class AlphaBot:
         if self._options_strategies:
             logger.info("Options overlay started on %d pairs", len(self._options_strategies))
 
-        # Start WebSocket price feed for real-time exit checks
+        # Start WebSocket price feed — Delta only (for exit checks + premium monitoring)
         try:
-            binance_ws_exchange = None
-            # Binance WS — DISABLED (no spot strategies active)
-            # if config.binance.api_key:
-            #     import ccxt.pro as ccxtpro
-            #     binance_ws_exchange = ccxtpro.binance({
-            #         "apiKey": config.binance.api_key,
-            #         "secret": config.binance.secret,
-            #         "enableRateLimit": True,
-            #         "options": {"defaultType": "spot"},
-            #     })
-
             self._price_feed = PriceFeed(
                 strategies=self._scalp_strategies,
-                binance_exchange=binance_ws_exchange,
                 delta_pairs=self.delta_pairs if self.delta else [],
-                bybit_pairs=self.bybit_pairs if self.bybit else [],
-                kraken_pairs=self.kraken_pairs if self.kraken else [],
-                binance_pairs=[],  # Binance spot WS disabled for now
                 delta_testnet=config.delta.testnet,
-                bybit_testnet=config.bybit.testnet,
-                kraken_testnet=config.kraken.testnet,
             )
-
-            # Register momentum wake callbacks — WS detects sharp moves and
-            # wakes strategy check loop instantly instead of waiting for tick sleep
-            for _key, strategy in self._scalp_strategies.items():
-                self._price_feed.register_wake_callback(strategy.pair, strategy.wake)
-
             await self._price_feed.start()
         except Exception:
             logger.exception("PriceFeed failed to start — REST polling continues as fallback")
@@ -400,30 +277,24 @@ class AlphaBot:
         self._scheduler.add_job(self._poll_commands, "interval", seconds=5)
         self._scheduler.start()
 
-        # Fetch live exchange balances → per-exchange capital for trade sizing
-        binance_bal: float | None = None
+        # Fetch Delta balance for trade sizing
         delta_bal: float | None = None
-        bybit_bal: float | None = None
-        kraken_bal: float | None = None
         try:
-            binance_bal = await self._fetch_portfolio_usd(self.binance)
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-            bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
-            kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
-            self.risk_manager.update_exchange_balances(binance_bal, delta_bal, bybit_bal, kraken_bal)
+            self.risk_manager.update_exchange_balances(delta=delta_bal)
         except Exception:
-            logger.exception("[STARTUP] Failed to fetch exchange balances — continuing with defaults")
+            logger.exception("[STARTUP] Failed to fetch Delta balance — continuing with defaults")
 
         total_capital = self.risk_manager.capital
 
-        # ── Log per-pair affordability for Delta scalp ────────────────────
+        # ── Log per-pair affordability for Delta ────────────────────
         try:
             if self.delta and delta_bal is not None:
                 from alpha.trade_executor import DELTA_CONTRACT_SIZE
 
                 active_pairs: list[str] = []
                 skipped_pairs: list[str] = []
-                leverage = config.delta.leverage or 1  # guard against zero
+                leverage = config.delta.leverage or 1
                 for pair in self.delta_pairs:
                     contract_size = DELTA_CONTRACT_SIZE.get(pair, 0)
                     if contract_size <= 0:
@@ -449,24 +320,12 @@ class AlphaBot:
                             skipped_pairs.append(pair)
                     else:
                         logger.warning("[STARTUP] %s — could not fetch price", pair)
-                        active_pairs.append(pair)  # still register, let runtime handle it
+                        active_pairs.append(pair)
                 logger.info(
                     "[STARTUP] Delta Active: %s | Skipped: %s",
                     ", ".join(active_pairs) or "none",
                     ", ".join(skipped_pairs) or "none",
                 )
-
-            # ── Log Binance spot pair info ──────────────────────────────────
-            if self.binance and binance_bal is not None and self.pairs:
-                min_trade = 6.0  # MIN_NOTIONAL_SPOT
-                can_trade = binance_bal >= min_trade
-                logger.info(
-                    "[STARTUP] Binance: $%.2f USDT | %d pairs | Min trade: $%.0f | %s",
-                    binance_bal, len(self.pairs), min_trade,
-                    "ACTIVE" if can_trade else "INSUFFICIENT — need $6+",
-                )
-                for pair in self.pairs:
-                    logger.info("[STARTUP] Binance spot: %s (1x, long-only)", pair)
         except Exception:
             logger.exception("[STARTUP] Affordability check failed — continuing")
 
@@ -476,37 +335,19 @@ class AlphaBot:
 
             _v = _gv()
             _now = _ist().strftime("%Y-%m-%d %H:%M IST")
-            _lev = config.bybit.leverage or config.delta.leverage or config.kraken.leverage or 1
 
-            # Exchanges
+            # Exchange
             _ex_lines = []
-            for name, ex_obj, bal, enabled in [
-                ("Delta", self.delta, delta_bal, self._delta_enabled),
-                ("Kraken", self.kraken, kraken_bal, self._kraken_enabled),
-                ("Bybit", self.bybit, bybit_bal, self._bybit_enabled),
-                ("Binance", self.binance, binance_bal, True),
-            ]:
-                if not enabled:
-                    continue
-                if ex_obj is None:
-                    _ex_lines.append(f"  \u274c {name} — no API key")
-                elif bal is not None and bal > 0:
-                    _ex_lines.append(f"  \u2705 {name} ${bal:,.2f}")
-                elif bal is not None:
-                    _ex_lines.append(f"  \u26a0\ufe0f {name} ${bal:,.2f}")
-                else:
-                    _ex_lines.append(f"  \u274c {name} — offline")
+            if self.delta and delta_bal is not None and delta_bal > 0:
+                _ex_lines.append(f"  \u2705 Delta ${delta_bal:,.2f}")
+            elif self.delta:
+                _ex_lines.append(f"  \u26a0\ufe0f Delta ${delta_bal or 0:,.2f}")
+            else:
+                _ex_lines.append(f"  \u274c Delta — no API key")
 
             # Strategies
             _st_lines = []
-            n_scalp = len(self._scalp_strategies)
             n_opts = len(self._options_strategies)
-            if self._scalp_enabled and n_scalp > 0:
-                _st_lines.append(f"  \u2705 Scalp — {n_scalp} pairs, {_lev}x")
-            elif self._scalp_enabled:
-                _st_lines.append(f"  \u274c Scalp — no pairs")
-            else:
-                _st_lines.append(f"  \u274c Scalp — disabled")
             if self._options_enabled and self._delta_enabled and n_opts > 0:
                 _st_lines.append(f"  \u2705 Options — {n_opts} pairs")
             else:
@@ -557,9 +398,8 @@ class AlphaBot:
 
         # Keep running
         logger.info(
-            "Bot running — Bybit %d futures (%dx) + Delta options — Ctrl+C to stop",
-            len(self.bybit_pairs) if self.bybit else 0,
-            config.bybit.leverage,
+            "Bot running — Delta options (%d pairs) — Ctrl+C to stop",
+            len(self._options_strategies),
         )
         try:
             while self._running:
@@ -602,18 +442,10 @@ class AlphaBot:
         await self.alerts.disconnect()
 
         # Close exchange connections
-        if self.binance:
-            await self.binance.close()
-        if self.kucoin:
-            await self.kucoin.close()
         if self.delta:
             await self.delta.close()
         if self.delta_options:
             await self.delta_options.close()
-        if self.bybit:
-            await self.bybit.close()
-        if self.kraken:
-            await self.kraken.close()
 
         logger.info("Shutdown complete")
 
@@ -632,32 +464,14 @@ class AlphaBot:
             logger.exception("Failed to refresh pair/setup configs")
 
         try:
-            # 1. Analyze all pairs in parallel (each exchange uses its own analyzer)
+            # 1. Analyze Delta pairs (provides signals for options)
             analysis_pairs: list[str] = []
             analysis_tasks = []
 
-            # Binance spot pairs
-            for pair in self.pairs:
-                analysis_pairs.append(pair)
-                analysis_tasks.append(self.analyzer.analyze(pair))  # type: ignore[union-attr]
-
-            # Delta pairs
             if self.delta and self.delta_analyzer:
                 for pair in self.delta_pairs:
                     analysis_pairs.append(pair)
                     analysis_tasks.append(self.delta_analyzer.analyze(pair))
-
-            # Bybit pairs
-            if self.bybit and self.bybit_analyzer:
-                for pair in self.bybit_pairs:
-                    analysis_pairs.append(pair)
-                    analysis_tasks.append(self.bybit_analyzer.analyze(pair))
-
-            # Kraken pairs
-            if self.kraken and self.kraken_analyzer:
-                for pair in self.kraken_pairs:
-                    analysis_pairs.append(pair)
-                    analysis_tasks.append(self.kraken_analyzer.analyze(pair))
 
             results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
 
@@ -685,14 +499,7 @@ class AlphaBot:
 
                 # Log to strategy_log DB table (dashboard reads this) — always "scalp"
                 try:
-                    if pair in self.bybit_pairs:
-                        exchange = "bybit"
-                    elif pair in self.delta_pairs:
-                        exchange = "delta"
-                    elif pair in self.kraken_pairs:
-                        exchange = "kraken"
-                    else:
-                        exchange = "binance"
+                    exchange = "delta"
                     if analysis.rsi >= 50:
                         entry_distance_pct = analysis.rsi - 55.0
                     else:
@@ -804,18 +611,8 @@ class AlphaBot:
             logger.exception("Error in analysis cycle")
 
     async def _check_arb_opportunity(self, pair: str) -> bool:
-        """Quick check if there's a cross-exchange spread for a pair."""
-        if not self.kucoin:
-            return False
-        try:
-            binance_ticker = await self.binance.fetch_ticker(pair)  # type: ignore[union-attr]
-            kucoin_ticker = await self.kucoin.fetch_ticker(pair)
-            bp = binance_ticker["last"]
-            kp = kucoin_ticker["last"]
-            spread_pct = abs((bp - kp) / bp) * 100
-            return spread_pct > config.trading.arb_min_spread_pct
-        except Exception:
-            return False
+        """DISABLED — arbitrage removed (Delta options only mode)."""
+        return False
 
     async def _check_liquidation_risks(self) -> None:
         """Monitor futures positions for liquidation proximity.
@@ -969,13 +766,9 @@ class AlphaBot:
                 best_trade = {"pair": best_pair, "pnl": pnl_map[best_pair]}
                 worst_trade = {"pair": worst_pair, "pnl": pnl_map[worst_pair]}
 
-        # Fetch live exchange balances
-        binance_bal = await self._fetch_portfolio_usd(self.binance)
+        # Fetch Delta balance
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-        bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
-
-        # Capital = sum of actual exchange balances
-        total_capital = (binance_bal or 0) + (delta_bal or 0) + (bybit_bal or 0)
+        total_capital = delta_bal or 0
 
         await self.alerts.send_daily_summary(
             total_trades=total,
@@ -987,7 +780,6 @@ class AlphaBot:
             pnl_by_pair=pnl_map,
             best_trade=best_trade,
             worst_trade=worst_trade,
-            binance_balance=binance_bal,
             delta_balance=delta_bal,
         )
         rm.reset_daily()
@@ -1024,14 +816,11 @@ class AlphaBot:
                 else:
                     active_map[pair] = None
 
-            # Fetch live exchange balances (includes held assets)
-            binance_bal = await self._fetch_portfolio_usd(self.binance)
+            # Fetch live exchange balance — Delta only
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-            bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
-            kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
 
-            # Capital = sum of actual exchange balances
-            total_capital = (binance_bal or 0) + (delta_bal or 0) + (bybit_bal or 0) + (kraken_bal or 0)
+            # Capital = Delta balance
+            total_capital = delta_bal or 0
 
             # Cross-check positions against exchange: verify we actually hold coins
             verified_positions = await self._verify_positions_against_exchange()
@@ -1054,16 +843,10 @@ class AlphaBot:
                                 unrealized_pnl += notional * (pnl_pct / 100)
                                 break
 
-            # Build exchange balances dict
+            # Build exchange balances dict — Delta only
             exchange_balances: dict[str, float] = {}
-            if binance_bal is not None:
-                exchange_balances["binance"] = binance_bal
             if delta_bal is not None:
                 exchange_balances["delta"] = delta_bal
-            if bybit_bal is not None:
-                exchange_balances["bybit"] = bybit_bal
-            if kraken_bal is not None:
-                exchange_balances["kraken"] = kraken_bal
 
             # Build options status per base asset
             options_status: dict[str, str] = {}
@@ -1115,45 +898,13 @@ class AlphaBot:
         """Cross-check risk manager positions against actual exchange balances.
 
         Returns a list of verified positions (those confirmed to still exist
-        on the exchange). Also cleans up stale positions from the risk manager.
+        on the exchange). Delta only — trust internal state for futures/options.
         """
         rm = self.risk_manager
         verified: list[dict[str, Any]] = []
 
-        # Fetch exchange balances once
-        binance_free: dict[str, Any] = {}
-        try:
-            if self.binance:
-                bal = await self.binance.fetch_balance()
-                binance_free = bal.get("free", {})
-        except Exception:
-            logger.debug("Could not fetch Binance balance for position verification")
-            # Fall back to internal state
-            return [
-                {"pair": p.pair, "position_type": p.position_type, "exchange": p.exchange}
-                for p in rm.open_positions
-            ]
-
         for pos in rm.open_positions:
-            if pos.exchange == "binance":
-                base = pos.pair.split("/")[0] if "/" in pos.pair else pos.pair
-                held = float(binance_free.get(base, 0) or 0)
-                held_value = held * pos.entry_price if pos.entry_price > 0 else 0
-                if held > 0 and held_value > 0.50:
-                    verified.append({
-                        "pair": pos.pair,
-                        "position_type": pos.position_type,
-                        "exchange": pos.exchange,
-                        "held": held,
-                        "held_value": held_value,
-                    })
-                else:
-                    logger.info(
-                        "Position %s on %s not found on exchange (held=%.8f, value=$%.2f) — stale?",
-                        pos.pair, pos.exchange, held, held_value,
-                    )
-            else:
-                # Delta/futures: trust internal state (futures positions may not show as balances)
+            # Delta: trust internal state (futures/options positions don't show as spot balances)
                 verified.append({
                     "pair": pos.pair,
                     "position_type": pos.position_type,
@@ -1191,22 +942,16 @@ class AlphaBot:
             else:
                 active_map[pair] = None
 
-        # Use primary pair's analysis for condition
-        last = self.analyzer.last_analysis if self.analyzer else None
+        # Use Delta analyzer for condition
+        last = self.delta_analyzer.last_analysis if self.delta_analyzer else None
 
-        # Fetch exchange balances and update per-exchange capital
-        binance_bal: float | None = None
+        # Fetch Delta balance
         delta_bal: float | None = None
-        bybit_bal: float | None = None
-        kraken_bal: float | None = None
         try:
-            binance_bal = await self._fetch_portfolio_usd(self.binance)
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-            bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
-            kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
         except Exception:
             logger.exception("[STATUS] Balance fetch failed — saving status with partial data")
-        rm.update_exchange_balances(binance_bal, delta_bal, bybit_bal, kraken_bal)
+        rm.update_exchange_balances(delta=delta_bal)
 
         # Fetch raw INR balance for dashboard display
         delta_balance_inr = None
@@ -1243,35 +988,25 @@ class AlphaBot:
             "win_rate": trade_stats["win_rate"],
             "total_trades": trade_stats["total_trades"],
             "open_positions": len(rm.open_positions),
-            "active_strategy": active_map.get(self.pairs[0]) if self.pairs else None,
+            "active_strategy": active_map.get(self.delta_pairs[0]) if self.delta_pairs else None,
             "market_condition": last.condition.value if last else None,
             "capital": rm.capital,
             "pair": ", ".join(self.all_pairs),
             "is_running": self._running,
             "is_paused": rm.is_paused,
             "pause_reason": rm._pause_reason or None,
-            # Exchange data
-            "binance_balance": binance_bal,
+            # Exchange data — Delta only
             "delta_balance": delta_bal,
             "delta_balance_inr": delta_balance_inr,
-            "bybit_balance": bybit_bal,
-            "kraken_balance": kraken_bal,
-            "binance_connected": self.binance is not None and binance_bal is not None,
             "delta_connected": self.delta is not None and delta_bal is not None,
-            "bybit_connected": self.bybit is not None and bybit_bal is not None,
-            "kraken_connected": self.kraken is not None and kraken_bal is not None,
             "bot_state": bot_state,
-            "shorting_enabled": config.bybit.enable_shorting,
-            "leverage": config.bybit.leverage,
+            "shorting_enabled": config.delta.enable_shorting,
+            "leverage": config.delta.leverage,
             "active_strategy_count": active_count,
             "uptime_seconds": int(time.monotonic() - self._start_time) if self._start_time else 0,
             # Strategy toggles
-            "scalp_enabled": self._scalp_enabled,
-            "options_scalp_enabled": True,  # hardcoded — variable was writing False despite being True in memory
-            # Exchange toggles
-            "bybit_enabled": self._bybit_enabled,
+            "options_scalp_enabled": True,
             "delta_enabled": self._delta_enabled,
-            "kraken_enabled": self._kraken_enabled,
             # INR exchange rate for dashboard display
             "inr_usd_rate": await self._get_inr_usd_rate(),
             # Daily P&L breakdown
@@ -1323,13 +1058,7 @@ class AlphaBot:
                 },
                 "balance": {
                     "delta": round(delta_bal, 2) if delta_bal else None,
-                    "binance": round(binance_bal, 2) if binance_bal else None,
-                    "bybit": round(bybit_bal, 2) if bybit_bal else None,
-                    "kraken": round(kraken_bal, 2) if kraken_bal else None,
                     "delta_min_trade": bool(delta_bal and delta_bal >= 5),
-                    "binance_min_trade": bool(binance_bal and binance_bal >= 6),
-                    "bybit_min_trade": bool(bybit_bal and bybit_bal >= 1),
-                    "kraken_min_trade": bool(kraken_bal and kraken_bal >= 1),
                 },
                 "pairs": {},
             }
@@ -1457,12 +1186,8 @@ class AlphaBot:
                 exchange = params.get("exchange", "")
                 enabled = params.get("enabled", True)
                 tasks = []
-                if exchange == "bybit":
-                    self._bybit_enabled = enabled
-                elif exchange == "delta":
+                if exchange == "delta":
                     self._delta_enabled = enabled
-                elif exchange == "kraken":
-                    self._kraken_enabled = enabled
                 else:
                     result_msg = f"Unknown exchange: {exchange}"
                     await self.db.mark_command_executed(cmd_id, result_msg)
@@ -1748,9 +1473,7 @@ class AlphaBot:
             # Try to get exit price from exchange trade history
             exit_price = entry_price  # fallback
             try:
-                exchange = self.delta_options if is_option_symbol(pair_str) else (
-                    self.delta if exchange_id == "delta" else self.binance
-                )
+                exchange = self.delta_options if is_option_symbol(pair_str) else self.delta
                 if exchange:
                     recent = await exchange.fetch_my_trades(pair_str, limit=20)
                     close_side = "sell" if position_type in ("long", "spot") else "buy"
@@ -1796,8 +1519,9 @@ class AlphaBot:
     async def _close_binance_dust_trades(self) -> None:
         """Mark Binance trades below $6 as closed dust (too small to sell).
 
-        Only closes trades that are genuinely unsellable — checks actual balance.
+        DISABLED — Delta only mode, no Binance trades.
         """
+        return
         try:
             if not self.binance:
                 return
@@ -1962,22 +1686,15 @@ class AlphaBot:
         """
         last = await self.db.get_last_bot_status()
         if last:
-            # Restore per-exchange balances if available
-            binance_bal = last.get("binance_balance")
+            # Restore Delta balance if available
             delta_bal = last.get("delta_balance")
-            bybit_bal = last.get("bybit_balance")
-            kraken_bal = last.get("kraken_balance")
-            if binance_bal is not None or delta_bal is not None or bybit_bal is not None or kraken_bal is not None:
+            if delta_bal is not None:
                 self.risk_manager.update_exchange_balances(
-                    float(binance_bal) if binance_bal else None,
-                    float(delta_bal) if delta_bal else None,
-                    float(bybit_bal) if bybit_bal else None,
-                    float(kraken_bal) if kraken_bal else None,
+                    delta=float(delta_bal) if delta_bal else None,
                 )
                 logger.info(
-                    "Restored state from DB -- Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Kraken=$%.2f, Total=$%.2f",
-                    self.risk_manager.binance_capital, self.risk_manager.delta_capital,
-                    self.risk_manager.bybit_capital, self.risk_manager.kraken_capital, self.risk_manager.capital,
+                    "Restored state from DB -- Delta=$%.2f",
+                    self.risk_manager.delta_capital,
                 )
             else:
                 # Fallback to single capital field
@@ -2023,16 +1740,6 @@ class AlphaBot:
             return
 
         logger.info("Found %d open trades in DB — verifying against exchange...", len(open_trades))
-
-        # Fetch exchange balances once (not per-trade)
-        binance_balance: dict[str, Any] = {}
-
-        try:
-            if self.binance:
-                bal = await self.binance.fetch_balance()
-                binance_balance = bal.get("free", {})
-        except Exception:
-            logger.warning("Could not fetch Binance balance for position restore")
 
         # Fetch Delta positions via fetch_positions() — actual open contracts
         delta_positions: dict[str, dict[str, Any]] = {}
@@ -2084,31 +1791,6 @@ class AlphaBot:
         except Exception as e:
             logger.warning("Could not fetch options positions on startup: %s", e)
 
-        # Fetch Bybit positions via fetch_positions() — actual open positions
-        bybit_positions: dict[str, dict[str, Any]] = {}
-        try:
-            if self.bybit:
-                positions = await self.bybit.fetch_positions()
-                for pos in positions:
-                    contracts = float(pos.get("contracts", 0) or 0)
-                    if contracts != 0:
-                        symbol = pos.get("symbol", "")
-                        side = "long" if contracts > 0 else "short"
-                        entry_px = float(pos.get("entryPrice", 0) or 0)
-                        bybit_positions[symbol] = {
-                            "side": side,
-                            "amount": abs(contracts),
-                            "entry_price": entry_px,
-                        }
-                        logger.info(
-                            "Found open Bybit position: %s %s %.6f coins @ $%.2f",
-                            symbol, side, abs(contracts), entry_px,
-                        )
-                if not bybit_positions:
-                    logger.info("No open Bybit positions on exchange")
-        except Exception as e:
-            logger.error("Failed to fetch Bybit positions on startup: %s", e)
-
         restored = 0
         closed = 0
 
@@ -2125,48 +1807,15 @@ class AlphaBot:
             # Get the base asset (e.g., "ETH" from "ETH/USDT" or "ETHUSD")
             base = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace("USDT", "")
 
-            # Check if position still exists on exchange
+            # Check if position still exists on exchange — Delta only
             position_exists = False
 
-            if exchange_id == "binance":
-                held = float(binance_balance.get(base, 0) or 0)
-                # Check if held amount is worth at least $5 (Binance min notional)
-                # Below $5 = unsellable dust, mark as closed
-                if held > 0 and entry_price > 0:
-                    held_value = held * entry_price
-                    position_exists = held_value >= 5.0
-                    if not position_exists and held_value > 0:
-                        logger.info(
-                            "Binance position %s is dust ($%.2f < $5 min) — marking closed",
-                            pair, held_value,
-                        )
-                elif held > 0:
-                    position_exists = True
-            elif exchange_id == "bybit":
-                # Bybit futures: verify against actual Bybit positions
-                bybit_pos = bybit_positions.get(pair)
-                if bybit_pos:
-                    position_exists = True
-                    db_entry_price = float(trade.get("entry_price", 0) or 0)
-                    exchange_entry_price = bybit_pos["entry_price"]
-                    amount = bybit_pos["amount"]
-                    position_type = bybit_pos["side"]
-                    if db_entry_price > 0:
-                        entry_price = db_entry_price
-                    elif exchange_entry_price > 0:
-                        entry_price = exchange_entry_price
-                    logger.info(
-                        "Bybit position %s verified: %s %.6f coins | "
-                        "entry=$%.2f (DB) vs $%.2f (exchange) — using DB",
-                        pair, position_type, amount, db_entry_price, exchange_entry_price,
-                    )
-                else:
-                    logger.info(
-                        "Bybit position %s NOT found on exchange — was closed externally",
-                        pair,
-                    )
-                    position_exists = False
-            elif exchange_id == "delta":
+            if exchange_id != "delta":
+                # Non-Delta trades: skip (no longer supported)
+                logger.info("Skipping non-Delta trade %s on %s", pair, exchange_id)
+                continue
+
+            if exchange_id == "delta":
                 # Options trades: check options_positions (separate exchange)
                 if is_option_symbol(pair):
                     opt_pos = options_positions.get(pair)
@@ -2257,7 +1906,7 @@ class AlphaBot:
 
                 # Try to get real exit price from recent trade history
                 try:
-                    exchange = self.delta if exchange_id == "delta" else self.binance
+                    exchange = self.delta  # Delta only mode
                     if exchange:
                         # fetch_my_trades returns recent fills for this pair
                         recent_trades = await exchange.fetch_my_trades(pair, limit=20)
@@ -2533,14 +2182,7 @@ class AlphaBot:
         Returns None on any failure (caller should handle gracefully).
         """
         try:
-            if exchange_id == "bybit":
-                exchange = self.bybit
-            elif exchange_id == "kraken":
-                exchange = self.kraken
-            elif exchange_id == "delta":
-                exchange = self.delta
-            else:
-                exchange = self.binance
+            exchange = self.delta  # Delta only mode
             if exchange:
                 ticker = await exchange.fetch_ticker(pair)
                 return float(ticker.get("last", 0) or 0) or None
@@ -2575,24 +2217,9 @@ class AlphaBot:
         This is the #1 safety net. Runs on startup AND every 60 seconds.
         """
         try:
-            await self._reconcile_bybit_positions()
-        except Exception:
-            logger.exception("Orphan reconciliation failed (Bybit)")
-
-        try:
             await self._reconcile_delta_positions()
         except Exception:
             logger.exception("Orphan reconciliation failed (Delta)")
-
-        try:
-            await self._reconcile_kraken_positions()
-        except Exception:
-            logger.exception("Orphan reconciliation failed (Kraken)")
-
-        try:
-            await self._reconcile_binance_positions()
-        except Exception:
-            logger.exception("Orphan reconciliation failed (Binance)")
 
         # ── GHOST SWEEP ──────────────────────────────────────────────
         # Catch stale entries in open_positions where the strategy has
@@ -2622,16 +2249,16 @@ class AlphaBot:
         except Exception:
             logger.exception("Ghost sweep failed")
 
-        # ── DB ORPHAN SWEEP ────────────────────────────────────────────
+        # ── DB ORPHAN SWEEP (options only — log, never close) ──────────
         try:
             all_open = await self.db.get_all_open_trades()
-            await self._orphan_sweep_futures(all_open)
             await self._orphan_sweep_options(all_open)
         except Exception:
             logger.exception("DB orphan sweep failed")
 
     async def _orphan_sweep_futures(self, all_open: list[dict]) -> None:
-        """Close DB records for futures trades with no strategy and no exchange position."""
+        """DISABLED — futures sweep removed (Delta options only mode)."""
+        return  # noqa: no futures orphan sweep
         for trade in all_open:
             pair = trade.get("pair", "")
             exchange = trade.get("exchange", "")
@@ -2677,8 +2304,7 @@ class AlphaBot:
             # Try to get current price for P&L calculation
             exit_price = entry_price
             try:
-                ex = {"delta": self.delta, "bybit": self.bybit,
-                      "kraken": self.kraken, "binance": self.binance}.get(exchange)
+                ex = self.delta  # Delta only mode
                 if ex:
                     ticker = await ex.fetch_ticker(pair)
                     exit_price = float(ticker.get("last", 0) or 0) or entry_price
@@ -2742,16 +2368,8 @@ class AlphaBot:
             )
 
     async def _reconcile_bybit_positions(self) -> None:
-        """Reconcile Bybit positions with bot memory.
-
-        Same pattern as Delta reconciliation but simpler:
-        - Bybit amounts are in coins (no contract conversion)
-        - No options to worry about
-
-        CASE 1 (ORPHAN): Exchange has position, bot doesn't → CLOSE immediately
-        CASE 2 (PHANTOM): Bot thinks position exists, exchange doesn't → clear state
-        CASE 3 (RESTORE): Exchange has position, DB has trade → restore strategy
-        """
+        """DISABLED — Bybit not used (Delta options only mode)."""
+        return  # noqa: Bybit disabled
         if not self.bybit:
             return
 
@@ -3181,6 +2799,8 @@ class AlphaBot:
                 self.risk_manager.record_close(scalp.pair, phantom_pnl_for_rm)
 
     async def _reconcile_kraken_positions(self) -> None:
+        """DISABLED — Kraken not used (Delta options only mode)."""
+        return  # noqa: Kraken disabled
         """Reconcile Kraken positions with bot memory.
 
         Same pattern as Bybit reconciliation:
@@ -4207,10 +3827,8 @@ class AlphaBot:
                 self.risk_manager.record_close(scalp.pair, phantom_pnl_for_rm)
 
     async def _reconcile_binance_positions(self) -> None:
-        """Reconcile Binance spot positions with bot memory.
-
-        Simpler than Delta — just check if we hold a meaningful amount of each asset.
-        """
+        """DISABLED — Binance not used (Delta options only mode)."""
+        return  # noqa: Binance disabled
         if not self.binance:
             return
 
@@ -4389,7 +4007,7 @@ class AlphaBot:
                 close_side = "sell" if position_type == "long" else "buy"
 
                 # Get current price for P&L calc
-                exchange = self.delta if exchange_id == "delta" else self.binance
+                exchange = self.delta  # Delta only mode
                 if exchange:
                     ticker = await exchange.fetch_ticker(pair)
                     current_price = float(ticker.get("last", 0) or 0)
@@ -4451,7 +4069,7 @@ class AlphaBot:
                         # Try to get current price for accurate P&L
                         fallback_exit = entry_price
                         try:
-                            exchange = self.delta if exchange_id == "delta" else self.binance
+                            exchange = self.delta  # Delta only mode
                             if exchange:
                                 ticker = await exchange.fetch_ticker(pair)
                                 fallback_exit = float(ticker.get("last", 0) or 0) or entry_price
@@ -4479,44 +4097,11 @@ class AlphaBot:
     # -- Exchange init ---------------------------------------------------------
 
     async def _init_exchanges(self) -> None:
-        """Create ccxt exchange instances.
+        """Create ccxt exchange instances — Delta only.
 
         Uses the threaded DNS resolver to avoid aiodns failures on Windows.
         """
-        # Force threaded resolver so aiohttp doesn't depend on aiodns/c-ares
-        resolver = aiohttp.resolver.ThreadedResolver()
-        connector = aiohttp.TCPConnector(resolver=resolver, ssl=True)
-        session = aiohttp.ClientSession(connector=connector)
-
-        # Binance (required)
-        self.binance = ccxt.binance({
-            "apiKey": config.binance.api_key,
-            "secret": config.binance.secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-            "session": session,
-        })
-        if not config.binance.api_key:
-            logger.warning("Binance API key not set -- running in sandbox/read-only mode")
-            self.binance.set_sandbox_mode(True)
-
-        # KuCoin (optional, for arbitrage)
-        if config.kucoin.api_key:
-            kucoin_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver(), ssl=True)
-            )
-            self.kucoin = ccxt.kucoin({
-                "apiKey": config.kucoin.api_key,
-                "secret": config.kucoin.secret,
-                "password": config.kucoin.passphrase,
-                "enableRateLimit": True,
-                "session": kucoin_session,
-            })
-            logger.info("KuCoin exchange initialized (arbitrage enabled)")
-        else:
-            logger.info("KuCoin credentials not set -- arbitrage disabled")
-
-        # Delta Exchange India (optional, for futures)
+        # Delta Exchange India (futures + options)
         if config.delta.api_key:
             # Validate credentials are plain strings
             delta_key = str(config.delta.api_key).strip()
@@ -4582,65 +4167,8 @@ class AlphaBot:
             self.delta_pairs = []  # no Delta pairs if no credentials
             logger.info("Delta credentials not set -- futures disabled")
 
-        # Bybit (primary futures exchange)
-        if config.bybit.api_key:
-            bybit_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(
-                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
-                )
-            )
-            self.bybit = ccxt.bybit({
-                "apiKey": config.bybit.api_key,
-                "secret": config.bybit.secret,
-                "enableRateLimit": True,
-                "options": {"defaultType": "linear"},
-                "session": bybit_session,
-            })
-            if config.bybit.testnet:
-                self.bybit.set_sandbox_mode(True)
-            if config.bybit.leverage > 20:
-                logger.warning(
-                    "!!! LEVERAGE IS %dx — max supported is 20x !!! "
-                    "Set BYBIT_LEVERAGE=20 in .env",
-                    config.bybit.leverage,
-                )
-            logger.info(
-                "Bybit initialized (futures enabled, testnet=%s, leverage=%dx)",
-                config.bybit.testnet, config.bybit.leverage,
-            )
-        else:
-            self.bybit_pairs = []
-            logger.info("Bybit credentials not set -- futures disabled")
-
-        # Kraken Futures (alternative futures exchange)
-        if config.kraken.api_key:
-            kraken_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(
-                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
-                )
-            )
-            self.kraken = ccxt.krakenfutures({
-                "apiKey": config.kraken.api_key,
-                "secret": config.kraken.secret,
-                "enableRateLimit": True,
-                "options": {"defaultType": "future"},
-                "session": kraken_session,
-            })
-            if config.kraken.testnet:
-                self.kraken.set_sandbox_mode(True)
-            if config.kraken.leverage > 20:
-                logger.warning(
-                    "!!! KRAKEN LEVERAGE IS %dx — max supported is 20x !!! "
-                    "Set KRAKEN_LEVERAGE=20 in .env",
-                    config.kraken.leverage,
-                )
-            logger.info(
-                "Kraken Futures initialized (testnet=%s, leverage=%dx)",
-                config.kraken.testnet, config.kraken.leverage,
-            )
-        else:
-            self.kraken_pairs = []
-            logger.info("Kraken credentials not set -- futures disabled")
+        # Bybit/Kraken/Binance — DISABLED (Delta options only mode)
+        logger.info("Running in Delta-only mode — Bybit/Kraken/Binance disabled")
 
     async def _fetch_portfolio_usd(
         self, exchange: ccxt.Exchange | None,
@@ -4773,18 +4301,11 @@ class AlphaBot:
             if now - self._inr_rate_time < 3600:  # cache for 1 hour
                 return self._inr_rate
 
-        # Try fetching from Binance (USDT/INR pair if available)
         rate = 86.5  # fallback default
         try:
-            if self.binance:
-                # Binance doesn't have USDT/INR directly.
-                # Use a well-known approximate rate; update periodically.
-                # The user can set DELTA_INR_USD_RATE in env for precision.
-                env_rate = config.delta.__dict__.get("inr_usd_rate")
-                if env_rate and float(env_rate) > 0:
-                    rate = float(env_rate)
-                else:
-                    rate = 86.5  # current approximate rate as of Feb 2026
+            env_rate = config.delta.__dict__.get("inr_usd_rate")
+            if env_rate and float(env_rate) > 0:
+                rate = float(env_rate)
         except Exception:
             pass
 
