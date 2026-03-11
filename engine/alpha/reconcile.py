@@ -411,10 +411,9 @@ class DeltaReconciler:
 
         return {
             "pair": rt["pair"],
-            "exchange_id": "delta",
+            "exchange": "delta",
             "strategy": "options_scalp",
-            "direction": "long",
-            "side": rt.get("option_type", "call"),
+            "side": "buy",
             "entry_price": rt["entry"],
             "exit_price": rt["exit"],
             "contracts": float(rt["qty"]),
