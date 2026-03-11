@@ -142,12 +142,12 @@ def _parse_fill(t: dict) -> Fill | None:
 async def fetch_all_option_fills(exchange: ccxt.delta) -> list[Fill]:
     """Fetch all historical fills from Delta, keep only options.
 
-    Pagination strategy:
-      1. page_num=1,2,3… via fetch_my_trades  (Delta /fills supports this)
-      2. If page_num silently returns the same data, fall back to
-         after={last_trade_id} cursor pagination
-      3. If both fail on the very first page, try the raw
-         private_get_fills endpoint as a last resort
+    Uses the raw private_get_fills endpoint directly (bypassing ccxt's
+    fetch_my_trades which mangles the 'since' parameter).  Delta's
+    /fills API uses cursor-based pagination via meta.after / meta.before.
+
+    We filter server-side with contract_types=call_options,put_options
+    so every returned fill is an option.
     """
     from datetime import datetime, timezone
 
@@ -157,115 +157,110 @@ async def fetch_all_option_fills(exchange: ccxt.delta) -> list[Fill]:
     print("Fetching fills from Delta Exchange...")
     await exchange.load_markets()
 
-    PER_PAGE = 100          # 100 worked before; don't push to 500
-    MAX_PAGES = 100         # safety cap
-    method_label = "page_num"
+    PER_PAGE = 100
+    MAX_PAGES = 200         # safety cap (~20k fills max)
+    cursor_after: str | None = None
 
-    page_num = 1
-    last_id: str | None = None
-    use_after = False       # flip to True if page_num doesn't advance
+    page = 0
+    while page < MAX_PAGES:
+        page += 1
 
-    while page_num <= MAX_PAGES:
-        trades: list | None = None
+        req_params: dict = {
+            "page_size": str(PER_PAGE),
+            "contract_types": "call_options,put_options",
+        }
+        if cursor_after:
+            req_params["after"] = cursor_after
 
-        # ── Strategy A: page_num pagination ───────────────────────
-        if not use_after:
-            try:
-                trades = await exchange.fetch_my_trades(
-                    symbol=None,
-                    limit=PER_PAGE,
-                    params={"page_num": str(page_num)},
-                )
-            except Exception:
-                # page_num param might not be supported — fall through
-                trades = None
-
-        # ── Strategy B: after=<last_id> cursor pagination ─────────
-        if trades is None or (not trades and page_num > 1 and not use_after):
-            use_after = True
-            method_label = "after-id"
-            params: dict = {"page_size": str(PER_PAGE)}
-            if last_id:
-                params["after"] = last_id
-            try:
-                trades = await exchange.fetch_my_trades(
-                    symbol=None,
-                    limit=PER_PAGE,
-                    params=params,
-                )
-            except Exception:
-                trades = None
-
-        # ── Strategy C: plain call with no params (first page only) ──
-        if not trades and page_num == 1:
-            method_label = "plain"
-            try:
-                trades = await exchange.fetch_my_trades(
-                    symbol=None, limit=PER_PAGE,
-                )
-            except Exception:
-                trades = None
-
-        # ── Strategy D: raw private_get_fills (first page only) ──
-        if not trades and page_num == 1:
-            method_label = "private_get_fills"
-            try:
-                resp = await exchange.private_get_fills(
-                    {"page_size": str(PER_PAGE)}
-                )
-                raw_list = (
-                    resp.get("result", resp.get("data", []))
-                    if isinstance(resp, dict) else resp
-                )
-                if raw_list:
-                    trades = [exchange.parse_trade(f) for f in raw_list]
-            except Exception as e:
-                print(f"  private_get_fills failed: {e}")
-
-        # Nothing from any method → done
-        if not trades:
-            if page_num == 1:
-                print("  No fills returned from any method.")
+        try:
+            resp = await exchange.private_get_fills(req_params)
+        except Exception as e:
+            print(f"  Page {page} error: {e}")
             break
 
-        # ── Deduplicate ───────────────────────────────────────────
-        new_trades = []
+        if not isinstance(resp, dict):
+            print(f"  Page {page}: unexpected response type {type(resp)}")
+            break
+
+        meta = resp.get("meta", {})
+        raw_fills = resp.get("result", [])
+
+        if not raw_fills:
+            break
+
+        # Parse each raw fill through ccxt's parser for unified format
+        try:
+            trades = exchange.parse_trades(raw_fills)
+        except Exception:
+            # If parse_trades fails, parse individually and skip bad ones
+            trades = []
+            for rf in raw_fills:
+                try:
+                    trades.append(exchange.parse_trade(rf))
+                except Exception:
+                    pass
+
+        # Deduplicate
+        new_count = 0
         for t in trades:
             tid = str(t.get("id", ""))
             if tid and tid not in seen_ids:
                 seen_ids.add(tid)
-                new_trades.append(t)
-                last_id = tid          # keep cursor updated
+                new_count += 1
 
-        if not new_trades:
-            # All duplicates — pagination stalled
-            if not use_after:
-                # Switch strategy and retry this page
-                use_after = True
-                method_label = "after-id"
-                continue
-            break
+                fill = _parse_fill(t)
+                if fill:
+                    all_fills.append(fill)
 
-        # ── Parse option fills ────────────────────────────────────
-        option_count = 0
-        for t in new_trades:
-            fill = _parse_fill(t)
-            if fill:
-                all_fills.append(fill)
-                option_count += 1
+        # Also count raw fills for option detection (in case ccxt
+        # strips the option symbol during parsing)
+        if new_count == 0 and len(raw_fills) > 0:
+            # ccxt might have failed to parse — try raw
+            for rf in raw_fills:
+                fid = str(rf.get("id", ""))
+                if fid and fid not in seen_ids:
+                    seen_ids.add(fid)
+                    # Build Fill from raw Delta response
+                    product_id = rf.get("product_id")
+                    symbol = rf.get("product_symbol", "")
+                    side = rf.get("side", "").lower()
+                    price = float(rf.get("price", 0) or 0)
+                    size = float(rf.get("size", 0) or 0)
+                    fee = abs(float(rf.get("commission", 0) or 0))
+                    ts_str = rf.get("created_at", "")
+                    try:
+                        ts = int(datetime.fromisoformat(
+                            ts_str.replace("Z", "+00:00")
+                        ).timestamp() * 1000)
+                    except Exception:
+                        ts = 0
+
+                    if _OPTION_RE.search(symbol):
+                        all_fills.append(Fill(
+                            symbol=symbol,
+                            side=side,
+                            price=price,
+                            amount=size,
+                            fee=fee,
+                            timestamp=ts,
+                            order_id=str(rf.get("order_id", "")),
+                            trade_id=fid,
+                            raw=rf,
+                        ))
+                        new_count += 1
 
         print(
-            f"  Page {page_num} ({method_label}): "
-            f"{len(new_trades)} new fills, {option_count} options "
-            f"(total options: {len(all_fills)})"
+            f"  Page {page}: {len(raw_fills)} fills, {new_count} new "
+            f"(total options: {len(all_fills)}) "
+            f"cursor={'yes' if meta.get('after') else 'end'}"
         )
 
-        # Fewer than requested → last page
-        if len(trades) < PER_PAGE:
+        # Next page cursor
+        cursor_after = meta.get("after")
+        if not cursor_after:
             break
 
-        page_num += 1
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
     print(f"\nTotal option fills: {len(all_fills)}")
     if all_fills:
