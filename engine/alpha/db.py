@@ -45,6 +45,11 @@ class Database:
     def is_connected(self) -> bool:
         return self._client is not None
 
+    @property
+    def client(self) -> "Client | None":
+        """Public accessor for the raw Supabase client."""
+        return self._client
+
     # ── Trades ────────────────────────────────────────────────────────────────
 
     async def log_trade(self, data: dict[str, Any]) -> int | None:
