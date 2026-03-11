@@ -1,130 +1,123 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
-import { formatShortDate, formatTimeAgo, cn } from '@/lib/utils';
-import type { OptionsState, ActivityLogRow, OpenPosition } from '@/lib/types';
+import { formatShortDate, cn } from '@/lib/utils';
+import type { OptionsState, ActivityLogRow, OpenPosition, BotStatus } from '@/lib/types';
 
-// Options-eligible assets (options_scalp only runs on BTC + ETH)
+// ── Constants ────────────────────────────────────────────────
 const OPTIONS_ASSETS = ['BTC', 'ETH'] as const;
+const STALE_WARN_MS = 45_000;   // yellow after 45s
+const STALE_DEAD_MS = 90_000;   // red after 90s
+
+// ── CSS-in-JS keyframes (injected once) ─────────────────────
+const STYLE_ID = '__opts-tracker-pulse';
+function ensureStyles() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById(STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = STYLE_ID;
+  style.textContent = `
+    @keyframes optsPulse {
+      0%   { opacity: 1; transform: scale(1); }
+      50%  { opacity: 0.6; transform: scale(1.15); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+    .opts-pulse-green { animation: optsPulse 2s infinite; }
+    @keyframes optsFlash {
+      0%   { opacity: 1; }
+      50%  { opacity: 0.3; }
+      100% { opacity: 1; }
+    }
+    .opts-flash { animation: optsFlash 0.4s ease-in-out 3; }
+    @keyframes optsBarPass {
+      0%   { box-shadow: 0 0 0 rgba(0,200,83,0); }
+      50%  { box-shadow: 0 0 12px rgba(0,200,83,0.6); }
+      100% { box-shadow: 0 0 0 rgba(0,200,83,0); }
+    }
+    .opts-bar-pass { animation: optsBarPass 1s ease-in-out 2; }
+    @keyframes optsRegimeFlash {
+      0%   { opacity: 0.4; transform: scale(0.95); }
+      50%  { opacity: 1; transform: scale(1.05); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+    .opts-regime-flash { animation: optsRegimeFlash 0.5s ease-out; }
+  `;
+  document.head.appendChild(style);
+}
+
+// ── Helpers ──────────────────────────────────────────────────
 
 function extractBaseAsset(pair: string): string {
   if (pair.includes('/')) return pair.split('/')[0];
   return pair.replace(/USD.*$/, '');
 }
 
-/** Format premium as $X.XXXX */
 function fmtPrem(v: number | null): string {
-  if (v == null) return '—';
+  if (v == null) return '\u2014';
   return `$${v.toFixed(4)}`;
 }
 
-/** Format spot price ($98,450 for BTC, $2,780 for ETH) */
 function fmtSpot(v: number | null): string {
-  if (v == null) return '—';
+  if (v == null) return '\u2014';
   return `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
 }
 
-/** Format strike ($98,400 for BTC, $2,780 for ETH) */
 function fmtStrike(v: number | null): string {
-  if (v == null) return '—';
+  if (v == null) return '\u2014';
   return `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
 }
 
-/** How old is the last update in milliseconds? */
 function ageMs(updatedAt: string | null): number {
   if (!updatedAt) return Infinity;
   return Date.now() - new Date(updatedAt).getTime();
 }
 
-/** Staleness check: is updated_at older than 2 minutes? */
-function isStale(updatedAt: string | null): boolean {
-  return ageMs(updatedAt) > 2 * 60 * 1000;
-}
-
 const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
 
-interface MergedPairState {
-  asset: string;
-  pair: string;
-  state: OptionsState | null;
-  recentEvents: ActivityLogRow[];
-  stale: boolean;
-  /** Fallback: open options trade from trades table (if options_state lacks position info) */
-  openTrade: OpenPosition | null;
+// ── Scan staleness ──────────────────────────────────────────
+
+type ScanHealth = 'alive' | 'stale' | 'dead';
+
+function getScanHealth(updatedAt: string | null): ScanHealth {
+  const age = ageMs(updatedAt);
+  if (age < STALE_WARN_MS) return 'alive';
+  if (age < STALE_DEAD_MS) return 'stale';
+  return 'dead';
 }
 
-export function OptionsTracker() {
-  const { optionsState, optionsLog, openPositions } = useSupabase();
+const HEALTH_DOT: Record<ScanHealth, string> = {
+  alive: 'bg-[#00c853] opts-pulse-green',
+  stale: 'bg-[#ffd600]',
+  dead: 'bg-[#ff1744]',
+};
 
-  const pairStates = useMemo(() => {
-    const results: MergedPairState[] = [];
+// ── Regime helpers ──────────────────────────────────────────
 
-    // Build a map of open options trades by base asset
-    const optionTrades = new Map<string, OpenPosition>();
-    for (const pos of (openPositions ?? [])) {
-      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) {
-        const asset = extractBaseAsset(pos.pair);
-        optionTrades.set(asset, pos);
-      }
-    }
-
-    for (const asset of OPTIONS_ASSETS) {
-      const pair = `${asset}/USD:USD`;
-
-      // Find options_state row for this pair
-      const state = optionsState.find((s) => s.pair === pair) ?? null;
-
-      // Get recent activity_log events for mini-log
-      const assetEvents = optionsLog.filter((e) => {
-        return extractBaseAsset(e.pair) === asset;
-      });
-
-      results.push({
-        asset,
-        pair,
-        state,
-        recentEvents: assetEvents.slice(0, 5),
-        stale: isStale(state?.updated_at ?? null),
-        openTrade: optionTrades.get(asset) ?? null,
-      });
-    }
-
-    return results;
-  }, [optionsState, optionsLog, openPositions]);
-
-  return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
-          Options Entry Signals
-        </h3>
-        <span className="text-[9px] text-zinc-600 font-mono">BTC + ETH | 30s refresh</span>
-      </div>
-
-      <div className="space-y-3">
-        {pairStates.map((ps) => (
-          <PairCard key={ps.asset} ps={ps} />
-        ))}
-      </div>
-    </div>
-  );
+function regimeColor(regime: string | null | undefined): string {
+  if (!regime) return 'bg-zinc-800 text-zinc-400 border-zinc-700';
+  const r = regime.toUpperCase();
+  if (r.includes('TRENDING')) return 'bg-[#00c853]/15 text-[#00c853] border-[#00c853]/30';
+  if (r.includes('SIDEWAYS')) return 'bg-[#ffd600]/15 text-[#ffd600] border-[#ffd600]/30';
+  if (r.includes('CHOPPY')) return 'bg-[#ff1744]/15 text-[#ff1744] border-[#ff1744]/30';
+  return 'bg-zinc-800 text-zinc-400 border-zinc-700';
 }
 
-// ─── Helpers for bot state display ───────────────────────────
+// ── Bot state parser ────────────────────────────────────────
 
-/** Parse "blocked:trade_cooldown:45s" → { reason, timer, isBlocked } */
 function parseBotState(botState: string | null | undefined): {
   label: string;
   color: string;
   isBlocked: boolean;
   isReady: boolean;
+  blockReason?: string;
+  cooldownCandles?: { current: number; needed: number } | null;
 } {
   if (!botState || botState === 'scanning') {
     return { label: 'Scanning...', color: 'text-zinc-500', isBlocked: false, isReady: false };
   }
   if (botState === 'ready') {
-    return { label: 'CANDLE PASS — Entering', color: 'text-[#00c853]', isBlocked: false, isReady: true };
+    return { label: 'CANDLE PASS \u2014 Entering', color: 'text-[#00c853]', isBlocked: false, isReady: true };
   }
   if (botState === 'in_position') {
     return { label: 'In Position', color: 'text-[#7c4dff]', isBlocked: false, isReady: false };
@@ -134,25 +127,417 @@ function parseBotState(botState: string | null | undefined): {
     const reason = parts[0].replace(/_/g, ' ');
     const timer = parts[1] ?? null;
     const label = timer ? `${reason} (${timer})` : reason;
-    return { label, color: 'text-[#ff1744]', isBlocked: true, isReady: false };
+
+    // Parse cooldown candle info: "trade_cooldown:0/3"
+    let cooldownCandles: { current: number; needed: number } | null = null;
+    if (timer && timer.includes('/')) {
+      const [cur, tot] = timer.split('/').map(Number);
+      if (!isNaN(cur) && !isNaN(tot)) cooldownCandles = { current: cur, needed: tot };
+    }
+
+    return { label, color: 'text-[#ff1744]', isBlocked: true, isReady: false, blockReason: reason, cooldownCandles };
   }
   return { label: botState.replace(/_/g, ' '), color: 'text-zinc-400', isBlocked: false, isReady: false };
 }
 
-// ─── Per-asset card ─────────────────────────────────────────
+// ── Merged state per asset ──────────────────────────────────
 
-function PairCard({ ps }: { ps: MergedPairState }) {
+interface MergedPairState {
+  asset: string;
+  pair: string;
+  state: OptionsState | null;
+  recentEvents: ActivityLogRow[];
+  openTrade: OpenPosition | null;
+}
+
+// ══════════════════════════════════════════════════════════════
+// useLiveTick — 1-second timer for all live counters
+// ══════════════════════════════════════════════════════════════
+
+function useLiveTick(intervalMs = 1000) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return tick;
+}
+
+// ══════════════════════════════════════════════════════════════
+// 1. ScanPulse — pulsing dot + "Xs ago" counter
+// ══════════════════════════════════════════════════════════════
+
+function ScanPulse({ updatedAt }: { updatedAt: string | null }) {
+  useLiveTick();
+  const health = getScanHealth(updatedAt);
+  const ageSec = updatedAt ? Math.floor(ageMs(updatedAt) / 1000) : null;
+
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={cn('w-2.5 h-2.5 rounded-full shrink-0', HEALTH_DOT[health])} />
+      <span className="text-[9px] font-mono text-zinc-500">
+        {ageSec != null ? `${ageSec}s ago` : 'no data'}
+      </span>
+    </span>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 2. CandleCountdown — seconds until next 1-min candle
+// ══════════════════════════════════════════════════════════════
+
+function CandleCountdown() {
+  useLiveTick();
+  const now = Date.now() / 1000;
+  const secsLeft = Math.ceil(60 - (now % 60));
+  const isFlash = secsLeft <= 1;
+
+  return (
+    <span className={cn(
+      'text-[9px] font-mono',
+      isFlash ? 'text-amber-400 opts-flash' : 'text-zinc-500',
+    )}>
+      Next candle in: {secsLeft}s
+    </span>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 3. SignalStrengthBar — visual bar for candle momentum
+// ══════════════════════════════════════════════════════════════
+
+function SignalStrengthBar({ momentum }: {
+  momentum: NonNullable<OptionsState['candle_momentum']>;
+}) {
+  // Use cum_pct vs a threshold (0.25% for BTC, 0.10% for ETH — we'll use
+  // the passed flag to detect if threshold was met)
+  // We infer threshold from the ratio: if passed at cum_pct, that's >= threshold
+  // For display, show a reasonable default
+  const absCum = Math.abs(momentum.cum_pct);
+  // Estimate threshold: engine uses 0.25 for BTC, 0.10 for ETH
+  // Since we don't get threshold from DB, use 0.25 as default display
+  const threshold = 0.25;
+  const fillPct = Math.min((absCum / threshold) * 100, 100);
+
+  let barColor = 'bg-[#ff1744]';         // < 50%
+  if (fillPct >= 100 && momentum.passed) barColor = 'bg-[#00e676]'; // bright green PASS
+  else if (fillPct >= 80) barColor = 'bg-[#00c853]';
+  else if (fillPct >= 50) barColor = 'bg-[#ffd600]';
+
+  return (
+    <div className="mb-2">
+      {/* Bar */}
+      <div className={cn(
+        'relative h-3 rounded-full bg-zinc-800 overflow-hidden',
+        momentum.passed && 'opts-bar-pass',
+      )}>
+        <div
+          className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-700', barColor)}
+          style={{ width: `${fillPct}%` }}
+        />
+        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-mono text-white/80 font-medium">
+          {absCum.toFixed(2)}% / {threshold.toFixed(2)}% needed
+        </span>
+      </div>
+      <div className="flex items-center justify-between mt-0.5">
+        <span className="text-[8px] font-mono text-zinc-500">
+          {fillPct.toFixed(0)}% of threshold
+        </span>
+        <span className={cn(
+          'px-1.5 py-0.5 rounded text-[8px] font-bold uppercase',
+          momentum.passed
+            ? 'bg-[#00c853]/15 text-[#00c853] border border-[#00c853]/30'
+            : 'bg-zinc-800 text-zinc-500 border border-zinc-700',
+        )}>
+          {momentum.passed ? 'PASS' : 'FAIL'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 4. PremiumTick — premium value + direction arrow + delta
+// ══════════════════════════════════════════════════════════════
+
+function PremiumTick({ label, value, colorUp, colorDown }: {
+  label: string;
+  value: number | null;
+  colorUp: string;
+  colorDown: string;
+}) {
+  const prevRef = useRef<{ value: number; timestamp: number } | null>(null);
+  const [delta, setDelta] = useState<{ pct: number; direction: 'up' | 'down' | 'flat'; secAgo: number } | null>(null);
+
+  useEffect(() => {
+    if (value == null) return;
+    const now = Date.now();
+    if (prevRef.current && prevRef.current.value > 0) {
+      const pct = ((value - prevRef.current.value) / prevRef.current.value) * 100;
+      const secAgo = Math.floor((now - prevRef.current.timestamp) / 1000);
+      setDelta({
+        pct,
+        direction: pct > 0.01 ? 'up' : pct < -0.01 ? 'down' : 'flat',
+        secAgo: Math.max(secAgo, 1),
+      });
+    }
+    prevRef.current = { value, timestamp: now };
+  }, [value]);
+
+  const arrowChar = delta?.direction === 'up' ? '\u2191' : delta?.direction === 'down' ? '\u2193' : '';
+  const arrowColor = delta?.direction === 'up' ? colorUp : delta?.direction === 'down' ? colorDown : 'text-zinc-500';
+
+  return (
+    <div>
+      <div className="text-[9px] text-zinc-500 uppercase mb-0.5">{label}</div>
+      <div className="flex items-center gap-1.5">
+        <span className={cn('text-[11px] font-mono font-medium', value != null && value > 0 ? 'text-zinc-200' : 'text-zinc-600')}>
+          {fmtPrem(value)}
+        </span>
+        {delta && delta.direction !== 'flat' && (
+          <span className={cn('text-[10px] font-bold', arrowColor)}>
+            {arrowChar}
+          </span>
+        )}
+      </div>
+      {delta && delta.direction !== 'flat' && (
+        <div className={cn('text-[8px] font-mono', arrowColor)}>
+          {delta.pct >= 0 ? '+' : ''}{delta.pct.toFixed(1)}% from {delta.secAgo}s ago
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 5. PositionLive — live ticking position state
+// ══════════════════════════════════════════════════════════════
+
+function PositionLive({
+  positionSide,
+  positionStrike,
+  entryPremium,
+  currentPremium,
+  pnlPct,
+  pnlUsd,
+  highestPremium,
+  trailingActive,
+  openedAt,
+  botState,
+}: {
+  positionSide: string | null;
+  positionStrike: number | null;
+  entryPremium: number | null;
+  currentPremium: number | null;
+  pnlPct: number | null;
+  pnlUsd: number | null;
+  highestPremium: number | null;
+  trailingActive: boolean;
+  openedAt: string | null;
+  botState: string | null | undefined;
+}) {
+  useLiveTick();
+
+  // Hold timer
+  const holdSec = openedAt ? Math.floor((Date.now() - new Date(openedAt).getTime()) / 1000) : 0;
+  const holdMin = Math.floor(holdSec / 60);
+  const holdRemSec = holdSec % 60;
+
+  // Peak P&L
+  const peakPct = highestPremium != null && entryPremium != null && entryPremium > 0
+    ? ((highestPremium - entryPremium) / entryPremium * 100)
+    : null;
+
+  // Ratchet floor (simplified display from bot state)
+  // Phase detection: < 30s = phase 1 (hands off), >= 30s = phase 2 (active trailing)
+  const phase = holdSec < 30 ? 1 : 2;
+  const phaseCountdown = phase === 1 ? Math.max(30 - holdSec, 0) : null;
+
+  return (
+    <div className="bg-[#7c4dff]/5 border border-[#7c4dff]/20 rounded p-2.5 mb-2">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] font-semibold text-[#7c4dff] uppercase tracking-wide">
+          HOLDING {positionSide?.toUpperCase()} {fmtStrike(positionStrike)}
+        </span>
+        {trailingActive && (
+          <span className="flex items-center gap-1 text-[9px] font-mono text-[#00c853]">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
+            TRAILING
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-1 text-[9px] font-mono">
+        {/* Hold timer */}
+        <div className="flex items-center gap-1">
+          <span className="text-zinc-600">\u251C Hold:</span>
+          <span className="text-zinc-300">{holdMin}m {String(holdRemSec).padStart(2, '0')}s</span>
+        </div>
+
+        {/* P&L */}
+        <div className="flex items-center gap-1">
+          <span className="text-zinc-600">\u251C P&L:</span>
+          <span className={cn('font-medium', (pnlPct ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+            {pnlUsd != null ? `$${pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(4)}` : '\u2014'}
+            {pnlPct != null && ` (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`}
+          </span>
+        </div>
+
+        {/* Peak */}
+        {peakPct != null && (
+          <div className="flex items-center gap-1">
+            <span className="text-zinc-600">\u251C Peak:</span>
+            <span className="text-[#00c853]">
+              ${highestPremium!.toFixed(4)} (+{peakPct.toFixed(1)}%)
+            </span>
+          </div>
+        )}
+
+        {/* Entry premium */}
+        <div className="flex items-center gap-1">
+          <span className="text-zinc-600">\u251C Entry:</span>
+          <span className="text-zinc-400">{fmtPrem(entryPremium)}</span>
+          <span className="text-zinc-600">Now:</span>
+          <span className="text-zinc-300">{currentPremium != null ? fmtPrem(currentPremium) : 'updating...'}</span>
+        </div>
+
+        {/* Phase */}
+        <div className="flex items-center gap-1">
+          <span className="text-zinc-600">\u251C Phase:</span>
+          <span className="text-zinc-300">
+            {phase} ({phase === 1 ? 'hands off' : 'active trailing'})
+            {phaseCountdown != null && <span className="text-amber-400 ml-1">\u2192 Phase 2 in {phaseCountdown}s</span>}
+          </span>
+        </div>
+
+        {/* Exit watching */}
+        <div className="flex items-center gap-1">
+          <span className="text-zinc-600">\u2514 Exit:</span>
+          <span className="text-zinc-400">
+            {trailingActive ? 'trailing stop active' : 'watching for momentum fade...'}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 6. CooldownDisplay — post-exit cooldown with candle count
+// ══════════════════════════════════════════════════════════════
+
+function CooldownDisplay({
+  lastExitType,
+  lastExitPnlPct,
+  lastExitPnlUsd,
+  cooldownCandles,
+}: {
+  lastExitType: string | null | undefined;
+  lastExitPnlPct: number | null | undefined;
+  lastExitPnlUsd: number | null | undefined;
+  cooldownCandles: { current: number; needed: number } | null | undefined;
+}) {
+  if (!lastExitType) return null;
+
+  return (
+    <div className="text-[9px] font-mono mb-2 space-y-0.5">
+      <div className="flex items-center gap-1">
+        <span className="text-zinc-500">Last:</span>
+        <span className="text-zinc-400">{lastExitType}</span>
+        {lastExitPnlPct != null && (
+          <span className={cn(lastExitPnlPct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+            {lastExitPnlPct >= 0 ? '+' : ''}{lastExitPnlPct.toFixed(1)}%
+          </span>
+        )}
+        {lastExitPnlUsd != null && (
+          <span className="text-zinc-600">
+            (${lastExitPnlUsd >= 0 ? '+' : ''}{lastExitPnlUsd.toFixed(4)})
+          </span>
+        )}
+      </div>
+      {cooldownCandles && (
+        <div className="flex items-center gap-1.5">
+          <span className="text-zinc-500">Cooldown:</span>
+          <span className="text-amber-400">
+            fresh candles needed ({cooldownCandles.current}/{cooldownCandles.needed} directional)
+          </span>
+          {/* Mini candle boxes showing progress */}
+          <div className="flex gap-0.5">
+            {Array.from({ length: cooldownCandles.needed }, (_, i) => (
+              <div
+                key={i}
+                className={cn(
+                  'w-2.5 h-2 rounded-sm',
+                  i < cooldownCandles.current ? 'bg-amber-400' : 'bg-zinc-700',
+                )}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 7. RegimeBadge — flashing regime with duration
+// ══════════════════════════════════════════════════════════════
+
+function RegimeBadge({ regime, regimeSince }: {
+  regime: string | null | undefined;
+  regimeSince: string | null | undefined;
+}) {
+  useLiveTick();
+  const prevRegimeRef = useRef<string | null>(null);
+  const [isFlashing, setIsFlashing] = useState(false);
+
+  useEffect(() => {
+    if (regime && prevRegimeRef.current && regime !== prevRegimeRef.current) {
+      setIsFlashing(true);
+      const t = setTimeout(() => setIsFlashing(false), 1500);
+      return () => clearTimeout(t);
+    }
+    prevRegimeRef.current = regime ?? null;
+  }, [regime]);
+
+  if (!regime) return null;
+
+  const durationSec = regimeSince ? Math.floor((Date.now() - new Date(regimeSince).getTime()) / 1000) : null;
+  const durationLabel = durationSec != null
+    ? (durationSec >= 3600
+      ? `${Math.floor(durationSec / 3600)}h ${Math.floor((durationSec % 3600) / 60)}m`
+      : durationSec >= 60
+        ? `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`
+        : `${durationSec}s`)
+    : null;
+
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[9px] font-mono font-semibold uppercase border',
+      regimeColor(regime),
+      isFlashing && 'opts-regime-flash',
+    )}>
+      {regime.replace(/_/g, ' ')}
+      {durationLabel && <span className="text-[8px] opacity-70">({durationLabel})</span>}
+    </span>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// PairCard — per-asset card with ALL live features
+// ══════════════════════════════════════════════════════════════
+
+function PairCard({ ps, botStatus }: { ps: MergedPairState; botStatus: BotStatus | null }) {
   const s = ps.state;
-  // Position is "live" if:
-  //   1. options_state has position_side set AND data is fresh (< 5 min), OR
-  //   2. There's an open options trade in the trades table (fallback for engine restart)
+
+  // Position detection
   const positionSideSet = s?.position_side != null;
   const dataAge = ageMs(s?.updated_at ?? null);
   const hasPositionFromState = positionSideSet && dataAge < 5 * 60 * 1000;
   const hasPositionFromTrades = ps.openTrade != null;
   const hasPosition = hasPositionFromState || hasPositionFromTrades;
 
-  // Derive position info: prefer options_state, fallback to trades table
+  // Derive position info
   const positionSide = s?.position_side ?? (
     hasPositionFromTrades
       ? (ps.openTrade!.pair.endsWith('-C') ? 'call' : ps.openTrade!.pair.endsWith('-P') ? 'put' : 'call')
@@ -166,11 +551,10 @@ function PairCard({ ps }: { ps: MergedPairState }) {
   const trailingActive = s?.trailing_active ?? (hasPositionFromTrades && ps.openTrade!.position_state === 'trailing');
   const highestPremium = s?.highest_premium ?? null;
 
-  // Candle momentum data
   const momentum = s?.candle_momentum ?? null;
   const botState = parseBotState(s?.bot_state);
 
-  // Target strike + premium from chain data
+  // Target strike + premium
   const targetStrike = s?.target_strike ?? null;
   let targetPremium: number | null = null;
   let targetCollateral: number | null = null;
@@ -183,8 +567,14 @@ function PairCard({ ps }: { ps: MergedPairState }) {
     }
   }
 
-  // Which strike to show prominently: position strike > target strike > ATM strike
   const displayStrike = hasPosition ? positionStrike : (targetStrike ?? s?.atm_strike ?? null);
+
+  // Open trade opened_at for hold timer
+  const openedAt = hasPositionFromTrades ? ps.openTrade!.opened_at : null;
+
+  // Regime from botStatus
+  const regime = botStatus?.market_regime ?? null;
+  const regimeSince = botStatus?.regime_since ?? null;
 
   return (
     <div
@@ -193,7 +583,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
         hasPosition ? 'border-[#7c4dff]/40' : botState.isReady ? 'border-[#00c853]/40' : 'border-zinc-800/50',
       )}
     >
-      {/* ═══ HEADER ═══ */}
+      {/* ═══ HEADER with SCAN PULSE ═══ */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-white">{ps.asset}</span>
@@ -204,21 +594,15 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             Delta
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2">
           {hasPosition && (
             <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-[#7c4dff] bg-[#7c4dff]/10 flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-[#7c4dff] animate-pulse" />
               {positionSide?.toUpperCase()} OPEN
             </span>
           )}
-          {ps.stale ? (
-            <span className="text-[8px] text-zinc-600 font-mono">STALE</span>
-          ) : s?.updated_at ? (
-            <span className="text-[8px] text-zinc-600 font-mono flex items-center gap-1">
-              <span className="w-1 h-1 rounded-full bg-[#00c853]" />
-              {formatTimeAgo(s.updated_at)}
-            </span>
-          ) : null}
+          {/* 1. SCAN PULSE */}
+          <ScanPulse updatedAt={s?.updated_at ?? null} />
         </div>
       </div>
 
@@ -229,7 +613,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
         </div>
       ) : (
         <>
-          {/* ═══ STRIKE + EXPIRY + BALANCE — always visible, prominent ═══ */}
+          {/* ═══ STRIKE + EXPIRY + BALANCE ═══ */}
           <div className="flex items-center gap-3 mb-2.5 px-2 py-1.5 bg-zinc-800/40 rounded border border-zinc-800/60">
             <div className="flex items-center gap-1.5">
               <span className="text-[8px] text-zinc-500 uppercase">Strike</span>
@@ -244,7 +628,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             <div className="flex items-center gap-1.5">
               <span className="text-[8px] text-zinc-500 uppercase">Exp</span>
               <span className="text-[10px] font-mono text-zinc-300 truncate max-w-[80px]">
-                {s.expiry_label ?? '—'}
+                {s.expiry_label ?? '\u2014'}
               </span>
             </div>
             {s.balance != null && (
@@ -260,11 +644,16 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             )}
           </div>
 
-          {/* ═══ CANDLE MOMENTUM BOXES ═══ */}
+          {/* ═══ 7. REGIME BADGE ═══ */}
+          <div className="mb-2.5">
+            <RegimeBadge regime={regime} regimeSince={regimeSince} />
+          </div>
+
+          {/* ═══ CANDLE MOMENTUM BOXES + 2. COUNTDOWN + 3. SIGNAL BAR ═══ */}
           {momentum ? (
             <div className="mb-2.5">
-              <div className="flex items-center gap-2">
-                {/* The boxes that light up */}
+              {/* Candle direction boxes */}
+              <div className="flex items-center gap-2 mb-1.5">
                 <div className={cn('flex gap-1', momentum.passed && 'animate-pulse')}>
                   {Array.from({ length: momentum.total }, (_, i) => (
                     <div key={i} className={cn(
@@ -278,23 +667,8 @@ function PairCard({ ps }: { ps: MergedPairState }) {
                   ))}
                 </div>
                 <span className="text-[9px] font-mono text-zinc-500">
-                  {momentum.count}/{momentum.total} {momentum.direction === 'long' ? 'green' : momentum.direction === 'short' ? 'red' : '—'}
+                  {momentum.count}/{momentum.total} {momentum.direction === 'long' ? 'green' : momentum.direction === 'short' ? 'red' : '\u2014'}
                 </span>
-                <span className={cn(
-                  'text-[9px] font-mono',
-                  momentum.cum_pct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-                )}>
-                  {momentum.cum_pct >= 0 ? '+' : ''}{momentum.cum_pct.toFixed(2)}%
-                </span>
-                <span className={cn(
-                  'px-1.5 py-0.5 rounded text-[8px] font-bold uppercase',
-                  momentum.passed
-                    ? 'bg-[#00c853]/15 text-[#00c853] border border-[#00c853]/30'
-                    : 'bg-zinc-800 text-zinc-500 border border-zinc-700',
-                )}>
-                  {momentum.passed ? 'PASS' : 'FAIL'}
-                </span>
-                {/* Direction arrow when passing */}
                 {momentum.passed && momentum.direction && (
                   <span className={cn(
                     'text-sm font-bold',
@@ -304,10 +678,19 @@ function PairCard({ ps }: { ps: MergedPairState }) {
                   </span>
                 )}
               </div>
+
+              {/* 2. Candle countdown */}
+              <div className="mb-1.5">
+                <CandleCountdown />
+              </div>
+
+              {/* 3. Signal strength bar */}
+              <SignalStrengthBar momentum={momentum} />
+
               {/* Fail reason */}
               {!momentum.passed && momentum.reason && (
                 <div className="text-[8px] font-mono text-zinc-500 mt-1 truncate">
-                  {momentum.reason.replace(/^EARLY_GATE:\s*/, '').replace(/\s*→\s*SKIP$/, '')}
+                  {momentum.reason.replace(/^EARLY_GATE:\s*/, '').replace(/\s*\u2192\s*SKIP$/, '')}
                 </div>
               )}
             </div>
@@ -315,7 +698,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             <div className="text-[9px] font-mono text-zinc-600 mb-2.5">Candles: waiting...</div>
           )}
 
-          {/* ═══ BOT STATE — WHY NOT ENTERING ═══ */}
+          {/* ═══ BOT STATE ═══ */}
           <div className={cn(
             'rounded px-2.5 py-1.5 mb-2.5 border',
             botState.isBlocked
@@ -327,11 +710,10 @@ function PairCard({ ps }: { ps: MergedPairState }) {
                   : 'bg-zinc-800/30 border-zinc-800/50',
           )}>
             <div className="flex items-center gap-2">
-              {/* Status dot */}
               <span className={cn(
                 'w-2 h-2 rounded-full shrink-0',
                 botState.isBlocked ? 'bg-[#ff1744]'
-                  : botState.isReady ? 'bg-[#00c853] animate-pulse'
+                  : botState.isReady ? 'bg-[#00c853] opts-pulse-green'
                   : hasPosition ? 'bg-[#7c4dff] animate-pulse'
                   : 'bg-zinc-600',
               )} />
@@ -356,91 +738,44 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             </div>
           )}
 
-          {/* ═══ PREMIUMS ═══ */}
+          {/* ═══ 4. PREMIUMS with LIVE TICK ═══ */}
           <div className="grid grid-cols-2 gap-2 mb-2.5">
-            <div>
-              <div className="text-[9px] text-zinc-500 uppercase mb-0.5">CALL Premium</div>
-              <div className="text-[10px] font-mono text-[#00c853]">
-                {fmtPrem(s.call_premium)}
-              </div>
-            </div>
-            <div>
-              <div className="text-[9px] text-zinc-500 uppercase mb-0.5">PUT Premium</div>
-              <div className="text-[10px] font-mono text-[#ff1744]">
-                {fmtPrem(s.put_premium)}
-              </div>
-            </div>
+            <PremiumTick
+              label="CALL Premium"
+              value={s.call_premium}
+              colorUp="text-[#00c853]"
+              colorDown="text-[#ff1744]"
+            />
+            <PremiumTick
+              label="PUT Premium"
+              value={s.put_premium}
+              colorUp="text-[#00c853]"
+              colorDown="text-[#ff1744]"
+            />
           </div>
 
-          {/* ═══ ACTIVE POSITION ═══ */}
+          {/* ═══ 5. ACTIVE POSITION with LIVE TIMERS ═══ */}
           {hasPosition ? (
-            <div className="bg-[#7c4dff]/5 border border-[#7c4dff]/20 rounded p-2 mb-2">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] font-medium text-[#7c4dff] uppercase">
-                  {positionSide?.toUpperCase()} Position
-                </span>
-                {trailingActive && (
-                  <span className="flex items-center gap-1 text-[9px] font-mono text-[#00c853]">
-                    <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
-                    TRAILING
-                  </span>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] font-mono text-zinc-400">
-                {positionStrike != null && (
-                  <div>
-                    <span className="text-zinc-600">Strike </span>
-                    {fmtStrike(positionStrike)}
-                  </div>
-                )}
-                <div>
-                  <span className="text-zinc-600">Entry </span>
-                  {fmtPrem(entryPremium)}
-                </div>
-                <div>
-                  <span className="text-zinc-600">Now </span>
-                  {currentPremium != null ? fmtPrem(currentPremium) : <span className="text-zinc-600">updating...</span>}
-                </div>
-                <div>
-                  <span className="text-zinc-600">P&L </span>
-                  <span className={cn(
-                    'font-medium',
-                    (pnlPct ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-                  )}>
-                    {pnlPct != null ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%` : '—'}
-                    {pnlUsd != null && ` ($${pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(4)})`}
-                  </span>
-                </div>
-              </div>
-              {highestPremium != null && entryPremium != null && entryPremium > 0 && (
-                <div className="text-[8px] font-mono text-zinc-600 mt-1">
-                  Peak ${highestPremium.toFixed(4)} ({((highestPremium - entryPremium) / entryPremium * 100).toFixed(1)}%)
-                </div>
-              )}
-            </div>
+            <PositionLive
+              positionSide={positionSide}
+              positionStrike={positionStrike}
+              entryPremium={entryPremium}
+              currentPremium={currentPremium}
+              pnlPct={pnlPct}
+              pnlUsd={pnlUsd}
+              highestPremium={highestPremium}
+              trailingActive={trailingActive}
+              openedAt={openedAt}
+              botState={s.bot_state}
+            />
           ) : (
-            <div className="text-[9px] font-mono text-zinc-600 mb-2">
-              {s.last_exit_type ? (
-                <span>
-                  Last: {s.last_exit_type}
-                  {s.last_exit_pnl_pct != null && (
-                    <span className={cn(
-                      'ml-1',
-                      s.last_exit_pnl_pct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-                    )}>
-                      {s.last_exit_pnl_pct >= 0 ? '+' : ''}{s.last_exit_pnl_pct.toFixed(1)}%
-                    </span>
-                  )}
-                  {s.last_exit_pnl_usd != null && (
-                    <span className="text-zinc-600 ml-0.5">
-                      (${s.last_exit_pnl_usd >= 0 ? '+' : ''}{s.last_exit_pnl_usd.toFixed(4)})
-                    </span>
-                  )}
-                </span>
-              ) : (
-                <span>Position: None</span>
-              )}
-            </div>
+            /* ═══ 6. COOLDOWN DISPLAY ═══ */
+            <CooldownDisplay
+              lastExitType={s.last_exit_type}
+              lastExitPnlPct={s.last_exit_pnl_pct}
+              lastExitPnlUsd={s.last_exit_pnl_usd}
+              cooldownCandles={botState.cooldownCandles}
+            />
           )}
 
           {/* ═══ MINI EVENT LOG ═══ */}
@@ -466,6 +801,62 @@ function PairCard({ ps }: { ps: MergedPairState }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// Main Export: OptionsTracker
+// ══════════════════════════════════════════════════════════════
+
+export function OptionsTracker() {
+  const { optionsState, optionsLog, openPositions, botStatus } = useSupabase();
+
+  // Inject pulse animations
+  useEffect(() => { ensureStyles(); }, []);
+
+  const pairStates = useMemo(() => {
+    const results: MergedPairState[] = [];
+
+    const optionTrades = new Map<string, OpenPosition>();
+    for (const pos of (openPositions ?? [])) {
+      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) {
+        const asset = extractBaseAsset(pos.pair);
+        optionTrades.set(asset, pos);
+      }
+    }
+
+    for (const asset of OPTIONS_ASSETS) {
+      const pair = `${asset}/USD:USD`;
+      const state = optionsState.find((s) => s.pair === pair) ?? null;
+      const assetEvents = optionsLog.filter((e) => extractBaseAsset(e.pair) === asset);
+
+      results.push({
+        asset,
+        pair,
+        state,
+        recentEvents: assetEvents.slice(0, 5),
+        openTrade: optionTrades.get(asset) ?? null,
+      });
+    }
+
+    return results;
+  }, [optionsState, optionsLog, openPositions]);
+
+  return (
+    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
+          Options Entry Signals
+        </h3>
+        <span className="text-[9px] text-zinc-600 font-mono">BTC + ETH | LIVE</span>
+      </div>
+
+      <div className="space-y-3">
+        {pairStates.map((ps) => (
+          <PairCard key={ps.asset} ps={ps} botStatus={botStatus} />
+        ))}
+      </div>
     </div>
   );
 }
