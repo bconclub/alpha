@@ -2610,17 +2610,47 @@ class OptionsScalpStrategy(BaseStrategy):
 
             # Overwrite DB with correct options P&L using actual fill price.
             # Snapshot volatile state — create_task runs after we clear self.*
+            _sym = self.option_symbol or self.pair
+            _entry_prem = self.entry_premium
+            _highest_prem = self.highest_premium
+            _contracts = self._contracts
+            _side = self.option_side
+            _strike = self.strike_price
+            _base = self._base_asset
+
             if exit_fill > 0:
                 import asyncio
                 asyncio.get_event_loop().create_task(
                     self._close_option_trade_in_db(
                         exit_fill, exit_type,
-                        option_symbol=self.option_symbol or self.pair,
-                        entry_premium=self.entry_premium,
-                        highest_premium=self.highest_premium,
-                        contracts=self._contracts,
+                        option_symbol=_sym,
+                        entry_premium=_entry_prem,
+                        highest_premium=_highest_prem,
+                        contracts=_contracts,
                     )
                 )
+
+            # Telegram exit notification — sent here because
+            # _close_option_trade_in_db may not find the open trade
+            # (trade_executor already closed it before on_fill runs)
+            try:
+                alerts = getattr(self.executor, "alerts", None)
+                if alerts is not None and exit_fill > 0 and _entry_prem > 0:
+                    import asyncio as _aio
+                    _mult = 0.001 if "BTC" in _sym else 0.01
+                    _gross = (exit_fill - _entry_prem) * _contracts * _mult
+                    _pnl_pct = (exit_fill - _entry_prem) / _entry_prem * 100
+                    _emoji = "\u2705" if _gross >= 0 else "\u274c"
+                    _side_label = "CALL" if _sym.endswith("-C") or _sym.endswith("C") else "PUT"
+                    msg = (
+                        f"{_emoji} {_base} option closed\n"
+                        f"{exit_type} | {_side_label} ${_strike:.0f}\n"
+                        f"${_entry_prem:.2f} \u2192 ${exit_fill:.2f} ({_pnl_pct:+.1f}%)\n"
+                        f"Gross: ${_gross:+.4f} | x{_contracts}"
+                    )
+                    _aio.get_event_loop().create_task(alerts.send_text(msg))
+            except Exception:
+                pass
 
             self.in_position = False
             self.option_side = None
