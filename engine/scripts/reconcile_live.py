@@ -117,128 +117,170 @@ async def create_delta_exchange() -> ccxt.delta:
 
 # ── Fetch all option fills with pagination ────────────────────────────
 
+def _parse_fill(t: dict) -> Fill | None:
+    """Parse a ccxt-unified trade dict into a Fill (options only)."""
+    symbol = t.get("symbol", "")
+    if not _OPTION_RE.search(symbol):
+        return None  # not an option
+
+    fee_info = t.get("fee", {})
+    fee_cost = float(fee_info.get("cost", 0) or 0) if isinstance(fee_info, dict) else 0
+
+    return Fill(
+        symbol=symbol,
+        side=t.get("side", ""),
+        price=float(t.get("price", 0) or 0),
+        amount=float(t.get("amount", 0) or 0),
+        fee=abs(fee_cost),
+        timestamp=int(t.get("timestamp", 0) or 0),
+        order_id=str(t.get("order", "")),
+        trade_id=str(t.get("id", "")),
+        raw=t,
+    )
+
+
 async def fetch_all_option_fills(exchange: ccxt.delta) -> list[Fill]:
-    """Fetch all historical fills from Delta, keep only options."""
+    """Fetch all historical fills from Delta, keep only options.
+
+    Pagination strategy:
+      1. page_num=1,2,3… via fetch_my_trades  (Delta /fills supports this)
+      2. If page_num silently returns the same data, fall back to
+         after={last_trade_id} cursor pagination
+      3. If both fail on the very first page, try the raw
+         private_get_fills endpoint as a last resort
+    """
+    from datetime import datetime, timezone
+
     all_fills: list[Fill] = []
     seen_ids: set[str] = set()
-    page = 0
 
     print("Fetching fills from Delta Exchange...")
     await exchange.load_markets()
 
-    # Walk backwards in time using 'since' — Delta returns newest first
-    # with limit, so we use end_time and walk backwards
-    from datetime import datetime, timezone, timedelta
-    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
-    # Go back to Feb 1 2026 to cover all historical trades
-    start_time = int(datetime(2026, 2, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    PER_PAGE = 100          # 100 worked before; don't push to 500
+    MAX_PAGES = 100         # safety cap
+    method_label = "page_num"
 
-    # Strategy: fetch page by page, using the oldest timestamp from each
-    # batch as the new 'end' for the next request (walk backwards)
-    cursor_end = end_time
+    page_num = 1
+    last_id: str | None = None
+    use_after = False       # flip to True if page_num doesn't advance
 
-    while cursor_end > start_time:
-        page += 1
-        try:
-            # Try multiple pagination strategies
-            trades = await exchange.fetch_my_trades(
-                symbol=None, since=start_time, limit=500,
-                params={"end_time": str(cursor_end // 1000)},
-            )
-        except Exception as e1:
-            # Fallback: try without end_time
+    while page_num <= MAX_PAGES:
+        trades: list | None = None
+
+        # ── Strategy A: page_num pagination ───────────────────────
+        if not use_after:
             try:
                 trades = await exchange.fetch_my_trades(
-                    symbol=None, limit=500,
-                    params={"page_num": str(page)},
+                    symbol=None,
+                    limit=PER_PAGE,
+                    params={"page_num": str(page_num)},
                 )
-            except Exception as e2:
-                print(f"  Page {page} failed: {e1} / {e2}")
-                break
+            except Exception:
+                # page_num param might not be supported — fall through
+                trades = None
 
+        # ── Strategy B: after=<last_id> cursor pagination ─────────
+        if trades is None or (not trades and page_num > 1 and not use_after):
+            use_after = True
+            method_label = "after-id"
+            params: dict = {"page_size": str(PER_PAGE)}
+            if last_id:
+                params["after"] = last_id
+            try:
+                trades = await exchange.fetch_my_trades(
+                    symbol=None,
+                    limit=PER_PAGE,
+                    params=params,
+                )
+            except Exception:
+                trades = None
+
+        # ── Strategy C: plain call with no params (first page only) ──
+        if not trades and page_num == 1:
+            method_label = "plain"
+            try:
+                trades = await exchange.fetch_my_trades(
+                    symbol=None, limit=PER_PAGE,
+                )
+            except Exception:
+                trades = None
+
+        # ── Strategy D: raw private_get_fills (first page only) ──
+        if not trades and page_num == 1:
+            method_label = "private_get_fills"
+            try:
+                resp = await exchange.private_get_fills(
+                    {"page_size": str(PER_PAGE)}
+                )
+                raw_list = (
+                    resp.get("result", resp.get("data", []))
+                    if isinstance(resp, dict) else resp
+                )
+                if raw_list:
+                    trades = [exchange.parse_trade(f) for f in raw_list]
+            except Exception as e:
+                print(f"  private_get_fills failed: {e}")
+
+        # Nothing from any method → done
         if not trades:
+            if page_num == 1:
+                print("  No fills returned from any method.")
             break
 
-        # Deduplicate (pagination may overlap)
+        # ── Deduplicate ───────────────────────────────────────────
         new_trades = []
         for t in trades:
             tid = str(t.get("id", ""))
             if tid and tid not in seen_ids:
                 seen_ids.add(tid)
                 new_trades.append(t)
+                last_id = tid          # keep cursor updated
 
         if not new_trades:
-            break
-
-        option_count = 0
-        oldest_ts = cursor_end
-        for t in new_trades:
-            ts = int(t.get("timestamp", 0) or 0)
-            if ts > 0 and ts < oldest_ts:
-                oldest_ts = ts
-
-            symbol = t.get("symbol", "")
-            if not _OPTION_RE.search(symbol):
+            # All duplicates — pagination stalled
+            if not use_after:
+                # Switch strategy and retry this page
+                use_after = True
+                method_label = "after-id"
                 continue
-
-            fee_info = t.get("fee", {})
-            fee_cost = float(fee_info.get("cost", 0) or 0) if isinstance(fee_info, dict) else 0
-
-            all_fills.append(Fill(
-                symbol=symbol,
-                side=t.get("side", ""),
-                price=float(t.get("price", 0) or 0),
-                amount=float(t.get("amount", 0) or 0),
-                fee=abs(fee_cost),
-                timestamp=ts,
-                order_id=str(t.get("order", "")),
-                trade_id=str(t.get("id", "")),
-                raw=t,
-            ))
-            option_count += 1
-
-        oldest_dt = datetime.fromtimestamp(oldest_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-        print(f"  Page {page}: {len(new_trades)} new fills, {option_count} options "
-              f"(total: {len(all_fills)}, oldest: {oldest_dt})")
-
-        # Move cursor back — subtract 1ms to avoid re-fetching the same oldest
-        if oldest_ts >= cursor_end:
-            # Didn't move backwards — we're stuck, break
             break
-        cursor_end = oldest_ts - 1
 
-        await asyncio.sleep(1)
+        # ── Parse option fills ────────────────────────────────────
+        option_count = 0
+        for t in new_trades:
+            fill = _parse_fill(t)
+            if fill:
+                all_fills.append(fill)
+                option_count += 1
+
+        print(
+            f"  Page {page_num} ({method_label}): "
+            f"{len(new_trades)} new fills, {option_count} options "
+            f"(total options: {len(all_fills)})"
+        )
+
+        # Fewer than requested → last page
+        if len(trades) < PER_PAGE:
+            break
+
+        page_num += 1
+        await asyncio.sleep(0.5)
 
     print(f"\nTotal option fills: {len(all_fills)}")
     if all_fills:
-        # Sort by timestamp
         all_fills.sort(key=lambda f: f.timestamp)
-        oldest = datetime.fromtimestamp(all_fills[0].timestamp / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-        newest = datetime.fromtimestamp(all_fills[-1].timestamp / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        oldest = datetime.fromtimestamp(
+            all_fills[0].timestamp / 1000, tz=timezone.utc
+        ).strftime("%Y-%m-%d")
+        newest = datetime.fromtimestamp(
+            all_fills[-1].timestamp / 1000, tz=timezone.utc
+        ).strftime("%Y-%m-%d")
         print(f"  Date range: {oldest} to {newest}")
-        print(f"  Sample fill symbols:")
+        print(f"  Sample fills:")
         for f in all_fills[:5]:
             print(f"    {f.symbol} | {f.side} {f.amount}x @ ${f.price} | fee=${f.fee}")
     return all_fills
-
-
-async def _fetch_fills_fallback(exchange: ccxt.delta, after_id: str | None) -> list:
-    """Fallback: use privateGetOrderHistory or direct fills endpoint."""
-    try:
-        params: dict = {"page_size": "100"}
-        if after_id:
-            params["after"] = after_id
-        response = await exchange.private_get_fills(params)
-        # ccxt may wrap this differently — try common patterns
-        if isinstance(response, dict):
-            fills_raw = response.get("result", response.get("data", []))
-        else:
-            fills_raw = response
-        # Parse into ccxt-like format
-        return [exchange.parse_trade(f) for f in fills_raw] if fills_raw else []
-    except Exception as e:
-        print(f"  Fallback also failed: {e}")
-        return []
 
 
 # ── Build round trips via FIFO matching ───────────────────────────────
