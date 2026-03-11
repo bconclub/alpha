@@ -2139,6 +2139,39 @@ class OptionsScalpStrategy(BaseStrategy):
                 sym, open_trade["id"], exit_premium,
                 gross_pnl, net_pnl, pnl_pct,
             )
+
+            # Telegram exit notification
+            try:
+                alerts = getattr(self.executor, "alerts", None)
+                if alerts is not None:
+                    pnl_emoji = "\u2705" if net_pnl >= 0 else "\u274c"
+                    # Calculate hold time from DB opened_at
+                    opened_at = open_trade.get("opened_at") or open_trade.get("created_at")
+                    hold_time = "?"
+                    if opened_at:
+                        from datetime import datetime as _dt, timezone as _tz
+                        try:
+                            if isinstance(opened_at, str):
+                                opened_at = _dt.fromisoformat(opened_at.replace("Z", "+00:00"))
+                            delta = _dt.now(_tz.utc) - opened_at
+                            mins = int(delta.total_seconds() // 60)
+                            hold_time = f"{mins}m" if mins < 60 else f"{mins // 60}h{mins % 60}m"
+                        except Exception:
+                            pass
+                    option_side = open_trade.get("side", "buy")
+                    # Derive call/put from symbol (ends with -C or -P)
+                    side_label = "CALL" if sym.endswith("-C") or sym.endswith("C") else "PUT"
+                    msg = (
+                        f"{pnl_emoji} {self._base_asset} option closed\n"
+                        f"{exit_type} | {side_label} ${ep:.0f}\n"
+                        f"${db_entry:.2f} \u2192 ${exit_premium:.2f} ({pnl_pct:+.1f}%)\n"
+                        f"Gross: ${gross_pnl:+.4f} | Net: ${net_pnl:+.4f}\n"
+                        f"Hold: {hold_time} | Fees: ${entry_fee + exit_fee:.4f}"
+                    )
+                    await alerts.send_text(msg)
+            except Exception:
+                self.logger.debug("[%s] Failed to send exit Telegram alert", sym)
+
             return True
 
         except Exception:
@@ -2551,6 +2584,21 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.strike_price, fill_price,
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
+            # Telegram entry notification
+            try:
+                alerts = getattr(self.executor, "alerts", None)
+                if alerts is not None:
+                    import asyncio
+                    collateral = fill_price * self._contracts / self.OPTIONS_LEVERAGE
+                    msg = (
+                        f"\U0001f4e5 {self._base_asset} option opened\n"
+                        f"{self.option_side.upper()} ${self.strike_price:.0f} | "
+                        f"x{self._contracts} @ ${fill_price:.2f}\n"
+                        f"Collateral: ${collateral:.2f}"
+                    )
+                    asyncio.get_event_loop().create_task(alerts.send_text(msg))
+            except Exception:
+                pass
         else:
             # Exit fill — close trade in DB with actual fill price from exchange
             exit_fill = float(order.get("average") or order.get("price") or signal.price or 0)
