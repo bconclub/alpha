@@ -120,7 +120,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
     # ── GPFC: Premium cap — avoid expensive low-gamma options ───
-    MAX_PREMIUM_USD = 40.0               # skip if all premiums > $40
+    MAX_PREMIUM_USD: dict[str, float] = {"ETH": 40.0, "BTC": 800.0}
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # Same pair allocation as futures so capital is balanced.
@@ -1180,6 +1180,20 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_affordable_strike"
             return []
 
+        # 9a-post. PREMIUM CAP — check BEFORE placing any order
+        max_prem = self.MAX_PREMIUM_USD.get(self._base_asset, 40.0)
+        if premium > max_prem:
+            self.logger.info(
+                "[%s] OPTIONS PREMIUM_HIGH: $%.2f > $%.0f cap — skipping",
+                self.pair, premium, max_prem,
+            )
+            await self._log_skip(
+                f"{self.pair} — OPTIONS PREMIUM_HIGH: ${premium:.2f} > ${max_prem:.0f}",
+                {"option_type": option_type, "premium": premium, "setup_type": setup_type},
+            )
+            self._cached_bot_state = "blocked:premium_high"
+            return []
+
         # 9b. PREMIUM CONFIRMATION + LIMIT ENTRY at original price.
         # Dynamic wait: strong moves get fast confirm, weaker ones standard.
         # Premium must rise (or hold flat ±0.5%) during the window.
@@ -1331,18 +1345,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # 10b. SIDEWAYS regime — all setups allowed (candle momentum is the gate)
         # Only CHOPPY is blocked (at regime gate above)
 
-        # 10c. GPFC: Premium too expensive — low gamma, more to lose
-        if premium > self.MAX_PREMIUM_USD:
-            self.logger.info(
-                "[%s] OPTIONS PREMIUM_HIGH: $%.2f > $%.0f cap — skipping",
-                self.pair, premium, self.MAX_PREMIUM_USD,
-            )
-            await self._log_skip(
-                f"{self.pair} — OPTIONS PREMIUM_HIGH: ${premium:.2f} > ${self.MAX_PREMIUM_USD:.0f}",
-                {"option_type": option_type, "premium": premium, "setup_type": setup_type},
-            )
-            self._cached_bot_state = "blocked:premium_high"
-            return []
+        # 10c. (MOVED to step 9a-post — premium cap now checked BEFORE limit order)
 
         # 10d. Sizing already handled by dynamic candle alloc (35/50%)
         # BB_SQUEEZE gets 60% factor applied on top
@@ -2088,6 +2091,27 @@ class OptionsScalpStrategy(BaseStrategy):
             entry_fee = float(open_trade.get("entry_fee") or 0)
             exit_fee = float(open_trade.get("exit_fee") or 0)
 
+            # Sanity: if exit_fee > $0.10 for options, it was stored wrong — recalculate
+            if exit_fee > 0.10:
+                multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                # Approximate spot from premium (ETH: ~100x, BTC: ~200x rough ATM)
+                _spot_approx = exit_premium * (200 if self._base_asset == "BTC" else 100)
+                exit_fee = round(db_contracts * multiplier * _spot_approx * 0.00012, 8)
+                self.logger.info(
+                    "[%s] exit_fee was too high, recalculated fallback=$%.6f",
+                    sym, exit_fee,
+                )
+
+            # Same sanity for entry_fee
+            if entry_fee > 0.10:
+                multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                _spot_approx = db_entry * (200 if self._base_asset == "BTC" else 100)
+                entry_fee = round(db_contracts * multiplier * _spot_approx * 0.00012, 8)
+                self.logger.info(
+                    "[%s] entry_fee was too high, recalculated fallback=$%.6f",
+                    sym, entry_fee,
+                )
+
             gross_pnl = self._calc_options_pnl(db_entry, exit_premium, db_contracts)
             pnl_pct = (exit_premium - db_entry) / db_entry * 100 if db_entry > 0 else 0.0
             net_pnl = gross_pnl - entry_fee - exit_fee
@@ -2100,6 +2124,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "exit_price": round(exit_premium, 8),
                 "closed_at": iso_now(),
                 "pnl": round(net_pnl, 8),
+                "net_pnl": round(net_pnl, 8),
                 "pnl_pct": round(pnl_pct, 4),
                 "gross_pnl": round(gross_pnl, 8),
                 "entry_fee": round(entry_fee, 8),
@@ -2310,6 +2335,16 @@ class OptionsScalpStrategy(BaseStrategy):
                     entry_fee = float(open_trade.get("entry_fee") or 0)
                     exit_fee = float(open_trade.get("exit_fee") or 0)
 
+                    # Sanity: if fees > $0.10 for options, recalculate
+                    if exit_fee > 0.10:
+                        multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                        _spot_approx = exit_premium * (200 if self._base_asset == "BTC" else 100)
+                        exit_fee = round(contracts * multiplier * _spot_approx * 0.00012, 8)
+                    if entry_fee > 0.10:
+                        multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                        _spot_approx = entry_price * (200 if self._base_asset == "BTC" else 100)
+                        entry_fee = round(contracts * multiplier * _spot_approx * 0.00012, 8)
+
                     gross_pnl = self._calc_options_pnl(entry_price, exit_premium, contracts)
                     net_pnl = gross_pnl - entry_fee - exit_fee
                     db_pnl_pct = (exit_premium - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
@@ -2324,6 +2359,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         "exit_price": exit_premium,
                         "closed_at": iso_now(),
                         "pnl": round(net_pnl, 8),
+                        "net_pnl": round(net_pnl, 8),
                         "pnl_pct": round(db_pnl_pct, 4),
                         "gross_pnl": round(gross_pnl, 8),
                         "entry_fee": round(entry_fee, 8),
