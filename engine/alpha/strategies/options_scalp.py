@@ -242,6 +242,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Last known premium — used as exit price when position disappears
         self._last_known_premium: float = 0.0
+        # Last known spot price — used for accurate fee calculation
+        self._last_spot_price: float = 0.0
+        # Entry context string for signals_fired DB column
+        self._entry_context: str = ""
 
         # Cooldown after POSITION_GONE — no new options entry for 60s
         self._position_gone_cooldown_until: float = 0.0
@@ -999,6 +1003,7 @@ class OptionsScalpStrategy(BaseStrategy):
             ohlcv_1s = await self.futures_exchange.fetch_ohlcv(self.pair, "1m", limit=2)
             if ohlcv_1s and len(ohlcv_1s) >= 2:
                 price_now = float(ohlcv_1s[-1][4])  # latest close
+                self._last_spot_price = price_now    # cache for fee calculation
                 price_ago = float(ohlcv_1s[-2][1])  # open of previous candle (~60s ago)
                 if price_ago > 0:
                     underlying_move_pct = abs(price_now - price_ago) / price_ago * 100
@@ -1053,10 +1058,10 @@ class OptionsScalpStrategy(BaseStrategy):
         _mom60 = signal_state.get("momentum_60s", 0) if signal_state else 0
         _bb = _opt_cached.get("bb_position", 0)
         _vol = _opt_cached.get("volume_ratio", 0)
-        _entry_context = f"RSI={_rsi:.0f} mom60={_mom60:.3f}% BB={_bb:.2f} vol={_vol:.2f}x"
+        self._entry_context = f"RSI={_rsi:.0f} mom60={_mom60:.3f}% BB={_bb:.2f} vol={_vol:.2f}x cum={candle_cum_pct:.2f}%"
         self.logger.info(
-            "[%s] ENTRY_CONTEXT: %s | candles=%d/3 cum=%.2f%%",
-            self.pair, _entry_context, candle_count, candle_cum_pct,
+            "[%s] ENTRY_CONTEXT: %s | candles=%d/3",
+            self.pair, self._entry_context, candle_count,
         )
 
         self._cached_bot_state = "ready"
@@ -1354,6 +1359,25 @@ class OptionsScalpStrategy(BaseStrategy):
         premium = fill_price
         self._limit_entry_filled = True  # flag for executor to skip order placement
 
+        # SET POSITION STATE IMMEDIATELY — before async trade_executor flow.
+        # If on_fill() never fires (WS miss, restart), this ensures we track the position.
+        self.in_position = True
+        OptionsScalpStrategy._global_in_position = True
+        self.entry_premium = fill_price
+        self._contracts = opt_contracts
+        self.option_symbol = selected_symbol
+        self.option_side = option_type
+        self.entry_time = time.monotonic()
+        self.highest_premium = fill_price
+        self._last_known_premium = fill_price
+        self.strike_price = selected_strike
+        if self._selected_expiry:
+            self.expiry_dt = self._selected_expiry
+        self.logger.info(
+            "[%s] POSITION LOCKED — %s x%d @ $%.4f (before executor flow)",
+            self.pair, option_type.upper(), opt_contracts, fill_price,
+        )
+
         # 10. Classify setup_type from scalp signal reason (soft — default MOMENTUM_BURST)
         signals_str = ""
         if signal_state is not None:
@@ -1601,7 +1625,9 @@ class OptionsScalpStrategy(BaseStrategy):
                 "setup_type": setup_type,
                 "contracts": contracts,
                 "already_filled": already_filled,
-                "entry_context": _entry_context,
+                "entry_context": self._entry_context,
+                "signals_fired": self._entry_context,
+                "spot_price": self._last_spot_price,
             },
         )]
 
@@ -2127,29 +2153,23 @@ class OptionsScalpStrategy(BaseStrategy):
 
             db_entry = float(open_trade.get("entry_price", ep) or ep)
             db_contracts = int(open_trade.get("contracts") or open_trade.get("amount") or ct)
-            entry_fee = float(open_trade.get("entry_fee") or 0)
-            exit_fee = float(open_trade.get("exit_fee") or 0)
 
-            # Sanity: if exit_fee > $0.10 for options, it was stored wrong — recalculate
-            if exit_fee > 0.10:
-                multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                # Approximate spot from premium (ETH: ~100x, BTC: ~200x rough ATM)
-                _spot_approx = exit_premium * (200 if self._base_asset == "BTC" else 100)
-                exit_fee = round(db_contracts * multiplier * _spot_approx * 0.00012, 8)
-                self.logger.info(
-                    "[%s] exit_fee was too high, recalculated fallback=$%.6f",
-                    sym, exit_fee,
-                )
+            # Delta fee = qty × contract_multiplier × spot_price × 0.000118
+            multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+            spot = self._last_spot_price or (exit_premium * (200 if self._base_asset == "BTC" else 100))
+            calculated_fee = round(db_contracts * multiplier * spot * 0.000118, 8)
 
-            # Same sanity for entry_fee
-            if entry_fee > 0.10:
-                multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                _spot_approx = db_entry * (200 if self._base_asset == "BTC" else 100)
-                entry_fee = round(db_contracts * multiplier * _spot_approx * 0.00012, 8)
-                self.logger.info(
-                    "[%s] entry_fee was too high, recalculated fallback=$%.6f",
-                    sym, entry_fee,
-                )
+            # Entry fee: use DB value if reasonable, else recalculate
+            stored_entry_fee = float(open_trade.get("entry_fee") or 0)
+            entry_fee = stored_entry_fee if 0 < stored_entry_fee <= 0.10 else calculated_fee
+
+            # Exit fee: always calculate from spot (most accurate at exit time)
+            exit_fee = calculated_fee
+
+            self.logger.info(
+                "[%s] FEE CHECK: entry stored=$%.6f calc=$%.6f using=$%.6f | exit calc=$%.6f",
+                sym, stored_entry_fee, calculated_fee, entry_fee, exit_fee,
+            )
 
             gross_pnl = self._calc_options_pnl(db_entry, exit_premium, db_contracts)
             pnl_pct = (exit_premium - db_entry) / db_entry * 100 if db_entry > 0 else 0.0
@@ -2404,18 +2424,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 if open_trade:
                     entry_price = float(open_trade.get("entry_price", self.entry_premium) or self.entry_premium)
                     contracts = int(open_trade.get("contracts") or open_trade.get("amount") or self._contracts)
-                    entry_fee = float(open_trade.get("entry_fee") or 0)
-                    exit_fee = float(open_trade.get("exit_fee") or 0)
+                    # Delta fee = qty × contract_multiplier × spot_price × 0.000118
+                    multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                    spot = self._last_spot_price or (exit_premium * (200 if self._base_asset == "BTC" else 100))
+                    calculated_fee = round(contracts * multiplier * spot * 0.000118, 8)
 
-                    # Sanity: if fees > $0.10 for options, recalculate
-                    if exit_fee > 0.10:
-                        multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                        _spot_approx = exit_premium * (200 if self._base_asset == "BTC" else 100)
-                        exit_fee = round(contracts * multiplier * _spot_approx * 0.00012, 8)
-                    if entry_fee > 0.10:
-                        multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                        _spot_approx = entry_price * (200 if self._base_asset == "BTC" else 100)
-                        entry_fee = round(contracts * multiplier * _spot_approx * 0.00012, 8)
+                    stored_entry_fee = float(open_trade.get("entry_fee") or 0)
+                    entry_fee = stored_entry_fee if 0 < stored_entry_fee <= 0.10 else calculated_fee
+                    exit_fee = calculated_fee  # position gone = no exchange fee, use calculated
 
                     gross_pnl = self._calc_options_pnl(entry_price, exit_premium, contracts)
                     net_pnl = gross_pnl - entry_fee - exit_fee
@@ -2598,8 +2614,11 @@ class OptionsScalpStrategy(BaseStrategy):
         """Track option position state on fill."""
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
-            # Entry fill — prefer Delta's actual average over signal.price (which is the limit price)
-            fill_price = order.get("average") or order.get("price") or self.entry_premium or signal.price
+            # Entry fill — ONLY use exchange fill price. Never fallback to signal.price (limit price).
+            fill_price = order.get("average") or order.get("price") or self.entry_premium
+            if not fill_price:
+                self.logger.error("[%s] NO FILL PRICE from exchange — skipping on_fill", signal.pair)
+                return
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True  # global lock
             self.option_side = pending_side
@@ -2631,11 +2650,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 if alerts is not None:
                     import asyncio
                     collateral = fill_price * self._contracts / self.OPTIONS_LEVERAGE
+                    _mult = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                    _spot = self._last_spot_price or signal.metadata.get("spot_price", 0)
+                    _fee = round(self._contracts * _mult * _spot * 0.000118, 6) if _spot else 0
                     msg = (
                         f"\U0001f4e5 {self._base_asset} option opened\n"
                         f"{self.option_side.upper()} ${self.strike_price:.0f} | "
                         f"x{self._contracts} @ ${fill_price:.2f}\n"
-                        f"Collateral: ${collateral:.2f}"
+                        f"Collateral: ${collateral:.2f} | Fee: ${_fee:.4f}"
                     )
                     asyncio.get_event_loop().create_task(alerts.send_text(msg))
             except Exception:
