@@ -80,6 +80,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Class-level shared state ──────────────────────────────────────
     _global_in_position: bool = False  # ONE option at a time across ALL assets (BTC+ETH)
+    _global_position_asset: str | None = None  # which asset holds the lock
 
     # ── Delta Exchange contract multiplier (options) ─────────────
     CONTRACT_MULTIPLIER: dict[str, float] = {"ETH": 0.01, "BTC": 0.001}
@@ -888,8 +889,8 @@ class OptionsScalpStrategy(BaseStrategy):
         if OptionsScalpStrategy._global_in_position and not self.in_position:
             if self._tick_count % 6 == 0:
                 self.logger.info(
-                    "[%s] OPTIONS GLOBAL_LOCK — another asset has an open option",
-                    self.pair,
+                    "[%s] OPTIONS GLOBAL_LOCK — %s has an open option",
+                    self.pair, OptionsScalpStrategy._global_position_asset or "another asset",
                 )
             self._cached_bot_state = "blocked:other_asset_in_position"
             return []
@@ -1363,6 +1364,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # If on_fill() never fires (WS miss, restart), this ensures we track the position.
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
+        OptionsScalpStrategy._global_position_asset = self._base_asset
         self.entry_premium = fill_price
         self._contracts = opt_contracts
         self.option_symbol = selected_symbol
@@ -2532,6 +2534,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # Clear all position state — no retry, we're done
         self.in_position = False
         OptionsScalpStrategy._global_in_position = False  # release global lock
+        OptionsScalpStrategy._global_position_asset = None
         self.option_side = None
         self.option_symbol = None
         self.entry_premium = 0.0
@@ -2614,13 +2617,14 @@ class OptionsScalpStrategy(BaseStrategy):
         """Track option position state on fill."""
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
-            # Entry fill — ONLY use exchange fill price. Never fallback to signal.price (limit price).
-            fill_price = order.get("average") or order.get("price") or self.entry_premium
+            # Entry fill — ONLY use exchange fill price. NEVER fallback to signal.price or entry_premium.
+            fill_price = order.get("average") or order.get("price")
             if not fill_price:
                 self.logger.error("[%s] NO FILL PRICE from exchange — skipping on_fill", signal.pair)
                 return
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True  # global lock
+            OptionsScalpStrategy._global_position_asset = self._base_asset
             self.option_side = pending_side
             self.option_symbol = signal.pair
             self.entry_premium = fill_price
@@ -2664,7 +2668,10 @@ class OptionsScalpStrategy(BaseStrategy):
                 pass
         else:
             # Exit fill — close trade in DB with actual fill price from exchange
-            exit_fill = float(order.get("average") or order.get("price") or signal.price or 0)
+            exit_fill = float(order.get("average") or order.get("price") or 0)
+            if not exit_fill:
+                self.logger.error("[%s] NO EXIT FILL PRICE from exchange — skipping", signal.pair)
+                return
             exit_type = signal.metadata.get("exit_type", "UNKNOWN")
             self.logger.info(
                 "[%s] OPTION EXIT FILLED — %s closed @ $%.4f",
@@ -2717,6 +2724,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
             self.in_position = False
             OptionsScalpStrategy._global_in_position = False  # release global lock
+            OptionsScalpStrategy._global_position_asset = None
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0

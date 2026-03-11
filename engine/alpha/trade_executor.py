@@ -1419,15 +1419,23 @@ class TradeExecutor:
 
             # Calculate entry fee for storage
             if signal.strategy and signal.strategy.value == "options_scalp":
-                # Options: read actual fee from exchange fill response
-                fee_info = order.get("fee", {})
-                entry_fee = abs(float((fee_info.get("cost", 0) if isinstance(fee_info, dict) else 0) or 0))
-                if entry_fee <= 0:
-                    # Fallback: qty * multiplier * premium * 0.012% (Delta options brokerage)
-                    _mult = 0.001 if "BTC" in signal.pair else 0.01
-                    entry_fee = round(float(filled_amount) * _mult * float(fill_price) * 0.00012, 8)
+                # Options: Delta charges fee on UNDERLYING notional, not premium.
+                # fee = qty × contract_multiplier × spot_price × 0.000118
+                _mult = 0.001 if "BTC" in signal.pair else 0.01
+                _spot = signal.metadata.get("spot_price", 0) if signal.metadata else 0
+                if _spot and _spot > 0:
+                    calculated_fee = round(float(filled_amount) * _mult * float(_spot) * 0.000118, 8)
                 else:
-                    entry_fee = round(entry_fee, 8)
+                    # No spot price available — estimate from premium
+                    calculated_fee = round(float(filled_amount) * _mult * float(fill_price) * 0.000118, 8)
+                # Exchange fee from fill response
+                fee_info = order.get("fee", {})
+                exchange_fee = abs(float((fee_info.get("cost", 0) if isinstance(fee_info, dict) else 0) or 0))
+                entry_fee = max(exchange_fee, calculated_fee)
+                logger.info(
+                    "[%s] FEE CHECK: exchange=$%.6f calculated=$%.6f using=$%.6f",
+                    signal.pair, exchange_fee, calculated_fee, entry_fee,
+                )
             else:
                 if signal.exchange_id == "bybit":
                     entry_fee_rate = self._bybit_taker_fee
