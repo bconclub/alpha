@@ -6,6 +6,7 @@ import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
+import { OptionsTracker } from '@/components/dashboard/OptionsTracker';
 
 function LiveInfoBar() {
   const { isConnected, trades, botStatus } = useSupabase();
@@ -80,10 +81,15 @@ export default function DashboardPage() {
       {/* 1. Live Status Bar — full width */}
       <LiveStatusBar />
 
-      {/* 2. Market Overview + Live Positions */}
-      <div className="space-y-2">
-        <MarketOverview />
-        <LivePositions />
+      {/* 2. Market Overview + Live Positions | Options Signals */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="lg:col-span-3 space-y-2">
+          <MarketOverview />
+          <LivePositions />
+        </div>
+        <div className="lg:col-span-2">
+          <OptionsTracker />
+        </div>
       </div>
 
       {/* Options Chain — full width */}
