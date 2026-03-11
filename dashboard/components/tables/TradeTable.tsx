@@ -697,23 +697,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
   /** Get P&L display values for a trade (realized or unrealized) */
   function getDisplayPnL(trade: Trade): { pnl: number; pnlPct: number | null; grossPnl: number | null; isUnrealized: boolean } {
     if (trade.status === 'closed') {
-      // Options: always recalculate from entry/exit premiums to fix legacy DB values.
-      // Dollar amounts are REAL wallet P&L (notional ÷ leverage).
-      // At 50x: BTC $95→$68 = -$27 notional, but real wallet loss = -$27/50 = -$0.54.
-      if (isOptionTrade(trade) && trade.price > 0 && trade.exit_price != null) {
-        const contracts = trade.amount || 1;
-        const leverage = trade.leverage > 1 ? trade.leverage : 1;
-        const notionalGross = (trade.exit_price - trade.price) * contracts;
-        const totalFees = (trade.entry_fee ?? 0) + (trade.exit_fee ?? 0);
-        // Real wallet impact = notional / leverage
-        const grossPnl = notionalGross / leverage;
-        const realFees = totalFees / leverage;
-        const netPnl = grossPnl - realFees;
-        // pnl_pct vs collateral (stays the same: net / collateral * 100)
-        const collateral = (trade.price * contracts) / leverage;
-        const pnlPct = collateral > 0 ? (netPnl / collateral) * 100 : 0;
-        return { pnl: netPnl, pnlPct, grossPnl, isUnrealized: false };
-      }
+      // All closed trades (options AND futures): read P&L from DB directly.
+      // The engine writes gross_pnl, pnl (net), and pnl_pct with the correct
+      // formula for each instrument type. Do NOT recalculate in the dashboard.
       return {
         pnl: trade.pnl,
         pnlPct: trade.pnl_pct ?? null,
@@ -723,30 +709,17 @@ export default function TradeTable({ trades }: TradeTableProps) {
     }
 
     if (trade.status === 'open') {
-      // Options: use pnl_usd / pnl_pct / current_premium from options_state
-      // (NOT the spot price, which is the underlying asset price, not the premium)
+      // Options: use pnl_usd / pnl_pct from options_state (engine-calculated).
+      // The engine writes real wallet P&L (already accounts for contract multiplier
+      // and leverage). Do NOT recalculate with (premium * contracts / leverage).
       if (isOptionTrade(trade) && trade.price > 0) {
         const asset = extractBaseAsset(trade.pair);
         const pairKey = `${asset}/USD:USD`;
         const optState = optionsState.find((s) => s.pair === pairKey);
 
-        // Try current_premium first (calculate real wallet P&L ourselves)
-        const currentPremium = optState?.current_premium;
-        if (currentPremium != null && currentPremium > 0) {
-          const contracts = trade.amount || 1;
-          const leverage = trade.leverage > 1 ? trade.leverage : 1;
-          const notionalGross = (currentPremium - trade.price) * contracts;
-          const grossPnl = notionalGross / leverage;
-          const collateral = (trade.price * contracts) / leverage;
-          const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
-          return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
-        }
-
-        // Fallback: use engine-calculated pnl_usd / pnl_pct from options_state
+        // Use engine-calculated pnl_usd / pnl_pct from options_state
         if (optState?.pnl_usd != null) {
-          const leverage = trade.leverage > 1 ? trade.leverage : 1;
-          const realPnl = optState.pnl_usd / leverage;
-          return { pnl: realPnl, pnlPct: optState.pnl_pct ?? 0, grossPnl: realPnl, isUnrealized: true };
+          return { pnl: optState.pnl_usd, pnlPct: optState.pnl_pct ?? 0, grossPnl: optState.pnl_usd, isUnrealized: true };
         }
 
         // Last fallback: show zeros with "live" tag so user knows it's updating

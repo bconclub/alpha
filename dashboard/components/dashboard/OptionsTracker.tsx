@@ -183,6 +183,9 @@ function PairCard({ ps }: { ps: MergedPairState }) {
     }
   }
 
+  // Which strike to show prominently: position strike > target strike > ATM strike
+  const displayStrike = hasPosition ? positionStrike : (targetStrike ?? s?.atm_strike ?? null);
+
   return (
     <div
       className={cn(
@@ -190,8 +193,8 @@ function PairCard({ ps }: { ps: MergedPairState }) {
         hasPosition ? 'border-[#7c4dff]/40' : botState.isReady ? 'border-[#00c853]/40' : 'border-zinc-800/50',
       )}
     >
-      {/* Header: asset name + staleness + updated time */}
-      <div className="flex items-center justify-between mb-2.5">
+      {/* ═══ HEADER ═══ */}
+      <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-white">{ps.asset}</span>
           {s?.spot_price != null && (
@@ -226,6 +229,37 @@ function PairCard({ ps }: { ps: MergedPairState }) {
         </div>
       ) : (
         <>
+          {/* ═══ STRIKE + EXPIRY + BALANCE — always visible, prominent ═══ */}
+          <div className="flex items-center gap-3 mb-2.5 px-2 py-1.5 bg-zinc-800/40 rounded border border-zinc-800/60">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[8px] text-zinc-500 uppercase">Strike</span>
+              <span className={cn(
+                'text-[11px] font-mono font-semibold',
+                hasPosition ? 'text-[#7c4dff]' : targetStrike != null ? 'text-amber-400' : 'text-zinc-300',
+              )}>
+                {fmtStrike(displayStrike)}
+              </span>
+            </div>
+            <div className="w-px h-3 bg-zinc-700" />
+            <div className="flex items-center gap-1.5">
+              <span className="text-[8px] text-zinc-500 uppercase">Exp</span>
+              <span className="text-[10px] font-mono text-zinc-300 truncate max-w-[80px]">
+                {s.expiry_label ?? '—'}
+              </span>
+            </div>
+            {s.balance != null && (
+              <>
+                <div className="w-px h-3 bg-zinc-700" />
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[8px] text-zinc-500 uppercase">Bal</span>
+                  <span className="text-[10px] font-mono text-zinc-300">
+                    ${s.balance.toFixed(2)}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+
           {/* ═══ CANDLE MOMENTUM BOXES ═══ */}
           {momentum ? (
             <div className="mb-2.5">
@@ -322,21 +356,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             </div>
           )}
 
-          {/* ═══ MARKET DATA: Expiry + Premiums ═══ */}
-          <div className="grid grid-cols-2 gap-2 mb-2.5">
-            <div>
-              <div className="text-[9px] text-zinc-500 uppercase mb-0.5">Expiry</div>
-              <div className="text-[10px] font-mono text-zinc-300 truncate">
-                {s.expiry_label ?? '—'}
-              </div>
-            </div>
-            <div>
-              <div className="text-[9px] text-zinc-500 uppercase mb-0.5">ATM Strike</div>
-              <div className="text-[10px] font-mono text-zinc-300">
-                {fmtStrike(s.atm_strike)}
-              </div>
-            </div>
-          </div>
+          {/* ═══ PREMIUMS ═══ */}
           <div className="grid grid-cols-2 gap-2 mb-2.5">
             <div>
               <div className="text-[9px] text-zinc-500 uppercase mb-0.5">CALL Premium</div>

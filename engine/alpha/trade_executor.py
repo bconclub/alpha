@@ -1418,15 +1418,26 @@ class TradeExecutor:
             cost = notional / signal.leverage if is_futures else notional
 
             # Calculate entry fee for storage
-            if signal.exchange_id == "bybit":
-                entry_fee_rate = self._bybit_taker_fee
-            elif signal.exchange_id == "kraken":
-                entry_fee_rate = self._kraken_taker_fee
-            elif signal.exchange_id == "delta":
-                entry_fee_rate = self._delta_taker_fee  # entries are always taker (market)
+            if signal.strategy and signal.strategy.value == "options_scalp":
+                # Options: read actual fee from exchange fill response
+                fee_info = order.get("fee", {})
+                entry_fee = abs(float((fee_info.get("cost", 0) if isinstance(fee_info, dict) else 0) or 0))
+                if entry_fee <= 0:
+                    # Fallback: qty * multiplier * premium * 0.012% (Delta options brokerage)
+                    _mult = 0.001 if "BTC" in signal.pair else 0.01
+                    entry_fee = round(float(filled_amount) * _mult * float(fill_price) * 0.00012, 8)
+                else:
+                    entry_fee = round(entry_fee, 8)
             else:
-                entry_fee_rate = self._binance_taker_fee
-            entry_fee = round(notional * entry_fee_rate, 8)
+                if signal.exchange_id == "bybit":
+                    entry_fee_rate = self._bybit_taker_fee
+                elif signal.exchange_id == "kraken":
+                    entry_fee_rate = self._kraken_taker_fee
+                elif signal.exchange_id == "delta":
+                    entry_fee_rate = self._delta_taker_fee  # entries are always taker (market)
+                else:
+                    entry_fee_rate = self._binance_taker_fee
+                entry_fee = round(notional * entry_fee_rate, 8)
 
             # Collateral = margin posted to exchange
             lev = max(int(signal.leverage or 1), 1)
@@ -1567,31 +1578,83 @@ class TradeExecutor:
             exchange_id = open_trade.get("exchange", signal.exchange_id)
 
             # Determine fee rates for this trade
-            if exchange_id == "bybit":
-                entry_order_type = open_trade.get("order_type", "market")
-                entry_fee_rate = self._bybit_maker_fee if entry_order_type == "limit" else self._bybit_taker_fee
-                exit_fee_rate = self._bybit_taker_fee
-            elif exchange_id == "kraken":
-                entry_order_type = open_trade.get("order_type", "market")
-                entry_fee_rate = self._kraken_maker_fee if entry_order_type == "limit" else self._kraken_taker_fee
-                exit_fee_rate = self._kraken_taker_fee  # exits always market
-            elif exchange_id == "delta":
-                entry_order_type = open_trade.get("order_type", "market")
-                entry_fee_rate = self._delta_maker_fee if entry_order_type == "limit" else self._delta_taker_fee
-                exit_fee_rate = self._delta_taker_fee  # exits always market
-            else:
-                entry_fee_rate = self._binance_taker_fee
-                exit_fee_rate = self._binance_taker_fee
+            is_option = is_option_symbol(signal.pair)
+            if is_option:
+                # Options: read actual exit fee from exchange fill, skip rate-based calc_pnl
+                fee_info = order.get("fee", {})
+                exit_fee_actual = abs(float((fee_info.get("cost", 0) if isinstance(fee_info, dict) else 0) or 0))
+                if exit_fee_actual <= 0:
+                    # Fallback: qty * multiplier * premium * 0.012%
+                    _mult = 0.001 if "BTC" in signal.pair else 0.01
+                    exit_fee_actual = round(float(entry_amount) * _mult * fill_price * 0.00012, 8)
+                else:
+                    exit_fee_actual = round(exit_fee_actual, 8)
 
-            result = calc_pnl(
-                entry_price, fill_price, entry_amount,
-                position_type, trade_leverage,
-                exchange_id, signal.pair,
-                entry_fee_rate=entry_fee_rate,
-                exit_fee_rate=exit_fee_rate,
-            )
-            pnl = result.net_pnl
-            pnl_pct = result.pnl_pct
+                entry_fee_stored = float(open_trade.get("entry_fee") or 0)
+                # Options P&L: use contract multiplier directly (not calc_pnl's rate-based fees)
+                _mult = 0.001 if "BTC" in signal.pair else 0.01
+                gross_pnl = (fill_price - entry_price) * float(entry_amount) * _mult
+                net_pnl = gross_pnl - entry_fee_stored - exit_fee_actual
+                pnl_pct = (fill_price - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
+
+                # Build a PnLResult-compatible namespace for downstream code
+                class _OptionsResult:
+                    pass
+                result = _OptionsResult()
+                result.net_pnl = round(net_pnl, 8)
+                result.pnl_pct = round(pnl_pct, 4)
+                result.gross_pnl = round(gross_pnl, 8)
+                result.entry_fee = round(entry_fee_stored, 8)
+                result.exit_fee = exit_fee_actual
+                pnl = result.net_pnl
+                pnl_pct = result.pnl_pct
+            else:
+                if exchange_id == "bybit":
+                    entry_order_type = open_trade.get("order_type", "market")
+                    entry_fee_rate = self._bybit_maker_fee if entry_order_type == "limit" else self._bybit_taker_fee
+                    exit_fee_rate = self._bybit_taker_fee
+                elif exchange_id == "kraken":
+                    entry_order_type = open_trade.get("order_type", "market")
+                    entry_fee_rate = self._kraken_maker_fee if entry_order_type == "limit" else self._kraken_taker_fee
+                    exit_fee_rate = self._kraken_taker_fee  # exits always market
+                elif exchange_id == "delta":
+                    entry_order_type = open_trade.get("order_type", "market")
+                    entry_fee_rate = self._delta_maker_fee if entry_order_type == "limit" else self._delta_taker_fee
+                    exit_fee_rate = self._delta_taker_fee  # exits always market
+                else:
+                    entry_fee_rate = self._binance_taker_fee
+                    exit_fee_rate = self._binance_taker_fee
+
+                result = calc_pnl(
+                    entry_price, fill_price, entry_amount,
+                    position_type, trade_leverage,
+                    exchange_id, signal.pair,
+                    entry_fee_rate=entry_fee_rate,
+                    exit_fee_rate=exit_fee_rate,
+                )
+                pnl = result.net_pnl
+                pnl_pct = result.pnl_pct
+
+            # ── SANITY: warn on abnormally high P&L ──
+            _coin_amount = float(entry_amount)
+            if exchange_id == "delta" and not is_option_symbol(signal.pair):
+                _cs = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
+                _coin_amount = float(entry_amount) * _cs
+            _entry_notional = entry_price * _coin_amount
+            if _entry_notional > 0 and abs(pnl) > _entry_notional * 2:
+                logger.error(
+                    "PNL_SANITY: %s pnl=$%.2f exceeds 2x notional ($%.2f) — "
+                    "entry=$%.4f exit=$%.4f amount=%s exchange=%s",
+                    signal.pair, pnl, _entry_notional,
+                    entry_price, fill_price, entry_amount, exchange_id,
+                )
+            if abs(pnl_pct) > 500:
+                logger.warning(
+                    "PNL_SANITY: %s pnl_pct=%.1f%% abnormally high — "
+                    "entry=$%.4f exit=$%.4f lev=%s exchange=%s",
+                    signal.pair, pnl_pct,
+                    entry_price, fill_price, trade_leverage, exchange_id,
+                )
 
             trade_id = open_trade["id"]
 

@@ -79,6 +79,10 @@ class Database:
     async def close_trade(
         self, order_id: str, exit_price: float, pnl: float, pnl_pct: float,
         reason: str = "", exit_reason: str = "",
+        *,
+        gross_pnl: float | None = None,
+        entry_fee: float | None = None,
+        exit_fee: float | None = None,
     ) -> None:
         """Mark a trade as closed with exit price and realised P&L."""
         if not self.is_connected:
@@ -103,6 +107,12 @@ class Database:
             data["reason"] = reason
         if exit_reason:
             data["exit_reason"] = exit_reason
+        if gross_pnl is not None:
+            data["gross_pnl"] = gross_pnl
+        if entry_fee is not None:
+            data["entry_fee"] = entry_fee
+        if exit_fee is not None:
+            data["exit_fee"] = exit_fee
         await loop.run_in_executor(
             None,
             lambda: (
@@ -129,6 +139,22 @@ class Database:
                     trade_id, float(ep), data,
                 )
                 return
+        # ── SANITY: warn on bogus P&L values ──
+        if "pnl" in data:
+            _pnl = float(data.get("pnl", 0) or 0)
+            _pnl_pct = float(data.get("pnl_pct", 0) or 0)
+            if abs(_pnl) > 10_000:
+                logger.error(
+                    "PNL_SANITY: update_trade id=%s pnl=$%.2f exceeds $10k — "
+                    "likely a calculation bug. data=%s",
+                    trade_id, _pnl, data,
+                )
+            if abs(_pnl_pct) > 1000:
+                logger.error(
+                    "PNL_SANITY: update_trade id=%s pnl_pct=%.1f%% exceeds 1000%% — "
+                    "likely a calculation bug. data=%s",
+                    trade_id, _pnl_pct, data,
+                )
         loop = asyncio.get_running_loop()
 
         def _do_update() -> Any:

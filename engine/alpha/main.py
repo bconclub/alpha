@@ -1486,10 +1486,16 @@ class AlphaBot:
             except Exception as e:
                 logger.warning("Ghost trade %s: could not fetch exit price: %s", pair_str, e)
 
+            # Determine fee rate by exchange
+            _fee = {"kraken": config.kraken.taker_fee,
+                    "bybit": config.bybit.taker_fee,
+                    "delta": config.delta.taker_fee_with_gst,
+                    "binance": 0.001}.get(exchange_id, 0.0)
             result = calc_pnl(
                 entry_price, exit_price, amount,
                 position_type, leverage,
                 exchange_id, pair_str,
+                entry_fee_rate=_fee, exit_fee_rate=_fee,
             )
 
             await self.db.update_trade(trade_id, {
@@ -1547,17 +1553,22 @@ class AlphaBot:
                             current_price = float(ticker.get("last", 0) or 0)
                         except Exception:
                             current_price = entry_price  # fallback: 0 P&L
-                        pnl, pnl_pct = calc_pnl(
+                        _r = calc_pnl(
                             entry_price, current_price, held,
                             trade.get("position_type", "spot"),
                             trade.get("leverage", 1) or 1,
                             "binance", pair,
+                            entry_fee_rate=0.001, exit_fee_rate=0.001,
                         )
+                        pnl, pnl_pct = _r.net_pnl, _r.pnl_pct
                         if order_id:
                             await self.db.close_trade(
                                 order_id, current_price, pnl, pnl_pct,
                                 reason="dust_unsellable",
                                 exit_reason="DUST",
+                                gross_pnl=_r.gross_pnl,
+                                entry_fee=_r.entry_fee,
+                                exit_fee=_r.exit_fee,
                             )
                         else:
                             await self.db.update_trade(trade_id, {
@@ -1940,11 +1951,17 @@ class AlphaBot:
                     exit_price = entry_price  # worst case: 0 P&L
 
                 # Calculate P&L (leveraged, contract-aware)
-                pnl, pnl_pct = calc_pnl(
+                _fee = {"kraken": config.kraken.taker_fee,
+                        "bybit": config.bybit.taker_fee,
+                        "delta": config.delta.taker_fee_with_gst,
+                        "binance": 0.001}.get(exchange_id, 0.0)
+                result = calc_pnl(
                     entry_price, exit_price, amount,
                     position_type, leverage,
                     exchange_id, pair,
+                    entry_fee_rate=_fee, exit_fee_rate=_fee,
                 )
+                pnl, pnl_pct = result.net_pnl, result.pnl_pct
 
                 # Close in DB with real data
                 order_id = trade.get("order_id", "")
@@ -1953,6 +1970,9 @@ class AlphaBot:
                         order_id, exit_price, pnl, pnl_pct,
                         reason="position_not_found_on_restart",
                         exit_reason="POSITION_GONE",
+                        gross_pnl=result.gross_pnl,
+                        entry_fee=result.entry_fee,
+                        exit_fee=result.exit_fee,
                     )
                 elif trade_id:
                     await self.db.update_trade(trade_id, {
@@ -1961,6 +1981,9 @@ class AlphaBot:
                         "exit_price": exit_price,
                         "pnl": pnl,
                         "pnl_pct": pnl_pct,
+                        "gross_pnl": round(result.gross_pnl, 8),
+                        "entry_fee": round(result.entry_fee, 8),
+                        "exit_fee": round(result.exit_fee, 8),
                         "reason": "position_not_found_on_restart",
                         "exit_reason": "POSITION_GONE",
                     })
@@ -2311,10 +2334,15 @@ class AlphaBot:
             except Exception:
                 pass  # use entry_price as fallback (0 P&L)
 
+            _fee = {"kraken": config.kraken.taker_fee,
+                    "bybit": config.bybit.taker_fee,
+                    "delta": config.delta.taker_fee_with_gst,
+                    "binance": 0.001}.get(exchange, 0.0)
             result = calc_pnl(
                 entry_price, exit_price, amount,
                 position_type, leverage,
                 exchange, pair,
+                entry_fee_rate=_fee, exit_fee_rate=_fee,
             )
             await self.db.update_trade(trade_id, {
                 "status": "closed",
@@ -2627,17 +2655,23 @@ class AlphaBot:
                                 except Exception:
                                     exit_price = entry_px
                                 trade_lev = open_trade.get("leverage", config.bybit.leverage) or 1
-                                pnl, pnl_pct = calc_pnl(
+                                _r = calc_pnl(
                                     entry_px, exit_price, amount,
                                     side, trade_lev,
                                     "bybit", pair,
+                                    entry_fee_rate=config.bybit.taker_fee,
+                                    exit_fee_rate=config.bybit.taker_fee,
                                 )
+                                pnl, pnl_pct = _r.net_pnl, _r.pnl_pct
                                 order_id = open_trade.get("order_id", "")
                                 if order_id:
                                     await self.db.close_trade(
                                         order_id, exit_price, pnl, pnl_pct,
                                         reason="orphan_closed",
                                         exit_reason="ORPHAN",
+                                        gross_pnl=_r.gross_pnl,
+                                        entry_fee=_r.entry_fee,
+                                        exit_fee=_r.exit_fee,
                                     )
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
@@ -2776,10 +2810,13 @@ class AlphaBot:
                             logger.error("Bybit phantom %s: exit=$0, skipping close", scalp.pair)
                             continue
 
-                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                        _r = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
                             pos_type, trade_lev, "bybit", scalp.pair,
+                            entry_fee_rate=config.bybit.taker_fee,
+                            exit_fee_rate=config.bybit.taker_fee,
                         )
+                        phantom_pnl, phantom_pnl_pct = _r.net_pnl, _r.pnl_pct
                         phantom_pnl_for_rm = phantom_pnl
                         _bybit_exit_map = {
                             "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE",
@@ -2790,6 +2827,9 @@ class AlphaBot:
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
                                 reason="phantom_cleared",
                                 exit_reason=phantom_exit_reason,
+                                gross_pnl=_r.gross_pnl,
+                                entry_fee=_r.entry_fee,
+                                exit_fee=_r.exit_fee,
                             )
                         logger.info(
                             "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
@@ -3091,17 +3131,23 @@ class AlphaBot:
                                 except Exception:
                                     exit_price = entry_px
                                 trade_lev = open_trade.get("leverage", config.kraken.leverage) or 1
-                                pnl, pnl_pct = calc_pnl(
+                                _r = calc_pnl(
                                     entry_px, exit_price, amount,
                                     side, trade_lev,
                                     "kraken", pair,
+                                    entry_fee_rate=config.kraken.taker_fee,
+                                    exit_fee_rate=config.kraken.taker_fee,
                                 )
+                                pnl, pnl_pct = _r.net_pnl, _r.pnl_pct
                                 order_id = open_trade.get("order_id", "")
                                 if order_id:
                                     await self.db.close_trade(
                                         order_id, exit_price, pnl, pnl_pct,
                                         reason="orphan_closed",
                                         exit_reason="ORPHAN",
+                                        gross_pnl=_r.gross_pnl,
+                                        entry_fee=_r.entry_fee,
+                                        exit_fee=_r.exit_fee,
                                     )
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
@@ -3244,16 +3290,22 @@ class AlphaBot:
                             logger.error("Kraken phantom %s: exit=$0, skipping close", scalp.pair)
                             continue
 
-                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                        _r = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
                             pos_type, trade_lev, "kraken", scalp.pair,
+                            entry_fee_rate=config.kraken.taker_fee,
+                            exit_fee_rate=config.kraken.taker_fee,
                         )
+                        phantom_pnl, phantom_pnl_pct = _r.net_pnl, _r.pnl_pct
                         phantom_pnl_for_rm = phantom_pnl
                         if order_id:
                             await self.db.close_trade(
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
                                 reason="phantom_cleared",
                                 exit_reason="PHANTOM",
+                                gross_pnl=_r.gross_pnl,
+                                entry_fee=_r.entry_fee,
+                                exit_fee=_r.exit_fee,
                             )
                         logger.info(
                             "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
@@ -3620,17 +3672,23 @@ class AlphaBot:
                                 except Exception:
                                     exit_price = entry_px
                                 trade_lev = open_trade.get("leverage", config.delta.leverage) or 1
-                                pnl, pnl_pct = calc_pnl(
+                                _r = calc_pnl(
                                     entry_px, exit_price, contracts,
                                     side, trade_lev,
                                     "delta", pair,
+                                    entry_fee_rate=config.delta.taker_fee_with_gst,
+                                    exit_fee_rate=config.delta.taker_fee_with_gst,
                                 )
+                                pnl, pnl_pct = _r.net_pnl, _r.pnl_pct
                                 order_id = open_trade.get("order_id", "")
                                 if order_id:
                                     await self.db.close_trade(
                                         order_id, exit_price, pnl, pnl_pct,
                                         reason="orphan_closed",
                                         exit_reason="ORPHAN",
+                                        gross_pnl=_r.gross_pnl,
+                                        entry_fee=_r.entry_fee,
+                                        exit_fee=_r.exit_fee,
                                     )
                                     logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
@@ -3793,10 +3851,13 @@ class AlphaBot:
                             logger.error("Delta phantom %s: exit=$0, skipping close", scalp.pair)
                             continue
 
-                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                        _r = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
                             pos_type, trade_lev, "delta", scalp.pair,
+                            entry_fee_rate=config.delta.taker_fee_with_gst,
+                            exit_fee_rate=config.delta.taker_fee_with_gst,
                         )
+                        phantom_pnl, phantom_pnl_pct = _r.net_pnl, _r.pnl_pct
                         phantom_pnl_for_rm = phantom_pnl
                         trade_id = open_trade.get("id")
                         _phantom_exit_map = {"SL_EXCHANGE": "SL_EXCHANGE",
@@ -3807,6 +3868,9 @@ class AlphaBot:
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
                                 reason=phantom_reason,
                                 exit_reason=phantom_exit_reason,
+                                gross_pnl=_r.gross_pnl,
+                                entry_fee=_r.entry_fee,
+                                exit_fee=_r.exit_fee,
                             )
                         elif trade_id:
                             await self.db.update_trade(trade_id, {
@@ -3924,10 +3988,12 @@ class AlphaBot:
                             logger.error("Binance phantom %s: exit=$0, skipping close", scalp.pair)
                             continue
 
-                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                        _r = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
                             "spot", 1, "binance", scalp.pair,
+                            entry_fee_rate=0.001, exit_fee_rate=0.001,
                         )
+                        phantom_pnl, phantom_pnl_pct = _r.net_pnl, _r.pnl_pct
                         phantom_pnl_for_rm_bn = phantom_pnl
                         trade_id = open_trade.get("id")
                         _phantom_exit_map_bn = {"phantom_cleared": "PHANTOM", "SL_EXCHANGE": "SL_EXCHANGE",
@@ -3938,6 +4004,9 @@ class AlphaBot:
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
                                 reason=phantom_reason,
                                 exit_reason=phantom_exit_reason,
+                                gross_pnl=_r.gross_pnl,
+                                entry_fee=_r.entry_fee,
+                                exit_fee=_r.exit_fee,
                             )
                         elif trade_id:
                             await self.db.update_trade(trade_id, {
@@ -4035,11 +4104,17 @@ class AlphaBot:
                         )
 
                 # Calculate P&L (leveraged, contract-aware)
-                pnl, pnl_pct = calc_pnl(
+                _fee = {"kraken": config.kraken.taker_fee,
+                        "bybit": config.bybit.taker_fee,
+                        "delta": config.delta.taker_fee_with_gst,
+                        "binance": 0.001}.get(exchange_id, 0.0)
+                _r = calc_pnl(
                     entry_price, current_price, amount,
                     position_type, trade_lev,
                     exchange_id, pair,
+                    entry_fee_rate=_fee, exit_fee_rate=_fee,
                 )
+                pnl, pnl_pct = _r.net_pnl, _r.pnl_pct
 
                 # Close in DB
                 if order_id:
@@ -4047,6 +4122,9 @@ class AlphaBot:
                         order_id, current_price, pnl, pnl_pct,
                         reason="orphan_strategy_removed",
                         exit_reason="ORPHAN",
+                        gross_pnl=_r.gross_pnl,
+                        entry_fee=_r.entry_fee,
+                        exit_fee=_r.exit_fee,
                     )
 
                 # Remove from risk manager — prevents ghost entries
@@ -4075,15 +4153,24 @@ class AlphaBot:
                                 fallback_exit = float(ticker.get("last", 0) or 0) or entry_price
                         except Exception:
                             pass  # keep fallback_exit = entry_price, pnl = 0
-                        fallback_pnl, fallback_pnl_pct = calc_pnl(
+                        _fee = {"kraken": config.kraken.taker_fee,
+                                "bybit": config.bybit.taker_fee,
+                                "delta": config.delta.taker_fee_with_gst,
+                                "binance": 0.001}.get(exchange_id, 0.0)
+                        _r = calc_pnl(
                             entry_price, fallback_exit, amount,
                             position_type, trade_lev,
                             exchange_id, pair,
+                            entry_fee_rate=_fee, exit_fee_rate=_fee,
                         )
+                        fallback_pnl, fallback_pnl_pct = _r.net_pnl, _r.pnl_pct
                         await self.db.close_trade(
                             order_id, fallback_exit, fallback_pnl, fallback_pnl_pct,
                             reason="orphan_strategy_removed",
                             exit_reason="ORPHAN",
+                            gross_pnl=_r.gross_pnl,
+                            entry_fee=_r.entry_fee,
+                            exit_fee=_r.exit_fee,
                         )
                         logger.info(
                             "Orphan fallback close %s: exit=$%.2f pnl=$%.4f (%.2f%%)",
