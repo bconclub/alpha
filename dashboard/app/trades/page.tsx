@@ -25,37 +25,40 @@ export default function TradesPage() {
         .insert({
           command: 'reconcile',
           params: { hours: 24 },
-          status: 'pending',
         })
         .select('id')
         .single();
 
-      if (error) throw error;
+      if (error) throw new Error(error.message || 'Insert failed');
       const cmdId = data?.id;
+      if (!cmdId) throw new Error('No command ID returned');
 
-      // Poll for completion (bot polls every 5s, give it up to 60s)
+      // Poll for completion (bot polls every 5s, give it up to 90s)
       let attempts = 0;
-      while (attempts < 12) {
+      let done = false;
+      while (attempts < 18) {
         await new Promise((r) => setTimeout(r, 5000));
         attempts++;
 
         const { data: cmd } = await sb
           .from('bot_commands')
-          .select('status, result')
+          .select('executed, result')
           .eq('id', cmdId)
           .single();
 
-        if (cmd?.status === 'executed' || cmd?.status === 'done') {
+        if (cmd?.executed) {
           setReconcileResult(cmd.result || 'Reconciliation complete');
+          done = true;
           break;
         }
       }
 
-      if (attempts >= 12) {
+      if (!done) {
         setReconcileResult('Timeout — bot may still be processing');
       }
-    } catch (err) {
-      setReconcileResult(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : JSON.stringify(err);
+      setReconcileResult(`Error: ${msg}`);
     } finally {
       setReconciling(false);
     }
@@ -68,36 +71,48 @@ export default function TradesPage() {
           Trade History
         </h1>
         <ExchangeToggle />
+
+        {/* Reconcile icon button */}
         <button
           onClick={handleReconcile}
           disabled={reconciling}
-          className={`ml-auto px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+          title="Reconcile with Delta Exchange"
+          className={`ml-auto p-2 rounded-lg transition-colors ${
             reconciling
-              ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed'
-              : 'bg-blue-600 hover:bg-blue-500 text-white'
+              ? 'text-zinc-500 cursor-not-allowed'
+              : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
           }`}
         >
           {reconciling ? (
-            <span className="flex items-center gap-2">
-              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              Reconciling...
-            </span>
+            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
           ) : (
-            'Reconcile with Exchange'
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3" />
+            </svg>
           )}
         </button>
       </div>
 
       {reconcileResult && (
-        <div className={`px-4 py-3 rounded-lg text-sm ${
-          reconcileResult.startsWith('Error') || reconcileResult.startsWith('Timeout')
-            ? 'bg-red-900/50 text-red-300 border border-red-700'
-            : 'bg-green-900/50 text-green-300 border border-green-700'
-        }`}>
-          {reconcileResult}
+        <div
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-mono ${
+            reconcileResult.startsWith('Error') || reconcileResult.startsWith('Timeout')
+              ? 'bg-red-900/30 text-red-400 border border-red-800/50'
+              : 'bg-green-900/30 text-green-400 border border-green-800/50'
+          }`}
+        >
+          <span className="flex-1">{reconcileResult}</span>
+          <button
+            onClick={() => setReconcileResult(null)}
+            className="text-zinc-500 hover:text-zinc-300 shrink-0"
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
         </div>
       )}
 
