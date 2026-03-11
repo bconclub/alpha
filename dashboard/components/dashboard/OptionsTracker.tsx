@@ -1,5 +1,3 @@
-// DEPRECATED: Options data is now shown inline in EntrySignals (TriggerProximity.tsx).
-// This file is kept for reference. Not imported anywhere.
 'use client';
 
 import { useMemo } from 'react';
@@ -98,19 +96,47 @@ export function OptionsTracker() {
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
-          Options Overview
+        <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
+          Options Entry Signals
         </h3>
         <span className="text-[9px] text-zinc-600 font-mono">BTC + ETH | 30s refresh</span>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="space-y-3">
         {pairStates.map((ps) => (
           <PairCard key={ps.asset} ps={ps} />
         ))}
       </div>
     </div>
   );
+}
+
+// ─── Helpers for bot state display ───────────────────────────
+
+/** Parse "blocked:trade_cooldown:45s" → { reason, timer, isBlocked } */
+function parseBotState(botState: string | null | undefined): {
+  label: string;
+  color: string;
+  isBlocked: boolean;
+  isReady: boolean;
+} {
+  if (!botState || botState === 'scanning') {
+    return { label: 'Scanning...', color: 'text-zinc-500', isBlocked: false, isReady: false };
+  }
+  if (botState === 'ready') {
+    return { label: 'CANDLE PASS — Entering', color: 'text-[#00c853]', isBlocked: false, isReady: true };
+  }
+  if (botState === 'in_position') {
+    return { label: 'In Position', color: 'text-[#7c4dff]', isBlocked: false, isReady: false };
+  }
+  if (botState.startsWith('blocked:')) {
+    const parts = botState.replace('blocked:', '').split(':');
+    const reason = parts[0].replace(/_/g, ' ');
+    const timer = parts[1] ?? null;
+    const label = timer ? `${reason} (${timer})` : reason;
+    return { label, color: 'text-[#ff1744]', isBlocked: true, isReady: false };
+  }
+  return { label: botState.replace(/_/g, ' '), color: 'text-zinc-400', isBlocked: false, isReady: false };
 }
 
 // ─── Per-asset card ─────────────────────────────────────────
@@ -140,23 +166,43 @@ function PairCard({ ps }: { ps: MergedPairState }) {
   const trailingActive = s?.trailing_active ?? (hasPositionFromTrades && ps.openTrade!.position_state === 'trailing');
   const highestPremium = s?.highest_premium ?? null;
 
-  const isReady = (s?.signal_strength ?? 0) >= 3;
-  const strength = s?.signal_strength ?? 0;
+  // Candle momentum data
+  const momentum = s?.candle_momentum ?? null;
+  const botState = parseBotState(s?.bot_state);
+
+  // Target strike + premium from chain data
+  const targetStrike = s?.target_strike ?? null;
+  let targetPremium: number | null = null;
+  let targetCollateral: number | null = null;
+  if (targetStrike != null) {
+    const allChain = [...(s?.chain_calls ?? []), ...(s?.chain_puts ?? [])];
+    const match = allChain.find(c => c.strike === targetStrike);
+    if (match && match.ask > 0) {
+      targetPremium = match.ask;
+      targetCollateral = match.ask / 50;
+    }
+  }
+
+  // Which strike to show prominently: position strike > target strike > ATM strike
+  const displayStrike = hasPosition ? positionStrike : (targetStrike ?? s?.atm_strike ?? null);
 
   return (
     <div
       className={cn(
         'bg-zinc-900/40 border rounded-lg p-3',
-        hasPosition ? 'border-[#7c4dff]/40' : 'border-zinc-800/50',
+        hasPosition ? 'border-[#7c4dff]/40' : botState.isReady ? 'border-[#00c853]/40' : 'border-zinc-800/50',
       )}
     >
-      {/* Header: asset name + staleness + updated time */}
-      <div className="flex items-center justify-between mb-2.5">
+      {/* ═══ HEADER ═══ */}
+      <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-white">{ps.asset}</span>
           {s?.spot_price != null && (
             <span className="text-[10px] font-mono text-zinc-500">{fmtSpot(s.spot_price)}</span>
           )}
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-[#00d2ff] bg-[#00d2ff]/10">
+            Delta
+          </span>
         </div>
         <div className="flex items-center gap-1.5">
           {hasPosition && (
@@ -183,23 +229,134 @@ function PairCard({ ps }: { ps: MergedPairState }) {
         </div>
       ) : (
         <>
-          {/* Row 1: Expiry + ATM Strike */}
-          <div className="grid grid-cols-2 gap-2 mb-2.5">
-            <div>
-              <div className="text-[9px] text-zinc-500 uppercase mb-0.5">Expiry</div>
-              <div className="text-[10px] font-mono text-zinc-300 truncate">
-                {s.expiry_label ?? '—'}
-              </div>
+          {/* ═══ STRIKE + EXPIRY + BALANCE — always visible, prominent ═══ */}
+          <div className="flex items-center gap-3 mb-2.5 px-2 py-1.5 bg-zinc-800/40 rounded border border-zinc-800/60">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[8px] text-zinc-500 uppercase">Strike</span>
+              <span className={cn(
+                'text-[11px] font-mono font-semibold',
+                hasPosition ? 'text-[#7c4dff]' : targetStrike != null ? 'text-amber-400' : 'text-zinc-300',
+              )}>
+                {fmtStrike(displayStrike)}
+              </span>
             </div>
-            <div>
-              <div className="text-[9px] text-zinc-500 uppercase mb-0.5">ATM Strike</div>
-              <div className="text-[10px] font-mono text-zinc-300">
-                {fmtStrike(s.atm_strike)}
+            <div className="w-px h-3 bg-zinc-700" />
+            <div className="flex items-center gap-1.5">
+              <span className="text-[8px] text-zinc-500 uppercase">Exp</span>
+              <span className="text-[10px] font-mono text-zinc-300 truncate max-w-[80px]">
+                {s.expiry_label ?? '—'}
+              </span>
+            </div>
+            {s.balance != null && (
+              <>
+                <div className="w-px h-3 bg-zinc-700" />
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[8px] text-zinc-500 uppercase">Bal</span>
+                  <span className="text-[10px] font-mono text-zinc-300">
+                    ${s.balance.toFixed(2)}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* ═══ CANDLE MOMENTUM BOXES ═══ */}
+          {momentum ? (
+            <div className="mb-2.5">
+              <div className="flex items-center gap-2">
+                {/* The boxes that light up */}
+                <div className={cn('flex gap-1', momentum.passed && 'animate-pulse')}>
+                  {Array.from({ length: momentum.total }, (_, i) => (
+                    <div key={i} className={cn(
+                      'w-5 h-4 rounded-sm transition-all duration-500',
+                      i < momentum.count
+                        ? (momentum.direction === 'long'
+                          ? 'bg-[#00c853] shadow-[0_0_6px_rgba(0,200,83,0.4)]'
+                          : 'bg-[#ff1744] shadow-[0_0_6px_rgba(255,23,68,0.4)]')
+                        : 'bg-zinc-700/60',
+                    )} />
+                  ))}
+                </div>
+                <span className="text-[9px] font-mono text-zinc-500">
+                  {momentum.count}/{momentum.total} {momentum.direction === 'long' ? 'green' : momentum.direction === 'short' ? 'red' : '—'}
+                </span>
+                <span className={cn(
+                  'text-[9px] font-mono',
+                  momentum.cum_pct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                )}>
+                  {momentum.cum_pct >= 0 ? '+' : ''}{momentum.cum_pct.toFixed(2)}%
+                </span>
+                <span className={cn(
+                  'px-1.5 py-0.5 rounded text-[8px] font-bold uppercase',
+                  momentum.passed
+                    ? 'bg-[#00c853]/15 text-[#00c853] border border-[#00c853]/30'
+                    : 'bg-zinc-800 text-zinc-500 border border-zinc-700',
+                )}>
+                  {momentum.passed ? 'PASS' : 'FAIL'}
+                </span>
+                {/* Direction arrow when passing */}
+                {momentum.passed && momentum.direction && (
+                  <span className={cn(
+                    'text-sm font-bold',
+                    momentum.direction === 'long' ? 'text-[#00c853]' : 'text-[#ff1744]',
+                  )}>
+                    {momentum.direction === 'long' ? 'CALL \u2191' : 'PUT \u2193'}
+                  </span>
+                )}
               </div>
+              {/* Fail reason */}
+              {!momentum.passed && momentum.reason && (
+                <div className="text-[8px] font-mono text-zinc-500 mt-1 truncate">
+                  {momentum.reason.replace(/^EARLY_GATE:\s*/, '').replace(/\s*→\s*SKIP$/, '')}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-[9px] font-mono text-zinc-600 mb-2.5">Candles: waiting...</div>
+          )}
+
+          {/* ═══ BOT STATE — WHY NOT ENTERING ═══ */}
+          <div className={cn(
+            'rounded px-2.5 py-1.5 mb-2.5 border',
+            botState.isBlocked
+              ? 'bg-[#ff1744]/5 border-[#ff1744]/20'
+              : botState.isReady
+                ? 'bg-[#00c853]/5 border-[#00c853]/20'
+                : hasPosition
+                  ? 'bg-[#7c4dff]/5 border-[#7c4dff]/20'
+                  : 'bg-zinc-800/30 border-zinc-800/50',
+          )}>
+            <div className="flex items-center gap-2">
+              {/* Status dot */}
+              <span className={cn(
+                'w-2 h-2 rounded-full shrink-0',
+                botState.isBlocked ? 'bg-[#ff1744]'
+                  : botState.isReady ? 'bg-[#00c853] animate-pulse'
+                  : hasPosition ? 'bg-[#7c4dff] animate-pulse'
+                  : 'bg-zinc-600',
+              )} />
+              <span className={cn('text-[10px] font-mono font-medium uppercase', botState.color)}>
+                {hasPosition && !botState.isBlocked
+                  ? `${positionSide?.toUpperCase()} @ ${fmtStrike(positionStrike)}`
+                  : botState.label}
+              </span>
             </div>
           </div>
 
-          {/* Row 2: CALL / PUT premiums */}
+          {/* ═══ TARGET STRIKE + PREMIUM (when not in position) ═══ */}
+          {!hasPosition && targetStrike != null && (
+            <div className="flex flex-wrap gap-x-3 text-[9px] font-mono text-zinc-400 mb-2.5">
+              <span><span className="text-zinc-600">Target </span><span className="text-amber-400">{fmtStrike(targetStrike)}</span></span>
+              {targetPremium != null && (
+                <span><span className="text-zinc-600">Ask </span>{fmtPrem(targetPremium)}</span>
+              )}
+              {targetCollateral != null && (
+                <span><span className="text-zinc-600">Col </span>${targetCollateral.toFixed(2)}</span>
+              )}
+            </div>
+          )}
+
+          {/* ═══ PREMIUMS ═══ */}
           <div className="grid grid-cols-2 gap-2 mb-2.5">
             <div>
               <div className="text-[9px] text-zinc-500 uppercase mb-0.5">CALL Premium</div>
@@ -215,42 +372,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             </div>
           </div>
 
-          {/* Row 3: Signal strength bar */}
-          <div className="mb-2.5">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-[9px] text-zinc-500 uppercase w-14 shrink-0">Signal</span>
-              <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-700"
-                  style={{
-                    width: `${(strength / 4) * 100}%`,
-                    backgroundColor: strength >= 3 ? '#7c4dff' : strength >= 1 ? '#ffd600' : '#71717a',
-                  }}
-                />
-              </div>
-              <span className={cn(
-                'text-[10px] font-mono w-8 text-right',
-                strength >= 3 ? 'text-[#7c4dff]' : strength >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
-              )}>
-                {strength}/4
-              </span>
-            </div>
-            <div className="text-[9px] font-mono">
-              {isReady ? (
-                <span className={s.signal_side === 'long' ? 'text-[#00c853]' : 'text-[#ff1744]'}>
-                  SIGNAL: {s.signal_side?.toUpperCase()} {strength}/4 ✔
-                </span>
-              ) : strength > 0 ? (
-                <span className="text-[#ffd600]">
-                  {s.signal_side === 'long' ? 'CALL' : s.signal_side === 'short' ? 'PUT' : '...'} building ({strength}/4)
-                </span>
-              ) : (
-                <span className="text-zinc-600">Waiting for 3/4+ signal...</span>
-              )}
-            </div>
-          </div>
-
-          {/* Row 4: Active position or "None" */}
+          {/* ═══ ACTIVE POSITION ═══ */}
           {hasPosition ? (
             <div className="bg-[#7c4dff]/5 border border-[#7c4dff]/20 rounded p-2 mb-2">
               <div className="flex items-center justify-between mb-1.5">
@@ -321,7 +443,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             </div>
           )}
 
-          {/* Mini event log (last 3 options decisions from activity_log) */}
+          {/* ═══ MINI EVENT LOG ═══ */}
           {ps.recentEvents.length > 0 && (
             <div className="border-t border-zinc-800/50 pt-1.5 space-y-0.5">
               {ps.recentEvents.slice(0, 3).map((ev) => (
