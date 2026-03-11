@@ -2117,12 +2117,13 @@ class OptionsScalpStrategy(BaseStrategy):
             entry_fee = round(contracts * mult * spot * 0.000118, 8) if spot else 0
             collateral = fill_price * contracts / self.OPTIONS_LEVERAGE
 
+            order_id = str(order.get("id", "")) if order else ""
+
             row = {
                 "pair": option_symbol,
-                "exchange_id": "delta",
+                "exchange": "delta",
                 "strategy": "options_scalp",
-                "direction": "long",
-                "side": option_side,
+                "side": "buy",
                 "entry_price": fill_price,
                 "contracts": float(contracts),
                 "leverage": self.OPTIONS_LEVERAGE,
@@ -2136,6 +2137,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "status": "open",
                 "setup_type": "MOMENTUM_BURST",
                 "signals_fired": getattr(self, '_entry_signals_fired', ''),
+                "order_id": order_id,
                 "opened_at": datetime.utcnow().isoformat() + "Z",
             }
 
@@ -2156,6 +2158,7 @@ class OptionsScalpStrategy(BaseStrategy):
         *, option_symbol: str | None = None,
         entry_premium: float = 0.0, highest_premium: float = 0.0,
         contracts: int = 0,
+        exit_order: dict | None = None,
     ) -> bool:
         """Close the option trade in DB with correct options P&L.
 
@@ -2219,7 +2222,9 @@ class OptionsScalpStrategy(BaseStrategy):
             peak_pnl_pct = (hp - ep) / ep * 100 if ep > 0 else 0
 
             from alpha.trade_executor import _extract_exit_reason
-            await self._db.update_trade(open_trade["id"], {
+            exit_fill_id = str(exit_order.get("id", "")) if exit_order else ""
+
+            update_data = {
                 "status": "closed",
                 "exit_price": round(exit_premium, 8),
                 "closed_at": iso_now(),
@@ -2232,7 +2237,11 @@ class OptionsScalpStrategy(BaseStrategy):
                 "peak_pnl": round(peak_pnl_pct, 4),
                 "exit_reason": _extract_exit_reason(exit_type),
                 "position_state": None,
-            })
+            }
+            if exit_fill_id:
+                update_data["exchange_fill_id"] = exit_fill_id
+
+            await self._db.update_trade(open_trade["id"], update_data)
 
             self.logger.info(
                 "[%s] OPTIONS DB CLOSE: id=%s exit=$%.4f gross=$%.6f net=$%.6f (%.2f%%)",
@@ -2748,6 +2757,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         entry_premium=_entry_prem,
                         highest_premium=_highest_prem,
                         contracts=_contracts,
+                        exit_order=order,
                     )
                 )
 
