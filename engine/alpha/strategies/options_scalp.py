@@ -79,7 +79,7 @@ class OptionsScalpStrategy(BaseStrategy):
     check_interval_sec = 5  # 5-second ticks (was 10 — catch fresh signals faster)
 
     # ── Class-level shared state ──────────────────────────────────────
-    # (loss streak tracking removed — candle momentum is the quality gate)
+    _global_in_position: bool = False  # ONE option at a time across ALL assets (BTC+ETH)
 
     # ── Delta Exchange contract multiplier (options) ─────────────
     CONTRACT_MULTIPLIER: dict[str, float] = {"ETH": 0.01, "BTC": 0.001}
@@ -87,6 +87,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Option chain refresh ──────────────────────────────────────
     CHAIN_REFRESH_INTERVAL = 30 * 60     # Refresh every 30 min
     MIN_EXPIRY_HOURS = 1                 # Must be 1+ hour to expiry — prefer today's expiry (10-100x more volume)
+    EXPIRY_SWITCH_HOURS = 3.0            # Switch to next-day expiry when < 3h remain on current day
     CLOSE_BEFORE_EXPIRY_HOURS = 0.5      # Close 30 min before expiry
 
     # ── Strike selection ──────────────────────────────────────────
@@ -101,19 +102,19 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
-    # Candle-based early-direction gate (2/3 candles = early entry)
-    CANDLE_MOM_STREAK = 2                # min directional candles out of last 3
+    # Candle-based early-direction gate (3/3 candles required)
+    CANDLE_MOM_STREAK = 3                # ALL 3 candles must agree (was 2 — 2/3 had 27% WR, 3/3 had 40%)
     CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
-    # Per-asset cumulative thresholds
-    CANDLE_MOM_CUM_PCT_BTC = 0.15        # BTC: min cumulative move over 3 candles
-    CANDLE_MOM_CUM_PCT_ETH = 0.10        # ETH: lower — 0.20 was too high for ETH volatility
+    # Per-asset cumulative thresholds (raised — 0.10% entries were noise)
+    CANDLE_MOM_CUM_PCT_BTC = 0.20        # BTC: was 0.15 — winners had 0.20%+
+    CANDLE_MOM_CUM_PCT_ETH = 0.15        # ETH: was 0.10 — 0.10% entries were noise
     MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
-    OPT_TRADE_COOLDOWN_SEC = 120        # 2 min between options trades
+    OPT_TRADE_COOLDOWN_SEC = 300        # 5 min between trades (was 120 — max 12/hr = ~15-20/day)
     OPT_DEAD_COOLDOWN_SEC = 600         # 10 min cooldown after dead momentum exit (0% peak = dead market)
-    COOLDOWN_OVERRIDE_CUM_PCT = 0.20    # bypass trade cooldown if candle cum move >= 0.20%
+    COOLDOWN_OVERRIDE_CUM_PCT = 0.30    # bypass 5min cooldown only on very strong moves (was 0.20)
     DEAD_COOLDOWN_OVERRIDE_CUM_PCT = 0.25  # bypass dead-market cooldown if cum move >= 0.25%
     # OPT_LOSS_STREAK_LIMIT removed — candle momentum gates entry quality
 
@@ -533,11 +534,30 @@ class OptionsScalpStrategy(BaseStrategy):
 
             if chain:
                 self._selected_expiry = chain[0]["expiry"]
+                hours_away = (self._selected_expiry - now_utc).total_seconds() / 3600
+
+                # EXPIRY SWITCH: if nearest expiry < 3h away, use next-day expiry
+                if hours_away < self.EXPIRY_SWITCH_HOURS:
+                    next_expiries = sorted(set(
+                        c["expiry"] for c in chain if c["expiry"] > self._selected_expiry
+                    ))
+                    if next_expiries:
+                        old_exp = self._selected_expiry
+                        self._selected_expiry = next_expiries[0]
+                        new_hours = (self._selected_expiry - now_utc).total_seconds() / 3600
+                        self.logger.info(
+                            "[%s] EXPIRY_SWITCH: nearest %s only %.1fh away — "
+                            "switching to %s (%.1fh away)",
+                            self.pair,
+                            old_exp.strftime("%b %d %H:%M UTC"), hours_away,
+                            self._selected_expiry.strftime("%b %d %H:%M UTC"), new_hours,
+                        )
+                        hours_away = new_hours
+
                 self._available_strikes = sorted(set(
                     c["strike"] for c in chain
                     if c["expiry"] == self._selected_expiry
                 ))
-                hours_away = (self._selected_expiry - now_utc).total_seconds() / 3600
                 self.logger.info(
                     "[%s] Option chain refreshed: %d contracts, "
                     "selected expiry=%s (%.1fh away), %d strikes",
@@ -860,7 +880,17 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_bot_state = "scanning"
         self._cached_target_strike = None
 
-        # 0. POSITION_GONE cooldown — no new entries for 60s after position disappeared
+        # 0. GLOBAL POSITION LOCK — only 1 option across all assets (BTC+ETH)
+        if OptionsScalpStrategy._global_in_position and not self.in_position:
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] OPTIONS GLOBAL_LOCK — another asset has an open option",
+                    self.pair,
+                )
+            self._cached_bot_state = "blocked:other_asset_in_position"
+            return []
+
+        # 0a. POSITION_GONE cooldown — no new entries for 60s after position disappeared
         if time.monotonic() < self._position_gone_cooldown_until:
             remaining = self._position_gone_cooldown_until - time.monotonic()
             if self._tick_count % 6 == 0:
@@ -956,11 +986,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.logger.info("[%s] %s", self.pair, candle_reason)
             return []
 
-        # Dynamic allocation based on candle quality
-        if candle_count >= 3:
-            self._candle_alloc_pct = 50.0  # 3/3 candles → max conviction
-        else:
-            self._candle_alloc_pct = 35.0  # 2/3 candles → strong
+        # 3/3 candles required — max conviction allocation
+        self._candle_alloc_pct = 50.0
 
         self.logger.info(
             "[%s] EARLY_GATE: %d/3 candles %s, cum=%.2f%% → premium check | alloc=%.0f%%",
@@ -1020,6 +1047,17 @@ class OptionsScalpStrategy(BaseStrategy):
         strength = 0
         if signal_state is not None:
             strength = signal_state.get("strength", 0)
+
+        # Log entry context from scalp signals for analysis
+        _rsi = signal_state.get("rsi", 0) if signal_state else 0
+        _mom60 = signal_state.get("momentum_60s", 0) if signal_state else 0
+        _bb = _opt_cached.get("bb_position", 0)
+        _vol = _opt_cached.get("volume_ratio", 0)
+        _entry_context = f"RSI={_rsi:.0f} mom60={_mom60:.3f}% BB={_bb:.2f} vol={_vol:.2f}x"
+        self.logger.info(
+            "[%s] ENTRY_CONTEXT: %s | candles=%d/3 cum=%.2f%%",
+            self.pair, _entry_context, candle_count, candle_cum_pct,
+        )
 
         self._cached_bot_state = "ready"
         self.logger.info(
@@ -1198,7 +1236,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # Dynamic wait: strong moves get fast confirm, weaker ones standard.
         # Premium must rise (or hold flat ±0.5%) during the window.
         first_ask = premium
-        fast_confirm = candle_count >= 3 or candle_cum_pct >= 0.40
+        fast_confirm = True  # 3/3 candles required → always fast confirm (3s)
         confirm_wait = 3 if fast_confirm else 10
         confirm_mode = "fast" if fast_confirm else "standard"
         self.logger.info(
@@ -1563,6 +1601,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "setup_type": setup_type,
                 "contracts": contracts,
                 "already_filled": already_filled,
+                "entry_context": _entry_context,
             },
         )]
 
@@ -2476,6 +2515,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Clear all position state — no retry, we're done
         self.in_position = False
+        OptionsScalpStrategy._global_in_position = False  # release global lock
         self.option_side = None
         self.option_symbol = None
         self.entry_premium = 0.0
@@ -2561,6 +2601,7 @@ class OptionsScalpStrategy(BaseStrategy):
             # Entry fill — prefer Delta's actual average over signal.price (which is the limit price)
             fill_price = order.get("average") or order.get("price") or self.entry_premium or signal.price
             self.in_position = True
+            OptionsScalpStrategy._global_in_position = True  # global lock
             self.option_side = pending_side
             self.option_symbol = signal.pair
             self.entry_premium = fill_price
@@ -2653,6 +2694,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 pass
 
             self.in_position = False
+            OptionsScalpStrategy._global_in_position = False  # release global lock
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0
