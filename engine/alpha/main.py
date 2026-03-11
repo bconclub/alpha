@@ -275,6 +275,7 @@ class AlphaBot:
         self._scheduler.add_job(self._reconcile_exchange_positions, "interval", seconds=60)
         self._scheduler.add_job(self._telegram_health_check, "interval", minutes=5)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=5)
+        self._scheduler.add_job(self._run_reconciliation, "interval", minutes=60)
         self._scheduler.start()
 
         # Fetch Delta balance for trade sizing
@@ -1091,6 +1092,29 @@ class AlphaBot:
 
         await self.db.save_bot_status(status)
 
+    async def _run_reconciliation(self) -> None:
+        """Hourly reconciliation against Delta Exchange fills."""
+        if not self.delta_options or not self.db.is_connected:
+            return
+        try:
+            from alpha.reconcile import DeltaReconciler
+            reconciler = DeltaReconciler(self.delta_options, self.db.client, logger)
+            result = await reconciler.run(since_hours=2)
+            logger.info(
+                "RECONCILE: matched=%d updated=%d inserted=%d diff=$%.4f",
+                result["matched"], result["updated"], result["inserted"], result["diff"],
+            )
+            if result["updated"] > 0 or result["inserted"] > 0:
+                try:
+                    await self.alerts.send_text(
+                        f"\U0001f504 Reconciled: {result['updated']} updated, "
+                        f"{result['inserted']} ghosts inserted, diff=${result['diff']:.4f}"
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("Reconcile failed")
+
     async def _poll_commands(self) -> None:
         """Check Supabase for pending dashboard commands and execute them."""
         try:
@@ -1236,6 +1260,15 @@ class AlphaBot:
             elif command == "close_trade":
                 result_msg = await self._handle_close_trade(params)
                 await self.alerts.send_command_confirmation("close_trade", result_msg)
+
+            elif command == "reconcile":
+                from alpha.reconcile import DeltaReconciler
+                reconciler = DeltaReconciler(self.delta_options, self.db.client, logger)
+                result = await reconciler.run(since_hours=int(params.get("hours", 24)))
+                result_msg = (
+                    f"Reconciled: {result['updated']} updated, "
+                    f"{result['inserted']} inserted, diff=${result['diff']:.4f}"
+                )
 
             else:
                 result_msg = f"Unknown command: {command}"
