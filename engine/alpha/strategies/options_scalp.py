@@ -107,17 +107,15 @@ class OptionsScalpStrategy(BaseStrategy):
     CANDLE_MOM_STREAK = 3                # ALL 3 candles must agree (was 2 — 2/3 had 27% WR, 3/3 had 40%)
     CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
     # Per-asset cumulative thresholds (raised — 0.10% entries were noise)
-    CANDLE_MOM_CUM_PCT_BTC = 0.20        # BTC: was 0.15 — winners had 0.20%+
-    CANDLE_MOM_CUM_PCT_ETH = 0.15        # ETH: was 0.10 — 0.10% entries were noise
+    CANDLE_MOM_CUM_PCT_BTC = 0.25        # BTC: raised — need real moves
+    CANDLE_MOM_CUM_PCT_ETH = 0.20        # ETH: raised — 0.15% was noise
     MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
-    OPT_TRADE_COOLDOWN_SEC = 300        # 5 min between trades (was 120 — max 12/hr = ~15-20/day)
-    OPT_DEAD_COOLDOWN_SEC = 600         # 10 min cooldown after dead momentum exit (0% peak = dead market)
-    COOLDOWN_OVERRIDE_CUM_PCT = 0.30    # bypass 5min cooldown only on very strong moves (was 0.20)
-    DEAD_COOLDOWN_OVERRIDE_CUM_PCT = 0.25  # bypass dead-market cooldown if cum move >= 0.25%
-    # OPT_LOSS_STREAK_LIMIT removed — candle momentum gates entry quality
+    # Smart cooldown thresholds (replaces hard time-based cooldowns)
+    SMART_CD_LOSS_CUM_PCT = 0.30        # after loss: require this cum% for re-entry
+    SMART_CD_SL_CUM_PCT = 0.40          # after SL: require this cum% for re-entry
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
@@ -142,9 +140,14 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds (tuned for momentum scalps) ────────────────
     TP_PREMIUM_GAIN_PCT = 30.0           # Take profit at +30% premium gain
-    SL_PREMIUM_LOSS_PCT = 50.0           # Stop loss at -50% premium drop (was 30 — $20 option SLs at $10, clean/predictable)
-    TRAILING_ACTIVATE_PCT = 15.0         # Trail activates at +15% gain (was 10 — too early)
-    TRAILING_DISTANCE_PCT = 5.0          # Trail 5% below peak premium
+    SL_PREMIUM_LOSS_PCT = 30.0           # Stop loss at -30% premium drop (was 50 — thesis is wrong, get out)
+    # Tiered trailing: start wide, tighten as profit grows
+    OPT_TRAIL_TIERS: list[tuple[float, float]] = [
+        (10.0, 8.0),   # +10% peak → 8% trail distance
+        (20.0, 6.0),   # +20% peak → 6% trail
+        (30.0, 5.0),   # +30% peak → 5% trail
+        (50.0, 4.0),   # +50% peak → 4% trail
+    ]
     PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain (was 50 — too aggressive)
     PULLBACK_ACTIVATE_PCT = 8.0          # Pullback only fires after +8% peak (was 5 — let winners breathe)
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
@@ -155,26 +158,24 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Momentum fade — premium profitable but momentum dying ────────
     OPT_MOM_FADE_THRESHOLD = 0.02        # momentum < 0.02% = dying
     OPT_MOM_FADE_CONFIRM_SEC = 60        # hold 60s below threshold to confirm (was 15 — options premium lags spot)
-    OPT_MOM_FADE_MIN_HOLD = 60           # min 60s in position before fade can fire
-    OPT_MOM_FADE_TREND_HOLD = 90         # trend-aligned: need 90s hold
+    OPT_MOM_FADE_MIN_HOLD = 120          # min 120s before fade can fire (was 60 — too early)
+    OPT_MOM_FADE_TREND_HOLD = 120        # trend-aligned: 120s hold (was 90)
     OPT_MOM_FADE_TREND_CONFIRM = 20      # trend-aligned: need 20s confirm
 
     # ── Dead momentum — momentum dead + losing + held too long ───────
     OPT_DEAD_MOM_CONFIRM_SEC = 30        # 30s of dead momentum (was 45)
-    OPT_DEAD_MOM_MIN_HOLD = 120          # min 2min hold before dead fires (was 180)
+    OPT_DEAD_MOM_MIN_HOLD = 300          # min 5min hold before dead fires (was 120 — options cost nothing to hold)
 
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
-    # GPFC: Lower entry floors — protect small peaks that reverse
+    # Wider floors — give winners room to breathe. Don't lock breakeven until +5%.
     OPT_RATCHET_FLOOR_TABLE = [
-        (1.0, -1.0),     # +1% peak → floor -1% (limit bleed on small movers)
-        (2.0, 0.0),      # +2% peak → breakeven lock
-        (3.0, 1.0),      # +3% peak → lock +1%
-        (5.0, 2.0),      # small winner lock — +5% peak → floor at +2%
-        (10.0, 3.0),     # first major floor at 10% peak
-        (15.0, 7.0),     # mid-tier
-        (25.0, 15.0),    # big runner
-        (40.0, 25.0),    # lock 25% at 40% peak
-        (100.0, 70.0),   # 70% locked at 100% peak
+        (3.0, -2.0),     # +3% peak → floor -2% (room to breathe)
+        (5.0, 0.0),      # +5% peak → breakeven lock
+        (8.0, 2.0),      # +8% → lock +2%
+        (15.0, 5.0),     # +15% → lock +5%
+        (25.0, 10.0),    # +25% → lock +10%
+        (40.0, 20.0),    # +40% → lock +20%
+        (60.0, 35.0),    # +60% → lock +35%
     ]
 
     # ── Position limits ───────────────────────────────────────────
@@ -251,11 +252,13 @@ class OptionsScalpStrategy(BaseStrategy):
         # Cooldown after POSITION_GONE — no new options entry for 60s
         self._position_gone_cooldown_until: float = 0.0
         self._POSITION_GONE_COOLDOWN_SEC = 60
-        # Cooldown after dead market (OPT_DEAD_MOMENTUM with 0% peak)
-        self._dead_market_cooldown_until: float = 0.0
 
-        # Trade cooldown — 5 min between options trades
-        self._last_option_trade_time: float = 0.0
+        # Smart cooldown state — require fresh momentum after losses
+        self._last_exit_was_loss: bool = False
+        self._last_exit_was_sl: bool = False
+
+        # DB trade ID — set on entry write, used for close lookup
+        self._db_trade_id: int | None = None
 
         # Regime skip logging throttle (log once per 60s to avoid spam)
         self._last_regime_log: float = 0.0
@@ -338,7 +341,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "Timeout=%dm Phase1=%ds Alloc=%s%s",
             self.pair, self.MIN_SIGNAL_STRENGTH,
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
-            int(self.TRAILING_ACTIVATE_PCT), int(self.TRAILING_DISTANCE_PCT),
+            int(self.OPT_TRAIL_TIERS[0][0]), int(self.OPT_TRAIL_TIERS[0][1]),
             int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
             self.TIMEOUT_MINUTES, self.PHASE1_HANDS_OFF_SEC,
             f"{self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 20)}%",
@@ -856,24 +859,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return
 
-        # Trade cooldown
-        if self._last_option_trade_time > 0:
-            elapsed = time.monotonic() - self._last_option_trade_time
-            if elapsed < self.OPT_TRADE_COOLDOWN_SEC:
-                remaining = self.OPT_TRADE_COOLDOWN_SEC - elapsed
-                self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
-                return
-
-        # Dead market cooldown
-        if time.monotonic() < self._dead_market_cooldown_until:
-            remaining = self._dead_market_cooldown_until - time.monotonic()
-            self._cached_bot_state = f"blocked:dead_market_cooldown:{int(remaining)}s"
-            return
-
         # Will be overwritten by _check_option_entry() with the real state
         # but this ensures dashboard write has at least "scanning"
-        if self._cached_bot_state.startswith("blocked:trade_cooldown") or \
-           self._cached_bot_state.startswith("blocked:position_gone_cooldown"):
+        if self._cached_bot_state.startswith("blocked:position_gone_cooldown"):
             self._cached_bot_state = "scanning"
 
     # ==================================================================
@@ -906,52 +894,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return []
 
-        # 0b. Trade cooldown — 2 min between options trades
-        now = time.monotonic()
-        if self._last_option_trade_time > 0:
-            elapsed = now - self._last_option_trade_time
-            if elapsed < self.OPT_TRADE_COOLDOWN_SEC:
-                remaining = self.OPT_TRADE_COOLDOWN_SEC - elapsed
-                # Momentum override: strong fresh momentum bypasses cooldown
-                _, _, _, _ov_count, _ov_cum = await self._check_candle_momentum()
-                if _ov_count >= 2 and _ov_cum >= self.COOLDOWN_OVERRIDE_CUM_PCT:
-                    self.logger.info(
-                        "[%s] COOLDOWN_OVERRIDE: trade cooldown bypassed — "
-                        "%d/5 candles, cum=%.2f%% >= %.2f%% (%.0fs remaining)",
-                        self.pair, _ov_count, _ov_cum,
-                        self.COOLDOWN_OVERRIDE_CUM_PCT, remaining,
-                    )
-                else:
-                    if self._tick_count % 6 == 0:
-                        self.logger.info(
-                            "[%s] OPTIONS TRADE_COOLDOWN — %.0fs remaining (2min between trades)",
-                            self.pair, remaining,
-                        )
-                    self._cached_bot_state = f"blocked:trade_cooldown:{int(remaining)}s"
-                    return []
-
-        # 0b2. Dead market cooldown — 10 min after OPT_DEAD_MOMENTUM exit with 0% peak
-        if time.monotonic() < self._dead_market_cooldown_until:
-            remaining = self._dead_market_cooldown_until - time.monotonic()
-            # Momentum override: stronger threshold for dead-market cooldown
-            _, _, _, _ov_count, _ov_cum = await self._check_candle_momentum()
-            if _ov_count >= 2 and _ov_cum >= self.DEAD_COOLDOWN_OVERRIDE_CUM_PCT:
-                self.logger.info(
-                    "[%s] COOLDOWN_OVERRIDE: dead-market cooldown bypassed — "
-                    "%d/5 candles, cum=%.2f%% >= %.2f%% (%.0fs remaining)",
-                    self.pair, _ov_count, _ov_cum,
-                    self.DEAD_COOLDOWN_OVERRIDE_CUM_PCT, remaining,
-                )
-                # Clear the dead-market cooldown so it doesn't re-block next tick
-                self._dead_market_cooldown_until = 0.0
-            else:
-                if self._tick_count % 6 == 0:
-                    self.logger.info(
-                        "[%s] DEAD_MARKET_COOLDOWN — %.0fs remaining (10min after 0%% peak exit)",
-                        self.pair, remaining,
-                    )
-                self._cached_bot_state = f"blocked:dead_market_cooldown:{int(remaining)}s"
-                return []
+        # 0b. Smart cooldown — no hard time block, just require fresh momentum after losses
 
         # 0c. BTC balance skip REMOVED — at 50x leverage, BTC OTM collateral is tiny ($0.60-1.12)
 
@@ -980,7 +923,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # 2. Early-direction gate — PRIMARY ENTRY GATE
         # Direction determined FROM candles (2/3 completed 1m candles).
         # Per-asset cumulative: BTC >= 0.15%, ETH >= 0.20%.
-        candle_pass, candle_reason, side, candle_count, candle_cum_pct = await self._check_candle_momentum()
+        candle_pass, candle_reason, side, candle_count, candle_cum_pct, candle_pass_sizes = await self._check_candle_momentum()
         self._cached_candle_momentum = {
             "count": candle_count, "total": self.CANDLE_MOM_LOOKBACK,
             "cum_pct": round(candle_cum_pct, 4), "direction": side, "passed": candle_pass,
@@ -990,6 +933,41 @@ class OptionsScalpStrategy(BaseStrategy):
             if self._tick_count % 6 == 0:
                 self.logger.info("[%s] %s", self.pair, candle_reason)
             return []
+
+        # 2a. Smart cooldown — after losses, require higher cum threshold for re-entry
+        if self._last_exit_was_sl:
+            _cd_min = self.SMART_CD_SL_CUM_PCT
+            if candle_cum_pct < _cd_min:
+                self.logger.info(
+                    "[%s] SMART_CD: post-SL cum=%.2f%% < %.2f%% — need stronger signal",
+                    self.pair, candle_cum_pct, _cd_min,
+                )
+                self._cached_bot_state = "blocked:smart_cd_sl"
+                return []
+        elif self._last_exit_was_loss:
+            _cd_min = self.SMART_CD_LOSS_CUM_PCT
+            if candle_cum_pct < _cd_min:
+                self.logger.info(
+                    "[%s] SMART_CD: post-loss cum=%.2f%% < %.2f%% — need fresh momentum",
+                    self.pair, candle_cum_pct, _cd_min,
+                )
+                self._cached_bot_state = "blocked:smart_cd_loss"
+                return []
+
+        # 2b. Candle acceleration — last candle must be >= 50% of avg first two
+        if candle_pass_sizes and len(candle_pass_sizes) >= 3:
+            avg_first_two = (candle_pass_sizes[0] + candle_pass_sizes[1]) / 2
+            if avg_first_two > 0 and candle_pass_sizes[2] < avg_first_two * 0.5:
+                self.logger.info(
+                    "[%s] DECEL_SKIP: last candle %.3f%% < 50%% of avg %.3f%% — move fading",
+                    self.pair, candle_pass_sizes[2], avg_first_two,
+                )
+                self._cached_bot_state = "blocked:decelerating"
+                return []
+            self.logger.info(
+                "[%s] ACCEL_OK: candles=[%.3f, %.3f, %.3f]%% — accelerating",
+                self.pair, candle_pass_sizes[0], candle_pass_sizes[1], candle_pass_sizes[2],
+            )
 
         # 3/3 candles required — max conviction allocation
         self._candle_alloc_pct = 50.0
@@ -1257,12 +1235,14 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.debug("[%s] Premium confirm fetch failed: %s", self.pair, e)
             second_ask = 0
 
-        # Premium must rise or hold flat (within -0.5%) — skip if dropped more
+        # Premium must RISE during confirm — not just hold flat.
+        # Fast mode (3s): require +1.5% rise. Standard (10s): require +2.0% rise.
         pct_chg = ((second_ask - first_ask) / first_ask * 100) if first_ask > 0 else 0
-        if second_ask <= 0 or pct_chg < -0.5:
+        min_rise_pct = 1.5 if fast_confirm else 2.0
+        if second_ask <= 0 or pct_chg < min_rise_pct:
             self.logger.info(
-                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%+.2f%%) — premium dead, SKIP",
-                self.pair, first_ask, second_ask, pct_chg,
+                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%+.2f%% < +%.1f%%) — not rising, SKIP",
+                self.pair, first_ask, second_ask, pct_chg, min_rise_pct,
             )
             return []
 
@@ -1700,7 +1680,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # CANDLE-BASED MOMENTUM GATE
     # ==================================================================
 
-    async def _check_candle_momentum(self) -> tuple[bool, str, str | None, int, float]:
+    async def _check_candle_momentum(self) -> tuple[bool, str, str | None, int, float, list[float]]:
         """Early-direction gate for options entry — PRIMARY GATE.
 
         Determines direction AND momentum from last 3 completed 1m candles.
@@ -1712,27 +1692,27 @@ class OptionsScalpStrategy(BaseStrategy):
         3. Last candle: must match direction (no reversal at end)
 
         Returns:
-            (passed, reason_string, side, directional_count, cum_pct)
+            (passed, reason_string, side, directional_count, cum_pct, candle_sizes)
         """
         exchange = self.futures_exchange
         if not exchange:
-            return False, "no_exchange", None, 0, 0.0
+            return False, "no_exchange", None, 0, 0.0, []
 
         try:
             ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK + 2)
         except Exception as e:
             self.logger.debug("[%s] CANDLE_MOM: fetch_ohlcv failed: %s", self.pair, e)
-            return False, f"fetch_failed ({e})", None, 0, 0.0
+            return False, f"fetch_failed ({e})", None, 0, 0.0, []
 
         if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK:
-            return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None, 0, 0.0
+            return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None, 0, 0.0, []
 
         # Take last 3 completed candles
         completed = ohlcv[-self.CANDLE_MOM_LOOKBACK:]
 
         current_price = float(completed[-1][4])  # close of last completed candle
         if current_price <= 0:
-            return False, "bad price", None, 0, 0.0
+            return False, "bad price", None, 0, 0.0, []
 
         # Per-asset cumulative threshold
         cum_threshold = (
@@ -1745,11 +1725,13 @@ class OptionsScalpStrategy(BaseStrategy):
         green_count = 0
         red_count = 0
         cumulative_move = 0.0
+        candle_sizes: list[float] = []  # abs % move per candle (for acceleration check)
 
         for candle in completed:
             o, c = float(candle[1]), float(candle[4])
             move = c - o
             cumulative_move += move
+            candle_sizes.append(abs(move) / o * 100 if o > 0 else 0.0)
 
             if abs(move) < doji_threshold:
                 continue  # doji — neutral, skip
@@ -1768,7 +1750,7 @@ class OptionsScalpStrategy(BaseStrategy):
             directional_count = red_count
         else:
             n = self.CANDLE_MOM_LOOKBACK
-            return False, f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP", None, 0, 0.0
+            return False, f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP", None, 0, 0.0, candle_sizes
 
         # Last completed candle must match direction (no reversal)
         last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
@@ -1807,7 +1789,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 parts.append(f"last candle {last_color} but need {color} for {direction_label}")
             reason = "EARLY_GATE: " + ", ".join(parts) + " → SKIP"
 
-        return passed, reason, side if passed else None, directional_count, cum_pct
+        return passed, reason, side if passed else None, directional_count, cum_pct, candle_sizes
 
     # ==================================================================
     # RATCHET FLOOR
@@ -1970,14 +1952,15 @@ class OptionsScalpStrategy(BaseStrategy):
         if in_phase1:
             return []
 
-        # ── 3. MOMENTUM FADE: profitable + momentum dying ─────────────
+        # ── 3. MOMENTUM FADE: LOSING + momentum dying ──────────────
+        # Only fires if premium is BELOW entry. Winners exit via ratchet/trail, not fade.
         momentum_60s = 0.0
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
             ss = self._scalp.last_signal_state
             if ss:
                 momentum_60s = abs(ss.get("momentum_60s", 0) or 0)
 
-        if hold_seconds >= self.OPT_MOM_FADE_MIN_HOLD and premium_change_pct > 0:
+        if hold_seconds >= self.OPT_MOM_FADE_MIN_HOLD and premium_change_pct < 0:
             if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
                 now_m = time.monotonic()
                 if self._opt_mom_fade_since is None:
@@ -1998,7 +1981,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 elapsed = now_m - self._opt_mom_fade_since
                 if elapsed >= confirm_sec and hold_seconds >= min_hold:
                     self.logger.info(
-                        "[%s] OPT_MOMENTUM_FADE — profitable +%.1f%% but mom=%.4f%% dead %.0fs (aligned=%s)",
+                        "[%s] OPT_MOMENTUM_FADE — losing %.1f%% + mom=%.4f%% dead %.0fs (aligned=%s)",
                         self.option_symbol, premium_change_pct, momentum_60s,
                         elapsed, trend_aligned,
                     )
@@ -2006,12 +1989,9 @@ class OptionsScalpStrategy(BaseStrategy):
             else:
                 self._opt_mom_fade_since = None
 
-        # ── 4. DEAD MOMENTUM: losing + momentum dead + held too long ──
-        # If peak was never green (highest_premium <= entry_premium), cut faster (90s hold)
-        # If peak > 0%, keep full 120s — it moved once, might move again
-        peak_was_green = self.highest_premium > self.entry_premium if self.entry_premium > 0 else False
-        dead_min_hold = self.OPT_DEAD_MOM_MIN_HOLD if peak_was_green else 90
-        if hold_seconds >= dead_min_hold and premium_change_pct < 0:
+        # ── 4. DEAD MOMENTUM: losing >5% + momentum dead + held 5 min ──
+        # Only fire if premium is clearly losing (< -5%). Flat positions cost nothing to hold.
+        if hold_seconds >= self.OPT_DEAD_MOM_MIN_HOLD and premium_change_pct < -5.0:
             if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
                 now_m = time.monotonic()
                 if self._opt_mom_dying_since is None:
@@ -2035,21 +2015,27 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "TP")
 
-        # ── 6. TRAILING activation at +15% ───────────────────────────
-        if premium_change_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
+        # ── 6. TIERED TRAILING: activate at +10%, tighten as profit grows ──
+        # Find the active trail tier based on peak premium pct
+        trail_distance = 0.0
+        for tier_pct, tier_dist in self.OPT_TRAIL_TIERS:
+            if peak_pnl_pct >= tier_pct:
+                trail_distance = tier_dist
+        if trail_distance > 0 and not self._trailing_active:
             self._trailing_active = True
             self.logger.info(
-                "[%s] OPTION TRAIL ON at +%.1f%%", self.option_symbol, premium_change_pct,
+                "[%s] OPTION TRAIL ON at +%.1f%% (distance=%.1f%%)",
+                self.option_symbol, premium_change_pct, trail_distance,
             )
 
-        # ── 7. TRAILING STOP: 5% below peak premium ─────────────────
-        if self._trailing_active:
-            trail_floor = self.highest_premium * (1 - self.TRAILING_DISTANCE_PCT / 100)
+        # ── 7. TRAILING STOP: distance% below peak premium ──────────
+        if self._trailing_active and trail_distance > 0:
+            trail_floor = self.highest_premium * (1 - trail_distance / 100)
             if current_premium <= trail_floor:
                 final_pct = (current_premium - self.entry_premium) / self.entry_premium * 100
                 self.logger.info(
-                    "[%s] OPTION TRAIL HIT — peak=$%.4f floor=$%.4f now=$%.4f",
-                    self.option_symbol, self.highest_premium, trail_floor, current_premium,
+                    "[%s] OPTION TRAIL HIT — peak=$%.4f floor=$%.4f now=$%.4f (dist=%.1f%%)",
+                    self.option_symbol, self.highest_premium, trail_floor, current_premium, trail_distance,
                 )
                 return await self._do_option_exit(current_premium, final_pct, "OPT_TRAIL")
 
@@ -2117,8 +2103,53 @@ class OptionsScalpStrategy(BaseStrategy):
         return []
 
     # ==================================================================
-    # OPTIONS DB CLOSE (bypasses trade_executor P&L)
+    # OPTIONS DB WRITE (entry + close, bypasses trade_executor P&L)
     # ==================================================================
+
+    async def _write_entry_to_db(self, fill_price: float, contracts: int,
+                                  order: dict, signal, option_symbol: str,
+                                  option_side: str, strike_price: float,
+                                  base_asset: str):
+        """Insert a new options trade row into the DB."""
+        try:
+            mult = self.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
+            spot = self._last_spot_price or 0
+            entry_fee = round(contracts * mult * spot * 0.000118, 8) if spot else 0
+            collateral = fill_price * contracts / self.OPTIONS_LEVERAGE
+
+            row = {
+                "pair": option_symbol,
+                "exchange_id": "delta",
+                "strategy": "options_scalp",
+                "direction": "long",
+                "side": option_side,
+                "entry_price": fill_price,
+                "contracts": float(contracts),
+                "leverage": self.OPTIONS_LEVERAGE,
+                "collateral": round(collateral, 4),
+                "entry_fee": entry_fee,
+                "exit_fee": 0,
+                "gross_pnl": 0,
+                "net_pnl": 0,
+                "pnl": 0,
+                "pnl_pct": 0,
+                "status": "open",
+                "setup_type": "MOMENTUM_BURST",
+                "signals_fired": getattr(self, '_entry_signals_fired', ''),
+                "opened_at": datetime.utcnow().isoformat() + "Z",
+            }
+
+            result = self.executor.db.client.table("trades").insert(row).execute()
+            if result.data:
+                self._db_trade_id = result.data[0].get("id")
+                self.logger.info(
+                    "[%s] OPTIONS DB ENTRY: id=%s entry=$%.4f x%d fee=$%.6f",
+                    option_symbol, self._db_trade_id, fill_price, contracts, entry_fee,
+                )
+            else:
+                self.logger.error("[%s] OPTIONS DB ENTRY returned no data", option_symbol)
+        except Exception:
+            self.logger.exception("[%s] _write_entry_to_db FAILED", option_symbol)
 
     async def _close_option_trade_in_db(
         self, exit_premium: float, exit_type: str,
@@ -2144,12 +2175,20 @@ class OptionsScalpStrategy(BaseStrategy):
         try:
             from alpha.utils import iso_now
 
-            open_trade = await self._db.get_open_trade(
-                pair=sym, exchange="delta", strategy="options_scalp",
-            )
+            # Use _db_trade_id if available (set by _write_entry_to_db)
+            if self._db_trade_id:
+                resp = self.executor.db.client.table("trades").select("*").eq(
+                    "id", self._db_trade_id
+                ).execute()
+                open_trade = resp.data[0] if resp.data else None
+            else:
+                open_trade = await self._db.get_open_trade(
+                    pair=sym, exchange="delta", strategy="options_scalp",
+                )
             if not open_trade:
                 self.logger.warning(
-                    "[%s] _close_option_trade_in_db: no open trade found", sym,
+                    "[%s] _close_option_trade_in_db: no open trade found (db_id=%s)",
+                    sym, self._db_trade_id,
                 )
                 return False
 
@@ -2297,15 +2336,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
         self.hourly_pnl += pnl_usd
 
-        # Trade cooldown — extended to 10 min for dead momentum exits where peak was 0%
-        self._last_option_trade_time = time.monotonic()
-        if exit_type == "OPT_DEAD_MOMENTUM" and self.highest_premium <= self.entry_premium:
-            # Peak never went green → dead market, use 10 min cooldown
-            self._dead_market_cooldown_until = time.monotonic() + self.OPT_DEAD_COOLDOWN_SEC
-            self.logger.info(
-                "[%s] DEAD MARKET — peak was 0%%, setting 10-min cooldown",
-                self.option_symbol,
-            )
+        # Smart cooldown — track exit type for next entry's cum threshold
+        self._last_exit_was_loss = pnl_pct < 0
+        self._last_exit_was_sl = "SL" in exit_type
 
         # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
@@ -2518,8 +2551,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
         self.hourly_pnl += pnl_usd
 
-        # Trade cooldown — set 5 min timer
-        self._last_option_trade_time = time.monotonic()
+        # Smart cooldown — position_gone is always a loss
+        self._last_exit_was_loss = True
+        self._last_exit_was_sl = False
 
         # Clear dashboard + position state
         await self._clear_dashboard_position(exit_reason_detail, pnl_pct, pnl_usd)
@@ -2648,6 +2682,11 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.strike_price, fill_price,
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
+            # Clear smart cooldown — successful entry resets loss tracking
+            self._last_exit_was_loss = False
+            self._last_exit_was_sl = False
+            self._db_trade_id = None  # reset; will be set by _write_entry_to_db
+
             # Telegram entry notification
             try:
                 alerts = getattr(self.executor, "alerts", None)
@@ -2666,6 +2705,18 @@ class OptionsScalpStrategy(BaseStrategy):
                     asyncio.get_event_loop().create_task(alerts.send_text(msg))
             except Exception:
                 pass
+
+            # Write entry to DB
+            import asyncio as _aio_entry
+            _aio_entry.get_event_loop().create_task(
+                self._write_entry_to_db(
+                    fill_price, self._contracts, order, signal,
+                    option_symbol=self.option_symbol,
+                    option_side=self.option_side,
+                    strike_price=self.strike_price,
+                    base_asset=self._base_asset,
+                )
+            )
         else:
             # Exit fill — close trade in DB with actual fill price from exchange
             exit_fill = float(order.get("average") or order.get("price") or 0)
@@ -2733,6 +2784,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.strike_price = 0.0
             self.expiry_dt = None
             self._contracts = 1
+            self._db_trade_id = None
             # Force next check() to immediately write cleared state to dashboard
             self._last_state_write = 0.0
 
