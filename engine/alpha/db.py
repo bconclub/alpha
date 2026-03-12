@@ -25,7 +25,7 @@ class Database:
     TABLE_STRATEGY_LOG = "strategy_log"
     TABLE_BOT_STATUS = "bot_status"
     TABLE_BOT_COMMANDS = "bot_commands"
-    TABLE_ACTIVITY_LOG = "activity_log"
+    TABLE_ACTIVITY_LOG = "latest_strategy_log"
     TABLE_CHANGELOG = "changelog"
 
     def __init__(self) -> None:
