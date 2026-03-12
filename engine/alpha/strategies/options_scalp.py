@@ -1,21 +1,24 @@
 """Alpha Options Scalp — Buy CALLs/PUTs on strong momentum signals.
 
 ═══════════════════════════════════════════════════════════════
- OPTION ENTRY SIGNAL — CURRENT FLOW (all gates must pass)
+ OPTION ENTRY SIGNAL — ADAPTIVE FLOW (reads the market, not thresholds)
 ═══════════════════════════════════════════════════════════════
 
  1. REGIME GATE        CHOPPY blocked, all others allowed
- 2. EARLY DIRECTION    2 of 3 candles directional + cumulative move threshold
-                       BTC >= 0.15% | ETH >= 0.20% | last candle must match
+ 2. ADAPTIVE GATE      3 of 5 candles directional + cumulative move >= 2.5x
+                       recent avg candle range (adapts to market noise)
+                       + Volume confirmation: entry candles >= 1.5x avg volume
+                       + Acceleration: recent candles bigger than earlier ones
+                       + Floor: minimum 0.10% cum regardless
  3. UNDERLYING MOVE    Price must move >= 0.10% in last ~60s
  4. EXPIRY             Nearest expiry (today preferred, min 1h to expiry)
  5. STRIKE SELECTION   Highest OI within ATM + 1-2 OTM (liquidity = premium moves)
- 6. PREMIUM FLOOR      Min $5 premium (kills dead low-delta strikes)
- 7. PREMIUM CAP        Max $40 premium (avoid low-gamma expensive options)
- 8. PREMIUM CONFIRM    Dynamic wait (3s fast / 10s standard), must rise or hold ±0.5%
- 9. LIMIT ENTRY        Place limit buy at ORIGINAL price, wait 15s for fill
+ 6. PREMIUM SWEET SPOT Prefer $3-15 ETH / $50-300 BTC. Too cheap = illiquid skip.
+                       Expensive = only enter on monster signal (4x noise + 2.5x vol)
+ 7. PREMIUM CONFIRM    Dynamic wait (3s fast / 10s standard), must rise or hold ±0.5%
+ 8. LIMIT ENTRY        Place limit buy at ORIGINAL price, wait 15s for fill
                        If not filled → cancel and skip (no overpaying)
-10. PULLBACK WAIT      Wait up to 15s for 3% premium dip before buying
+ 9. PULLBACK WAIT      Wait up to 15s for 3% premium dip before buying
 
  COOLDOWNS:
    - Trade cooldown: 2 min between trades
@@ -23,7 +26,7 @@
    - Position gone: 60s after position disappears
 
  SIZING:
-   - 3/3 candles → 50% allocation | 2/3 → 35%
+   - 3+/5 candles directional → 50% allocation
    - BB_SQUEEZE → 60% factor on top
    - Survival mode: balance < $5 → max 5 contracts
    - BTC + ETH both enabled (50x leverage = tiny collateral)
@@ -48,7 +51,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from statistics import mean
 from typing import TYPE_CHECKING, Any
 
 import ccxt.async_support as ccxt
@@ -103,12 +108,17 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
-    # Candle-based early-direction gate (3/3 candles required)
-    CANDLE_MOM_STREAK = 3                # ALL 3 candles must agree (was 2 — 2/3 had 27% WR, 3/3 had 40%)
-    CANDLE_MOM_LOOKBACK = 3              # number of completed 1m candles to check
-    # Per-asset cumulative thresholds (raised — 0.10% entries were noise)
-    CANDLE_MOM_CUM_PCT_BTC = 0.25        # BTC: raised — need real moves
-    CANDLE_MOM_CUM_PCT_ETH = 0.20        # ETH: raised — 0.15% was noise
+    # Candle-based early-direction gate (3/5 candles required, adaptive threshold)
+    CANDLE_MOM_STREAK = 3                # 3 of 5 candles must agree in direction
+    CANDLE_MOM_LOOKBACK = 5              # check last 5 completed 1m candles (was 3)
+    # ── Adaptive threshold — compare move to recent noise ─────────
+    ADAPTIVE_CUM_MULTIPLIER = 2.5        # entry requires cum >= 2.5x avg candle range
+    ADAPTIVE_CUM_FLOOR = 0.10            # absolute minimum cum% regardless of noise level
+    ADAPTIVE_RANGE_WINDOW = 20           # rolling window of candle ranges for noise baseline
+    # ── Volume confirmation — no volume no trade ──────────────────
+    VOLUME_CONFIRM_WINDOW = 20           # rolling window for avg volume baseline
+    VOLUME_CONFIRM_MULTIPLIER = 1.5      # entry candles must have >= 1.5x avg volume
+    VOLUME_CONFIRM_CANDLES = 3           # average volume of last 3 candles for entry check
     MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
@@ -119,8 +129,13 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
-    # ── GPFC: Premium cap — avoid expensive low-gamma options ───
-    MAX_PREMIUM_USD: dict[str, float] = {"ETH": 40.0, "BTC": 800.0}
+    # ── Premium sweet spot — prefer cheap, allow expensive only on strong signal ──
+    PREMIUM_SWEET_SPOT: dict[str, tuple[float, float]] = {
+        "ETH": (3.0, 15.0),   # $3-$15 sweet spot for ETH
+        "BTC": (50.0, 300.0), # $50-$300 sweet spot for BTC
+    }
+    PREMIUM_EXPENSIVE_CUM_MULT = 4.0    # expensive premium requires cum >= 4x avg_range
+    PREMIUM_EXPENSIVE_VOL_MULT = 2.5    # expensive premium requires vol >= 2.5x avg
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # Same pair allocation as futures so capital is balanced.
@@ -273,6 +288,11 @@ class OptionsScalpStrategy(BaseStrategy):
         # Ratchet profit floor
         self._opt_ratchet_floor: float = 0.0
 
+        # ── Adaptive threshold: rolling candle ranges + volumes ──
+        self._candle_ranges: deque[float] = deque(maxlen=self.ADAPTIVE_RANGE_WINDOW)
+        self._candle_volumes: deque[float] = deque(maxlen=self.VOLUME_CONFIRM_WINDOW)
+        self._last_range_candle_ts: float = 0.0   # timestamp of last candle ingested
+
         # Dashboard chain panel cached state (set during check, read by _write_dashboard_state)
         self._cached_candle_momentum: dict | None = None
         self._cached_bot_state: str = "scanning"
@@ -335,11 +355,14 @@ class OptionsScalpStrategy(BaseStrategy):
         # Restore position state from DB if engine restarted with open option trade
         await self._restore_position_from_db()
 
+        _ss = self.PREMIUM_SWEET_SPOT.get(self._base_asset, (3.0, 15.0))
         self.logger.info(
-            "[%s] OPTIONS SCALP ACTIVE — min_strength=%d, "
+            "[%s] OPTIONS SCALP ACTIVE — adaptive_gate(2.5x noise, vol 1.5x, 3/5 candles), "
+            "premium=$%.0f-$%.0f sweet | "
             "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
             "Timeout=%dm Phase1=%ds Alloc=%s%s",
-            self.pair, self.MIN_SIGNAL_STRENGTH,
+            self.pair,
+            _ss[0], _ss[1],
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
             int(self.OPT_TRAIL_TIERS[0][0]), int(self.OPT_TRAIL_TIERS[0][1]),
             int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
@@ -924,10 +947,17 @@ class OptionsScalpStrategy(BaseStrategy):
         # Direction determined FROM candles (2/3 completed 1m candles).
         # Per-asset cumulative: BTC >= 0.15%, ETH >= 0.20%.
         candle_pass, candle_reason, side, candle_count, candle_cum_pct, candle_pass_sizes = await self._check_candle_momentum()
+        # Compute adaptive threshold for dashboard display
+        _avg_range = mean(self._candle_ranges) if len(self._candle_ranges) >= 10 else 0.10
+        _adaptive_thresh = max(_avg_range * self.ADAPTIVE_CUM_MULTIPLIER, self.ADAPTIVE_CUM_FLOOR)
+        _avg_vol = mean(self._candle_volumes) if len(self._candle_volumes) >= 5 else 0
         self._cached_candle_momentum = {
             "count": candle_count, "total": self.CANDLE_MOM_LOOKBACK,
             "cum_pct": round(candle_cum_pct, 4), "direction": side, "passed": candle_pass,
             "reason": candle_reason,
+            "adaptive_threshold": round(_adaptive_thresh, 4),
+            "avg_range": round(_avg_range, 4),
+            "avg_volume": round(_avg_vol, 0),
         }
         if not candle_pass:
             if self._tick_count % 6 == 0:
@@ -954,27 +984,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._cached_bot_state = "blocked:smart_cd_loss"
                 return []
 
-        # 2b. Candle acceleration — last candle must be >= 50% of avg first two
-        if candle_pass_sizes and len(candle_pass_sizes) >= 3:
-            avg_first_two = (candle_pass_sizes[0] + candle_pass_sizes[1]) / 2
-            if avg_first_two > 0 and candle_pass_sizes[2] < avg_first_two * 0.5:
-                self.logger.info(
-                    "[%s] DECEL_SKIP: last candle %.3f%% < 50%% of avg %.3f%% — move fading",
-                    self.pair, candle_pass_sizes[2], avg_first_two,
-                )
-                self._cached_bot_state = "blocked:decelerating"
-                return []
-            self.logger.info(
-                "[%s] ACCEL_OK: candles=[%.3f, %.3f, %.3f]%% — accelerating",
-                self.pair, candle_pass_sizes[0], candle_pass_sizes[1], candle_pass_sizes[2],
-            )
+        # 2b. Acceleration check is now inside _check_candle_momentum (3-of-5 with growing check)
 
-        # 3/3 candles required — max conviction allocation
+        # 3+/5 candles required — max conviction allocation
         self._candle_alloc_pct = 50.0
 
         self.logger.info(
-            "[%s] EARLY_GATE: %d/3 candles %s, cum=%.2f%% → premium check | alloc=%.0f%%",
-            self.pair, candle_count, side, candle_cum_pct, self._candle_alloc_pct,
+            "[%s] ADAPTIVE_GATE: %d/%d candles %s, cum=%.2f%% (thresh=%.2f%%) → premium check | alloc=%.0f%%",
+            self.pair, candle_count, self.CANDLE_MOM_LOOKBACK, side, candle_cum_pct, _adaptive_thresh, self._candle_alloc_pct,
         )
 
         # 2b. Underlying move check — confirm price is actually moving, not just candle noise
@@ -1039,8 +1056,8 @@ class OptionsScalpStrategy(BaseStrategy):
         _vol = _opt_cached.get("volume_ratio", 0)
         self._entry_context = f"RSI={_rsi:.0f} mom60={_mom60:.3f}% BB={_bb:.2f} vol={_vol:.2f}x cum={candle_cum_pct:.2f}%"
         self.logger.info(
-            "[%s] ENTRY_CONTEXT: %s | candles=%d/3",
-            self.pair, self._entry_context, candle_count,
+            "[%s] ENTRY_CONTEXT: %s | candles=%d/%d",
+            self.pair, self._entry_context, candle_count, self.CANDLE_MOM_LOOKBACK,
         )
 
         self._cached_bot_state = "ready"
@@ -1202,25 +1219,56 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_affordable_strike"
             return []
 
-        # 9a-post. PREMIUM CAP — check BEFORE placing any order
-        max_prem = self.MAX_PREMIUM_USD.get(self._base_asset, 40.0)
-        if premium > max_prem:
+        # 9a-post. PREMIUM SWEET SPOT — prefer cheap, allow expensive on strong signal
+        sweet_low, sweet_high = self.PREMIUM_SWEET_SPOT.get(
+            self._base_asset, (3.0, 15.0),
+        )
+        if premium < sweet_low:
             self.logger.info(
-                "[%s] OPTIONS PREMIUM_HIGH: $%.2f > $%.0f cap — skipping",
-                self.pair, premium, max_prem,
+                "[%s] PREMIUM_TOO_CHEAP: $%.2f < $%.1f — likely illiquid, SKIP",
+                self.pair, premium, sweet_low,
             )
-            await self._log_skip(
-                f"{self.pair} — OPTIONS PREMIUM_HIGH: ${premium:.2f} > ${max_prem:.0f}",
-                {"option_type": option_type, "premium": premium, "setup_type": setup_type},
-            )
-            self._cached_bot_state = "blocked:premium_high"
+            self._cached_bot_state = "blocked:premium_illiquid"
             return []
+
+        if premium > sweet_high:
+            # Expensive premium — only enter on STRONG signal
+            _avg_range_now = mean(self._candle_ranges) if len(self._candle_ranges) >= 10 else 0.10
+            _strong_cum = max(_avg_range_now * self.PREMIUM_EXPENSIVE_CUM_MULT, self.ADAPTIVE_CUM_FLOOR * 2)
+            _avg_vol_now = mean(self._candle_volumes) if len(self._candle_volumes) >= 5 else 0
+            # Use the most recent volumes from the rolling deque
+            _recent_vols = list(self._candle_volumes)[-self.VOLUME_CONFIRM_CANDLES:]
+            _entry_vol_now = mean(_recent_vols) if _recent_vols else 0
+
+            if candle_cum_pct < _strong_cum:
+                self.logger.info(
+                    "[%s] EXPENSIVE_PREMIUM: $%.1f > $%.0f, need stronger signal "
+                    "(cum=%.2f%% < %.2f%%) → SKIP",
+                    self.pair, premium, sweet_high, candle_cum_pct, _strong_cum,
+                )
+                self._cached_bot_state = "blocked:premium_expensive_weak"
+                return []
+            if _avg_vol_now > 0 and _entry_vol_now < _avg_vol_now * self.PREMIUM_EXPENSIVE_VOL_MULT:
+                self.logger.info(
+                    "[%s] EXPENSIVE_PREMIUM: $%.1f > $%.0f, need stronger volume "
+                    "(%.0f < %.1fx avg %.0f) → SKIP",
+                    self.pair, premium, sweet_high, _entry_vol_now,
+                    self.PREMIUM_EXPENSIVE_VOL_MULT, _avg_vol_now,
+                )
+                self._cached_bot_state = "blocked:premium_expensive_low_vol"
+                return []
+            self.logger.info(
+                "[%s] EXPENSIVE_PREMIUM_OK: $%.1f > $%.0f but signal is STRONG "
+                "(cum=%.2f%% >= %.2f%%, vol=%.0f >= %.1fx) → proceeding",
+                self.pair, premium, sweet_high, candle_cum_pct, _strong_cum,
+                _entry_vol_now, self.PREMIUM_EXPENSIVE_VOL_MULT,
+            )
 
         # 9b. PREMIUM CONFIRMATION + LIMIT ENTRY at original price.
         # Dynamic wait: strong moves get fast confirm, weaker ones standard.
         # Premium must rise (or hold flat ±0.5%) during the window.
         first_ask = premium
-        fast_confirm = True  # 3/3 candles required → always fast confirm (3s)
+        fast_confirm = True  # adaptive gate passed → always fast confirm (3s)
         confirm_wait = 3 if fast_confirm else 10
         confirm_mode = "fast" if fast_confirm else "standard"
         self.logger.info(
@@ -1683,13 +1731,11 @@ class OptionsScalpStrategy(BaseStrategy):
     async def _check_candle_momentum(self) -> tuple[bool, str, str | None, int, float, list[float]]:
         """Early-direction gate for options entry — PRIMARY GATE.
 
-        Determines direction AND momentum from last 3 completed 1m candles.
-        Direction comes FROM candles (not from scalp signal).
-
-        All three conditions must pass:
-        1. Direction gate: ≥2 of 3 candles in same direction (green=long, red=short)
-        2. Cumulative move: sum of (close-open) ≥ threshold (BTC 0.15%, ETH 0.20%)
-        3. Last candle: must match direction (no reversal at end)
+        Reads the market like a trader watching the tape:
+        1. Direction: ≥3 of last 5 candles in same direction
+        2. Adaptive threshold: cum move >= 2.5x recent avg candle range (adapts to noise)
+        3. Volume confirmation: entry candles must have 1.5x avg volume
+        4. Acceleration: recent candles bigger than earlier ones (move is growing)
 
         Returns:
             (passed, reason_string, side, directional_count, cum_pct, candle_sizes)
@@ -1699,7 +1745,9 @@ class OptionsScalpStrategy(BaseStrategy):
             return False, "no_exchange", None, 0, 0.0, []
 
         try:
-            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=self.CANDLE_MOM_LOOKBACK + 2)
+            # Fetch extra candles for the rolling range/volume baseline
+            fetch_limit = max(self.ADAPTIVE_RANGE_WINDOW, self.VOLUME_CONFIRM_WINDOW) + self.CANDLE_MOM_LOOKBACK + 2
+            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=fetch_limit)
         except Exception as e:
             self.logger.debug("[%s] CANDLE_MOM: fetch_ohlcv failed: %s", self.pair, e)
             return False, f"fetch_failed ({e})", None, 0, 0.0, []
@@ -1707,41 +1755,55 @@ class OptionsScalpStrategy(BaseStrategy):
         if not ohlcv or len(ohlcv) < self.CANDLE_MOM_LOOKBACK:
             return False, f"insufficient candles ({len(ohlcv) if ohlcv else 0})", None, 0, 0.0, []
 
-        # Take last 3 completed candles
+        # ── Update rolling baseline from ALL fetched candles ──
+        # Only ingest candles we haven't seen yet (by timestamp)
+        for candle in ohlcv:
+            ts = float(candle[0])
+            if ts <= self._last_range_candle_ts:
+                continue
+            self._last_range_candle_ts = ts
+            o, c, vol = float(candle[1]), float(candle[4]), float(candle[5])
+            if o > 0:
+                self._candle_ranges.append(abs(c - o) / o * 100)
+            if vol > 0:
+                self._candle_volumes.append(vol)
+
+        # ── Take last 5 completed candles for direction/momentum ──
         completed = ohlcv[-self.CANDLE_MOM_LOOKBACK:]
 
-        current_price = float(completed[-1][4])  # close of last completed candle
+        current_price = float(completed[-1][4])
         if current_price <= 0:
             return False, "bad price", None, 0, 0.0, []
 
-        # Per-asset cumulative threshold
-        cum_threshold = (
-            self.CANDLE_MOM_CUM_PCT_ETH if self._base_asset == "ETH"
-            else self.CANDLE_MOM_CUM_PCT_BTC
-        )
+        # ── ADAPTIVE THRESHOLD: compare move to recent noise ──
+        avg_range = mean(self._candle_ranges) if len(self._candle_ranges) >= 10 else 0.10
+        cum_threshold = max(avg_range * self.ADAPTIVE_CUM_MULTIPLIER, self.ADAPTIVE_CUM_FLOOR)
 
-        # Classify each candle: bullish (green), bearish (red), or doji (neutral)
+        # ── Classify candles ──
         doji_threshold = current_price * 0.0001  # 0.01% of price
         green_count = 0
         red_count = 0
         cumulative_move = 0.0
-        candle_sizes: list[float] = []  # abs % move per candle (for acceleration check)
+        candle_sizes: list[float] = []
+        candle_volumes: list[float] = []
 
         for candle in completed:
-            o, c = float(candle[1]), float(candle[4])
+            o, c, vol = float(candle[1]), float(candle[4]), float(candle[5])
             move = c - o
             cumulative_move += move
             candle_sizes.append(abs(move) / o * 100 if o > 0 else 0.0)
+            candle_volumes.append(vol)
 
             if abs(move) < doji_threshold:
-                continue  # doji — neutral, skip
-
+                continue
             if move > 0:
                 green_count += 1
             else:
                 red_count += 1
 
-        # Determine direction from candle majority (2/3 minimum)
+        n = self.CANDLE_MOM_LOOKBACK  # 5
+
+        # ── DIRECTION: 3 of 5 candles must agree ──
         if green_count >= self.CANDLE_MOM_STREAK:
             side = "long"
             directional_count = green_count
@@ -1749,10 +1811,13 @@ class OptionsScalpStrategy(BaseStrategy):
             side = "short"
             directional_count = red_count
         else:
-            n = self.CANDLE_MOM_LOOKBACK
-            return False, f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP", None, 0, 0.0, candle_sizes
+            return (
+                False,
+                f"{green_count}/{n} green, {red_count}/{n} red — no clear direction → SKIP",
+                None, 0, 0.0, candle_sizes,
+            )
 
-        # Last completed candle must match direction (no reversal)
+        # Last candle must match direction
         last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
         last_move = last_c - last_o
         last_is_directional = (
@@ -1760,34 +1825,55 @@ class OptionsScalpStrategy(BaseStrategy):
             or (side == "short" and last_move < -doji_threshold)
         )
 
-        # Cumulative move check (direction-aware)
+        # ── Cumulative move (direction-aware) ──
         cum_pct = (cumulative_move / current_price) * 100
         if side == "short":
-            cum_pct = -cum_pct  # for shorts, negative move is positive for our direction
+            cum_pct = -cum_pct
 
-        # Build result
+        # ── VOLUME CONFIRMATION: entry candles must spike ──
+        avg_vol = mean(self._candle_volumes) if len(self._candle_volumes) >= 5 else 0
+        entry_vol_candles = candle_volumes[-self.VOLUME_CONFIRM_CANDLES:]
+        entry_vol = mean(entry_vol_candles) if entry_vol_candles else 0
+        vol_ratio = entry_vol / avg_vol if avg_vol > 0 else 0
+        vol_ok = avg_vol <= 0 or entry_vol >= avg_vol * self.VOLUME_CONFIRM_MULTIPLIER
+
+        # ── ACCELERATION: are recent candles bigger? ──
+        accel_ok = True
+        if len(candle_sizes) >= 4:
+            recent_avg = mean(candle_sizes[-2:])
+            earlier_avg = mean(candle_sizes[:2])
+            if earlier_avg > 0 and recent_avg < earlier_avg * 0.3:
+                accel_ok = False  # move is fading, not building
+
+        # ── Build result ──
         color = "green" if side == "long" else "red"
         last_color = "green" if last_move > doji_threshold else ("red" if last_move < -doji_threshold else "doji")
-        n = self.CANDLE_MOM_LOOKBACK
 
         passed = (
             cum_pct >= cum_threshold
             and last_is_directional
+            and vol_ok
+            and accel_ok
         )
 
         if passed:
             reason = (
-                f"EARLY_GATE: {directional_count}/{n} {color}, "
-                f"cum={cum_pct:+.2f}% (≥{cum_threshold}%), last={last_color} → ENTER"
+                f"ADAPTIVE_GATE: {directional_count}/{n} {color}, "
+                f"cum={cum_pct:+.2f}% vs 2.5x avg_range={cum_threshold:.2f}%, "
+                f"vol={vol_ratio:.1f}x, last={last_color} → PASS"
             )
         else:
             parts = [f"{directional_count}/{n} {color}"]
             if cum_pct < cum_threshold:
-                parts.append(f"cum={cum_pct:+.2f}% < {cum_threshold}%")
+                parts.append(f"cum={cum_pct:+.2f}% < adaptive {cum_threshold:.2f}%")
             if not last_is_directional:
                 direction_label = "CALL" if side == "long" else "PUT"
                 parts.append(f"last candle {last_color} but need {color} for {direction_label}")
-            reason = "EARLY_GATE: " + ", ".join(parts) + " → SKIP"
+            if not vol_ok:
+                parts.append(f"LOW_VOLUME: {entry_vol:.0f} < {self.VOLUME_CONFIRM_MULTIPLIER}x avg {avg_vol:.0f}")
+            if not accel_ok:
+                parts.append("FADING_MOVE: recent candles shrinking")
+            reason = "ADAPTIVE_GATE: " + ", ".join(parts) + " → SKIP"
 
         return passed, reason, side if passed else None, directional_count, cum_pct, candle_sizes
 
