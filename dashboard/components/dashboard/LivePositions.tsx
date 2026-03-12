@@ -155,10 +155,10 @@ export function LivePositions() {
 
         // Dollar P&L (gross — fees deducted on close)
         // Options: 1 contract = 1 unit (no contract size conversion)
-        let coinAmount = pos.amount;
+        let coinAmount = pos.contracts ?? pos.amount;
         if (pos.exchange === 'delta' && !isOption) {
           const contractSize = DELTA_CONTRACT_SIZE[pos.pair] ?? 1.0;
-          coinAmount = pos.amount * contractSize;
+          coinAmount = (pos.contracts ?? pos.amount) * contractSize;
         }
         if (pos.position_type === 'short') {
           pnlUsd = (pos.entry_price - currentPrice) * coinAmount;
@@ -210,7 +210,7 @@ export function LivePositions() {
         positionType: pos.position_type as 'long' | 'short',
         entryPrice: pos.entry_price,
         currentPrice,
-        contracts: pos.amount,
+        contracts: pos.contracts ?? pos.amount,
         leverage,
         pricePnlPct,
         capitalPnlPct,

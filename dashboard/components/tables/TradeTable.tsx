@@ -327,7 +327,7 @@ function calcUnrealizedPnL(
   if (trade.status !== 'open') return null;
 
   const entryPrice = trade.price;
-  const contracts = trade.amount;
+  const contracts = trade.contracts ?? trade.amount;
   if (!entryPrice || !contracts) return null;
 
   const isOption = isOptionTrade(trade);
@@ -386,10 +386,10 @@ function buildPositionDisplay(
     }
 
     // Options: 1 contract = 1 unit (no contract size conversion)
-    let coinAmount = trade.amount;
+    let coinAmount = trade.contracts ?? trade.amount;
     if (trade.exchange === 'delta' && !isOption) {
       const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
-      coinAmount = trade.amount * contractSize;
+      coinAmount = (trade.contracts ?? trade.amount) * contractSize;
     }
     if (trade.position_type === 'short') {
       pnlUsd = (entry - currentPrice) * coinAmount;
@@ -455,7 +455,7 @@ function buildPositionDisplay(
     positionType: trade.position_type as 'long' | 'short',
     entryPrice: entry,
     currentPrice,
-    contracts: trade.amount,
+    contracts: trade.contracts ?? trade.amount,
     leverage,
     pricePnlPct,
     capitalPnlPct,
@@ -1009,7 +1009,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       )}
                       {trade.exchange === 'delta' && (
                         <span className="text-zinc-500 font-mono">
-                          {trade.amount} {isOptionTrade(trade) ? 'opt' : 'contracts'}
+                          {trade.contracts ?? trade.amount} {isOptionTrade(trade) ? 'opt' : 'contracts'}
                         </span>
                       )}
                     </div>
@@ -1305,12 +1305,12 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Contracts / Amount */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
                           {trade.exchange === 'delta' ? (
-                            <span title={isOptionTrade(trade) ? `${trade.amount} option contract(s)` : `${trade.amount} contracts`}>
-                              {trade.amount.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                            <span title={isOptionTrade(trade) ? `${trade.contracts ?? trade.amount} option contract(s)` : `${trade.contracts ?? trade.amount} contracts`}>
+                              {(trade.contracts ?? trade.amount).toLocaleString('en-US', { maximumFractionDigits: 0 })}
                               <span className="text-zinc-500 text-[10px] ml-0.5">{isOptionTrade(trade) ? 'opt' : 'ct'}</span>
                             </span>
                           ) : (
-                            trade.amount.toLocaleString('en-US', {
+                            (trade.contracts ?? trade.amount).toLocaleString('en-US', {
                               minimumFractionDigits: 2,
                               maximumFractionDigits: 6,
                             })
@@ -1388,8 +1388,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           )}
                           {isOptionTrade(trade) && trade.status === 'closed' && (
                             <div className="text-[9px] text-zinc-500 font-normal mt-0.5"
-                                 title={`Collateral: $${(trade.collateral ?? ((trade.price * (trade.amount || 1)) / Math.max(trade.leverage, 1))).toFixed(4)} (${trade.leverage}x)`}>
-                              risk: ${(trade.collateral ?? ((trade.price * (trade.amount || 1)) / Math.max(trade.leverage, 1))).toFixed(4)}
+                                 title={`Collateral: $${(trade.collateral ?? ((trade.price * ((trade.contracts ?? trade.amount) || 1)) / Math.max(trade.leverage, 1))).toFixed(4)} (${trade.leverage}x)`}>
+                              risk: ${(trade.collateral ?? ((trade.price * ((trade.contracts ?? trade.amount) || 1)) / Math.max(trade.leverage, 1))).toFixed(4)}
                             </div>
                           )}
                         </td>

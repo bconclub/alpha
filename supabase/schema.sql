@@ -364,7 +364,7 @@ order  by occurrences desc;
 create or replace view public.v_open_positions as
 select
     id, opened_at, pair, side,
-    entry_price, amount, cost,
+    entry_price, amount, contracts, cost,
     strategy, exchange, leverage, position_type,
     reason, order_id,
     round((cost * leverage)::numeric, 8) as effective_exposure,
