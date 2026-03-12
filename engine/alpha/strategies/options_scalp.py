@@ -1733,7 +1733,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         Reads the market like a trader watching the tape:
         1. Direction: ≥3 of last 5 candles in same direction
-        2. Adaptive threshold: cum move >= 2.5x recent avg candle range (adapts to noise)
+        2. Adaptive threshold: cum move >= 2.0x recent avg candle range (adapts to noise)
         3. Volume confirmation: entry candles must have 1.5x avg volume
         4. Acceleration: recent candles bigger than earlier ones (move is growing)
 
@@ -1859,7 +1859,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if passed:
             reason = (
                 f"ADAPTIVE_GATE: {directional_count}/{n} {color}, "
-                f"cum={cum_pct:+.2f}% vs 2.5x avg_range={cum_threshold:.2f}%, "
+                f"cum={cum_pct:+.2f}% vs {self.ADAPTIVE_CUM_MULTIPLIER}x avg_range={cum_threshold:.2f}%, "
                 f"vol={vol_ratio:.1f}x, last={last_color} → PASS"
             )
         else:
