@@ -82,6 +82,17 @@ class AlphaBot:
         # Track last analysis cycle time for diagnostics
         self._last_cycle_time: float = time.monotonic()
 
+        # ── Session-based reporting (IST) ──────────────────────────────
+        # Session boundaries in IST hours: (start_hour, start_min, end_hour, end_min, name)
+        self._sessions: list[tuple[int, int, int, int, str]] = [
+            (8, 0, 12, 0, "Morning"),       # 08:00-12:00 IST
+            (12, 0, 17, 30, "Afternoon"),    # 12:00-17:30 IST
+            (17, 30, 22, 0, "Evening"),      # 17:30-22:00 IST
+            (22, 0, 8, 0, "Night"),          # 22:00-08:00 IST (crosses midnight)
+        ]
+        self._session_trades: list[dict[str, Any]] = []
+        self._current_session_name: str | None = None
+
         # Orphan grace: first-seen time for untracked positions (key: "exchange:pair")
         self._position_first_seen: dict[str, float] = {}
         self.ORPHAN_GRACE_S = 120  # seconds before orphan close fires
@@ -209,7 +220,7 @@ class AlphaBot:
                 if scalp is None:
                     logger.warning("Options pair %s — no matching Delta scalp strategy", pair)
                     continue
-                self._options_strategies[pair] = OptionsScalpStrategy(
+                opts = OptionsScalpStrategy(
                     pair, self.executor, self.risk_manager,
                     options_exchange=self.delta_options,
                     futures_exchange=self.delta,
@@ -217,6 +228,8 @@ class AlphaBot:
                     market_analyzer=self.delta_analyzer,
                     db=self.db,
                 )
+                opts._alpha_bot = self  # back-ref for session tracking
+                self._options_strategies[pair] = opts
 
         # Inject restored position state into strategy instances
         await self._restore_strategy_state()
@@ -271,6 +284,25 @@ class AlphaBot:
         self._scheduler.add_job(self._daily_reset, "cron", hour=18, minute=30)  # midnight IST = 18:30 UTC
         # 3x daily updates: 8 AM, 12 PM, 8 PM IST (2:30, 6:30, 14:30 UTC)
         self._scheduler.add_job(self._hourly_report, "cron", hour="2,6,14", minute=30)
+        # Session summaries at IST boundaries (converted to UTC):
+        # 12:00 IST = 06:30 UTC (end Morning), 17:30 IST = 12:00 UTC (end Afternoon),
+        # 22:00 IST = 16:30 UTC (end Evening), 08:00 IST = 02:30 UTC (end Night)
+        self._scheduler.add_job(
+            lambda: asyncio.ensure_future(self._session_summary("Morning", "08:00-12:00")),
+            "cron", hour=6, minute=30,
+        )
+        self._scheduler.add_job(
+            lambda: asyncio.ensure_future(self._session_summary("Afternoon", "12:00-17:30")),
+            "cron", hour=12, minute=0,
+        )
+        self._scheduler.add_job(
+            lambda: asyncio.ensure_future(self._session_summary("Evening", "17:30-22:00")),
+            "cron", hour=16, minute=30,
+        )
+        self._scheduler.add_job(
+            lambda: asyncio.ensure_future(self._session_summary("Night", "22:00-08:00")),
+            "cron", hour=2, minute=30,
+        )
         self._scheduler.add_job(self._save_status, "interval", minutes=2)
         self._scheduler.add_job(self._reconcile_exchange_positions, "interval", seconds=60)
         self._scheduler.add_job(self._telegram_health_check, "interval", minutes=5)
@@ -771,6 +803,8 @@ class AlphaBot:
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
         total_capital = delta_bal or 0
 
+        total_fees = today_stats.get("total_fees", 0.0) if self.db else 0.0
+
         await self.alerts.send_daily_summary(
             total_trades=total,
             wins=wins,
@@ -782,6 +816,7 @@ class AlphaBot:
             best_trade=best_trade,
             worst_trade=worst_trade,
             delta_balance=delta_bal,
+            total_fees=total_fees,
         )
         rm.reset_daily()
         # Also reset hourly counters at midnight
@@ -913,6 +948,51 @@ class AlphaBot:
                 })
 
         return verified
+
+    def record_session_trade(self, trade_info: dict[str, Any]) -> None:
+        """Called on each options trade close to track session stats."""
+        self._session_trades.append(trade_info)
+
+    async def _session_summary(self, session_name: str, session_window: str) -> None:
+        """Send session summary and reset session trades."""
+        try:
+            trades = self._session_trades
+            if not trades:
+                logger.info("[SESSION] %s ended — no trades", session_name)
+                self._session_trades = []
+                return
+
+            total = len(trades)
+            wins = sum(1 for t in trades if t.get("net_pnl", 0) > 0)
+            losses = total - wins
+            session_pnl = sum(t.get("net_pnl", 0) for t in trades)
+            total_fees = sum(t.get("fees", 0) for t in trades)
+
+            best_trade = max(trades, key=lambda t: t.get("net_pnl", 0)) if trades else None
+            worst_trade = min(trades, key=lambda t: t.get("net_pnl", 0)) if trades else None
+
+            await self.alerts.send_session_summary(
+                session_name=session_name,
+                session_window=session_window,
+                total_trades=total,
+                wins=wins,
+                losses=losses,
+                session_pnl=session_pnl,
+                total_fees=total_fees,
+                best_trade=best_trade,
+                worst_trade=worst_trade,
+            )
+
+            logger.info(
+                "[SESSION] %s: %d trades, W/L=%d/%d, P&L=$%.4f",
+                session_name, total, wins, losses, session_pnl,
+            )
+
+            # Reset for next session
+            self._session_trades = []
+
+        except Exception:
+            logger.exception("[SESSION] Failed to send session summary for %s", session_name)
 
     async def _save_status(self) -> None:
         """Persist bot state to Supabase for crash recovery + dashboard display."""

@@ -5,7 +5,7 @@
 ═══════════════════════════════════════════════════════════════
 
  1. REGIME GATE        CHOPPY blocked, all others allowed
- 2. ADAPTIVE GATE      3 of 5 candles directional + cumulative move >= 2.5x
+ 2. ADAPTIVE GATE      3 of 5 candles directional + cumulative move >= 2.0x
                        recent avg candle range (adapts to market noise)
                        + Volume confirmation: entry candles >= 1.5x avg volume
                        + Acceleration: recent candles bigger than earlier ones
@@ -13,8 +13,8 @@
  3. UNDERLYING MOVE    Price must move >= 0.10% in last ~60s
  4. EXPIRY             Nearest expiry (today preferred, min 1h to expiry)
  5. STRIKE SELECTION   Highest OI within ATM + 1-2 OTM (liquidity = premium moves)
- 6. PREMIUM SWEET SPOT Prefer $3-15 ETH / $50-300 BTC. Too cheap = illiquid skip.
-                       Expensive = only enter on monster signal (4x noise + 2.5x vol)
+ 6. PREMIUM SWEET SPOT Prefer $3-25 ETH / $50-500 BTC. Too cheap = illiquid skip.
+                       Expensive = only enter on monster signal (3x noise + 2.5x vol)
  7. PREMIUM CONFIRM    Dynamic wait (3s fast / 10s standard), must rise or hold ±0.5%
  8. LIMIT ENTRY        Place limit buy at ORIGINAL price, wait 15s for fill
                        If not filled → cancel and skip (no overpaying)
@@ -112,7 +112,7 @@ class OptionsScalpStrategy(BaseStrategy):
     CANDLE_MOM_STREAK = 3                # 3 of 5 candles must agree in direction
     CANDLE_MOM_LOOKBACK = 5              # check last 5 completed 1m candles (was 3)
     # ── Adaptive threshold — compare move to recent noise ─────────
-    ADAPTIVE_CUM_MULTIPLIER = 2.5        # entry requires cum >= 2.5x avg candle range
+    ADAPTIVE_CUM_MULTIPLIER = 2.0        # entry requires cum >= 2.0x avg candle range (was 2.5 — volume confirms quality)
     ADAPTIVE_CUM_FLOOR = 0.10            # absolute minimum cum% regardless of noise level
     ADAPTIVE_RANGE_WINDOW = 20           # rolling window of candle ranges for noise baseline
     # ── Volume confirmation — no volume no trade ──────────────────
@@ -131,10 +131,10 @@ class OptionsScalpStrategy(BaseStrategy):
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
     # ── Premium sweet spot — prefer cheap, allow expensive only on strong signal ──
     PREMIUM_SWEET_SPOT: dict[str, tuple[float, float]] = {
-        "ETH": (3.0, 15.0),   # $3-$15 sweet spot for ETH
-        "BTC": (50.0, 300.0), # $50-$300 sweet spot for BTC
+        "ETH": (3.0, 25.0),   # $3-$25 sweet spot for ETH (was $15 — most ATM are $20+)
+        "BTC": (50.0, 500.0), # $50-$500 sweet spot for BTC (was $300)
     }
-    PREMIUM_EXPENSIVE_CUM_MULT = 4.0    # expensive premium requires cum >= 4x avg_range
+    PREMIUM_EXPENSIVE_CUM_MULT = 3.0    # expensive premium requires cum >= 3x avg_range (was 4x)
     PREMIUM_EXPENSIVE_VOL_MULT = 2.5    # expensive premium requires vol >= 2.5x avg
 
     # ── Dynamic option sizing ──────────────────────────────────────
@@ -2335,6 +2335,21 @@ class OptionsScalpStrategy(BaseStrategy):
                 gross_pnl, net_pnl, pnl_pct,
             )
 
+            # Record for session tracking
+            try:
+                bot = getattr(self, "_alpha_bot", None)
+                if bot and hasattr(bot, "record_session_trade"):
+                    side_label = "CALL" if sym.endswith("-C") or sym.endswith("C") else "PUT"
+                    bot.record_session_trade({
+                        "pair": sym, "base": self._base_asset,
+                        "side_label": side_label,
+                        "net_pnl": net_pnl,
+                        "fees": entry_fee + exit_fee,
+                        "pnl": net_pnl,
+                    })
+            except Exception:
+                pass  # non-critical
+
             # Telegram exit notification
             try:
                 alerts = getattr(self.executor, "alerts", None)
@@ -2847,27 +2862,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                 )
 
-            # Telegram exit notification — sent here because
-            # _close_option_trade_in_db may not find the open trade
-            # (trade_executor already closed it before on_fill runs)
-            try:
-                alerts = getattr(self.executor, "alerts", None)
-                if alerts is not None and exit_fill > 0 and _entry_prem > 0:
-                    import asyncio as _aio
-                    _mult = 0.001 if "BTC" in _sym else 0.01
-                    _gross = (exit_fill - _entry_prem) * _contracts * _mult
-                    _pnl_pct = (exit_fill - _entry_prem) / _entry_prem * 100
-                    _emoji = "\u2705" if _gross >= 0 else "\u274c"
-                    _side_label = "CALL" if _sym.endswith("-C") or _sym.endswith("C") else "PUT"
-                    msg = (
-                        f"{_emoji} {_base} option closed\n"
-                        f"{exit_type} | {_side_label} ${_strike:.0f}\n"
-                        f"${_entry_prem:.2f} \u2192 ${exit_fill:.2f} ({_pnl_pct:+.1f}%)\n"
-                        f"Gross: ${_gross:+.4f} | x{_contracts}"
-                    )
-                    _aio.get_event_loop().create_task(alerts.send_text(msg))
-            except Exception:
-                pass
+            # Single Telegram notification sent from _close_option_trade_in_db
+            # (has correct exchange-fill data, fees, hold time). No duplicate here.
 
             self.in_position = False
             OptionsScalpStrategy._global_in_position = False  # release global lock
