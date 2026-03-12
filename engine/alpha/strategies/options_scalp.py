@@ -2119,9 +2119,8 @@ class OptionsScalpStrategy(BaseStrategy):
 
             row = {
                 "pair": option_symbol,
-                "exchange_id": "delta",
+                "exchange": "delta",
                 "strategy": "options_scalp",
-                "direction": "long",
                 "side": option_side,
                 "entry_price": fill_price,
                 "contracts": float(contracts),
