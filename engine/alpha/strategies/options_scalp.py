@@ -1952,6 +1952,16 @@ class OptionsScalpStrategy(BaseStrategy):
         if in_phase1:
             return []
 
+        # ── 2c. PEAK TRAIL: once peak exceeds +15%, trail 35% behind ─
+        if peak_pnl_pct >= 15.0:
+            trail_floor_pct = peak_pnl_pct * 0.65
+            if premium_change_pct <= trail_floor_pct:
+                self.logger.info(
+                    "[%s] OPT_PEAK_TRAIL — peak +%.1f%%, floor +%.1f%%, now +%.1f%%",
+                    self.option_symbol, peak_pnl_pct, trail_floor_pct, premium_change_pct,
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_PEAK_TRAIL")
+
         # ── 3. MOMENTUM FADE: LOSING + momentum dying ──────────────
         # Only fires if premium is BELOW entry. Winners exit via ratchet/trail, not fade.
         momentum_60s = 0.0
