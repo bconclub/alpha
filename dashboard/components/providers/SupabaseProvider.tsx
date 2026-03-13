@@ -64,7 +64,7 @@ function normalizeTrade(raw: any): Trade {
     side: raw.side ?? 'buy',
     price: raw.entry_price ?? raw.price ?? 0,
     exit_price: raw.exit_price ?? null,
-    amount: raw.amount ?? 0,
+    amount: raw.contracts ?? raw.amount ?? 0,
     cost: raw.cost ?? undefined,
     collateral: raw.collateral != null ? Number(raw.collateral) : undefined,
     strategy: raw.strategy ?? '',
