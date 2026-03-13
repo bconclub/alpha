@@ -793,28 +793,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                 ))}
               </div>
             </div>
-            {/* Exchange + Position + P&L in a row */}
+            {/* P&L filter */}
             <div className="flex flex-wrap gap-3">
-              <div className="space-y-1.5">
-                <span className="text-xs font-medium text-zinc-400">Exchange</span>
-                <div className="flex gap-1">
-                  {EXCHANGES.map((ex) => (
-                    <button key={ex.value} onClick={() => handleExchangeFilter(ex.value)} className={cn(filterBtnBase, exchangeFilterLocal === ex.value ? filterBtnActive : filterBtnInactive)}>
-                      {ex.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <span className="text-xs font-medium text-zinc-400">Position</span>
-                <div className="flex gap-1">
-                  {POSITION_TYPES.map((pt) => (
-                    <button key={pt.value} onClick={() => handlePositionTypeFilter(pt.value)} className={cn(filterBtnBase, positionTypeFilter === pt.value ? filterBtnActive : filterBtnInactive)}>
-                      {pt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
               <div className="space-y-1.5">
                 <span className="text-xs font-medium text-zinc-400">P&L</span>
                 <div className="flex gap-1">
@@ -854,26 +834,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
               {(['All', ...STRATEGIES] as const).map((s) => (
                 <button key={s} onClick={() => handleStrategyFilter(s)} className={cn(filterBtnBase, strategyFilter === s ? filterBtnActive : filterBtnInactive)}>
                   {s === 'All' ? 'All' : getStrategyLabel(s)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <span className="text-xs font-medium text-zinc-400">Exchange</span>
-            <div className="flex gap-1">
-              {EXCHANGES.map((ex) => (
-                <button key={ex.value} onClick={() => handleExchangeFilter(ex.value)} className={cn(filterBtnBase, exchangeFilterLocal === ex.value ? filterBtnActive : filterBtnInactive)}>
-                  {ex.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <span className="text-xs font-medium text-zinc-400">Position</span>
-            <div className="flex gap-1">
-              {POSITION_TYPES.map((pt) => (
-                <button key={pt.value} onClick={() => handlePositionTypeFilter(pt.value)} className={cn(filterBtnBase, positionTypeFilter === pt.value ? filterBtnActive : filterBtnInactive)}>
-                  {pt.label}
                 </button>
               ))}
             </div>

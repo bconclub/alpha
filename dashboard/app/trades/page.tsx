@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
-import { ExchangeToggle } from '@/components/dashboard/ExchangeToggle';
 import TradeTable from '@/components/tables/TradeTable';
 import { getSupabase } from '@/lib/supabase';
 
@@ -70,7 +69,6 @@ export default function TradesPage() {
         <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
           Trade History
         </h1>
-        <ExchangeToggle />
 
         {/* Reconcile icon button */}
         <button
