@@ -13,6 +13,7 @@ export interface Trade {
   price: number;            // normalized from entry_price
   exit_price?: number | null;
   amount: number;
+  contracts?: number | null; // integer contract count (Delta futures/options)
   cost?: number;
   collateral?: number;      // margin posted (notional/leverage). Options: premium/50
   strategy: Strategy;
@@ -200,6 +201,7 @@ export interface OpenPosition {
   side: 'buy' | 'sell';
   entry_price: number;
   amount: number;
+  contracts?: number | null;
   cost?: number;
   strategy: Strategy;
   exchange: Exchange;

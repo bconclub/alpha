@@ -1811,6 +1811,10 @@ class TradeExecutor:
         """
         if self.alerts is None:
             return
+        # Options: _close_option_trade_in_db already sends the Telegram alert
+        # with correct exchange-fill data. Skip here to avoid duplicate message.
+        if self._is_option_symbol(signal.pair):
+            return
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
 

@@ -25,7 +25,7 @@ class Database:
     TABLE_STRATEGY_LOG = "strategy_log"
     TABLE_BOT_STATUS = "bot_status"
     TABLE_BOT_COMMANDS = "bot_commands"
-    TABLE_ACTIVITY_LOG = "activity_log"
+    TABLE_ACTIVITY_LOG = "latest_strategy_log"
     TABLE_CHANGELOG = "changelog"
 
     def __init__(self) -> None:
@@ -514,8 +514,9 @@ class Database:
         def _query() -> Any:
             q = (
                 self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
-                .select("pair, pnl")
+                .select("pair, pnl, net_pnl, entry_fee, exit_fee, strategy, entry_price, exit_price, side")
                 .eq("status", "closed")
+                .eq("strategy", "options_scalp")  # options only — skip futures/scalp $0 trades
                 .gte("closed_at", start_utc)
             )
             if end_utc is not None:
@@ -527,34 +528,57 @@ class Database:
 
         total_trades = len(rows)
         daily_pnl = 0.0
+        total_fees = 0.0
         wins = 0
         losses = 0
         pnl_by_pair: dict[str, float] = {}
+        # Track best/worst individual trades (not per-pair aggregate)
+        best_trade = None
+        worst_trade = None
+        best_pnl = float("-inf")
+        worst_pnl = float("inf")
 
         for r in rows:
-            pnl_val = float(r.get("pnl", 0) or 0)
+            # Use net_pnl for win/loss (includes fees)
+            net_val = float(r.get("net_pnl") or r.get("pnl", 0) or 0)
             pair = r.get("pair", "unknown")
-            daily_pnl += pnl_val
-            pnl_by_pair[pair] = pnl_by_pair.get(pair, 0.0) + pnl_val
-            if pnl_val >= 0:
+            daily_pnl += net_val
+            entry_fee = float(r.get("entry_fee", 0) or 0)
+            exit_fee = float(r.get("exit_fee", 0) or 0)
+            total_fees += entry_fee + exit_fee
+            pnl_by_pair[pair] = pnl_by_pair.get(pair, 0.0) + net_val
+            # Win = net_pnl > 0 (not gross >= 0)
+            if net_val > 0:
                 wins += 1
             else:
                 losses += 1
+            # Track best/worst individual trade with details
+            entry_p = float(r.get("entry_price", 0) or 0)
+            exit_p = float(r.get("exit_price", 0) or 0)
+            side = r.get("side", "")
+            side_label = "CALL" if pair.endswith("-C") or pair.endswith("C") else "PUT"
+            # Extract base asset from pair
+            base = "ETH" if "ETH" in pair else "BTC" if "BTC" in pair else "?"
+            trade_info = {
+                "pair": pair, "pnl": net_val, "base": base,
+                "side_label": side_label,
+                "entry_price": entry_p, "exit_price": exit_p,
+            }
+            if net_val > best_pnl:
+                best_pnl = net_val
+                best_trade = trade_info
+            if net_val < worst_pnl:
+                worst_pnl = net_val
+                worst_trade = trade_info
 
         win_rate = round((wins / total_trades * 100), 2) if total_trades > 0 else -1.0
-        best_trade = None
-        worst_trade = None
-        if pnl_by_pair:
-            best_pair = max(pnl_by_pair, key=pnl_by_pair.get)  # type: ignore[arg-type]
-            worst_pair = min(pnl_by_pair, key=pnl_by_pair.get)  # type: ignore[arg-type]
-            best_trade = {"pair": best_pair, "pnl": pnl_by_pair[best_pair]}
-            worst_trade = {"pair": worst_pair, "pnl": pnl_by_pair[worst_pair]}
 
         return {
             "total_trades": total_trades,
             "wins": wins,
             "losses": losses,
             "daily_pnl": daily_pnl,
+            "total_fees": total_fees,
             "win_rate": win_rate,
             "pnl_by_pair": pnl_by_pair,
             "best_trade": best_trade,

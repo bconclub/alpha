@@ -193,6 +193,7 @@ export function SentinelTab() {
         price: Number(row.entry_price || 0),
         exit_price: row.exit_price ? Number(row.exit_price) : null,
         amount: Number(row.amount || 0),
+        contracts: row.contracts ? Number(row.contracts) : null,
         cost: Number(row.cost || 0),
         strategy: String(row.strategy || ''),
         pnl: Number(row.pnl || 0),

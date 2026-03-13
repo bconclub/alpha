@@ -558,12 +558,13 @@ class AlertManager:
         worst_trade: dict[str, Any] | None = None,
         binance_balance: float | None = None,
         delta_balance: float | None = None,
+        total_fees: float = 0.0,
         # backward compat -- accept old kwargs and ignore
         total_pnl: float | None = None,
         trades_count: int | None = None,
         active_strategies: dict[str, str | None] | None = None,
     ) -> None:
-        """Midnight daily report with per-pair breakdown."""
+        """Midnight daily report — options trades only."""
         if total_trades == 0 and trades_count:
             total_trades = trades_count
         if daily_pnl == 0 and total_pnl is not None:
@@ -574,32 +575,83 @@ class AlertManager:
 
         version = get_version()
         lines = [
-            f"\U0001f4c5 <b>DAILY REPORT</b> <code>v{version}</code>",
+            f"\U0001f4ca <b>DAILY REPORT</b> <code>v{version}</code>",
             "",
-            f"\U0001f4ca Total trades: <code>{total_trades}</code>",
+            f"Total options trades: <code>{total_trades}</code>",
             f"\u2705 Wins: <code>{wins}</code> | \u274c Losses: <code>{losses}</code>",
-            f"\U0001f3c6 Win rate: <code>{'N/A' if win_rate < 0 else f'{win_rate:.1f}%'}</code>",
+            f"Win rate: <code>{'N/A' if win_rate < 0 else f'{win_rate:.0f}%'}</code>",
             f"{pnl_emoji} Daily P&amp;L: <code>{d_sign}{format_usd(daily_pnl)}</code>",
+            f"Fees: <code>{format_usd(total_fees)}</code>",
         ]
 
-        if pnl_by_pair:
-            lines.append("")
-            lines.append("<b>Per pair:</b>")
-            sorted_pairs = sorted(pnl_by_pair.items(), key=lambda x: x[1], reverse=True)
-            for pair, pnl in sorted_pairs:
-                icon = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
-                short = _pair_short(pair)
-                p_sign = "+" if pnl >= 0 else ""
-                lines.append(f"  {icon} <code>{short}</code>: <code>{p_sign}{format_usd(pnl)}</code>")
+        # Best/worst individual trades with entry→exit detail
+        if best_trade:
+            bt = best_trade
+            base = bt.get("base", "?")
+            side_l = bt.get("side_label", "?")
+            ep = bt.get("entry_price", 0)
+            xp = bt.get("exit_price", 0)
+            bp = bt.get("pnl", 0)
+            lines.append(
+                f"\n\U0001f31f Best: {base} {side_l} "
+                f"<code>${ep:.2f}\u2192${xp:.2f}</code> (<code>+{format_usd(bp)}</code>)"
+            )
+        if worst_trade:
+            wt = worst_trade
+            base = wt.get("base", "?")
+            side_l = wt.get("side_label", "?")
+            ep = wt.get("entry_price", 0)
+            xp = wt.get("exit_price", 0)
+            wp = wt.get("pnl", 0)
+            lines.append(
+                f"\U0001f4a9 Worst: {base} {side_l} "
+                f"<code>${ep:.2f}\u2192${xp:.2f}</code> (<code>{format_usd(wp)}</code>)"
+            )
 
         lines.append(f"\n\U0001f4b5 Capital: <code>{format_usd(capital)}</code>")
 
+        await self._send("\n".join(lines))
+
+    # ── 6b. SESSION SUMMARY ─────────────────────────────────────────────
+
+    async def send_session_summary(
+        self,
+        session_name: str,
+        session_window: str,
+        total_trades: int,
+        wins: int,
+        losses: int,
+        session_pnl: float,
+        total_fees: float,
+        best_trade: dict[str, Any] | None = None,
+        worst_trade: dict[str, Any] | None = None,
+    ) -> None:
+        """Send summary at end of a trading session."""
+        if total_trades == 0:
+            return  # don't spam empty sessions
+
+        win_rate = round(wins / total_trades * 100) if total_trades > 0 else 0
+        pnl_emoji = "\U0001f4c8" if session_pnl >= 0 else "\U0001f4c9"
+        d_sign = "+" if session_pnl >= 0 else ""
+
+        lines = [
+            f"\U0001f4ca <b>SESSION: {session_name}</b> ({session_window})",
+            f"Trades: <code>{total_trades}</code> | W/L: <code>{wins}/{losses}</code> | WR: <code>{win_rate}%</code>",
+            f"{pnl_emoji} P&amp;L: <code>{d_sign}{format_usd(session_pnl)}</code> | Fees: <code>{format_usd(total_fees)}</code>",
+        ]
+
         if best_trade:
-            bp = _pair_short(best_trade.get("pair", "?"))
-            lines.append(f"\U0001f31f Best: <code>{bp}</code> <code>+{format_usd(best_trade.get('pnl', 0))}</code>")
+            bt = best_trade
+            lines.append(
+                f"\U0001f31f Best: {bt.get('side_label', '?')} {bt.get('base', '?')} "
+                f"<code>+{format_usd(bt.get('pnl', 0))}</code>"
+            )
         if worst_trade:
-            wp = _pair_short(worst_trade.get("pair", "?"))
-            lines.append(f"\U0001f4a9 Worst: <code>{wp}</code> <code>{format_usd(worst_trade.get('pnl', 0))}</code>")
+            wt = worst_trade
+            lines.append(
+                f"\U0001f4a9 Worst: {wt.get('side_label', '?')} {wt.get('base', '?')} "
+                f"<code>{format_usd(wt.get('pnl', 0))}</code>"
+            )
 
         await self._send("\n".join(lines))
 
