@@ -55,7 +55,7 @@ interface TradeTableProps {
 // Constants
 // ---------------------------------------------------------------------------
 
-const STRATEGIES: Strategy[] = ['scalp', 'options_scalp'];
+const STRATEGIES: Strategy[] = ['options_scalp'];
 const EXCHANGES: { label: string; value: Exchange | 'All' }[] = [
   { label: 'All', value: 'All' },
   { label: 'Bybit', value: 'bybit' },
@@ -782,17 +782,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
         </div>
         {filtersOpen && (
           <div className="mt-2 space-y-3 rounded-lg border border-zinc-700/50 bg-zinc-800/50 p-3">
-            {/* Strategy */}
-            <div className="space-y-1.5">
-              <span className="text-xs font-medium text-zinc-400">Strategy</span>
-              <div className="flex gap-1 overflow-x-auto">
-                {(['All', ...STRATEGIES] as const).map((s) => (
-                  <button key={s} onClick={() => handleStrategyFilter(s)} className={cn(filterBtnBase, strategyFilter === s ? filterBtnActive : filterBtnInactive)}>
-                    {s === 'All' ? 'All' : getStrategyLabel(s)}
-                  </button>
-                ))}
-              </div>
-            </div>
             {/* P&L filter */}
             <div className="flex flex-wrap gap-3">
               <div className="space-y-1.5">
@@ -828,16 +817,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {/* Desktop: filters always visible */}
       <div className="hidden lg:flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div className="flex flex-wrap items-end gap-4">
-          <div className="space-y-1.5">
-            <span className="text-xs font-medium text-zinc-400">Strategy</span>
-            <div className="flex gap-1 overflow-x-auto">
-              {(['All', ...STRATEGIES] as const).map((s) => (
-                <button key={s} onClick={() => handleStrategyFilter(s)} className={cn(filterBtnBase, strategyFilter === s ? filterBtnActive : filterBtnInactive)}>
-                  {s === 'All' ? 'All' : getStrategyLabel(s)}
-                </button>
-              ))}
-            </div>
-          </div>
           <div className="space-y-1.5">
             <span className="text-xs font-medium text-zinc-400">P&L</span>
             <div className="flex gap-1">
