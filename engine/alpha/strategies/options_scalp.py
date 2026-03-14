@@ -2261,7 +2261,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "pair": option_symbol,
                 "exchange": "delta",
                 "strategy": "options_scalp",
-                "side": option_side,
+                "side": "buy",
                 "entry_price": fill_price,
                 "contracts": float(contracts),
                 "leverage": self.OPTIONS_LEVERAGE,
@@ -2274,7 +2274,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "pnl_pct": 0,
                 "status": "open",
                 "setup_type": "MOMENTUM_BURST",
-                "signals_fired": getattr(self, '_entry_signals_fired', ''),
+                "signals_fired": f"option_side={option_side} " + getattr(self, '_entry_signals_fired', ''),
                 "opened_at": datetime.utcnow().isoformat() + "Z",
             }
 
