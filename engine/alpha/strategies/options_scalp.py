@@ -140,10 +140,18 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Dynamic option sizing ──────────────────────────────────────
     # Same pair allocation as futures so capital is balanced.
     OPT_PAIR_ALLOC_PCT: dict[str, float] = {
-        "ETH": 30.0,
-        "BTC": 20.0,
+        "ETH": 60.0,
+        "BTC": 50.0,
     }
-    OPT_MAX_COLLATERAL_PCT = 40.0        # never use >40% of balance on 1 option
+    OPT_STRONG_ALLOC_PCT: dict[str, float] = {   # full alloc for strong signals
+        "ETH": 60.0,
+        "BTC": 50.0,
+    }
+    OPT_NORMAL_ALLOC_PCT: dict[str, float] = {   # reduced alloc for normal signals
+        "ETH": 45.0,
+        "BTC": 35.0,
+    }
+    OPT_MAX_COLLATERAL_PCT = 70.0        # never use >70% of balance on 1 option
     OPT_SURVIVAL_BALANCE = 20.0          # below this, cap allocation at 30%
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
@@ -231,7 +239,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self.entry_premium: float = 0.0
         self.entry_time: float = 0.0
         self._contracts: int = 1                   # dynamic — set by _calculate_option_contracts
-        self._candle_alloc_pct: float = 35.0       # dynamic — set by candle quality (35/50%)
+        self._candle_alloc_pct: float = 35.0       # dynamic — set by signal strength
+        self._strong_signal: bool = False          # True when cum >= 3x threshold + vol >= 2x
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
         self.strike_price: float = 0.0
@@ -986,15 +995,13 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # 2b. Acceleration check is now inside _check_candle_momentum (3-of-5 with growing check)
 
-        # 3+/5 candles required — max conviction allocation
-        self._candle_alloc_pct = 50.0
-
         self.logger.info(
-            "[%s] ADAPTIVE_GATE: %d/%d candles %s, cum=%.2f%% (thresh=%.2f%%) → premium check | alloc=%.0f%%",
-            self.pair, candle_count, self.CANDLE_MOM_LOOKBACK, side, candle_cum_pct, _adaptive_thresh, self._candle_alloc_pct,
+            "[%s] EARLY_GATE: %d/3 candles %s, cum=%.2f%% → premium check",
+            self.pair, candle_count, side, candle_cum_pct,
         )
 
         # 2b. Underlying move check — confirm price is actually moving, not just candle noise
+        underlying_move_pct = 0.0
         try:
             ohlcv_1s = await self.futures_exchange.fetch_ohlcv(self.pair, "1m", limit=2)
             if ohlcv_1s and len(ohlcv_1s) >= 2:
@@ -1012,6 +1019,27 @@ class OptionsScalpStrategy(BaseStrategy):
                         return []
         except Exception as e:
             self.logger.debug("[%s] Underlying move check failed: %s", self.pair, e)
+
+        # 2c. Signal strength sizing — strong signal gets full alloc, normal gets reduced
+        cum_threshold = (
+            self.CANDLE_MOM_CUM_PCT_ETH if self._base_asset == "ETH"
+            else self.CANDLE_MOM_CUM_PCT_BTC
+        )
+        self._strong_signal = (
+            candle_cum_pct >= cum_threshold * 3.0
+            and underlying_move_pct >= self.MIN_UNDERLYING_MOVE_PCT * 2.0
+        )
+        if self._strong_signal:
+            self._candle_alloc_pct = self.OPT_STRONG_ALLOC_PCT.get(self._base_asset, 60.0)
+        else:
+            self._candle_alloc_pct = self.OPT_NORMAL_ALLOC_PCT.get(self._base_asset, 45.0)
+
+        self.logger.info(
+            "[%s] SIGNAL_SIZING: %s (cum=%.2f%% vs 3x=%.2f%%, vol=%.3f%% vs 2x=%.3f%%) → alloc=%.0f%%",
+            self.pair, "STRONG" if self._strong_signal else "NORMAL",
+            candle_cum_pct, cum_threshold * 3, underlying_move_pct, self.MIN_UNDERLYING_MOVE_PCT * 2,
+            self._candle_alloc_pct,
+        )
 
         # 3. Determine option type from candle direction
         option_type = "call" if side == "long" else "put"
@@ -1680,13 +1708,14 @@ class OptionsScalpStrategy(BaseStrategy):
         if exchange_capital <= 0 or premium <= 0:
             return 0
 
-        alloc_pct = self._candle_alloc_pct  # dynamic: 35/50% based on candle quality
+        # Signal strength sizing: strong signal → full alloc, normal → reduced
+        alloc_pct = self._candle_alloc_pct  # set by _check_option_entry
 
         # Survival mode: low balance → cap allocation
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
             alloc_pct = min(alloc_pct, self.OPT_SURVIVAL_MAX_ALLOC)
 
-        # Collateral budget (capped at 40% of total balance)
+        # Collateral budget (capped at 70% of total balance)
         collateral_available = exchange_capital * (alloc_pct / 100)
         max_collateral = exchange_capital * (self.OPT_MAX_COLLATERAL_PCT / 100)
         collateral_available = min(collateral_available, max_collateral)
@@ -1699,7 +1728,7 @@ class OptionsScalpStrategy(BaseStrategy):
         contracts = math.floor(collateral_available / collateral_per_contract)
         contracts = max(contracts, 0)
 
-        # Survival mode: balance < $5 → cap at 5 contracts (collateral is tiny at 50x leverage)
+        # Survival mode: balance < $5 → cap at 5 contracts
         if exchange_capital < 5.0 and contracts > 5:
             self.logger.info(
                 "[%s] SURVIVAL_MODE: bal=$%.2f < $5 — capping %d → 5 contracts",
@@ -1707,20 +1736,35 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             contracts = 5
 
-        # Hard cap: never exceed 15 contracts per trade
-        if contracts > 15:
+        # Hard cap per asset: ETH 40, BTC whatever fits collateral
+        hard_cap = 40 if self._base_asset == "ETH" else 999
+        if contracts > hard_cap:
             self.logger.info(
-                "[%s] SIZE_CAP: %d → 15 contracts (hard cap)",
-                self.pair, contracts,
+                "[%s] SIZE_CAP: %d → %d contracts (hard cap)",
+                self.pair, contracts, hard_cap,
             )
-            contracts = 15
+            contracts = hard_cap
+
+        # SAFETY: max SL loss = 25% of balance
+        multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+        max_sl_loss = contracts * premium * (self.SL_PREMIUM_LOSS_PCT / 100) * multiplier
+        max_allowed_loss = exchange_capital * 0.25
+        if max_sl_loss > max_allowed_loss and premium > 0:
+            safe_contracts = math.floor(
+                max_allowed_loss / (premium * (self.SL_PREMIUM_LOSS_PCT / 100) * multiplier)
+            )
+            self.logger.info(
+                "[%s] SL_SAFETY: %d→%d contracts (SL loss $%.2f > 25%% of bal $%.2f)",
+                self.pair, contracts, safe_contracts, max_sl_loss, exchange_capital,
+            )
+            contracts = max(safe_contracts, 1)
 
         self.logger.info(
             "[%s] OPT_SIZING: %d contracts @ $%.4f "
-            "(collateral=$%.2f, alloc=%.0f%%, bal=$%.2f, per_ct=$%.4f)",
+            "(collateral=$%.2f, alloc=%.0f%%, bal=$%.2f, per_ct=$%.4f, strong=%s)",
             self.pair, contracts, premium,
             collateral_available, alloc_pct, exchange_capital,
-            collateral_per_contract,
+            collateral_per_contract, self._strong_signal,
         )
         return contracts
 
