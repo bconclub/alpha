@@ -1021,10 +1021,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.debug("[%s] Underlying move check failed: %s", self.pair, e)
 
         # 2c. Signal strength sizing — strong signal gets full alloc, normal gets reduced
-        cum_threshold = (
-            self.CANDLE_MOM_CUM_PCT_ETH if self._base_asset == "ETH"
-            else self.CANDLE_MOM_CUM_PCT_BTC
-        )
+        cum_threshold = _adaptive_thresh
         self._strong_signal = (
             candle_cum_pct >= cum_threshold * 3.0
             and underlying_move_pct >= self.MIN_UNDERLYING_MOVE_PCT * 2.0
