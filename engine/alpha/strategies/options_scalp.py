@@ -113,11 +113,11 @@ class OptionsScalpStrategy(BaseStrategy):
     CANDLE_MOM_LOOKBACK = 5              # check last 5 completed 1m candles (was 3)
     # ── Adaptive threshold — compare move to recent noise ─────────
     ADAPTIVE_CUM_MULTIPLIER = 2.0        # entry requires cum >= 2.0x avg candle range (was 2.5 — volume confirms quality)
-    ADAPTIVE_CUM_FLOOR = 0.10            # absolute minimum cum% regardless of noise level
+    ADAPTIVE_CUM_FLOOR = 0.08            # absolute minimum cum% regardless of noise level (was 0.10 — blocked quiet markets)
     ADAPTIVE_RANGE_WINDOW = 20           # rolling window of candle ranges for noise baseline
     # ── Volume confirmation — no volume no trade ──────────────────
     VOLUME_CONFIRM_WINDOW = 20           # rolling window for avg volume baseline
-    VOLUME_CONFIRM_MULTIPLIER = 1.5      # entry candles must have >= 1.5x avg volume
+    VOLUME_CONFIRM_MULTIPLIER = 1.2      # entry candles must have >= 1.2x avg volume (was 1.5 — too tight for options)
     VOLUME_CONFIRM_CANDLES = 3           # average volume of last 3 candles for entry check
     MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
@@ -135,7 +135,7 @@ class OptionsScalpStrategy(BaseStrategy):
         "BTC": (50.0, 500.0), # $50-$500 sweet spot for BTC (was $300)
     }
     PREMIUM_EXPENSIVE_CUM_MULT = 3.0    # expensive premium requires cum >= 3x avg_range (was 4x)
-    PREMIUM_EXPENSIVE_VOL_MULT = 2.5    # expensive premium requires vol >= 2.5x avg
+    PREMIUM_EXPENSIVE_VOL_MULT = 2.0    # expensive premium requires vol >= 2.0x avg (was 2.5)
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # Same pair allocation as futures so capital is balanced.
@@ -366,7 +366,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         _ss = self.PREMIUM_SWEET_SPOT.get(self._base_asset, (3.0, 15.0))
         self.logger.info(
-            "[%s] OPTIONS SCALP ACTIVE — adaptive_gate(2.5x noise, vol 1.5x, 3/5 candles), "
+            "[%s] OPTIONS SCALP ACTIVE — adaptive_gate(2.0x noise, vol 1.2x, 3/5 candles), "
             "premium=$%.0f-$%.0f sweet | "
             "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
             "Timeout=%dm Phase1=%ds Alloc=%s%s",
@@ -1861,13 +1861,9 @@ class OptionsScalpStrategy(BaseStrategy):
                 None, 0, 0.0, candle_sizes,
             )
 
-        # Last candle must match direction
+        # Last candle color (informational only — no longer required to match direction)
         last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
         last_move = last_c - last_o
-        last_is_directional = (
-            (side == "long" and last_move > doji_threshold)
-            or (side == "short" and last_move < -doji_threshold)
-        )
 
         # ── Cumulative move (direction-aware) ──
         cum_pct = (cumulative_move / current_price) * 100
@@ -1895,7 +1891,6 @@ class OptionsScalpStrategy(BaseStrategy):
 
         passed = (
             cum_pct >= cum_threshold
-            and last_is_directional
             and vol_ok
             and accel_ok
         )
@@ -1910,9 +1905,6 @@ class OptionsScalpStrategy(BaseStrategy):
             parts = [f"{directional_count}/{n} {color}"]
             if cum_pct < cum_threshold:
                 parts.append(f"cum={cum_pct:+.2f}% < adaptive {cum_threshold:.2f}%")
-            if not last_is_directional:
-                direction_label = "CALL" if side == "long" else "PUT"
-                parts.append(f"last candle {last_color} but need {color} for {direction_label}")
             if not vol_ok:
                 parts.append(f"LOW_VOLUME: {entry_vol:.0f} < {self.VOLUME_CONFIRM_MULTIPLIER}x avg {avg_vol:.0f}")
             if not accel_ok:
