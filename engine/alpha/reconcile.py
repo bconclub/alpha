@@ -155,6 +155,56 @@ class DeltaReconciler:
     # ROUND TRIP BUILDER (FIFO)
     # ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _merge_split_fills(fills: list[dict]) -> list[dict]:
+        """Merge consecutive same-side fills on same symbol within 30s.
+
+        Split fills (e.g. 14ct + 1ct + 1ct @$10.9 within 5s) get merged
+        into a single fill with summed qty, weighted avg price, summed fees.
+        """
+        if not fills:
+            return fills
+
+        merged: list[dict] = []
+        current = dict(fills[0])
+
+        for fill in fills[1:]:
+            same_side = fill.get("side", "").lower() == current.get("side", "").lower()
+            same_sym = (fill.get("_symbol") or fill.get("symbol", "")) == (
+                current.get("_symbol") or current.get("symbol", "")
+            )
+
+            # Check time gap
+            cur_ts = current.get("timestamp", 0)
+            fill_ts = fill.get("timestamp", 0)
+            within_window = abs(fill_ts - cur_ts) <= 30_000  # 30s in ms
+
+            if same_side and same_sym and within_window:
+                # Merge: weighted avg price, sum qty, sum fees
+                cur_qty = float(current.get("amount", 0))
+                fill_qty = float(fill.get("amount", 0))
+                cur_price = float(current.get("price", 0))
+                fill_price = float(fill.get("price", 0))
+                total_qty = cur_qty + fill_qty
+
+                if total_qty > 0:
+                    current["price"] = round(
+                        (cur_price * cur_qty + fill_price * fill_qty) / total_qty, 8,
+                    )
+                current["amount"] = total_qty
+
+                # Sum fees
+                cur_fee = float((current.get("fee") or {}).get("cost", 0) or 0)
+                fill_fee = float((fill.get("fee") or {}).get("cost", 0) or 0)
+                current["fee"] = {"cost": cur_fee + fill_fee}
+                # Keep earliest timestamp (already set from first fill)
+            else:
+                merged.append(current)
+                current = dict(fill)
+
+        merged.append(current)
+        return merged
+
     def _build_round_trips(self, fills: list[dict]) -> list[dict]:
         """FIFO match buys to sells per symbol → round trips."""
         # Group fills by symbol
@@ -166,6 +216,9 @@ class DeltaReconciler:
         round_trips: list[dict] = []
 
         for symbol, sym_fills in by_symbol.items():
+            # Merge split fills before FIFO matching
+            sym_fills = self._merge_split_fills(sym_fills)
+
             asset = self._get_asset(symbol)
             option_type = self._get_option_type(symbol)
             multiplier = CONTRACT_MULTIPLIER.get(asset, 0.01)
@@ -372,6 +425,11 @@ class DeltaReconciler:
                 continue
 
             # This is a ghost trade — Delta has it, DB doesn't
+            # Dedup check: skip if DB already has a trade with same pair,
+            # similar entry price, opened within 120s
+            if self._is_duplicate(rt):
+                continue
+
             row = self._build_insert_row(rt)
             try:
                 self.db.table("trades").insert(row).execute()
@@ -399,6 +457,40 @@ class DeltaReconciler:
     # ──────────────────────────────────────────────────────
     # HELPERS
     # ──────────────────────────────────────────────────────
+
+    def _is_duplicate(self, rt: dict) -> bool:
+        """Check if a round trip already exists in DB (dedup before insert)."""
+        buy_time = rt.get("buy_time", "")
+        if not buy_time:
+            return False
+
+        try:
+            opened = datetime.fromisoformat(buy_time.replace("Z", "+00:00"))
+            window = timedelta(seconds=120)
+            opened_min = (opened - window).isoformat()
+            opened_max = (opened + window).isoformat()
+
+            resp = (
+                self.db.table("trades")
+                .select("id,entry_price,opened_at")
+                .eq("pair", rt["pair"])
+                .gte("opened_at", opened_min)
+                .lte("opened_at", opened_max)
+                .execute()
+            )
+
+            for ex in resp.data or []:
+                ex_price = float(ex.get("entry_price") or 0)
+                if abs(ex_price - rt["entry"]) < 2.0:
+                    self.log.info(
+                        "RECONCILE DEDUP: skipping %s $%.2f, matches #%s ($%.2f)",
+                        rt["pair"], rt["entry"], ex["id"], ex_price,
+                    )
+                    return True
+        except Exception:
+            self.log.debug("RECONCILE DEDUP check failed for %s", rt["pair"], exc_info=True)
+
+        return False
 
     def _build_insert_row(self, rt: dict) -> dict:
         """Build a DB insert row for a ghost trade."""

@@ -2075,8 +2075,8 @@ class OptionsScalpStrategy(BaseStrategy):
         if in_phase1:
             return []
 
-        # ── 2c. PEAK TRAIL: once peak exceeds +15%, trail 35% behind ─
-        if peak_pnl_pct >= 15.0:
+        # ── 2c. PEAK TRAIL: once peak exceeds +8%, trail 35% behind ──
+        if peak_pnl_pct >= 8.0:
             trail_floor_pct = peak_pnl_pct * 0.65
             if premium_change_pct <= trail_floor_pct:
                 self.logger.info(
@@ -2086,14 +2086,19 @@ class OptionsScalpStrategy(BaseStrategy):
                 return await self._do_option_exit(current_premium, premium_change_pct, "OPT_PEAK_TRAIL")
 
         # ── 3. MOMENTUM FADE: LOSING + momentum dying ──────────────
-        # Only fires if premium is BELOW entry. Winners exit via ratchet/trail, not fade.
+        # Only fades dead trades: never peaked, below entry by 3%+, momentum gone.
+        # Trades that peaked above +5% are handled by peak trail, not fade.
         momentum_60s = 0.0
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
             ss = self._scalp.last_signal_state
             if ss:
                 momentum_60s = abs(ss.get("momentum_60s", 0) or 0)
 
-        if hold_seconds >= self.OPT_MOM_FADE_MIN_HOLD and premium_change_pct < 0:
+        # Rule 1: Never fade if trade peaked above +5% — let trail/ratchet handle
+        # Rule 2: Must be below entry by 3%+ (not just barely negative)
+        if (hold_seconds >= self.OPT_MOM_FADE_MIN_HOLD
+                and peak_pnl_pct < 5.0
+                and premium_change_pct < -3.0):
             if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
                 now_m = time.monotonic()
                 if self._opt_mom_fade_since is None:
