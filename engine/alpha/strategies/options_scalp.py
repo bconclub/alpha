@@ -176,6 +176,8 @@ class OptionsScalpStrategy(BaseStrategy):
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
     TIMEOUT_MINUTES = 10                 # Options timeout (was 5 — give gamma time to work)
     TIMEOUT_DECAY_PCT = 15.0             # Only timeout if premium decayed > 15% from entry
+    STALE_TIMEOUT_MINUTES = 60           # Force-close if held 60+ min and never exceeded +2% peak
+    STALE_PEAK_PCT = 2.0                 # Peak threshold for stale detection
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
 
     # ── Momentum fade — premium profitable but momentum dying ────────
@@ -290,6 +292,8 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Position verification ticker (every 3rd tick = ~30s)
         self._position_verify_tick: int = 0
+        self._position_verify_failures: int = 0
+        self._MAX_VERIFY_FAILURES = 10  # 10 × 30s = ~5 min of failed verifies → force POSITION_GONE
 
         # Momentum fade / dead momentum timers
         self._opt_mom_fade_since: float | None = None
@@ -2204,6 +2208,16 @@ class OptionsScalpStrategy(BaseStrategy):
                         self.option_symbol, int(hold_seconds / 60), premium_change_pct,
                     )
 
+        # ── 8b. STALE TRADE: held 60+ min, never moved — theta is eating it ──
+        if (hold_seconds >= self.STALE_TIMEOUT_MINUTES * 60
+                and peak_pnl_pct < self.STALE_PEAK_PCT):
+            self.logger.info(
+                "[%s] STALE TRADE — held %dm, peak only +%.1f%% (< +%.0f%%) — closing",
+                self.option_symbol, int(hold_seconds / 60),
+                peak_pnl_pct, self.STALE_PEAK_PCT,
+            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+
         # ── 9. SIGNAL REVERSAL ────────────────────────────────────────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
             ss = self._scalp.last_signal_state
@@ -2522,6 +2536,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         try:
             positions = await self.options_exchange.fetch_positions()
+            self._position_verify_failures = 0  # reset on success
             for pos in positions:
                 symbol = pos.get("symbol", "")
                 contracts = float(pos.get("contracts", 0) or 0)
@@ -2546,10 +2561,19 @@ class OptionsScalpStrategy(BaseStrategy):
             return await self._handle_position_gone("VERIFY_GONE")
 
         except Exception as e:
-            # fetch_positions failed — don't flag as gone, just log
-            self.logger.debug(
-                "[%s] Position verify fetch_positions failed: %s", self.option_symbol, e,
+            self._position_verify_failures += 1
+            self.logger.warning(
+                "[%s] Position verify fetch_positions failed (%d/%d): %s",
+                self.option_symbol, self._position_verify_failures,
+                self._MAX_VERIFY_FAILURES, e,
             )
+            # After repeated failures, force-close — API is down or position is gone
+            if self._position_verify_failures >= self._MAX_VERIFY_FAILURES:
+                self.logger.error(
+                    "[%s] POSITION VERIFY: %d consecutive failures — forcing POSITION_GONE",
+                    self.option_symbol, self._position_verify_failures,
+                )
+                return await self._handle_position_gone("VERIFY_API_FAIL")
             return None
 
     async def _handle_position_gone(self, reason: str) -> list[Signal]:
@@ -2721,6 +2745,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.strike_price = 0.0
         self.expiry_dt = None
         self._consecutive_ticker_failures = 0
+        self._position_verify_failures = 0
         self._last_state_write = 0.0
 
         return []  # No signal needed — handled directly in DB
