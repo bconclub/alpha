@@ -264,6 +264,9 @@ class AlphaBot:
         if self._options_strategies:
             logger.info("Options overlay started on %d pairs", len(self._options_strategies))
 
+        # ── ORPHAN_STARTUP: close stale DB trades with no exchange position ──
+        await self._close_orphan_options_on_startup()
+
         # Start WebSocket price feed — Delta only (for exit checks + premium monitoring)
         try:
             self._price_feed = PriceFeed(
@@ -2507,6 +2510,127 @@ class AlphaBot:
                 "options positions are restored on restart, not auto-closed",
                 trade_id, pair, exchange,
             )
+
+    async def _close_orphan_options_on_startup(self) -> None:
+        """Close stale options trades in DB that have no matching exchange position.
+
+        Runs AFTER opts.start() (which restores DB state into strategy memory).
+        If a trade has been open >30 min and Delta has no matching position,
+        close it as ORPHAN_STARTUP and clear the strategy's in_position flag.
+        """
+        if not self.delta_options or not self.db.is_connected:
+            return
+
+        # Fetch all open options_scalp trades from DB
+        try:
+            all_open = await self.db.get_open_trades()
+        except Exception as e:
+            logger.error("ORPHAN_STARTUP: failed to fetch open trades: %s", e)
+            return
+
+        option_trades = [
+            t for t in all_open
+            if t.get("strategy") == "options_scalp"
+            and t.get("exchange") == "delta"
+        ]
+        if not option_trades:
+            return
+
+        # Fetch live options positions from Delta
+        exchange_positions: dict[str, dict[str, Any]] = {}
+        try:
+            positions = await self.delta_options.fetch_positions()
+            for pos in positions:
+                contracts = float(pos.get("contracts", 0) or 0)
+                if contracts != 0:
+                    symbol = pos.get("symbol", "")
+                    exchange_positions[symbol] = {
+                        "side": "long" if contracts > 0 else "short",
+                        "contracts": abs(contracts),
+                    }
+        except Exception as e:
+            logger.error("ORPHAN_STARTUP: failed to fetch Delta options positions: %s", e)
+            return
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        closed = 0
+
+        for trade in option_trades:
+            trade_id = trade.get("id")
+            pair = trade.get("pair", "")
+            if not trade_id:
+                continue
+
+            # Check if position exists on exchange
+            if pair in exchange_positions:
+                continue  # real position — leave it alone
+
+            # Check age
+            opened_str = trade.get("opened_at", "")
+            if not opened_str:
+                continue
+            try:
+                if isinstance(opened_str, str):
+                    opened_str = opened_str.replace("Z", "+00:00")
+                    opened_dt = _dt.datetime.fromisoformat(opened_str)
+                else:
+                    opened_dt = opened_str
+                age = now - opened_dt
+            except (ValueError, TypeError):
+                logger.warning("ORPHAN_STARTUP: can't parse opened_at for trade %s", trade_id)
+                continue
+
+            if age < _dt.timedelta(minutes=30):
+                logger.info(
+                    "ORPHAN_STARTUP: trade %s %s age %s < 30min — skipping",
+                    trade_id, pair, age,
+                )
+                continue
+
+            # No exchange position and >30 min old → close as orphan
+            entry_price = float(trade.get("entry_price", 0) or 0)
+            contracts = int(trade.get("contracts") or trade.get("amount") or 0)
+
+            await self.db.update_trade(trade_id, {
+                "status": "closed",
+                "closed_at": iso_now(),
+                "exit_price": entry_price,
+                "pnl": 0.0,
+                "pnl_pct": 0.0,
+                "exit_reason": "ORPHAN_STARTUP",
+                "reason": f"stale orphan closed on startup (age {age})",
+            })
+
+            # Clear strategy in_position so it can trade again
+            base_asset = pair.split("/")[0] if "/" in pair else ""
+            opts = self._options_strategies.get(
+                next((k for k in self._options_strategies if k.split("/")[0] == base_asset), ""),
+            )
+            if opts and opts.in_position and opts.option_symbol == pair:
+                opts.in_position = False
+                opts.option_symbol = None
+                opts._db_trade_id = None
+                opts._contracts = 0
+
+            closed += 1
+            logger.warning(
+                "ORPHAN_STARTUP: closed stale trade #%s %s (age %s, entry=$%.4f, %d contracts)",
+                trade_id, pair, age, entry_price, contracts,
+            )
+
+            try:
+                await self.alerts.send_orphan_alert(
+                    pair=pair,
+                    side="buy",
+                    contracts=float(contracts),
+                    action="CLOSED as ORPHAN_STARTUP",
+                    detail=f"Age: {age} — entry: ${entry_price:.4f} — no exchange position",
+                )
+            except Exception:
+                pass
+
+        if closed:
+            logger.info("ORPHAN_STARTUP: closed %d stale options trade(s)", closed)
 
     async def _reconcile_bybit_positions(self) -> None:
         """DISABLED — Bybit not used (Delta options only mode)."""
