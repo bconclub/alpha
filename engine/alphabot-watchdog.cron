@@ -1,0 +1,5 @@
+# /etc/cron.d/alphabot-watchdog
+# Restart alpha-bot if no scan/heartbeat activity in last 3 minutes
+# Deploy: sudo cp alphabot-watchdog.cron /etc/cron.d/alphabot-watchdog && sudo chmod 644 /etc/cron.d/alphabot-watchdog
+SHELL=/bin/bash
+*/3 * * * * root if [ $(journalctl -u alpha-bot --since "3 min ago" --no-pager 2>/dev/null | grep -c "Scan\|scan\|ENTRY\|EXIT\|heartbeat") -lt 1 ]; then systemctl restart alpha-bot && echo "$(date) watchdog restart" >> /var/log/alphabot-watchdog.log; fi

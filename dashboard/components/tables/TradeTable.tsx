@@ -83,6 +83,12 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
   'XRP/USD:USD': 1.0,
 };
 
+// Options contract multiplier by base asset (must match engine)
+const OPTION_CONTRACT_MULTIPLIER: Record<string, number> = {
+  BTC: 0.001,
+  ETH: 0.01,
+};
+
 // ── Options helpers ──────────────────────────────────────────
 /** Options symbol pattern: contains date-strike-C/P  (e.g. "260221-98000-C") */
 const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
@@ -331,16 +337,28 @@ function calcUnrealizedPnL(
   if (!entryPrice || !contracts) return null;
 
   const isOption = isOptionTrade(trade);
+  const leverage = trade.leverage > 1 ? trade.leverage : 1;
 
-  // Get coin amount from contracts
-  // Options: 1 contract = 1 unit (no conversion). Futures: use contract size.
+  if (isOption) {
+    // Options: P&L = (current - entry) × contracts × CONTRACT_MULTIPLIER
+    const asset = extractBaseAsset(trade.pair);
+    const multiplier = OPTION_CONTRACT_MULTIPLIER[asset] ?? 0.01;
+    const coinAmount = contracts * multiplier;
+    const grossPnl = trade.position_type === 'short'
+      ? (entryPrice - currentPrice) * coinAmount
+      : (currentPrice - entryPrice) * coinAmount;
+    // Return % = premium move (do NOT multiply by leverage)
+    const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+    return { pnl: grossPnl, pnl_pct: trade.position_type === 'short' ? -pnlPct : pnlPct };
+  }
+
+  // Futures
   let coinAmount = contracts;
-  if (trade.exchange === 'delta' && !isOption) {
+  if (trade.exchange === 'delta') {
     const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
     coinAmount = contracts * contractSize;
   }
 
-  // Calculate gross P&L
   let grossPnl: number;
   if (trade.position_type === 'short') {
     grossPnl = (entryPrice - currentPrice) * coinAmount;
@@ -348,15 +366,11 @@ function calcUnrealizedPnL(
     grossPnl = (currentPrice - entryPrice) * coinAmount;
   }
 
-  // P&L % against collateral (margin posted)
   const notional = entryPrice * coinAmount;
-  const leverage = trade.leverage > 1 ? trade.leverage : 1;
   const collateral = notional / leverage;
   const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
 
-  // Options: real wallet P&L = notional / leverage
-  const realPnl = isOption && leverage > 1 ? grossPnl / leverage : grossPnl;
-  return { pnl: realPnl, pnl_pct: pnlPct };
+  return { pnl: grossPnl, pnl_pct: pnlPct };
 }
 
 /** Build a PositionDisplay from a Trade + current price (for range bar / state badge) */
@@ -385,23 +399,35 @@ function buildPositionDisplay(
       pricePnlPct = ((currentPrice - entry) / entry) * 100;
     }
 
-    // Options: 1 contract = 1 unit (no contract size conversion)
-    let coinAmount = trade.contracts ?? trade.amount;
-    if (trade.exchange === 'delta' && !isOption) {
-      const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
-      coinAmount = (trade.contracts ?? trade.amount) * contractSize;
-    }
-    if (trade.position_type === 'short') {
-      pnlUsd = (entry - currentPrice) * coinAmount;
+    if (isOption) {
+      // Options: P&L = (current - entry) × contracts × CONTRACT_MULTIPLIER
+      const contracts = trade.contracts ?? trade.amount;
+      const multiplier = OPTION_CONTRACT_MULTIPLIER[asset] ?? 0.01;
+      const coinAmount = contracts * multiplier;
+      if (trade.position_type === 'short') {
+        pnlUsd = (entry - currentPrice) * coinAmount;
+      } else {
+        pnlUsd = (currentPrice - entry) * coinAmount;
+      }
+      // Return % = premium move (do NOT multiply by leverage)
+      capitalPnlPct = pricePnlPct;
+      collateral = entry * coinAmount;
     } else {
-      pnlUsd = (currentPrice - entry) * coinAmount;
+      // Futures
+      let coinAmount = trade.contracts ?? trade.amount;
+      if (trade.exchange === 'delta') {
+        const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
+        coinAmount = (trade.contracts ?? trade.amount) * contractSize;
+      }
+      if (trade.position_type === 'short') {
+        pnlUsd = (entry - currentPrice) * coinAmount;
+      } else {
+        pnlUsd = (currentPrice - entry) * coinAmount;
+      }
+      const notional = entry * coinAmount;
+      capitalPnlPct = pricePnlPct * leverage;
+      collateral = leverage > 1 ? notional / leverage : notional;
     }
-    // Options: real wallet P&L = notional / leverage
-    if (isOption && leverage > 1) pnlUsd = pnlUsd / leverage;
-    const notional = entry * coinAmount;
-    // capitalPnlPct = return on collateral (margin posted)
-    capitalPnlPct = pricePnlPct * leverage;
-    collateral = leverage > 1 ? notional / leverage : notional;
   }
 
   const peakPnlPct = trade.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);

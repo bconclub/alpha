@@ -15,6 +15,7 @@ from typing import Any
 
 import aiohttp
 import ccxt.async_support as ccxt
+import sdnotify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from alpha.alerts import AlertManager
@@ -64,6 +65,9 @@ class AlphaBot:
 
         # Scheduler
         self._scheduler = AsyncIOScheduler()
+
+        # systemd watchdog notifier
+        self._sd_notifier = sdnotify.SystemdNotifier()
 
         # Shutdown flag
         self._running = False
@@ -311,7 +315,12 @@ class AlphaBot:
         self._scheduler.add_job(self._telegram_health_check, "interval", minutes=5)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=5)
         self._scheduler.add_job(self._run_reconciliation, "interval", minutes=60)
+        self._scheduler.add_job(self._watchdog_ping, "interval", seconds=60)
         self._scheduler.start()
+
+        # Signal systemd that we are ready and alive
+        self._sd_notifier.notify("READY=1")
+        self._sd_notifier.notify("WATCHDOG=1")
 
         # Fetch Delta balance for trade sizing
         delta_bal: float | None = None
@@ -448,6 +457,7 @@ class AlphaBot:
         if not self._running:
             return
         self._running = False
+        self._sd_notifier.notify("STOPPING=1")
         logger.info("Shutting down: %s", reason)
 
         # Stop WebSocket price feed first (prevents new exit triggers)
@@ -2333,6 +2343,11 @@ class AlphaBot:
     # TELEGRAM HEALTH CHECK — verify connection every 5 minutes
     # ==================================================================
 
+    def _watchdog_ping(self) -> None:
+        """Send systemd watchdog keepalive every 60s + heartbeat log for cron watchdog."""
+        self._sd_notifier.notify("WATCHDOG=1")
+        logger.info("heartbeat")
+
     async def _telegram_health_check(self) -> None:
         """Ping Telegram API every 5 minutes. Reconnect if dead."""
         try:
@@ -2515,7 +2530,7 @@ class AlphaBot:
         """Close stale options trades in DB that have no matching exchange position.
 
         Runs AFTER opts.start() (which restores DB state into strategy memory).
-        If a trade has been open >30 min and Delta has no matching position,
+        If a trade has been open >10 min and Delta has no matching position,
         close it as ORPHAN_STARTUP and clear the strategy's in_position flag.
         """
         if not self.delta_options or not self.db.is_connected:
@@ -2580,9 +2595,9 @@ class AlphaBot:
                 logger.warning("ORPHAN_STARTUP: can't parse opened_at for trade %s", trade_id)
                 continue
 
-            if age < _dt.timedelta(minutes=30):
+            if age < _dt.timedelta(minutes=10):
                 logger.info(
-                    "ORPHAN_STARTUP: trade %s %s age %s < 30min — skipping",
+                    "ORPHAN_STARTUP: trade %s %s age %s < 10min — skipping",
                     trade_id, pair, age,
                 )
                 continue

@@ -26,6 +26,12 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
   'XRP/USD:USD': 1.0,
 };
 
+// Options contract multiplier by base asset (must match engine)
+const OPTION_CONTRACT_MULTIPLIER: Record<string, number> = {
+  BTC: 0.001,
+  ETH: 0.01,
+};
+
 const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
 function isOptionPosition(pos: { pair: string; strategy?: string }): boolean {
   return pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair);
@@ -150,27 +156,36 @@ export function LivePositions() {
         } else {
           pricePnlPct = ((currentPrice - pos.entry_price) / pos.entry_price) * 100;
         }
-        // Capital return % = price move × leverage
-        capitalPnlPct = pricePnlPct * leverage;
 
-        // Dollar P&L (gross — fees deducted on close)
-        // Options: 1 contract = 1 unit (no contract size conversion)
-        let coinAmount = pos.contracts ?? pos.amount;
-        if (pos.exchange === 'delta' && !isOption) {
-          const contractSize = DELTA_CONTRACT_SIZE[pos.pair] ?? 1.0;
-          coinAmount = (pos.contracts ?? pos.amount) * contractSize;
-        }
-        if (pos.position_type === 'short') {
-          pnlUsd = (pos.entry_price - currentPrice) * coinAmount;
+        if (isOption) {
+          // Options: P&L = (current_premium - entry) × contracts × CONTRACT_MULTIPLIER
+          const contracts = pos.contracts ?? pos.amount;
+          const multiplier = OPTION_CONTRACT_MULTIPLIER[asset] ?? 0.01;
+          const coinAmount = contracts * multiplier;
+          if (pos.position_type === 'short') {
+            pnlUsd = (pos.entry_price - currentPrice) * coinAmount;
+          } else {
+            pnlUsd = (currentPrice - pos.entry_price) * coinAmount;
+          }
+          // Return % = premium move % (do NOT multiply by leverage)
+          capitalPnlPct = pricePnlPct;
+          collateral = pos.entry_price * coinAmount;
         } else {
-          pnlUsd = (currentPrice - pos.entry_price) * coinAmount;
+          // Futures: capital return = price move × leverage
+          capitalPnlPct = pricePnlPct * leverage;
+          let coinAmount = pos.contracts ?? pos.amount;
+          if (pos.exchange === 'delta') {
+            const contractSize = DELTA_CONTRACT_SIZE[pos.pair] ?? 1.0;
+            coinAmount = (pos.contracts ?? pos.amount) * contractSize;
+          }
+          if (pos.position_type === 'short') {
+            pnlUsd = (pos.entry_price - currentPrice) * coinAmount;
+          } else {
+            pnlUsd = (currentPrice - pos.entry_price) * coinAmount;
+          }
+          const notional = pos.entry_price * coinAmount;
+          collateral = leverage > 1 ? notional / leverage : notional;
         }
-        // Options: real wallet P&L = notional / leverage
-        if (isOption && leverage > 1) pnlUsd = pnlUsd / leverage;
-
-        // Collateral = notional / leverage
-        const notional = pos.entry_price * coinAmount;
-        collateral = leverage > 1 ? notional / leverage : notional;
       }
 
       // Use ACTUAL position state from bot (written to DB every ~10s)

@@ -36,8 +36,8 @@
 Exit (DO NOT TOUCH):
   - Ratchet floor: lock profit at (10→3, 15→7, 25→15, 40→25, 100→70)%
   - SL: 50% premium loss (always active, even in Phase 1)
-  - Momentum Fade: profitable + momentum < 0.02% for 60s → exit
-  - Dead Momentum: losing + momentum dead 45s + held 3min → exit
+  - Momentum Fade: BELOW entry + 3 consecutive drops + momentum < 0.02% 60s + no vol spike → exit
+  - Dead Momentum: flat zone (-5% to +5%) + momentum dead 60s + held 3min → exit
   - TP: 30% premium gain
   - Trailing: activates at +15%, trails 5% behind peak
   - Timeout: 10 minutes (only if premium decaying)
@@ -180,12 +180,15 @@ class OptionsScalpStrategy(BaseStrategy):
     STALE_PEAK_PCT = 2.0                 # Peak threshold for stale detection
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
 
-    # ── Momentum fade — premium profitable but momentum dying ────────
+    # ── Momentum fade — premium BELOW entry + momentum dying ─────────
     OPT_MOM_FADE_THRESHOLD = 0.02        # momentum < 0.02% = dying
     OPT_MOM_FADE_CONFIRM_SEC = 60        # hold 60s below threshold to confirm (was 15 — options premium lags spot)
-    OPT_MOM_FADE_MIN_HOLD = 120          # min 120s before fade can fire (was 60 — too early)
-    OPT_MOM_FADE_TREND_HOLD = 120        # trend-aligned: 120s hold (was 90)
+    OPT_MOM_FADE_MIN_HOLD = 150          # min 150s before fade can fire (was 120 — too early)
+    OPT_MOM_FADE_TREND_HOLD = 150        # trend-aligned: 150s hold (was 120)
     OPT_MOM_FADE_TREND_CONFIRM = 20      # trend-aligned: need 20s confirm
+    OPT_MOM_FADE_PEAK_BLOCK = 10.0       # never fade if peak was above +10% — let trail/ratchet handle
+    OPT_MOM_FADE_CONSEC_DROPS = 3        # premium must fall 3+ consecutive checks before fade
+    OPT_MOM_FADE_VOL_SPIKE = 2.0         # block fade if volume_ratio >= 2.0x (active trading)
 
     # ── Dead momentum — momentum dead + losing + held too long ───────
     OPT_DEAD_MOM_CONFIRM_SEC = 30        # 30s of dead momentum (was 45)
@@ -298,6 +301,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Momentum fade / dead momentum timers
         self._opt_mom_fade_since: float | None = None
         self._opt_mom_dying_since: float | None = None
+        # Track consecutive premium drops for fade confirmation
+        self._opt_last_premium: float = 0.0
+        self._opt_consec_drops: int = 0
         # Ratchet profit floor
         self._opt_ratchet_floor: float = 0.0
 
@@ -2086,19 +2092,39 @@ class OptionsScalpStrategy(BaseStrategy):
                 return await self._do_option_exit(current_premium, premium_change_pct, "OPT_PEAK_TRAIL")
 
         # ── 3. MOMENTUM FADE: LOSING + momentum dying ──────────────
-        # Only fades dead trades: never peaked, below entry by 3%+, momentum gone.
-        # Trades that peaked above +5% are handled by peak trail, not fade.
+        # Strict rules to cut the #1 P&L drain:
+        #   - Never fade if trade peaked above +10% — let trail/ratchet handle
+        #   - Premium must be BELOW entry (losing money)
+        #   - Premium falling 3+ consecutive checks (not just one dip)
+        #   - Hold time >= 150s
+        #   - No volume spike in last 30s (don't fade during active trading)
         momentum_60s = 0.0
+        vol_ratio = 0.0
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
             ss = self._scalp.last_signal_state
             if ss:
                 momentum_60s = abs(ss.get("momentum_60s", 0) or 0)
+        # Volume ratio from cached signals (1m candle volume vs avg)
+        if self._scalp:
+            _opt_cached = type(self._scalp)._cached_signals.get(self._base_asset, {})
+            vol_ratio = _opt_cached.get("volume_ratio", 0) or 0
 
-        # Rule 1: Never fade if trade peaked above +5% — let trail/ratchet handle
-        # Rule 2: Must be below entry by 3%+ (not just barely negative)
+        # Track consecutive premium drops
+        if self._opt_last_premium > 0 and current_premium < self._opt_last_premium:
+            self._opt_consec_drops += 1
+        elif current_premium > self._opt_last_premium:
+            self._opt_consec_drops = 0  # reset on any rise
+        self._opt_last_premium = current_premium
+
+        # Rule 1: Never fade if trade peaked above +10% — let trail/ratchet handle
+        # Rule 2: Premium must be BELOW entry (losing money, not just slowing)
+        # Rule 3: Premium falling 3+ consecutive checks
+        # Rule 4: No volume spike (active trading = don't exit)
         if (hold_seconds >= self.OPT_MOM_FADE_MIN_HOLD
-                and peak_pnl_pct < 5.0
-                and premium_change_pct < -3.0):
+                and peak_pnl_pct < self.OPT_MOM_FADE_PEAK_BLOCK
+                and premium_change_pct < 0.0
+                and self._opt_consec_drops >= self.OPT_MOM_FADE_CONSEC_DROPS
+                and vol_ratio < self.OPT_MOM_FADE_VOL_SPIKE):
             if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
                 now_m = time.monotonic()
                 if self._opt_mom_fade_since is None:
@@ -2119,15 +2145,36 @@ class OptionsScalpStrategy(BaseStrategy):
                 elapsed = now_m - self._opt_mom_fade_since
                 if elapsed >= confirm_sec and hold_seconds >= min_hold:
                     self.logger.info(
-                        "[%s] OPT_MOMENTUM_FADE — losing %.1f%% + mom=%.4f%% dead %.0fs (aligned=%s)",
+                        "[%s] OPT_MOMENTUM_FADE — losing %.1f%% + mom=%.4f%% dead %.0fs "
+                        "(aligned=%s, consec_drops=%d, vol=%.1fx)",
                         self.option_symbol, premium_change_pct, momentum_60s,
-                        elapsed, trend_aligned,
+                        elapsed, trend_aligned, self._opt_consec_drops, vol_ratio,
                     )
                     return await self._do_option_exit(current_premium, premium_change_pct, "OPT_MOMENTUM_FADE")
             else:
                 self._opt_mom_fade_since = None
+        else:
+            # Conditions not met — reset fade timer
+            if premium_change_pct >= 0.0 or peak_pnl_pct >= self.OPT_MOM_FADE_PEAK_BLOCK:
+                self._opt_mom_fade_since = None
 
-        # ── 4. DEAD MOMENTUM: losing >5% + momentum dead + held 5 min ──
+        # ── 3b. DEAD MOMENTUM: flat zone, no movement, held too long ──
+        # Premium between -5% and +5%, hold > 180s, momentum dead 60s
+        if (hold_seconds >= 180
+                and -5.0 <= premium_change_pct <= 5.0
+                and peak_pnl_pct < self.OPT_MOM_FADE_PEAK_BLOCK
+                and momentum_60s < self.OPT_MOM_FADE_THRESHOLD):
+            now_m = time.monotonic()
+            if self._opt_mom_dying_since is None:
+                self._opt_mom_dying_since = now_m
+            dead_elapsed = now_m - self._opt_mom_dying_since
+            if dead_elapsed >= 60:
+                self.logger.info(
+                    "[%s] OPT_DEAD_MOMENTUM — flat %.1f%% + mom dead %.0fs + held %ds",
+                    self.option_symbol, premium_change_pct, dead_elapsed, int(hold_seconds),
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_DEAD_MOMENTUM")
+        # ── 4. DEAD MOMENTUM (severe): losing >5% + momentum dead + held 5 min ──
         # Only fire if premium is clearly losing (< -5%). Flat positions cost nothing to hold.
         if hold_seconds >= self.OPT_DEAD_MOM_MIN_HOLD and premium_change_pct < -5.0:
             if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
@@ -2489,6 +2536,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # Reset momentum / ratchet state
         self._opt_mom_fade_since = None
         self._opt_mom_dying_since = None
+        self._opt_last_premium = 0.0
+        self._opt_consec_drops = 0
         self._opt_ratchet_floor = 0.0
 
         # Stats tracking
@@ -2843,6 +2892,8 @@ class OptionsScalpStrategy(BaseStrategy):
             # Reset momentum / ratchet state on entry
             self._opt_mom_fade_since = None
             self._opt_mom_dying_since = None
+            self._opt_last_premium = 0.0
+            self._opt_consec_drops = 0
             self._opt_ratchet_floor = 0.0
             self.strike_price = signal.metadata.get("strike", 0)
             self._contracts = int(signal.metadata.get("contracts", 1) or 1)

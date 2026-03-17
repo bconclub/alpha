@@ -10,11 +10,12 @@ Description=Alpha Trading Bot
 After=network.target
 
 [Service]
-Type=simple
+Type=notify
 User=root
 WorkingDirectory=/root/alpha/engine
 ExecStart=/usr/bin/python3 -m alpha.main
 EnvironmentFile=/root/alpha/engine/.env
+WatchdogSec=300
 Restart=always
 RestartSec=10
 

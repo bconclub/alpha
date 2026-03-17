@@ -6,3 +6,4 @@ supabase>=2.0.0
 python-telegram-bot>=20.0
 APScheduler>=3.10.0
 python-dotenv>=1.0.0
+sdnotify>=0.3.0
