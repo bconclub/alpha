@@ -35,15 +35,19 @@ function buildDailyPnL(trades: Trade[]): Map<string, { pnl: number; trades: numb
 function getPnLColor(pnl: number): string {
   if (pnl === 0) return 'bg-zinc-800/50';
   if (pnl > 0) {
-    if (pnl >= 0.5) return 'bg-emerald-400';
-    if (pnl >= 0.2) return 'bg-emerald-500';
-    if (pnl >= 0.05) return 'bg-emerald-600';
-    return 'bg-emerald-700/80';
+    // Bigger profit = darker/richer green, small profit = light/faded green
+    if (pnl >= 1.0) return 'bg-emerald-500';
+    if (pnl >= 0.5) return 'bg-emerald-500/80';
+    if (pnl >= 0.2) return 'bg-emerald-600/70';
+    if (pnl >= 0.05) return 'bg-emerald-700/60';
+    return 'bg-emerald-800/40';
   }
-  if (pnl <= -0.5) return 'bg-red-400';
-  if (pnl <= -0.2) return 'bg-red-500';
-  if (pnl <= -0.05) return 'bg-red-600';
-  return 'bg-red-700/80';
+  // Bigger loss = darker/deeper red, small loss = light/faded red
+  if (pnl <= -1.0) return 'bg-red-500';
+  if (pnl <= -0.5) return 'bg-red-500/80';
+  if (pnl <= -0.2) return 'bg-red-600/70';
+  if (pnl <= -0.05) return 'bg-red-700/60';
+  return 'bg-red-800/40';
 }
 
 function getPnLTextColor(pnl: number): string {
@@ -230,15 +234,15 @@ export default function PnLPage() {
       <div className="flex items-center justify-center gap-1 text-[10px] text-zinc-500">
         <span>Loss</span>
         <div className="flex gap-0.5">
-          <div className="w-3 h-3 rounded-sm bg-red-400" />
           <div className="w-3 h-3 rounded-sm bg-red-500" />
-          <div className="w-3 h-3 rounded-sm bg-red-600" />
-          <div className="w-3 h-3 rounded-sm bg-red-700/80" />
+          <div className="w-3 h-3 rounded-sm bg-red-500/80" />
+          <div className="w-3 h-3 rounded-sm bg-red-600/70" />
+          <div className="w-3 h-3 rounded-sm bg-red-700/60" />
           <div className="w-3 h-3 rounded-sm bg-zinc-800/50" />
-          <div className="w-3 h-3 rounded-sm bg-emerald-700/80" />
-          <div className="w-3 h-3 rounded-sm bg-emerald-600" />
+          <div className="w-3 h-3 rounded-sm bg-emerald-700/60" />
+          <div className="w-3 h-3 rounded-sm bg-emerald-600/70" />
+          <div className="w-3 h-3 rounded-sm bg-emerald-500/80" />
           <div className="w-3 h-3 rounded-sm bg-emerald-500" />
-          <div className="w-3 h-3 rounded-sm bg-emerald-400" />
         </div>
         <span>Profit</span>
       </div>
