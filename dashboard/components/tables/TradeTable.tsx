@@ -1004,6 +1004,32 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           {display.isUnrealized ? ' (unr)' : ''}
                         </span>
                       )}
+                      {trade.peak_pnl != null && trade.status === 'closed' && (() => {
+                        const taken = display.pnlPct ?? 0;
+                        const peak = trade.peak_pnl;
+                        const capture = peak > 0 ? Math.round((taken / peak) * 100) : null;
+                        return (
+                          <span className="font-mono text-zinc-400">
+                            <span className={cn(
+                              peak >= 0.3 ? 'text-emerald-400' :
+                              peak >= 0.1 ? 'text-yellow-400' :
+                              peak >= 0 ? 'text-zinc-400' : 'text-red-400'
+                            )}>
+                              pk {peak >= 0 ? '+' : ''}{peak.toFixed(2)}%
+                            </span>
+                            {capture != null && (
+                              <span className={cn(
+                                'ml-1',
+                                capture >= 80 ? 'text-emerald-400' :
+                                capture >= 50 ? 'text-yellow-400' :
+                                capture >= 0 ? 'text-orange-400' : 'text-red-400'
+                              )}>
+                                ({capture}%)
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })()}
                       <HoldTimeCell trade={trade} now={now} />
                       {trade.status === 'open' && (() => {
                         const asset = extractBaseAsset(trade.pair);
