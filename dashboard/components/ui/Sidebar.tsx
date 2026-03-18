@@ -46,12 +46,30 @@ const navItems = [
       </svg>
     ),
   },
+  {
+    name: 'P&L',
+    href: '/pnl',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="2" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3" />
+        <rect x="8" y="2" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
+        <rect x="14" y="2" width="4" height="4" rx="0.5" fill="currentColor" />
+        <rect x="2" y="8" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
+        <rect x="8" y="8" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3" />
+        <rect x="14" y="8" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
+        <rect x="2" y="14" width="4" height="4" rx="0.5" fill="currentColor" />
+        <rect x="8" y="14" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
+        <rect x="14" y="14" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3" />
+      </svg>
+    ),
+  },
 ];
 
 // Bottom nav items — subset for mobile (matches desktop)
 const bottomNavItems = [
   { name: 'Dashboard', href: '/', icon: navItems[0].icon },
   { name: 'Trades', href: '/trades', icon: navItems[1].icon },
+  { name: 'P&L', href: '/pnl', icon: navItems[3].icon },
   { name: 'Strategy', href: '/strategies', icon: navItems[2].icon },
 ];
 
