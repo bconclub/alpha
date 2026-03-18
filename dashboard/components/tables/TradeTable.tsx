@@ -22,6 +22,7 @@ import {
 } from '@/lib/utils';
 import { Badge } from '@/components/ui/Badge';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
+import { getSupabase } from '@/lib/supabase';
 import { useLivePrices } from '@/hooks/useLivePrices';
 import {
   type PositionDisplay,
@@ -533,6 +534,27 @@ export default function TradeTable({ trades }: TradeTableProps) {
     return () => obs.disconnect();
   }, []);
 
+  // -- Close trade handler ---------------------------------------------------
+  const [closingIds, setClosingIds] = useState<Set<string>>(new Set());
+  const handleClose = useCallback(async (posId: string, pair: string) => {
+    const sb = getSupabase();
+    if (!sb) return;
+    setClosingIds((prev) => new Set(prev).add(posId));
+    try {
+      const { error } = await sb.from('bot_commands').insert({
+        command: 'close_trade',
+        params: { trade_id: Number(posId), pair },
+      });
+      if (error) {
+        console.error('[Alpha] close_trade command failed:', error.message);
+        setClosingIds((prev) => { const next = new Set(prev); next.delete(posId); return next; });
+      }
+    } catch (e) {
+      console.error('[Alpha] close_trade insert error:', e);
+      setClosingIds((prev) => { const next = new Set(prev); next.delete(posId); return next; });
+    }
+  }, []);
+
   // -- Live timer for open trade hold times --------------------------------
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -939,22 +961,38 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           style={{ backgroundColor: getExchangeColor(trade.exchange) }}
                         />
                       </div>
-                      <div className="text-right">
-                        <span
-                          className={cn(
-                            'text-sm font-mono font-semibold',
-                            getPnLColor(display.pnl),
+                      <div className="flex items-center gap-2">
+                        <div className="text-right">
+                          <span
+                            className={cn(
+                              'text-sm font-mono font-semibold',
+                              getPnLColor(display.pnl),
+                            )}
+                          >
+                            {formatPnL(display.pnl)}
+                          </span>
+                          {display.isUnrealized && (
+                            <span className="text-[9px] text-zinc-500 ml-1">live</span>
                           )}
-                        >
-                          {formatPnL(display.pnl)}
-                        </span>
-                        {display.isUnrealized && (
-                          <span className="text-[9px] text-zinc-500 ml-1">live</span>
-                        )}
-                        {trade.status === 'closed' && (display.grossPnl != null || trade.gross_pnl != null) && (
-                          <div className="text-[10px] text-zinc-500 font-mono">
-                            gross {formatPnL(display.grossPnl ?? trade.gross_pnl ?? 0)} · fees -${((trade.entry_fee ?? 0) + (trade.exit_fee ?? 0)).toFixed(4)}
-                          </div>
+                          {trade.status === 'closed' && (display.grossPnl != null || trade.gross_pnl != null) && (
+                            <div className="text-[10px] text-zinc-500 font-mono">
+                              gross {formatPnL(display.grossPnl ?? trade.gross_pnl ?? 0)} · fees -${((trade.entry_fee ?? 0) + (trade.exit_fee ?? 0)).toFixed(4)}
+                            </div>
+                          )}
+                        </div>
+                        {trade.status === 'open' && (
+                          <button
+                            onClick={() => handleClose(String(trade.id), trade.pair)}
+                            disabled={closingIds.has(String(trade.id))}
+                            className={cn(
+                              'px-2 py-1 rounded text-[10px] font-semibold',
+                              closingIds.has(String(trade.id))
+                                ? 'bg-zinc-700/50 text-zinc-500 cursor-wait'
+                                : 'bg-[#ff1744]/10 text-[#ff1744] active:bg-[#ff1744]/20',
+                            )}
+                          >
+                            {closingIds.has(String(trade.id)) ? 'Closing...' : 'Close'}
+                          </button>
                         )}
                       </div>
                     </div>
