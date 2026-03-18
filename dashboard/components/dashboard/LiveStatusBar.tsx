@@ -441,7 +441,7 @@ export function LiveStatusBar() {
 
         {/* Row 3 — Market Regime */}
         <div className={cn(
-          'flex items-center justify-between rounded-lg border px-3 py-2',
+          'flex flex-col gap-1.5 rounded-lg border px-3 py-2',
           rc.bg,
           rc.pulse && 'animate-pulse',
         )}>
@@ -452,7 +452,7 @@ export function LiveStatusBar() {
               <span className="text-[10px] font-semibold text-red-300 ml-1">NO TRADES</span>
             )}
           </div>
-          <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-400">
+          <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
             <span>Chop: {chopScore.toFixed(2)}</span>
             <span>ATR: {atrRatio.toFixed(1)}x</span>
             <span>Net: {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%</span>
