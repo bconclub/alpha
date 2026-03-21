@@ -415,6 +415,8 @@ class OptionsScalpStrategy(BaseStrategy):
 
                 # Found our open option trade — restore state
                 self.in_position = True
+                OptionsScalpStrategy._global_in_position = True  # acquire global lock
+                OptionsScalpStrategy._global_position_asset = self._base_asset
                 self.option_symbol = trade_pair
                 self.entry_premium = trade.get("entry_price", 0)
                 self.entry_time = time.monotonic()  # can't restore exact time, use now
@@ -3013,6 +3015,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.option_symbol or signal.pair,
             )
             self.in_position = False
+            OptionsScalpStrategy._global_in_position = False  # release global lock
+            OptionsScalpStrategy._global_position_asset = None
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0

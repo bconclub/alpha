@@ -2623,6 +2623,8 @@ class AlphaBot:
             )
             if opts and opts.in_position and opts.option_symbol == pair:
                 opts.in_position = False
+                OptionsScalpStrategy._global_in_position = False  # release global lock
+                OptionsScalpStrategy._global_position_asset = None
                 opts.option_symbol = None
                 opts._db_trade_id = None
                 opts._contracts = 0
