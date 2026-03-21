@@ -1,172 +1,145 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine,
-  Legend,
-  BarChart,
-  Bar,
-  Cell,
-  PieChart,
-  Pie,
-} from 'recharts';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import {
   formatCurrency,
-  formatShortDate,
   formatPnL,
   formatPercentage,
-  getStrategyColor,
   cn,
 } from '@/lib/utils';
 import type { DailyPnL } from '@/lib/types';
 
-type TimeRange = '1d' | '7d' | '30d' | 'all';
-
-function filterByRange(data: DailyPnL[], range: TimeRange): DailyPnL[] {
-  if (range === 'all') return data;
-  const now = Date.now();
-  const ms: Record<string, number> = { '1d': 86400000, '7d': 604800000, '30d': 2592000000 };
-  const cutoff = now - (ms[range] ?? 0);
-  return data.filter((d) => new Date(d.trade_date).getTime() >= cutoff);
+/** Build a calendar grid for a given month: 7 columns (Mon–Sun), ~5 rows */
+function buildMonthGrid(year: number, month: number) {
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month + 1, 0);
+  // Monday = 0 ... Sunday = 6
+  const startDay = (first.getDay() + 6) % 7;
+  const totalDays = last.getDate();
+  const weeks: (number | null)[][] = [];
+  let week: (number | null)[] = new Array(startDay).fill(null);
+  for (let d = 1; d <= totalDays; d++) {
+    week.push(d);
+    if (week.length === 7) {
+      weeks.push(week);
+      week = [];
+    }
+  }
+  if (week.length > 0) {
+    while (week.length < 7) week.push(null);
+    weeks.push(week);
+  }
+  return weeks;
 }
 
-interface TooltipPayloadEntry {
-  dataKey: string;
-  value: number;
-  color: string;
-  payload: DailyPnL;
+function getDayColor(pnl: number, maxAbs: number): string {
+  if (maxAbs === 0) return 'bg-zinc-800/40';
+  const intensity = Math.min(Math.abs(pnl) / maxAbs, 1);
+  if (pnl > 0) {
+    if (intensity > 0.7) return 'bg-[#00c853] text-black';
+    if (intensity > 0.3) return 'bg-[#00c853]/60 text-white';
+    return 'bg-[#00c853]/25 text-white';
+  } else {
+    if (intensity > 0.7) return 'bg-[#ff1744] text-white';
+    if (intensity > 0.3) return 'bg-[#ff1744]/60 text-white';
+    return 'bg-[#ff1744]/25 text-white';
+  }
 }
 
-function ChartTooltip({ active, payload }: { active?: boolean; payload?: TooltipPayloadEntry[] }) {
-  if (!active || !payload || payload.length === 0) return null;
-  const data = payload[0].payload;
-  return (
-    <div className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs">
-      <p className="text-zinc-400 mb-1">{formatShortDate(data.trade_date)}</p>
-      <p className={data.daily_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]'}>
-        Total: {formatCurrency(data.daily_pnl)}
-      </p>
-      <p className="text-[#2196f3]">Spot: {formatCurrency(data.spot_pnl)}</p>
-      <p className="text-[#ffd600]">Futures: {formatCurrency(data.futures_pnl)}</p>
-    </div>
-  );
-}
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 
 export function PerformancePanel() {
-  const { dailyPnL, trades, strategyPerformance, pnlByExchange } = useSupabase();
+  const { dailyPnL, trades, pnlByExchange } = useSupabase();
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [timeRange, setTimeRange] = useState<TimeRange>('all');
+  const [hoveredDay, setHoveredDay] = useState<{ date: string; pnl: DailyPnL; x: number; y: number } | null>(null);
 
-  const filteredDaily = useMemo(() => filterByRange(dailyPnL, timeRange), [dailyPnL, timeRange]);
-
-  // Per-pair P&L
-  const pairBreakdown = useMemo(() => {
-    const byPair = new Map<string, { pnl: number; trades: number }>();
-    for (const t of trades) {
-      const cur = byPair.get(t.pair) ?? { pnl: 0, trades: 0 };
-      cur.pnl += t.pnl;
-      cur.trades += 1;
-      byPair.set(t.pair, cur);
+  // Build lookup map: "YYYY-MM-DD" -> DailyPnL
+  const pnlMap = useMemo(() => {
+    const map = new Map<string, DailyPnL>();
+    for (const d of dailyPnL) {
+      const key = d.trade_date.slice(0, 10);
+      map.set(key, d);
     }
-    return Array.from(byPair.entries())
-      .map(([pair, stats]) => ({ pair, ...stats }))
-      .sort((a, b) => b.pnl - a.pnl);
-  }, [trades]);
+    return map;
+  }, [dailyPnL]);
 
-  // Long vs Short
-  const longShortPnL = useMemo(() => {
-    let longPnl = 0, shortPnl = 0, longCount = 0, shortCount = 0;
-    for (const t of trades) {
-      if (t.position_type === 'short') {
-        shortPnl += t.pnl;
-        shortCount++;
-      } else {
-        longPnl += t.pnl;
-        longCount++;
-      }
+  // Figure out which months to show (all months with data, or last 3 months)
+  const months = useMemo(() => {
+    if (dailyPnL.length === 0) {
+      const now = new Date();
+      return [{ year: now.getFullYear(), month: now.getMonth() }];
     }
-    return [
-      { name: 'Long', pnl: longPnl, count: longCount, color: '#00c853' },
-      { name: 'Short', pnl: shortPnl, count: shortCount, color: '#ff1744' },
-    ];
-  }, [trades]);
-
-  // Strategy data for pie
-  const strategyData = useMemo(() => {
-    const grouped = new Map<string, { count: number; pnl: number }>();
-    for (const sp of strategyPerformance) {
-      const cur = grouped.get(sp.strategy) ?? { count: 0, pnl: 0 };
-      cur.count += sp.total_trades;
-      cur.pnl += sp.total_pnl;
-      grouped.set(sp.strategy, cur);
+    const dates = dailyPnL.map((d) => new Date(d.trade_date));
+    const minDate = new Date(Math.min(...dates.map((d) => d.getTime())));
+    const maxDate = new Date(Math.max(...dates.map((d) => d.getTime())));
+    const result: { year: number; month: number }[] = [];
+    let y = minDate.getFullYear();
+    let m = minDate.getMonth();
+    while (y < maxDate.getFullYear() || (y === maxDate.getFullYear() && m <= maxDate.getMonth())) {
+      result.push({ year: y, month: m });
+      m++;
+      if (m > 11) { m = 0; y++; }
     }
-    return Array.from(grouped.entries()).map(([strategy, stats]) => ({
-      name: strategy,
-      value: stats.count,
-      pnl: stats.pnl,
-      color: getStrategyColor(strategy),
-    }));
-  }, [strategyPerformance]);
+    return result;
+  }, [dailyPnL]);
 
-  // Win rate
+  // Max absolute P&L for color scaling
+  const maxAbsPnL = useMemo(() => {
+    let max = 0;
+    for (const d of dailyPnL) {
+      max = Math.max(max, Math.abs(d.daily_pnl));
+    }
+    return max;
+  }, [dailyPnL]);
+
+  // Stats
   const totalWins = trades.filter((t) => t.pnl > 0).length;
   const totalTrades = trades.filter((t) => t.status === 'closed').length;
   const winRate = totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0;
-
   const totalPnL = trades.reduce((s, t) => s + t.pnl, 0);
 
-  // Fee breakdown: gross P&L (before fees) and total fees
   const { grossPnL, totalFees } = useMemo(() => {
     let gross = 0;
     let fees = 0;
     for (const t of trades) {
       const tradeFees = (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
       fees += tradeFees;
-      // Use gross_pnl if available, otherwise derive from net + fees
       gross += t.gross_pnl != null ? t.gross_pnl : (t.pnl + tradeFees);
     }
     return { grossPnL: gross, totalFees: fees };
   }, [trades]);
+
+  // Winning / losing day counts
+  const { winDays, lossDays } = useMemo(() => {
+    let w = 0, l = 0;
+    for (const d of dailyPnL) {
+      if (d.daily_pnl > 0) w++;
+      else if (d.daily_pnl < 0) l++;
+    }
+    return { winDays: w, lossDays: l };
+  }, [dailyPnL]);
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl overflow-hidden">
       {/* Header */}
       <button
         onClick={() => setIsCollapsed(!isCollapsed)}
-        className="w-full flex items-center justify-between p-5 hover:bg-zinc-800/20 transition-colors"
+        className="w-full flex items-center justify-between p-4 md:p-5 hover:bg-zinc-800/20 transition-colors"
       >
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Performance
         </h3>
         <div className="flex items-center gap-3 md:gap-4">
-          <div className="flex flex-col items-end gap-0.5">
-            <div className="flex flex-wrap gap-2 md:gap-3 text-xs">
-              <span className={cn('font-mono font-bold', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                {formatPnL(totalPnL)} net
-              </span>
-              <span className="text-zinc-500">|</span>
-              <span className="text-zinc-300">{formatPercentage(winRate)} WR</span>
-              <span className="text-zinc-500">|</span>
-              <span className="text-zinc-400">{totalTrades} trades</span>
-            </div>
-            {totalFees > 0 && (
-              <div className="flex gap-2 text-[10px] font-mono">
-                <span className={cn(grossPnL >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
-                  {formatPnL(grossPnL)} P&L
-                </span>
-                <span className="text-zinc-600">|</span>
-                <span className="text-zinc-500">
-                  ${totalFees.toFixed(2)} fees
-                </span>
-              </div>
-            )}
+          <div className="flex flex-wrap gap-2 md:gap-3 text-xs">
+            <span className={cn('font-mono font-bold', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+              {formatPnL(totalPnL)} net
+            </span>
+            <span className="text-zinc-500">|</span>
+            <span className="text-zinc-300">{formatPercentage(winRate)} WR</span>
+            <span className="text-zinc-500">|</span>
+            <span className="text-zinc-400">{totalTrades} trades</span>
           </div>
           <svg
             className={cn('w-4 h-4 text-zinc-500 transition-transform', isCollapsed ? '' : 'rotate-180')}
@@ -180,166 +153,134 @@ export function PerformancePanel() {
       </button>
 
       {!isCollapsed && (
-        <div className="px-3 pb-4 md:px-5 md:pb-5 space-y-4 md:space-y-6">
-          {/* Time range toggle */}
-          <div className="flex gap-1">
-            {(['1d', '7d', '30d', 'all'] as TimeRange[]).map((range) => (
-              <button
-                key={range}
-                onClick={() => setTimeRange(range)}
-                className={cn(
-                  'px-3 py-1 rounded text-xs font-medium transition-colors',
-                  timeRange === range
-                    ? 'bg-zinc-700 text-white'
-                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50',
-                )}
-              >
-                {range === '1d' ? 'Today' : range === '7d' ? '7 Days' : range === '30d' ? '30 Days' : 'All Time'}
-              </button>
-            ))}
-          </div>
-
-          {/* Fee breakdown row */}
-          {totalFees > 0 && (
-            <div className="flex items-center gap-4 bg-zinc-900/40 border border-zinc-800/50 rounded-lg px-4 py-2.5">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Net</span>
-                <span className={cn('text-sm font-mono font-bold', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(totalPnL)}
-                </span>
+        <div className="px-3 pb-4 md:px-5 md:pb-5 space-y-4">
+          {/* P&L breakdown — big numbers */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-4 py-3">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Net P&L</div>
+              <div className={cn('text-xl font-mono font-bold', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                {formatPnL(totalPnL)}
               </div>
-              <span className="text-zinc-700">=</span>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Gross</span>
-                <span className={cn('text-sm font-mono', grossPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(grossPnL)}
-                </span>
+            </div>
+            <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-4 py-3">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Gross P&L</div>
+              <div className={cn('text-xl font-mono font-bold', grossPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                {formatPnL(grossPnL)}
               </div>
-              <span className="text-zinc-700">&minus;</span>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Fees</span>
-                <span className="text-sm font-mono text-zinc-400">
-                  ${totalFees.toFixed(2)}
-                </span>
+            </div>
+            <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-4 py-3">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Total Fees</div>
+              <div className="text-xl font-mono font-bold text-zinc-300">
+                ${totalFees.toFixed(2)}
               </div>
               {totalTrades > 0 && (
-                <div className="ml-auto hidden sm:flex items-center gap-2">
-                  <span className="text-[10px] text-zinc-600">avg fee/trade</span>
-                  <span className="text-xs font-mono text-zinc-500">
-                    ${(totalFees / totalTrades).toFixed(4)}
-                  </span>
+                <div className="text-[10px] font-mono text-zinc-600 mt-0.5">
+                  ${(totalFees / totalTrades).toFixed(4)}/trade
                 </div>
               )}
             </div>
-          )}
-
-          {/* P&L Chart */}
-          <div className="h-48 md:h-64">
-            {filteredDaily.length === 0 ? (
-              <div className="h-full flex items-center justify-center">
-                <p className="text-sm text-zinc-500">No P&L data for this period</p>
+            <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-lg px-4 py-3">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Win Rate</div>
+              <div className="text-xl font-mono font-bold text-zinc-100">
+                {winRate.toFixed(1)}%
               </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={filteredDaily} margin={{ top: 5, right: 10, bottom: 5, left: 5 }}>
-                  <XAxis
-                    dataKey="trade_date"
-                    tickFormatter={(v: string) => formatShortDate(v)}
-                    tick={{ fill: '#71717a', fontSize: 11 }}
-                    axisLine={{ stroke: '#27272a' }}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tickFormatter={(v: number) => formatCurrency(v)}
-                    tick={{ fill: '#71717a', fontSize: 11 }}
-                    axisLine={{ stroke: '#27272a' }}
-                    tickLine={false}
-                    width={80}
-                  />
-                  <ReferenceLine y={0} stroke="#3f3f46" strokeDasharray="4 4" />
-                  <Tooltip content={<ChartTooltip />} />
-                  <Legend wrapperStyle={{ color: '#d4d4d8', fontSize: 11, paddingTop: 8 }} />
-                  <Line type="monotone" dataKey="daily_pnl" name="Total" stroke="#e4e4e7" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="spot_pnl" name="Spot" stroke="#2196f3" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
-                  <Line type="monotone" dataKey="futures_pnl" name="Futures" stroke="#ffd600" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+              <div className="text-[10px] text-zinc-600 mt-0.5">
+                {totalWins}W / {totalTrades - totalWins}L
+              </div>
+            </div>
+          </div>
+
+          {/* Calendar heatmap */}
+          <div className="relative">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider">Daily P&L Calendar</h4>
+              <div className="flex items-center gap-1.5 text-[10px] text-zinc-600">
+                <span className="text-[#ff1744]">{lossDays}d loss</span>
+                <span>/</span>
+                <span className="text-[#00c853]">{winDays}d profit</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {months.map(({ year, month }) => {
+                const weeks = buildMonthGrid(year, month);
+                return (
+                  <div key={`${year}-${month}`} className="min-w-0">
+                    <div className="text-[11px] text-zinc-400 font-medium mb-1.5">
+                      {MONTH_NAMES[month]} {year}
+                    </div>
+                    {/* Day labels */}
+                    <div className="grid grid-cols-7 gap-[2px] mb-[2px]">
+                      {DAY_LABELS.map((label, i) => (
+                        <div key={i} className="text-[9px] text-zinc-600 text-center">{label}</div>
+                      ))}
+                    </div>
+                    {/* Weeks */}
+                    {weeks.map((week, wi) => (
+                      <div key={wi} className="grid grid-cols-7 gap-[2px] mb-[2px]">
+                        {week.map((day, di) => {
+                          if (day === null) {
+                            return <div key={di} className="aspect-square rounded-sm" />;
+                          }
+                          const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                          const dayData = pnlMap.get(dateStr);
+                          const hasTrade = !!dayData;
+                          const pnl = dayData?.daily_pnl ?? 0;
+
+                          return (
+                            <div
+                              key={di}
+                              className={cn(
+                                'aspect-square rounded-sm flex items-center justify-center text-[9px] font-mono cursor-default transition-all',
+                                hasTrade
+                                  ? getDayColor(pnl, maxAbsPnL)
+                                  : 'bg-zinc-800/20 text-zinc-700',
+                              )}
+                              onMouseEnter={(e) => {
+                                if (dayData) {
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setHoveredDay({ date: dateStr, pnl: dayData, x: rect.left, y: rect.bottom });
+                                }
+                              }}
+                              onMouseLeave={() => setHoveredDay(null)}
+                            >
+                              {day}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Tooltip */}
+            {hoveredDay && (
+              <div
+                className="fixed z-50 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs pointer-events-none shadow-xl"
+                style={{ left: hoveredDay.x, top: hoveredDay.y + 4 }}
+              >
+                <p className="text-zinc-400 mb-1">{hoveredDay.date}</p>
+                <p className={hoveredDay.pnl.daily_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]'}>
+                  Total: {formatCurrency(hoveredDay.pnl.daily_pnl)}
+                </p>
+                <p className="text-[#2196f3]">Spot: {formatCurrency(hoveredDay.pnl.spot_pnl)}</p>
+                <p className="text-[#ffd600]">Futures: {formatCurrency(hoveredDay.pnl.futures_pnl)}</p>
+              </div>
             )}
           </div>
 
-          {/* Bottom grid: exchange split, strategy breakdown, per-pair, long vs short */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
-            {/* Per-Exchange P&L */}
-            <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-4">
-              <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">By Exchange</h4>
-              <div className="space-y-2">
-                {pnlByExchange.map((ex) => (
-                  <div key={ex.exchange} className="flex items-center justify-between text-xs">
-                    <span className="text-zinc-300 capitalize">{ex.exchange}</span>
-                    <span className={cn('font-mono', ex.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                      {formatPnL(ex.total_pnl)}
-                    </span>
-                  </div>
-                ))}
+          {/* Compact bottom stats */}
+          <div className="flex flex-wrap gap-3 text-xs">
+            {pnlByExchange.map((ex) => (
+              <div key={ex.exchange} className="flex items-center gap-1.5 bg-zinc-900/40 border border-zinc-800/50 rounded px-2.5 py-1.5">
+                <span className="text-zinc-400 capitalize">{ex.exchange}</span>
+                <span className={cn('font-mono', ex.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                  {formatPnL(ex.total_pnl)}
+                </span>
               </div>
-            </div>
-
-            {/* Strategy breakdown */}
-            <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-4">
-              <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">By Strategy</h4>
-              {strategyData.length > 0 ? (
-                <div className="h-32">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={strategyData} cx="50%" cy="50%" innerRadius={25} outerRadius={45} paddingAngle={3} dataKey="value">
-                        {strategyData.map((entry) => (
-                          <Cell key={entry.name} fill={entry.color} />
-                        ))}
-                      </Pie>
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              ) : (
-                <p className="text-xs text-zinc-500 text-center py-4">No data</p>
-              )}
-            </div>
-
-            {/* Per-pair P&L */}
-            <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-4">
-              <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">By Pair</h4>
-              <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                {pairBreakdown.map((p) => (
-                  <div key={p.pair} className="flex items-center justify-between text-xs">
-                    <span className="text-zinc-300">{p.pair}</span>
-                    <span className={cn('font-mono', p.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                      {formatPnL(p.pnl)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Long vs Short */}
-            <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-4">
-              <h4 className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">Long vs Short</h4>
-              {longShortPnL.some((l) => l.count > 0) ? (
-                <div className="h-32">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={longShortPnL} layout="vertical">
-                      <XAxis type="number" tick={{ fill: '#71717a', fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={(v: number) => formatCurrency(v)} />
-                      <YAxis type="category" dataKey="name" tick={{ fill: '#a1a1aa', fontSize: 11 }} axisLine={false} tickLine={false} width={40} />
-                      <Bar dataKey="pnl" radius={[0, 4, 4, 0]}>
-                        {longShortPnL.map((entry) => (
-                          <Cell key={entry.name} fill={entry.color} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              ) : (
-                <p className="text-xs text-zinc-500 text-center py-4">No data</p>
-              )}
-            </div>
+            ))}
           </div>
         </div>
       )}
