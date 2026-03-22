@@ -394,6 +394,7 @@ class DeltaReconciler:
 
                 if needs_update:
                     trade_id = db_trade["id"]
+                    entry_corrected = abs(db_entry - delta_rt["entry"]) > 0.01
                     update_data = {
                         "entry_price": delta_rt["entry"],
                         "exit_price": delta_rt["exit"],
@@ -406,15 +407,30 @@ class DeltaReconciler:
                         "exit_fee": delta_rt["xfee"],
                     }
 
+                    # If entry_price was wrong, peak_pnl was computed from
+                    # the wrong base — recalculate what we can.
+                    if entry_corrected:
+                        exit_pnl_pct = delta_rt["pct"]
+                        if db_trade.get("status") == "closed" and exit_pnl_pct > 0:
+                            # Trade was profitable: peak was at least the exit P&L%
+                            update_data["peak_pnl"] = round(exit_pnl_pct, 4)
+                        else:
+                            # Negative or open: can't recover true peak, reset to 0
+                            update_data["peak_pnl"] = 0
+
                     try:
                         self.db.table("trades").update(update_data).eq("id", trade_id).execute()
                         updated += 1
+                        peak_msg = ""
+                        if entry_corrected:
+                            old_peak = float(db_trade.get("peak_pnl") or 0)
+                            peak_msg = f" peak {old_peak:.1f}%→{update_data['peak_pnl']:.1f}%"
                         self.log.info(
                             "RECONCILE UPDATE #%s: entry $%.2f→$%.2f exit $%.2f→$%.2f "
-                            "net $%.6f→$%.6f",
+                            "net $%.6f→$%.6f%s",
                             trade_id, db_entry, delta_rt["entry"],
                             db_exit, delta_rt["exit"],
-                            db_pnl, delta_rt["net"],
+                            db_pnl, delta_rt["net"], peak_msg,
                         )
                     except Exception:
                         self.log.exception("RECONCILE UPDATE FAILED #%s", trade_id)
@@ -501,6 +517,10 @@ class DeltaReconciler:
         opened_at = buy_time if buy_time else datetime.now(timezone.utc).isoformat()
         closed_at = sell_time if sell_time else datetime.now(timezone.utc).isoformat()
 
+        pct = rt.get("pct", 0)
+        # Ghost trade: no tick history, so peak = exit P&L% if positive, else 0
+        peak_pnl = round(pct, 4) if pct > 0 else 0
+
         return {
             "pair": rt["pair"],
             "exchange": "delta",
@@ -513,7 +533,8 @@ class DeltaReconciler:
             "gross_pnl": rt["gross"],
             "net_pnl": rt["net"],
             "pnl": rt["net"],
-            "pnl_pct": rt.get("pct", 0),
+            "pnl_pct": pct,
+            "peak_pnl": peak_pnl,
             "entry_fee": rt["efee"],
             "exit_fee": rt["xfee"],
             "status": "closed",

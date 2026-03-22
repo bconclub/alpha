@@ -2307,22 +2307,26 @@ class OptionsScalpStrategy(BaseStrategy):
                                   order: dict, signal, option_symbol: str,
                                   option_side: str, strike_price: float,
                                   base_asset: str):
-        """Insert a new options trade row into the DB."""
+        """Insert a new options trade row into the DB, then update with actual fill price.
+
+        Step 1: Insert with entry_price=0 (placeholder).
+        Step 2: Fetch actual execution price from exchange via fetch_order.
+        Step 3: UPDATE the row with the real fill price.
+        """
         try:
             mult = self.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
             spot = self._last_spot_price or 0
             entry_fee = round(contracts * mult * spot * 0.000118, 8) if spot else 0
-            collateral = fill_price * contracts / self.OPTIONS_LEVERAGE
 
             row = {
                 "pair": option_symbol,
                 "exchange": "delta",
                 "strategy": "options_scalp",
                 "side": "buy",
-                "entry_price": fill_price,
+                "entry_price": 0,
                 "contracts": float(contracts),
                 "leverage": self.OPTIONS_LEVERAGE,
-                "collateral": round(collateral, 4),
+                "collateral": 0,
                 "entry_fee": entry_fee,
                 "exit_fee": 0,
                 "gross_pnl": 0,
@@ -2338,20 +2342,81 @@ class OptionsScalpStrategy(BaseStrategy):
             result = self.executor.db.client.table("trades").insert(row).execute()
             if result.data:
                 self._db_trade_id = result.data[0].get("id")
-                self.logger.info(
-                    "[%s] OPTIONS DB ENTRY: id=%s entry=$%.4f x%d fee=$%.6f",
-                    option_symbol, self._db_trade_id, fill_price, contracts, entry_fee,
-                )
             else:
                 self.logger.error("[%s] OPTIONS DB ENTRY returned no data", option_symbol)
+                return
+
+            # ── Step 2: Resolve actual execution price from exchange ──
+            signal_price = getattr(signal, "price", 0) or 0
+            actual_fill = await self._resolve_fill_price(order, option_symbol)
+
+            if actual_fill and actual_fill > 0:
+                collateral = actual_fill * contracts / self.OPTIONS_LEVERAGE
+                self.executor.db.client.table("trades").update({
+                    "entry_price": round(actual_fill, 8),
+                    "collateral": round(collateral, 4),
+                }).eq("id", self._db_trade_id).execute()
+
+                # Also update in-memory entry_premium so exit P&L uses correct price
+                self.entry_premium = actual_fill
+                self.highest_premium = max(self.highest_premium, actual_fill)
+
+                self.logger.info(
+                    "[%s] DB entry_price updated: signal=$%.4f fill=$%.4f id=%s x%d fee=$%.6f",
+                    option_symbol, signal_price, actual_fill,
+                    self._db_trade_id, contracts, entry_fee,
+                )
+            else:
+                # Fallback: use fill_price from on_fill (order.average/price)
+                collateral = fill_price * contracts / self.OPTIONS_LEVERAGE
+                self.executor.db.client.table("trades").update({
+                    "entry_price": round(fill_price, 8),
+                    "collateral": round(collateral, 4),
+                }).eq("id", self._db_trade_id).execute()
+                self.logger.warning(
+                    "[%s] DB entry_price FALLBACK: signal=$%.4f on_fill=$%.4f (fetch_order failed) id=%s",
+                    option_symbol, signal_price, fill_price, self._db_trade_id,
+                )
         except Exception:
             self.logger.exception("[%s] _write_entry_to_db FAILED", option_symbol)
+
+    async def _resolve_fill_price(self, order: dict, symbol: str) -> float:
+        """Get the actual execution price from the exchange.
+
+        Tries order['average'] first, then fetches the order from exchange
+        to get the definitive fill price. Returns 0 on failure.
+        """
+        order_id = order.get("id")
+
+        # Try fetch_order for the definitive fill price
+        if order_id and self.options_exchange:
+            try:
+                import asyncio
+                await asyncio.sleep(1)  # brief delay for exchange settlement
+                fetched = await self.options_exchange.fetch_order(order_id, symbol)
+                avg = fetched.get("average")
+                if avg and float(avg) > 0:
+                    return float(avg)
+                # Some exchanges put fill price in 'price' after order is closed
+                if fetched.get("status") == "closed":
+                    p = fetched.get("price")
+                    if p and float(p) > 0:
+                        return float(p)
+            except Exception as e:
+                self.logger.debug("[%s] fetch_order for fill price failed: %s", symbol, e)
+
+        # Fall back to order dict from create_order response
+        avg = order.get("average")
+        if avg and float(avg) > 0:
+            return float(avg)
+
+        return 0
 
     async def _close_option_trade_in_db(
         self, exit_premium: float, exit_type: str,
         *, option_symbol: str | None = None,
         entry_premium: float = 0.0, highest_premium: float = 0.0,
-        contracts: int = 0,
+        contracts: int = 0, order: dict | None = None,
     ) -> bool:
         """Close the option trade in DB with correct options P&L.
 
@@ -2361,6 +2426,16 @@ class OptionsScalpStrategy(BaseStrategy):
         Falls back to self.* when called from _handle_position_gone.
         """
         sym = option_symbol or self.option_symbol or self.pair
+
+        # Resolve actual exit fill price from exchange (not limit order price)
+        if order:
+            resolved = await self._resolve_fill_price(order, sym)
+            if resolved and resolved > 0:
+                self.logger.info(
+                    "[%s] DB exit_price updated: on_fill=$%.4f actual=$%.4f",
+                    sym, exit_premium, resolved,
+                )
+                exit_premium = resolved
         ep = entry_premium or self.entry_premium
         hp = highest_premium or self.highest_premium
         ct = contracts or self._contracts
@@ -2875,8 +2950,11 @@ class OptionsScalpStrategy(BaseStrategy):
         """Track option position state on fill."""
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
-            # Entry fill — ONLY use exchange fill price. NEVER fallback to signal.price or entry_premium.
-            fill_price = order.get("average") or order.get("price")
+            # Entry fill — prefer order['average'] (actual execution price).
+            # order['price'] may be the limit order price, NOT the fill price.
+            # _write_entry_to_db will fetch_order for the definitive price.
+            fill_price = order.get("average") or order.get("price") or 0
+            fill_price = float(fill_price) if fill_price else 0
             if not fill_price:
                 self.logger.error("[%s] NO FILL PRICE from exchange — skipping on_fill", signal.pair)
                 return
@@ -2944,7 +3022,9 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             )
         else:
-            # Exit fill — close trade in DB with actual fill price from exchange
+            # Exit fill — close trade in DB with actual fill price from exchange.
+            # Prefer order['average'] (execution price). order['price'] may be
+            # the limit order price, NOT the fill price.
             exit_fill = float(order.get("average") or order.get("price") or 0)
             if not exit_fill:
                 self.logger.error("[%s] NO EXIT FILL PRICE from exchange — skipping", signal.pair)
@@ -2964,6 +3044,7 @@ class OptionsScalpStrategy(BaseStrategy):
             _side = self.option_side
             _strike = self.strike_price
             _base = self._base_asset
+            _order = dict(order)  # snapshot for async task
 
             if exit_fill > 0:
                 import asyncio
@@ -2974,6 +3055,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         entry_premium=_entry_prem,
                         highest_premium=_highest_prem,
                         contracts=_contracts,
+                        order=_order,
                     )
                 )
 
