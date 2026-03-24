@@ -2114,6 +2114,16 @@ class OptionsScalpStrategy(BaseStrategy):
         # Use PEAK pnl, not current — so the floor locks even if price has already dropped
         self._update_opt_ratchet_floor(peak_pnl_pct)
 
+        # ── 2b2. ENTRY DROP: premium drops 8%+ within first 60s → bad entry ──
+        # Runs first in Phase 1 so it catches bad entries before SL/ratchet.
+        if hold_seconds <= 60 and premium_change_pct <= -8.0:
+            self.logger.info(
+                "[%s] OPT_ENTRY_DROP: entry=$%.4f current=$%.4f drop=%.1f%% after %.0fs",
+                self.option_symbol, self.entry_premium, current_premium,
+                premium_change_pct, hold_seconds,
+            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_ENTRY_DROP")
+
         # ── 2a. RATCHET EXIT: premium fell below locked floor ─────────
         if self._opt_ratchet_floor != 0.0 and premium_change_pct < self._opt_ratchet_floor:
             self.logger.info(
@@ -2130,16 +2140,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.entry_premium, current_premium,
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "OPT_SL")
-
-        # ── 2b2. ENTRY DROP: premium drops 8%+ within first 60s → bad entry ──
-        # Separate from SL. If we just got in and it's immediately going against us, cut fast.
-        if hold_seconds <= 60 and premium_change_pct <= -8.0:
-            self.logger.info(
-                "[%s] OPT_ENTRY_DROP: entry=$%.4f current=$%.4f drop=%.1f%% after %.0fs",
-                self.option_symbol, self.entry_premium, current_premium,
-                premium_change_pct, hold_seconds,
-            )
-            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_ENTRY_DROP")
 
         # ── Phase 1 hands-off: only SL + ENTRY_DROP fire in first 30s ─────
         if in_phase1:
@@ -2163,14 +2163,27 @@ class OptionsScalpStrategy(BaseStrategy):
                 return await self._do_option_exit(current_premium, premium_change_pct, "OPT_DEAD_MOMENTUM")
 
         # ── 2c. PEAK TRAIL: once peak exceeds +8%, trail 35% behind ──
+        # Gate: only trail-exit if gross P&L exceeds estimated fees × 1.5,
+        # otherwise we lock in fee-losing "wins". Exception: peak >+15% always exits.
         if peak_pnl_pct >= 8.0:
             trail_floor_pct = peak_pnl_pct * 0.65
             if premium_change_pct <= trail_floor_pct:
-                self.logger.info(
-                    "[%s] OPT_PEAK_TRAIL — peak +%.1f%%, floor +%.1f%%, now +%.1f%%",
-                    self.option_symbol, peak_pnl_pct, trail_floor_pct, premium_change_pct,
-                )
-                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_PEAK_TRAIL")
+                multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                spot = self._last_spot_price or (current_premium * (200 if self._base_asset == "BTC" else 100))
+                estimated_fees = 2 * (self._contracts * multiplier * spot * 0.000118)
+                gross_pnl = self._calc_options_pnl(self.entry_premium, current_premium, self._contracts)
+
+                if peak_pnl_pct < 15.0 and gross_pnl < estimated_fees * 1.5:
+                    self.logger.info(
+                        "[%s] OPT_PEAK_TRAIL skipped — gross=$%.4f < fees*1.5=$%.4f (peak +%.1f%%)",
+                        self.option_symbol, gross_pnl, estimated_fees * 1.5, peak_pnl_pct,
+                    )
+                else:
+                    self.logger.info(
+                        "[%s] OPT_PEAK_TRAIL — peak +%.1f%%, floor +%.1f%%, now +%.1f%%",
+                        self.option_symbol, peak_pnl_pct, trail_floor_pct, premium_change_pct,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_PEAK_TRAIL")
 
         # ── 3. MOMENTUM FADE: LOSING + momentum dying ──────────────
         # Strict rules to cut the #1 P&L drain:
