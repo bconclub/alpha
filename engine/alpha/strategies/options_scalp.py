@@ -15,8 +15,10 @@
  5. STRIKE SELECTION   Highest OI within ATM + 1-2 OTM (liquidity = premium moves)
  6. PREMIUM SWEET SPOT Prefer $3-25 ETH / $50-500 BTC. Too cheap = illiquid skip.
                        Expensive = only enter on monster signal (3x noise + 2.5x vol)
- 7. PREMIUM CONFIRM    Dynamic wait (3s fast / 10s standard), must rise or hold ±0.5%
- 8. LIMIT ENTRY        Place limit buy at ORIGINAL price, wait 15s for fill
+ 7. PREMIUM VELOCITY   Sample premium 3x over 10-15s, require +2% velocity
+                       Flat (<+1%) or falling → SKIP (move already priced in)
+                       +1-2% → one more 5s sample, still under +2% → SKIP
+ 8. LIMIT ENTRY        Place limit buy at LATEST sampled ask, wait 15s for fill
                        If not filled → cancel and skip (no overpaying)
  9. PULLBACK WAIT      Wait up to 15s for 3% premium dip before buying
 
@@ -33,16 +35,18 @@
 
 ═══════════════════════════════════════════════════════════════
 
-Exit (DO NOT TOUCH):
+Exit:
   - Ratchet floor: lock profit at (10→3, 15→7, 25→15, 40→25, 100→70)%
   - SL: 50% premium loss (always active, even in Phase 1)
+  - Entry Drop: -8% in first 60s → OPT_ENTRY_DROP (active in Phase 1)
+  - Fast Dead Momentum: <1% move after 60s → exit, <2% after 90s → exit (skip if peak >+5%)
   - Momentum Fade: BELOW entry + 3 consecutive drops + momentum < 0.02% 60s + no vol spike → exit
-  - Dead Momentum: flat zone (-5% to +5%) + momentum dead 60s + held 3min → exit
+  - Dead Momentum: flat zone (-5% to +5%) + momentum dead 60s + held 3min → backstop
   - TP: 30% premium gain
   - Trailing: activates at +15%, trails 5% behind peak
   - Timeout: 10 minutes (only if premium decaying)
   - Decay: exit if was +10%+ and faded to +3%
-  - Phase 1 (first 30s): only SL fires
+  - Phase 1 (first 30s): only SL + ENTRY_DROP fire
 
 Risk: Max loss = premium paid. No liquidation. Safest momentum play.
 """
@@ -1301,49 +1305,94 @@ class OptionsScalpStrategy(BaseStrategy):
                 _entry_vol_now, self.PREMIUM_EXPENSIVE_VOL_MULT,
             )
 
-        # 9b. PREMIUM CONFIRMATION + LIMIT ENTRY at original price.
-        # Dynamic wait: strong moves get fast confirm, weaker ones standard.
-        # Premium must rise (or hold flat ±0.5%) during the window.
+        # 9b. PREMIUM VELOCITY GATE — sample premium 3x over 10-15s.
+        # Enter ONLY if premium is actively rising (+2% velocity).
+        # Kills dead-premium entries where underlying moves but option doesn't respond.
         first_ask = premium
-        fast_confirm = True  # adaptive gate passed → always fast confirm (3s)
-        confirm_wait = 3 if fast_confirm else 10
-        confirm_mode = "fast" if fast_confirm else "standard"
+        premium_samples = [first_ask]
         self.logger.info(
-            "[%s] PREMIUM_CONFIRM: %s mode (%ds) — %d/3 candles, cum=%.2f%%",
-            self.pair, confirm_mode, confirm_wait, candle_count, candle_cum_pct,
+            "[%s] PREMIUM_VELOCITY: starting 10-15s watch — first_ask=$%.4f, %d/3 candles, cum=%.2f%%",
+            self.pair, first_ask, candle_count, candle_cum_pct,
         )
-        await asyncio.sleep(confirm_wait)
-        try:
-            ticker2 = await self.options_exchange.fetch_ticker(selected_symbol)
-            second_ask = ticker2.get("ask") or ticker2.get("last") or 0
-        except Exception as e:
-            self.logger.debug("[%s] Premium confirm fetch failed: %s", self.pair, e)
-            second_ask = 0
 
-        # Premium must RISE during confirm — not just hold flat.
-        # Fast mode (3s): require +1.5% rise. Standard (10s): require +2.0% rise.
-        pct_chg = ((second_ask - first_ask) / first_ask * 100) if first_ask > 0 else 0
-        min_rise_pct = 1.5 if fast_confirm else 2.0
-        if second_ask <= 0 or pct_chg < min_rise_pct:
+        # Sample 2 more times at 5s intervals (total 10s window)
+        for _sample_i in range(2):
+            await asyncio.sleep(5)
+            try:
+                _vel_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+                _vel_ask = _vel_ticker.get("ask") or _vel_ticker.get("last") or 0
+            except Exception as e:
+                self.logger.debug("[%s] Premium velocity sample %d failed: %s", self.pair, _sample_i + 2, e)
+                _vel_ask = 0
+            if _vel_ask > 0:
+                premium_samples.append(_vel_ask)
+
+        if len(premium_samples) < 2:
+            self.logger.info("[%s] PREMIUM_VELOCITY: insufficient samples (%d) — SKIP", self.pair, len(premium_samples))
+            return []
+
+        latest_ask = premium_samples[-1]
+        premium_velocity = (latest_ask - first_ask) / first_ask * 100 if first_ask > 0 else 0
+
+        # Part D: Premium must be RISING or STABLE — if last < first, skip
+        if latest_ask < first_ask:
             self.logger.info(
-                "[%s] PREMIUM_CONFIRM: $%.4f → $%.4f (%+.2f%% < +%.1f%%) — not rising, SKIP",
-                self.pair, first_ask, second_ask, pct_chg, min_rise_pct,
+                "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → SKIP (PREMIUM_FALLING)",
+                self.pair, first_ask, latest_ask, premium_velocity,
+            )
+            await self._log_skip(
+                f"{self.pair} — PREMIUM_FALLING: ${first_ask:.4f} → ${latest_ask:.4f} ({premium_velocity:+.2f}%)",
+                {"first_ask": first_ask, "latest_ask": latest_ask, "velocity": round(premium_velocity, 2)},
             )
             return []
 
-        # Dynamic limit price: chase the move if premium rose significantly
-        if pct_chg >= 5.0:
-            limit_price = second_ask
+        # Velocity gate: need +2% to enter
+        if premium_velocity < 1.0:
+            # Flat (<+1%) — skip immediately
             self.logger.info(
-                "[%s] PREMIUM_LIMIT: chasing at confirmed $%.4f (+%.2f%% vs original) — strong move",
-                self.pair, second_ask, pct_chg,
+                "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → SKIP (PREMIUM_FLAT)",
+                self.pair, first_ask, latest_ask, premium_velocity,
             )
-        else:
-            limit_price = first_ask
+            await self._log_skip(
+                f"{self.pair} — PREMIUM_FLAT: ${first_ask:.4f} → ${latest_ask:.4f} ({premium_velocity:+.2f}%)",
+                {"first_ask": first_ask, "latest_ask": latest_ask, "velocity": round(premium_velocity, 2)},
+            )
+            return []
+
+        if premium_velocity < 2.0:
+            # Between +1% and +2% — take one more 5s sample
             self.logger.info(
-                "[%s] PREMIUM_LIMIT: placing limit at $%.4f (confirmed $%.4f, %+.2f%%) — waiting 15s",
-                self.pair, first_ask, second_ask, pct_chg,
+                "[%s] PREMIUM_VELOCITY: borderline %.2f%% — taking extra 5s sample",
+                self.pair, premium_velocity,
             )
+            await asyncio.sleep(5)
+            try:
+                _vel_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+                _vel_ask = _vel_ticker.get("ask") or _vel_ticker.get("last") or 0
+            except Exception:
+                _vel_ask = 0
+            if _vel_ask > 0:
+                premium_samples.append(_vel_ask)
+                latest_ask = _vel_ask
+                premium_velocity = (latest_ask - first_ask) / first_ask * 100 if first_ask > 0 else 0
+
+            if premium_velocity < 2.0:
+                self.logger.info(
+                    "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → SKIP (still under +2%%)",
+                    self.pair, first_ask, latest_ask, premium_velocity,
+                )
+                await self._log_skip(
+                    f"{self.pair} — PREMIUM_FLAT: ${first_ask:.4f} → ${latest_ask:.4f} ({premium_velocity:+.2f}%) after extra sample",
+                    {"first_ask": first_ask, "latest_ask": latest_ask, "velocity": round(premium_velocity, 2)},
+                )
+                return []
+
+        # Velocity passed — use LATEST sampled ask as limit price (not stale original)
+        self.logger.info(
+            "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → ENTER",
+            self.pair, first_ask, latest_ask, premium_velocity,
+        )
+        limit_price = latest_ask
 
         # Place limit buy
         limit_order_id = None
@@ -1943,18 +1992,21 @@ class OptionsScalpStrategy(BaseStrategy):
     async def _check_option_exit(self) -> list[Signal]:
         """Check exit conditions for open option position.
 
-        Phase 1 (first 30s after fill): only SL fires.
+        Phase 1 (first 30s after fill): SL + ENTRY_DROP fire.
         After Phase 1:
         1. Expiry: Close 2 hours before expiry
-        2. Ratchet floor: lock profit floor as premium rises
-        3. SL: -50% premium drop (always active)
-        4. Momentum Fade: profitable + momentum dying → exit
-        5. Dead Momentum: losing + momentum dead 45s + held 3min → exit
-        6. TP: +30% premium gain
-        7. Trailing: activates at +15%, trails 5% behind peak
+        2a. Ratchet floor: lock profit floor as premium rises
+        2b. SL: -50% premium drop (always active)
+        2b2. Entry Drop: -8% in first 60s → bad entry, cut fast
+        2b3. Fast Dead Momentum: <1% move at 60s, <2% at 90s (skip if peak >+5%)
+        3. Momentum Fade: losing + momentum dying → exit
+        3b. Dead Momentum: flat + momentum dead 60s + held 3min → backstop
+        4. Dead Momentum (severe): losing >5% + momentum dead + held 5min
+        5. TP: +30% premium gain
+        6-7. Trailing: tiered activation
         8. Pullback: exit if lost 40% of peak gain (when peak was 8%+)
         9. Decay: exit if was +10%+ and faded to +3%
-        10. Timeout: close after 5 minutes
+        10. Timeout: close after 10 minutes (only if decaying)
         11. Signal reversal: opposite momentum
         """
         if not self.in_position or not self.option_symbol:
@@ -2079,9 +2131,36 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "OPT_SL")
 
-        # ── Phase 1 hands-off: only SL fires in first 30s ────────────
+        # ── 2b2. ENTRY DROP: premium drops 8%+ within first 60s → bad entry ──
+        # Separate from SL. If we just got in and it's immediately going against us, cut fast.
+        if hold_seconds <= 60 and premium_change_pct <= -8.0:
+            self.logger.info(
+                "[%s] OPT_ENTRY_DROP: entry=$%.4f current=$%.4f drop=%.1f%% after %.0fs",
+                self.option_symbol, self.entry_premium, current_premium,
+                premium_change_pct, hold_seconds,
+            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_ENTRY_DROP")
+
+        # ── Phase 1 hands-off: only SL + ENTRY_DROP fire in first 30s ─────
         if in_phase1:
             return []
+
+        # ── 2b3. FAST DEAD MOMENTUM: premium hasn't moved after 60s/90s ──
+        # Exception: if premium peaked above +5%, the move happened — let trail/ratchet handle.
+        if peak_pnl_pct < 5.0:
+            abs_move_pct = abs(premium_change_pct)
+            if hold_seconds >= 60 and abs_move_pct < 1.0:
+                self.logger.info(
+                    "[%s] OPT_DEAD_MOMENTUM_FAST — move only %.1f%% after %ds (threshold <1%%)",
+                    self.option_symbol, premium_change_pct, int(hold_seconds),
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_DEAD_MOMENTUM_FAST")
+            if hold_seconds >= 90 and abs_move_pct < 2.0:
+                self.logger.info(
+                    "[%s] OPT_DEAD_MOMENTUM — move only %.1f%% after %ds (threshold <2%%)",
+                    self.option_symbol, premium_change_pct, int(hold_seconds),
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_DEAD_MOMENTUM")
 
         # ── 2c. PEAK TRAIL: once peak exceeds +8%, trail 35% behind ──
         if peak_pnl_pct >= 8.0:
