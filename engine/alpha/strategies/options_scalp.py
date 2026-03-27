@@ -1038,23 +1038,9 @@ class OptionsScalpStrategy(BaseStrategy):
         except Exception as e:
             self.logger.debug("[%s] Underlying move check failed: %s", self.pair, e)
 
-        # 2c. Signal strength sizing — strong signal gets full alloc, normal gets reduced
-        cum_threshold = _adaptive_thresh
-        self._strong_signal = (
-            candle_cum_pct >= cum_threshold * 3.0
-            and underlying_move_pct >= self.MIN_UNDERLYING_MOVE_PCT * 2.0
-        )
-        if self._strong_signal:
-            self._candle_alloc_pct = self.OPT_STRONG_ALLOC_PCT.get(self._base_asset, 60.0)
-        else:
-            self._candle_alloc_pct = self.OPT_NORMAL_ALLOC_PCT.get(self._base_asset, 45.0)
-
-        self.logger.info(
-            "[%s] SIGNAL_SIZING: %s (cum=%.2f%% vs 3x=%.2f%%, vol=%.3f%% vs 2x=%.3f%%) → alloc=%.0f%%",
-            self.pair, "STRONG" if self._strong_signal else "NORMAL",
-            candle_cum_pct, cum_threshold * 3, underlying_move_pct, self.MIN_UNDERLYING_MOVE_PCT * 2,
-            self._candle_alloc_pct,
-        )
+        # 2c. Full allocation base — confidence multiplier scales contracts below
+        self._candle_alloc_pct = self.OPT_STRONG_ALLOC_PCT.get(self._base_asset, 60.0)
+        self._strong_signal = False
 
         # 3. Determine option type from candle direction
         option_type = "call" if side == "long" else "put"
@@ -1102,6 +1088,24 @@ class OptionsScalpStrategy(BaseStrategy):
             "[%s] ENTRY_CONTEXT: %s | candles=%d/%d",
             self.pair, self._entry_context, candle_count, self.CANDLE_MOM_LOOKBACK,
         )
+
+        # 2d. Confidence score — skip low-conviction entries, scale contracts to conviction
+        _candle_score = 1.0 if candle_count >= 5 else (0.7 if candle_count >= 4 else 0.5)
+        _cum_ratio = candle_cum_pct / _adaptive_thresh if _adaptive_thresh > 0 else 1.0
+        _cum_score = 1.0 if _cum_ratio >= 2.0 else (0.7 if _cum_ratio >= 1.5 else 0.4)
+        _entry_vols_conf = list(self._candle_volumes)[-self.VOLUME_CONFIRM_CANDLES:]
+        _entry_vol_conf = mean(_entry_vols_conf) if _entry_vols_conf else 0
+        _avg_vol_conf = mean(self._candle_volumes) if len(self._candle_volumes) >= 5 else 0
+        _vol_ratio_conf = _entry_vol_conf / _avg_vol_conf if _avg_vol_conf > 0 else 0
+        _vol_score = 1.0 if _vol_ratio_conf >= 2.0 else (0.7 if _vol_ratio_conf >= 1.5 else 0.4)
+        entry_confidence = (_candle_score + _cum_score + _vol_score) / 3.0
+        if entry_confidence < 0.4:
+            self.logger.info(
+                "[%s] CONFIDENCE: candle=%.1f cum=%.1f vol=%.1f final=%.2f → SKIP (below 0.4)",
+                self.pair, _candle_score, _cum_score, _vol_score, entry_confidence,
+            )
+            self._cached_bot_state = "blocked:low_confidence"
+            return []
 
         self._cached_bot_state = "ready"
         self.logger.info(
@@ -1262,6 +1266,21 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_affordable_strike"
             return []
 
+        # Confidence multiplier: scale base contract count by signal conviction
+        _base_contracts = opt_contracts
+        if entry_confidence >= 0.8:
+            _conf_mult = 1.0
+        elif entry_confidence >= 0.6:
+            _conf_mult = 0.6
+        else:
+            _conf_mult = 0.3
+        opt_contracts = max(1, int(_base_contracts * _conf_mult))
+        self.logger.info(
+            "[%s] CONFIDENCE: candle=%.1f cum=%.1f vol=%.1f final=%.2f → %dct (base was %dct)",
+            self.pair, _candle_score, _cum_score, _vol_score, entry_confidence,
+            opt_contracts, _base_contracts,
+        )
+
         # 9a-post. PREMIUM SWEET SPOT — prefer cheap, allow expensive on strong signal
         sweet_low, sweet_high = self.PREMIUM_SWEET_SPOT.get(
             self._base_asset, (3.0, 15.0),
@@ -1339,10 +1358,12 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # Premium not falling — place limit NOW before the spike
-        limit_price = second_ask
+        # Premium not falling — place limit at FIRST ask (before spike)
+        # If premium keeps rising through our price we fill at a discount.
+        # If it peaked and reversed, nobody lifts our stale price → clean cancel.
+        limit_price = first_ask
         self.logger.info(
-            "[%s] PREMIUM_CHECK: first=$%.4f second=$%.4f → placing limit @ $%.4f",
+            "[%s] PREMIUM_CHECK: first=$%.4f second=$%.4f → placing limit @ $%.4f (first_ask)",
             self.pair, first_ask, second_ask, limit_price,
         )
 
