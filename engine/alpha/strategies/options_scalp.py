@@ -15,17 +15,18 @@
  5. STRIKE SELECTION   Highest OI within ATM + 1-2 OTM (liquidity = premium moves)
  6. PREMIUM SWEET SPOT Prefer $3-25 ETH / $50-500 BTC. Too cheap = illiquid skip.
                        Expensive = only enter on monster signal (3x noise + 2.5x vol)
- 7. PREMIUM VELOCITY   Sample premium 3x over 10-15s, require +2% velocity
-                       Flat (<+1%) or falling → SKIP (move already priced in)
-                       +1-2% → one more 5s sample, still under +2% → SKIP
- 8. LIMIT ENTRY        Place limit buy at LATEST sampled ask, wait 15s for fill
-                       If not filled → cancel and skip (no overpaying)
+ 7. PREMIUM CHECK      Sample premium twice 5s apart (5s total wait)
+                       Falling → SKIP. Not falling → place limit NOW at second ask
+ 8. LIMIT ENTRY        Place limit at pre-spike ask, wait 10s for fill
+                       Filled → on (market proved the move). Not filled → PREMIUM_NO_FILL, 30s cooldown
+                       Partial fill → keep filled qty, cancel residual
  9. PULLBACK WAIT      Wait up to 15s for 3% premium dip before buying
 
  COOLDOWNS:
    - Trade cooldown: 2 min between trades
    - Dead market: 10 min after exit with 0% peak
    - Position gone: 60s after position disappears
+   - No fill: 30s after PREMIUM_NO_FILL (order placed but market didn't fill in 10s)
 
  SIZING:
    - 3+/5 candles directional → 50% allocation
@@ -285,6 +286,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Cooldown after POSITION_GONE — no new options entry for 60s
         self._position_gone_cooldown_until: float = 0.0
         self._POSITION_GONE_COOLDOWN_SEC = 60
+
+        # Cooldown after PREMIUM_NO_FILL — no new entry for 30s
+        self._no_fill_cooldown_until: float = 0.0
 
         # Smart cooldown state — require fresh momentum after losses
         self._last_exit_was_loss: bool = False
@@ -901,6 +905,12 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "in_position"
             return
 
+        # No-fill cooldown
+        if time.monotonic() < self._no_fill_cooldown_until:
+            remaining = self._no_fill_cooldown_until - time.monotonic()
+            self._cached_bot_state = f"blocked:no_fill_cooldown:{int(remaining)}s"
+            return
+
         # Position-gone cooldown
         if time.monotonic() < self._position_gone_cooldown_until:
             remaining = self._position_gone_cooldown_until - time.monotonic()
@@ -909,7 +919,8 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Will be overwritten by _check_option_entry() with the real state
         # but this ensures dashboard write has at least "scanning"
-        if self._cached_bot_state.startswith("blocked:position_gone_cooldown"):
+        if self._cached_bot_state.startswith("blocked:position_gone_cooldown") or \
+                self._cached_bot_state.startswith("blocked:no_fill_cooldown"):
             self._cached_bot_state = "scanning"
 
     # ==================================================================
@@ -932,6 +943,16 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         # 0a. POSITION_GONE cooldown — no new entries for 60s after position disappeared
+        if time.monotonic() < self._no_fill_cooldown_until:
+            remaining = self._no_fill_cooldown_until - time.monotonic()
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] OPTIONS COOLDOWN after PREMIUM_NO_FILL — %.0fs remaining",
+                    self.pair, remaining,
+                )
+            self._cached_bot_state = f"blocked:no_fill_cooldown:{int(remaining)}s"
+            return []
+
         if time.monotonic() < self._position_gone_cooldown_until:
             remaining = self._position_gone_cooldown_until - time.monotonic()
             if self._tick_count % 6 == 0:
@@ -1305,94 +1326,44 @@ class OptionsScalpStrategy(BaseStrategy):
                 _entry_vol_now, self.PREMIUM_EXPENSIVE_VOL_MULT,
             )
 
-        # 9b. PREMIUM VELOCITY GATE — sample premium 3x over 10-15s.
-        # Enter ONLY if premium is actively rising (+2% velocity).
-        # Kills dead-premium entries where underlying moves but option doesn't respond.
+        # 9b. PREMIUM CHECK — sample twice 5s apart, place limit immediately if NOT falling.
+        # Enters before the spike rather than chasing it. Market proves the move by filling us.
         first_ask = premium
-        premium_samples = [first_ask]
         self.logger.info(
-            "[%s] PREMIUM_VELOCITY: starting 10-15s watch — first_ask=$%.4f, %d/3 candles, cum=%.2f%%",
-            self.pair, first_ask, candle_count, candle_cum_pct,
+            "[%s] PREMIUM_CHECK: first_ask=$%.4f — waiting 5s for confirmation",
+            self.pair, first_ask,
         )
 
-        # Sample 2 more times at 5s intervals (total 10s window)
-        for _sample_i in range(2):
-            await asyncio.sleep(5)
-            try:
-                _vel_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
-                _vel_ask = _vel_ticker.get("ask") or _vel_ticker.get("last") or 0
-            except Exception as e:
-                self.logger.debug("[%s] Premium velocity sample %d failed: %s", self.pair, _sample_i + 2, e)
-                _vel_ask = 0
-            if _vel_ask > 0:
-                premium_samples.append(_vel_ask)
+        await asyncio.sleep(5)
+        second_ask = 0.0
+        try:
+            _chk_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+            second_ask = float(_chk_ticker.get("ask") or _chk_ticker.get("last") or 0)
+        except Exception as e:
+            self.logger.debug("[%s] PREMIUM_CHECK: second sample failed: %s", self.pair, e)
 
-        if len(premium_samples) < 2:
-            self.logger.info("[%s] PREMIUM_VELOCITY: insufficient samples (%d) — SKIP", self.pair, len(premium_samples))
+        if second_ask <= 0:
+            self.logger.info("[%s] PREMIUM_CHECK: second ask unavailable — SKIP", self.pair)
             return []
 
-        latest_ask = premium_samples[-1]
-        premium_velocity = (latest_ask - first_ask) / first_ask * 100 if first_ask > 0 else 0
-
-        # Part D: Premium must be RISING or STABLE — if last < first, skip
-        if latest_ask < first_ask:
+        # Part D: if premium is falling, skip
+        if second_ask < first_ask:
             self.logger.info(
-                "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → SKIP (PREMIUM_FALLING)",
-                self.pair, first_ask, latest_ask, premium_velocity,
+                "[%s] PREMIUM_CHECK: first=$%.4f second=$%.4f → SKIP (PREMIUM_FALLING)",
+                self.pair, first_ask, second_ask,
             )
             await self._log_skip(
-                f"{self.pair} — PREMIUM_FALLING: ${first_ask:.4f} → ${latest_ask:.4f} ({premium_velocity:+.2f}%)",
-                {"first_ask": first_ask, "latest_ask": latest_ask, "velocity": round(premium_velocity, 2)},
+                f"{self.pair} — PREMIUM_FALLING: ${first_ask:.4f} → ${second_ask:.4f}",
+                {"first_ask": first_ask, "second_ask": second_ask},
             )
             return []
 
-        # Velocity gate: need +2% to enter
-        if premium_velocity < 1.0:
-            # Flat (<+1%) — skip immediately
-            self.logger.info(
-                "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → SKIP (PREMIUM_FLAT)",
-                self.pair, first_ask, latest_ask, premium_velocity,
-            )
-            await self._log_skip(
-                f"{self.pair} — PREMIUM_FLAT: ${first_ask:.4f} → ${latest_ask:.4f} ({premium_velocity:+.2f}%)",
-                {"first_ask": first_ask, "latest_ask": latest_ask, "velocity": round(premium_velocity, 2)},
-            )
-            return []
-
-        if premium_velocity < 2.0:
-            # Between +1% and +2% — take one more 5s sample
-            self.logger.info(
-                "[%s] PREMIUM_VELOCITY: borderline %.2f%% — taking extra 5s sample",
-                self.pair, premium_velocity,
-            )
-            await asyncio.sleep(5)
-            try:
-                _vel_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
-                _vel_ask = _vel_ticker.get("ask") or _vel_ticker.get("last") or 0
-            except Exception:
-                _vel_ask = 0
-            if _vel_ask > 0:
-                premium_samples.append(_vel_ask)
-                latest_ask = _vel_ask
-                premium_velocity = (latest_ask - first_ask) / first_ask * 100 if first_ask > 0 else 0
-
-            if premium_velocity < 2.0:
-                self.logger.info(
-                    "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → SKIP (still under +2%%)",
-                    self.pair, first_ask, latest_ask, premium_velocity,
-                )
-                await self._log_skip(
-                    f"{self.pair} — PREMIUM_FLAT: ${first_ask:.4f} → ${latest_ask:.4f} ({premium_velocity:+.2f}%) after extra sample",
-                    {"first_ask": first_ask, "latest_ask": latest_ask, "velocity": round(premium_velocity, 2)},
-                )
-                return []
-
-        # Velocity passed — use LATEST sampled ask as limit price (not stale original)
+        # Premium not falling — place limit NOW before the spike
+        limit_price = second_ask
         self.logger.info(
-            "[%s] PREMIUM_VELOCITY: first=$%.4f last=$%.4f vel=%.2f%% → ENTER",
-            self.pair, first_ask, latest_ask, premium_velocity,
+            "[%s] PREMIUM_CHECK: first=$%.4f second=$%.4f → placing limit @ $%.4f",
+            self.pair, first_ask, second_ask, limit_price,
         )
-        limit_price = latest_ask
 
         # Place limit buy
         limit_order_id = None
@@ -1413,16 +1384,17 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.info("[%s] PREMIUM_LIMIT: order placement failed: %s — SKIP", self.pair, e)
             return []
 
-        # Poll for fill over 15 seconds
+        # Poll for fill over 10 seconds (10 × 1s)
         limit_filled = False
         fill_price = limit_price
-        for _poll in range(5):  # 5 × 3s = 15s
-            await asyncio.sleep(3)
+        _filled_qty = 0.0
+        for _poll in range(10):  # 10 × 1s = 10s
+            await asyncio.sleep(1)
             try:
                 updated = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
                 status = updated.get("status", "")
-                filled_qty = float(updated.get("filled", 0) or 0)
-                if status == "closed" or filled_qty >= opt_contracts:
+                _filled_qty = float(updated.get("filled", 0) or 0)
+                if status == "closed" or _filled_qty >= opt_contracts:
                     fill_price = float(updated.get("average", 0) or updated.get("price", 0) or limit_price)
                     limit_filled = True
                     self.logger.info(
@@ -1430,32 +1402,61 @@ class OptionsScalpStrategy(BaseStrategy):
                         self.pair, fill_price, opt_contracts,
                     )
                     break
+                elif _filled_qty > 0:
+                    self.logger.debug(
+                        "[%s] PREMIUM_LIMIT: partial %.1f/%d — continuing poll",
+                        self.pair, _filled_qty, opt_contracts,
+                    )
             except Exception as e:
                 self.logger.debug("[%s] PREMIUM_LIMIT: poll failed: %s", self.pair, e)
 
         if not limit_filled:
-            # Cancel unfilled order — move happened without us
-            try:
-                await self.options_exchange.cancel_order(limit_order_id, selected_symbol)
-                self.logger.info(
-                    "[%s] PREMIUM_LIMIT: NOT filled in 15s — cancelled, SKIP (move happened without us)",
-                    self.pair,
-                )
-            except Exception as e:
-                # Cancel failed — check if it actually filled
+            if _filled_qty > 0:
+                # Partial fill — keep it, cancel residual, adjust contracts
                 try:
-                    final_check = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
-                    if final_check.get("status") == "closed" or float(final_check.get("filled", 0) or 0) >= opt_contracts:
-                        fill_price = float(final_check.get("average", 0) or final_check.get("price", 0) or limit_price)
-                        limit_filled = True
-                        self.logger.info(
-                            "[%s] PREMIUM_LIMIT: cancel failed but order FILLED @ $%.4f",
-                            self.pair, fill_price,
-                        )
+                    await self.options_exchange.cancel_order(limit_order_id, selected_symbol)
                 except Exception:
                     pass
+                opt_contracts = max(1, int(_filled_qty))
+                fill_price = limit_price
+                limit_filled = True
+                self.logger.info(
+                    "[%s] PREMIUM_LIMIT: PARTIAL FILL — %d contracts @ ~$%.4f — keeping",
+                    self.pair, opt_contracts, fill_price,
+                )
+            else:
+                # No fill — cancel, log, apply 30s cooldown
+                cancel_ok = False
+                try:
+                    await self.options_exchange.cancel_order(limit_order_id, selected_symbol)
+                    cancel_ok = True
+                except Exception as _ce:
+                    # Cancel failed — verify it didn't silently fill
+                    try:
+                        _fc = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
+                        if _fc.get("status") == "closed" or float(_fc.get("filled", 0) or 0) >= opt_contracts:
+                            fill_price = float(_fc.get("average", 0) or _fc.get("price", 0) or limit_price)
+                            limit_filled = True
+                            self.logger.info(
+                                "[%s] PREMIUM_LIMIT: cancel failed but order FILLED @ $%.4f",
+                                self.pair, fill_price,
+                            )
+                    except Exception:
+                        pass
+                    if not limit_filled:
+                        self.logger.info("[%s] PREMIUM_LIMIT: cancel failed: %s — SKIP", self.pair, _ce)
+                        return []
+
                 if not limit_filled:
-                    self.logger.info("[%s] PREMIUM_LIMIT: cancel failed: %s — SKIP", self.pair, e)
+                    self.logger.info(
+                        "[%s] PREMIUM_NO_FILL: ask=$%.4f pair=%s — order unfilled in 10s, cancelled",
+                        self.pair, limit_price, self.pair,
+                    )
+                    await self._log_skip(
+                        f"{self.pair} — PREMIUM_NO_FILL: ask=${limit_price:.4f} — order unfilled in 10s, cancelled",
+                        {"ask": limit_price, "pair": self.pair},
+                    )
+                    self._no_fill_cooldown_until = time.monotonic() + 30
                     return []
 
         if not limit_filled:
