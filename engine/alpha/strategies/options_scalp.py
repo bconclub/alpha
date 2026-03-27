@@ -40,10 +40,10 @@ Exit (4 ways out — we paid the premium, let it play):
   1. OPT_SL:         -30% premium (always active, even Phase 1)
   2. OPT_ENTRY_DROP: -8% in first 60s — bad entry, get out fast (Phase 1)
   3. Ratchet/Trail:  lock profit at (10→3, 15→7, 25→15, 40→25)%, trail at +8%, TP at +30%
-  4. EXPIRY_GUARD:   < 30 min to expiry → always exit
-                     < 2h to expiry AND pnl < +10% → exit before decay accelerates
+  4. EXPIRY_GUARD:   < 30 min → always exit; < 2h + pnl < +10% → exit
+  - Progressive SL for stale trades (peak < +10%, premium ≤ 0%, move < 5%):
+      5 min: SL tightens to -10% | 8 min: SL tightens to -5% | 12 min: force OPT_STALE
   - Phase 1 (first 30s): only SL + ENTRY_DROP fire
-  - Timeout: 10 min if decaying | Stale: 60 min if never moved
 
 Risk: Max loss = premium paid. No liquidation. Safest momentum play.
 """
@@ -175,10 +175,11 @@ class OptionsScalpStrategy(BaseStrategy):
     PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain (was 50 — too aggressive)
     PULLBACK_ACTIVATE_PCT = 8.0          # Pullback only fires after +8% peak (was 5 — let winners breathe)
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
-    TIMEOUT_MINUTES = 10                 # Options timeout (was 5 — give gamma time to work)
-    TIMEOUT_DECAY_PCT = 15.0             # Only timeout if premium decayed > 15% from entry
-    STALE_TIMEOUT_MINUTES = 60           # Force-close if held 60+ min and never exceeded +2% peak
-    STALE_PEAK_PCT = 2.0                 # Peak threshold for stale detection
+    # ── Stale SL tightening — progressive exit for stuck trades ─────
+    STALE_MOVE_THRESHOLD = 5.0           # < 5% from entry = stale (not going anywhere)
+    STALE_SL_5M = -10.0                  # After 5 min stale: SL tightens to -10%
+    STALE_SL_8M = -5.0                   # After 8 min stale: SL tightens to -5%
+    STALE_EXIT_MINUTES = 12              # After 12 min stale: force exit as OPT_STALE
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
 
     # ── Expiry guard — exit before contract expires worthless ────────
@@ -367,13 +368,13 @@ class OptionsScalpStrategy(BaseStrategy):
             "[%s] OPTIONS SCALP ACTIVE — adaptive_gate(2.0x noise, vol 1.2x, 3/5 candles), "
             "premium=$%.0f-$%.0f sweet | "
             "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
-            "Timeout=%dm Phase1=%ds Alloc=%s%s",
+            "Stale=%d/%d/%dm Phase1=%ds Alloc=%s%s",
             self.pair,
             _ss[0], _ss[1],
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
             int(self.OPT_TRAIL_TIERS[0][0]), int(self.OPT_TRAIL_TIERS[0][1]),
             int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
-            self.TIMEOUT_MINUTES, self.PHASE1_HANDS_OFF_SEC,
+            5, 8, self.STALE_EXIT_MINUTES, self.PHASE1_HANDS_OFF_SEC,
             f"{self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 20)}%",
             f" | RESTORED: {self.option_side} {self.option_symbol}" if self.in_position else "",
         )
@@ -2208,33 +2209,36 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "DECAY")
 
-        # ── 8. TIMEOUT: close after 10 minutes (GPFC: only if decaying) ──
-        if hold_seconds >= self.TIMEOUT_MINUTES * 60:
-            # GPFC: Don't timeout a flat/rising trade — only if premium decayed
-            if premium_change_pct <= -self.TIMEOUT_DECAY_PCT or premium_change_pct < 0:
+        # ── 8. PROGRESSIVE SL TIGHTENING: stale trade protection ────
+        # Gate: only fires when premium hasn't moved (< 5% from entry in either direction)
+        # AND peak was never meaningful (< +10%) AND currently not winning.
+        # If it moved and came back, trail/ratchet should have caught it — don't interfere.
+        abs_move_pct = abs(premium_change_pct)
+        is_stale = (
+            abs_move_pct < self.STALE_MOVE_THRESHOLD
+            and peak_pnl_pct < 10.0
+            and premium_change_pct <= 0.0
+        )
+        if is_stale:
+            hold_min = hold_seconds / 60
+            if hold_min >= self.STALE_EXIT_MINUTES:
                 self.logger.info(
-                    "[%s] OPTION TIMEOUT — held %dm (limit %dm) at %+.1f%%",
-                    self.option_symbol, int(hold_seconds / 60),
-                    self.TIMEOUT_MINUTES, premium_change_pct,
+                    "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
+                    self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
                 )
-                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_TIMEOUT")
-            else:
-                # Profitable or flat — let it ride, log once
-                if self._tick_count % 6 == 0:
-                    self.logger.info(
-                        "[%s] OPTION TIMEOUT SKIP — held %dm but at %+.1f%% (no decay)",
-                        self.option_symbol, int(hold_seconds / 60), premium_change_pct,
-                    )
-
-        # ── 8b. STALE TRADE: held 60+ min, never moved — theta is eating it ──
-        if (hold_seconds >= self.STALE_TIMEOUT_MINUTES * 60
-                and peak_pnl_pct < self.STALE_PEAK_PCT):
-            self.logger.info(
-                "[%s] STALE TRADE — held %dm, peak only +%.1f%% (< +%.0f%%) — closing",
-                self.option_symbol, int(hold_seconds / 60),
-                peak_pnl_pct, self.STALE_PEAK_PCT,
-            )
-            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+            elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M:
+                self.logger.info(
+                    "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
+                    self.option_symbol, self.STALE_SL_8M, premium_change_pct,
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+            elif hold_min >= 5.0 and premium_change_pct < self.STALE_SL_5M:
+                self.logger.info(
+                    "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
+                    self.option_symbol, self.STALE_SL_5M, premium_change_pct,
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
 
         # ── 9. SIGNAL REVERSAL ────────────────────────────────────────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
