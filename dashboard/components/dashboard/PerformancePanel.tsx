@@ -42,7 +42,7 @@ export function PerformancePanel() {
   // Win/loss days from the stats map
   const { winDays, lossDays } = useMemo(() => {
     let w = 0, l = 0;
-    for (const [, s] of dailyStats) {
+    for (const s of Array.from(dailyStats.values())) {
       if (s.pnl > 0) w++;
       else if (s.pnl < 0) l++;
     }
