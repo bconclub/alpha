@@ -124,9 +124,6 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
-    # Smart cooldown multipliers — applied to adaptive threshold, not fixed absolute
-    SMART_CD_LOSS_MULT = 1.2            # after loss: require cum >= 1.2× adaptive threshold
-    SMART_CD_SL_MULT = 1.5             # after SL:   require cum >= 1.5× adaptive threshold
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
@@ -276,10 +273,6 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Cooldown after PREMIUM_NO_FILL — no new entry for 30s
         self._no_fill_cooldown_until: float = 0.0
-
-        # Smart cooldown state — require fresh momentum after losses
-        self._last_exit_was_loss: bool = False
-        self._last_exit_was_sl: bool = False
 
         # DB trade ID — set on entry write, used for close lookup
         self._db_trade_id: int | None = None
@@ -991,26 +984,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.logger.info("[%s] %s", self.pair, candle_reason)
             return []
 
-        # 2a. Smart cooldown — after losses, require cum >= N× adaptive threshold for re-entry
-        # Uses the same noise-adjusted bar as the candle gate, so it scales with market conditions.
-        if self._last_exit_was_sl:
-            _cd_min = _adaptive_thresh * self.SMART_CD_SL_MULT
-            if candle_cum_pct < _cd_min:
-                self.logger.info(
-                    "[%s] SMART_CD: post-SL cum=%.2f%% < %.2f%% (%.1f× thresh=%.2f%%) — need stronger signal",
-                    self.pair, candle_cum_pct, _cd_min, self.SMART_CD_SL_MULT, _adaptive_thresh,
-                )
-                self._cached_bot_state = "blocked:smart_cd_sl"
-                return []
-        elif self._last_exit_was_loss:
-            _cd_min = _adaptive_thresh * self.SMART_CD_LOSS_MULT
-            if candle_cum_pct < _cd_min:
-                self.logger.info(
-                    "[%s] SMART_CD: post-loss cum=%.2f%% < %.2f%% (%.1f× thresh=%.2f%%) — need fresh momentum",
-                    self.pair, candle_cum_pct, _cd_min, self.SMART_CD_LOSS_MULT, _adaptive_thresh,
-                )
-                self._cached_bot_state = "blocked:smart_cd_loss"
-                return []
 
         # 2b. Acceleration check is now inside _check_candle_momentum (3-of-5 with growing check)
 
@@ -2610,10 +2583,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
         self.hourly_pnl += pnl_usd
 
-        # Smart cooldown — track exit type for next entry's cum threshold
-        self._last_exit_was_loss = pnl_pct < 0
-        self._last_exit_was_sl = "SL" in exit_type
-
         # Immediately clear dashboard position state so UI doesn't show stale "OPEN"
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
 
@@ -2835,10 +2804,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
         self.hourly_pnl += pnl_usd
 
-        # Smart cooldown — position_gone is always a loss
-        self._last_exit_was_loss = True
-        self._last_exit_was_sl = False
-
         # Clear dashboard + position state
         await self._clear_dashboard_position(exit_reason_detail, pnl_pct, pnl_usd)
 
@@ -2968,9 +2933,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.strike_price, fill_price,
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
-            # Clear smart cooldown — successful entry resets loss tracking
-            self._last_exit_was_loss = False
-            self._last_exit_was_sl = False
             self._db_trade_id = None  # reset; will be set by _write_entry_to_db
 
             # Telegram entry notification
