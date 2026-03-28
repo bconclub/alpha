@@ -124,9 +124,9 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
     OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
     OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
-    # Smart cooldown thresholds (replaces hard time-based cooldowns)
-    SMART_CD_LOSS_CUM_PCT = 0.30        # after loss: require this cum% for re-entry
-    SMART_CD_SL_CUM_PCT = 0.40          # after SL: require this cum% for re-entry
+    # Smart cooldown multipliers — applied to adaptive threshold, not fixed absolute
+    SMART_CD_LOSS_MULT = 1.2            # after loss: require cum >= 1.2× adaptive threshold
+    SMART_CD_SL_MULT = 1.5             # after SL:   require cum >= 1.5× adaptive threshold
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
@@ -991,22 +991,23 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.logger.info("[%s] %s", self.pair, candle_reason)
             return []
 
-        # 2a. Smart cooldown — after losses, require higher cum threshold for re-entry
+        # 2a. Smart cooldown — after losses, require cum >= N× adaptive threshold for re-entry
+        # Uses the same noise-adjusted bar as the candle gate, so it scales with market conditions.
         if self._last_exit_was_sl:
-            _cd_min = self.SMART_CD_SL_CUM_PCT
+            _cd_min = _adaptive_thresh * self.SMART_CD_SL_MULT
             if candle_cum_pct < _cd_min:
                 self.logger.info(
-                    "[%s] SMART_CD: post-SL cum=%.2f%% < %.2f%% — need stronger signal",
-                    self.pair, candle_cum_pct, _cd_min,
+                    "[%s] SMART_CD: post-SL cum=%.2f%% < %.2f%% (%.1f× thresh=%.2f%%) — need stronger signal",
+                    self.pair, candle_cum_pct, _cd_min, self.SMART_CD_SL_MULT, _adaptive_thresh,
                 )
                 self._cached_bot_state = "blocked:smart_cd_sl"
                 return []
         elif self._last_exit_was_loss:
-            _cd_min = self.SMART_CD_LOSS_CUM_PCT
+            _cd_min = _adaptive_thresh * self.SMART_CD_LOSS_MULT
             if candle_cum_pct < _cd_min:
                 self.logger.info(
-                    "[%s] SMART_CD: post-loss cum=%.2f%% < %.2f%% — need fresh momentum",
-                    self.pair, candle_cum_pct, _cd_min,
+                    "[%s] SMART_CD: post-loss cum=%.2f%% < %.2f%% (%.1f× thresh=%.2f%%) — need fresh momentum",
+                    self.pair, candle_cum_pct, _cd_min, self.SMART_CD_LOSS_MULT, _adaptive_thresh,
                 )
                 self._cached_bot_state = "blocked:smart_cd_loss"
                 return []
