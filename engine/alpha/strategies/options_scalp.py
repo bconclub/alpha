@@ -372,7 +372,7 @@ class OptionsScalpStrategy(BaseStrategy):
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
             int(self.OPT_TRAIL_TIERS[0][0]), int(self.OPT_TRAIL_TIERS[0][1]),
             int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
-            5, 8, self.STALE_EXIT_MINUTES, self.PHASE1_HANDS_OFF_SEC,
+            5, 8, self.STALE_EXIT_MIN_BTC if self._base_asset == "BTC" else self.STALE_EXIT_MIN_ETH, self.PHASE1_HANDS_OFF_SEC,
             f"{self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 20)}%",
             f" | RESTORED: {self.option_side} {self.option_symbol}" if self.in_position else "",
         )
