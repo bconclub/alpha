@@ -174,9 +174,14 @@ class OptionsScalpStrategy(BaseStrategy):
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
     # ── Stale SL tightening — progressive exit for stuck trades ─────
     STALE_MOVE_THRESHOLD = 5.0           # < 5% from entry = stale (not going anywhere)
-    STALE_SL_5M = -10.0                  # After 5 min stale: SL tightens to -10%
-    STALE_SL_8M = -5.0                   # After 8 min stale: SL tightens to -5%
-    STALE_EXIT_MINUTES = 12              # After 12 min stale: force exit as OPT_STALE
+    # ETH stale thresholds (faster-moving premium)
+    STALE_SL_5M_ETH = -10.0             # 5 min: SL → -10%
+    STALE_SL_8M_ETH = -5.0              # 8 min: SL → -5%
+    STALE_EXIT_MIN_ETH = 12             # 12 min: force OPT_STALE
+    # BTC stale thresholds (slower-moving premium — more room)
+    STALE_SL_8M_BTC = -15.0             # 8 min: SL → -15%
+    STALE_SL_12M_BTC = -10.0            # 12 min: SL → -10%
+    STALE_EXIT_MIN_BTC = 18             # 18 min: force OPT_STALE
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
 
     # ── Expiry guard — exit before contract expires worthless ────────
@@ -2216,24 +2221,45 @@ class OptionsScalpStrategy(BaseStrategy):
         )
         if is_stale:
             hold_min = hold_seconds / 60
-            if hold_min >= self.STALE_EXIT_MINUTES:
-                self.logger.info(
-                    "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
-                    self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
-                )
-                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
-            elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M:
-                self.logger.info(
-                    "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
-                    self.option_symbol, self.STALE_SL_8M, premium_change_pct,
-                )
-                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
-            elif hold_min >= 5.0 and premium_change_pct < self.STALE_SL_5M:
-                self.logger.info(
-                    "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
-                    self.option_symbol, self.STALE_SL_5M, premium_change_pct,
-                )
-                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+            _is_btc = self._base_asset == "BTC"
+            if _is_btc:
+                if hold_min >= self.STALE_EXIT_MIN_BTC:
+                    self.logger.info(
+                        "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
+                        self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                elif hold_min >= 12.0 and premium_change_pct < self.STALE_SL_12M_BTC:
+                    self.logger.info(
+                        "[%s] SL_TIGHTEN: 12m stale, SL → %.0f%% (now %.1f%%)",
+                        self.option_symbol, self.STALE_SL_12M_BTC, premium_change_pct,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+                elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_BTC:
+                    self.logger.info(
+                        "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
+                        self.option_symbol, self.STALE_SL_8M_BTC, premium_change_pct,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+            else:
+                if hold_min >= self.STALE_EXIT_MIN_ETH:
+                    self.logger.info(
+                        "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
+                        self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_ETH:
+                    self.logger.info(
+                        "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
+                        self.option_symbol, self.STALE_SL_8M_ETH, premium_change_pct,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+                elif hold_min >= 5.0 and premium_change_pct < self.STALE_SL_5M_ETH:
+                    self.logger.info(
+                        "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
+                        self.option_symbol, self.STALE_SL_5M_ETH, premium_change_pct,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
 
         # ── 9. SIGNAL REVERSAL ────────────────────────────────────────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
