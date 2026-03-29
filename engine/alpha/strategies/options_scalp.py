@@ -1119,6 +1119,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Weak candle direction penalty: 0.5x on final confidence when candle score is 0.5
         if _candle_score == 0.5:
             entry_confidence *= 0.5
+        # BTC confidence penalty: harder to trade profitably on Delta → size down
+        if self._base_asset == "BTC":
+            entry_confidence *= 0.7
         if entry_confidence < 0.6:
             self.logger.info(
                 "[%s] CONFIDENCE: candle=%.1f cum=%.1f vol=%.1f final=%.2f → SKIP (below 0.6)",
@@ -1879,10 +1882,11 @@ class OptionsScalpStrategy(BaseStrategy):
         """Early-direction gate for options entry — PRIMARY GATE.
 
         Reads the market like a trader watching the tape:
-        1. Direction: ≥3 of last 5 candles in same direction
-        2. Adaptive threshold: cum move >= 2.0x recent avg candle range (adapts to noise)
-        3. Volume confirmation: entry candles must have 1.5x avg volume
-        4. Acceleration: recent candles bigger than earlier ones (move is growing)
+        1. Direction: ETH 4/5, BTC 5/5 candles in same direction (0.03% min body)
+        2. Adaptive threshold: cum >= 3.0x avg range (ETH floor 0.25%, BTC floor 0.40%)
+        3. Volume: ETH 1.5x, BTC 2.0x avg — latest candle must be >= 1.0x independently
+        4. Last 2 candles must both be directional (fading tip = skip)
+        5. Acceleration: recent candles bigger than earlier ones (move is growing)
 
         Returns:
             (passed, reason_string, side, directional_count, cum_pct, candle_sizes)
@@ -1923,8 +1927,10 @@ class OptionsScalpStrategy(BaseStrategy):
             return False, "bad price", None, 0, 0.0, []
 
         # ── ADAPTIVE THRESHOLD: compare move to recent noise ──
+        _is_btc_gate = self._base_asset == "BTC"
         avg_range = mean(self._candle_ranges) if len(self._candle_ranges) >= 10 else 0.10
-        cum_threshold = max(avg_range * self.ADAPTIVE_CUM_MULTIPLIER, self.ADAPTIVE_CUM_FLOOR)
+        _cum_floor = 0.40 if _is_btc_gate else self.ADAPTIVE_CUM_FLOOR
+        cum_threshold = max(avg_range * self.ADAPTIVE_CUM_MULTIPLIER, _cum_floor)
 
         # ── Classify candles ──
         doji_threshold = current_price * 0.0003  # 0.03% min body — doji/tiny candles don't count
@@ -1949,12 +1955,13 @@ class OptionsScalpStrategy(BaseStrategy):
                 red_count += 1
 
         n = self.CANDLE_MOM_LOOKBACK  # 5
+        _streak_required = 5 if _is_btc_gate else self.CANDLE_MOM_STREAK
 
-        # ── DIRECTION: 4 of 5 candles must agree ──
-        if green_count >= self.CANDLE_MOM_STREAK:
+        # ── DIRECTION: BTC needs 5/5, ETH needs 4/5 ──
+        if green_count >= _streak_required:
             side = "long"
             directional_count = green_count
-        elif red_count >= self.CANDLE_MOM_STREAK:
+        elif red_count >= _streak_required:
             side = "short"
             directional_count = red_count
         else:
@@ -1986,11 +1993,12 @@ class OptionsScalpStrategy(BaseStrategy):
             cum_pct = -cum_pct
 
         # ── VOLUME CONFIRMATION: entry candles must spike ──
+        _vol_mult = 2.0 if _is_btc_gate else self.VOLUME_CONFIRM_MULTIPLIER
         avg_vol = mean(self._candle_volumes) if len(self._candle_volumes) >= 5 else 0
         entry_vol_candles = candle_volumes[-self.VOLUME_CONFIRM_CANDLES:]
         entry_vol = mean(entry_vol_candles) if entry_vol_candles else 0
         vol_ratio = entry_vol / avg_vol if avg_vol > 0 else 0
-        vol_ok = avg_vol <= 0 or entry_vol >= avg_vol * self.VOLUME_CONFIRM_MULTIPLIER
+        vol_ok = avg_vol <= 0 or entry_vol >= avg_vol * _vol_mult
         # Latest candle must have >= 1.0x average on its own (can't rely on a spike 3 candles ago)
         latest_vol = candle_volumes[-1] if candle_volumes else 0
         latest_vol_ok = avg_vol <= 0 or latest_vol >= avg_vol * 1.0
@@ -2026,7 +2034,7 @@ class OptionsScalpStrategy(BaseStrategy):
             if cum_pct < cum_threshold:
                 parts.append(f"cum={cum_pct:+.2f}% < adaptive {cum_threshold:.2f}%")
             if not vol_ok:
-                parts.append(f"LOW_VOLUME: {entry_vol:.0f} < {self.VOLUME_CONFIRM_MULTIPLIER}x avg {avg_vol:.0f}")
+                parts.append(f"LOW_VOLUME: {entry_vol:.0f} < {_vol_mult:.1f}x avg {avg_vol:.0f}")
             if not latest_vol_ok:
                 parts.append(f"LATEST_CANDLE_VOL: {latest_vol:.0f} < 1.0x avg {avg_vol:.0f}")
             if not accel_ok:
