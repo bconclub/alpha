@@ -149,7 +149,7 @@ class OptionsScalpStrategy(BaseStrategy):
         "ETH": 45.0,
         "BTC": 35.0,
     }
-    OPT_MAX_COLLATERAL_PCT = 70.0        # never use >70% of balance on 1 option
+    OPT_MAX_COLLATERAL_PCT = 40.0        # never use >40% of balance on 1 option
     OPT_SURVIVAL_BALANCE = 20.0          # below this, cap allocation at 30%
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
@@ -1078,9 +1078,12 @@ class OptionsScalpStrategy(BaseStrategy):
         _vol_ratio_conf = _entry_vol_conf / _avg_vol_conf if _avg_vol_conf > 0 else 0
         _vol_score = 1.0 if _vol_ratio_conf >= 2.0 else (0.7 if _vol_ratio_conf >= 1.5 else 0.4)
         entry_confidence = (_candle_score + _cum_score + _vol_score) / 3.0
-        if entry_confidence < 0.4:
+        # Weak candle direction penalty: 0.5x on final confidence when candle score is 0.5
+        if _candle_score == 0.5:
+            entry_confidence *= 0.5
+        if entry_confidence < 0.6:
             self.logger.info(
-                "[%s] CONFIDENCE: candle=%.1f cum=%.1f vol=%.1f final=%.2f → SKIP (below 0.4)",
+                "[%s] CONFIDENCE: candle=%.1f cum=%.1f vol=%.1f final=%.2f → SKIP (below 0.6)",
                 self.pair, _candle_score, _cum_score, _vol_score, entry_confidence,
             )
             self._cached_bot_state = "blocked:low_confidence"
@@ -1247,12 +1250,14 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Confidence multiplier: scale base contract count by signal conviction
         _base_contracts = opt_contracts
-        if entry_confidence >= 0.8:
+        if entry_confidence >= 0.9:
             _conf_mult = 1.0
-        elif entry_confidence >= 0.6:
-            _conf_mult = 0.6
-        else:
+        elif entry_confidence >= 0.8:
+            _conf_mult = 0.5
+        elif entry_confidence >= 0.7:
             _conf_mult = 0.3
+        else:  # 0.6–0.7
+            _conf_mult = 0.15
         opt_contracts = max(1, int(_base_contracts * _conf_mult))
         self.logger.info(
             "[%s] CONFIDENCE: candle=%.1f cum=%.1f vol=%.1f final=%.2f → %dct (base was %dct)",
