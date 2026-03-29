@@ -110,20 +110,20 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 2 — need full conviction for options)
     SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
     # Candle-based early-direction gate (3/5 candles required, adaptive threshold)
-    CANDLE_MOM_STREAK = 3                # 3 of 5 candles must agree in direction
+    CANDLE_MOM_STREAK = 4                # 4 of 5 candles must agree in direction (3/5 always SKIP)
     CANDLE_MOM_LOOKBACK = 5              # check last 5 completed 1m candles (was 3)
     # ── Adaptive threshold — compare move to recent noise ─────────
-    ADAPTIVE_CUM_MULTIPLIER = 2.0        # entry requires cum >= 2.0x avg candle range (was 2.5 — volume confirms quality)
-    ADAPTIVE_CUM_FLOOR = 0.08            # absolute minimum cum% regardless of noise level (was 0.10 — blocked quiet markets)
+    ADAPTIVE_CUM_MULTIPLIER = 3.0        # entry requires cum >= 3.0x avg candle range (was 2.0)
+    ADAPTIVE_CUM_FLOOR = 0.25            # absolute minimum cum% regardless of noise level (was 0.08)
     ADAPTIVE_RANGE_WINDOW = 20           # rolling window of candle ranges for noise baseline
     # ── Volume confirmation — no volume no trade ──────────────────
     VOLUME_CONFIRM_WINDOW = 20           # rolling window for avg volume baseline
-    VOLUME_CONFIRM_MULTIPLIER = 1.2      # entry candles must have >= 1.2x avg volume (was 1.5 — too tight for options)
+    VOLUME_CONFIRM_MULTIPLIER = 1.5      # entry candles must have >= 1.5x avg volume (was 1.2)
     VOLUME_CONFIRM_CANDLES = 3           # average volume of last 3 candles for entry check
     MIN_UNDERLYING_MOVE_PCT = 0.10       # underlying must move >= 0.10% in last 60s
     MIN_UNDERLYING_MOVE_SECS = 60        # lookback window for underlying move check
-    OPT_RSI_CALL_MAX = 40               # calls only when RSI < 40 (oversold conviction)
-    OPT_RSI_PUT_MIN = 60                # puts only when RSI > 60 (overbought conviction)
+    OPT_RSI_CALL_MAX = 65               # calls blocked when RSI > 65 (overbought — premium priced in)
+    OPT_RSI_PUT_MIN = 35                # puts blocked when RSI < 35 (oversold — already flushed)
 
     # ── GPFC: Setup whitelist — only proven setups ──────────────
     ALLOWED_SETUPS = {"MOMENTUM_BURST", "BB_SQUEEZE"}  # the only profitable patterns
@@ -278,6 +278,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Cooldown after PREMIUM_NO_FILL — no new entry for 30s
         self._no_fill_cooldown_until: float = 0.0
+        # Consecutive no-fill streak tracking (escalating cooldowns)
+        self._no_fill_streak: int = 0
+        self._no_fill_streak_start: float = 0.0
 
         # DB trade ID — set on entry write, used for close lookup
         self._db_trade_id: int | None = None
@@ -1068,6 +1071,41 @@ class OptionsScalpStrategy(BaseStrategy):
             self.pair, self._entry_context, candle_count, self.CANDLE_MOM_LOOKBACK,
         )
 
+        # RSI context filter — block overbought calls and oversold puts
+        if _rsi > 0:
+            if option_type == "call" and _rsi > self.OPT_RSI_CALL_MAX:
+                self.logger.info(
+                    "[%s] RSI_BLOCK: RSI=%.0f > %.0f for CALL → SKIP (overbought, premium priced in)",
+                    self.pair, _rsi, self.OPT_RSI_CALL_MAX,
+                )
+                self._cached_bot_state = "blocked:rsi_overbought"
+                return []
+            if option_type == "put" and _rsi < self.OPT_RSI_PUT_MIN:
+                self.logger.info(
+                    "[%s] RSI_BLOCK: RSI=%.0f < %.0f for PUT → SKIP (oversold, already flushed)",
+                    self.pair, _rsi, self.OPT_RSI_PUT_MIN,
+                )
+                self._cached_bot_state = "blocked:rsi_oversold"
+                return []
+
+        # Consecutive no-fill streak gate
+        _now = time.monotonic()
+        _streak_age = _now - self._no_fill_streak_start
+        if self._no_fill_streak >= 3 and _streak_age <= 600:
+            # 3 no-fills in 10 min — already handled by extended cooldown, but guard here too
+            self.logger.info(
+                "[%s] NO_FILL_STREAK x%d in %.0fs → blocked",
+                self.pair, self._no_fill_streak, _streak_age,
+            )
+            return []
+        if self._no_fill_streak >= 2 and _streak_age <= 300 and candle_count < 5:
+            self.logger.info(
+                "[%s] NO_FILL_STREAK x%d in %.0fs → require 5/5 candles, only %d/5 → SKIP",
+                self.pair, self._no_fill_streak, _streak_age, candle_count,
+            )
+            self._cached_bot_state = "blocked:no_fill_streak"
+            return []
+
         # 2d. Confidence score — skip low-conviction entries, scale contracts to conviction
         _candle_score = 1.0 if candle_count >= 5 else (0.7 if candle_count >= 4 else 0.5)
         _cum_ratio = candle_cum_pct / _adaptive_thresh if _adaptive_thresh > 0 else 1.0
@@ -1442,11 +1480,31 @@ class OptionsScalpStrategy(BaseStrategy):
                         f"{self.pair} — PREMIUM_NO_FILL: ask=${limit_price:.4f} — order unfilled in 10s, cancelled",
                         {"ask": limit_price, "pair": self.pair},
                     )
-                    self._no_fill_cooldown_until = time.monotonic() + 30
+                    # Track consecutive no-fill streak for escalating cooldowns
+                    _nf_now = time.monotonic()
+                    if _nf_now - self._no_fill_streak_start > 600:
+                        # >10 min since first streak no-fill — reset
+                        self._no_fill_streak = 0
+                        self._no_fill_streak_start = _nf_now
+                    elif self._no_fill_streak == 0:
+                        self._no_fill_streak_start = _nf_now
+                    self._no_fill_streak += 1
+                    if self._no_fill_streak >= 3 and _nf_now - self._no_fill_streak_start <= 600:
+                        # 3 no-fills in 10 min → 10-min block
+                        self._no_fill_cooldown_until = _nf_now + 600
+                        self.logger.info(
+                            "[%s] NO_FILL x3 in %.0fs → blocking pair 10min",
+                            self.pair, _nf_now - self._no_fill_streak_start,
+                        )
+                    else:
+                        self._no_fill_cooldown_until = _nf_now + 30
                     return []
 
         if not limit_filled:
             return []
+
+        # Filled — reset no-fill streak
+        self._no_fill_streak = 0
 
         # Re-fetch order for Delta's actual fill price (average field)
         try:
@@ -1869,7 +1927,7 @@ class OptionsScalpStrategy(BaseStrategy):
         cum_threshold = max(avg_range * self.ADAPTIVE_CUM_MULTIPLIER, self.ADAPTIVE_CUM_FLOOR)
 
         # ── Classify candles ──
-        doji_threshold = current_price * 0.0001  # 0.01% of price
+        doji_threshold = current_price * 0.0003  # 0.03% min body — doji/tiny candles don't count
         green_count = 0
         red_count = 0
         cumulative_move = 0.0
@@ -1892,7 +1950,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         n = self.CANDLE_MOM_LOOKBACK  # 5
 
-        # ── DIRECTION: 3 of 5 candles must agree ──
+        # ── DIRECTION: 4 of 5 candles must agree ──
         if green_count >= self.CANDLE_MOM_STREAK:
             side = "long"
             directional_count = green_count
@@ -1906,7 +1964,19 @@ class OptionsScalpStrategy(BaseStrategy):
                 None, 0, 0.0, candle_sizes,
             )
 
-        # Last candle color (informational only — no longer required to match direction)
+        # ── LAST 2 CANDLES must both be directional — fading move = skip ──
+        last2_ok = True
+        for _c in completed[-2:]:
+            _co, _cc = float(_c[1]), float(_c[4])
+            _cmove = _cc - _co
+            if side == "long" and _cmove <= doji_threshold:
+                last2_ok = False
+                break
+            if side == "short" and _cmove >= -doji_threshold:
+                last2_ok = False
+                break
+
+        # Last candle color (informational)
         last_o, last_c = float(completed[-1][1]), float(completed[-1][4])
         last_move = last_c - last_o
 
@@ -1921,6 +1991,9 @@ class OptionsScalpStrategy(BaseStrategy):
         entry_vol = mean(entry_vol_candles) if entry_vol_candles else 0
         vol_ratio = entry_vol / avg_vol if avg_vol > 0 else 0
         vol_ok = avg_vol <= 0 or entry_vol >= avg_vol * self.VOLUME_CONFIRM_MULTIPLIER
+        # Latest candle must have >= 1.0x average on its own (can't rely on a spike 3 candles ago)
+        latest_vol = candle_volumes[-1] if candle_volumes else 0
+        latest_vol_ok = avg_vol <= 0 or latest_vol >= avg_vol * 1.0
 
         # ── ACCELERATION: are recent candles bigger? ──
         accel_ok = True
@@ -1937,14 +2010,16 @@ class OptionsScalpStrategy(BaseStrategy):
         passed = (
             cum_pct >= cum_threshold
             and vol_ok
+            and latest_vol_ok
             and accel_ok
+            and last2_ok
         )
 
         if passed:
             reason = (
                 f"ADAPTIVE_GATE: {directional_count}/{n} {color}, "
                 f"cum={cum_pct:+.2f}% vs {self.ADAPTIVE_CUM_MULTIPLIER}x avg_range={cum_threshold:.2f}%, "
-                f"vol={vol_ratio:.1f}x, last={last_color} → PASS"
+                f"vol={vol_ratio:.1f}x latest={latest_vol:.0f}, last={last_color} → PASS"
             )
         else:
             parts = [f"{directional_count}/{n} {color}"]
@@ -1952,8 +2027,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 parts.append(f"cum={cum_pct:+.2f}% < adaptive {cum_threshold:.2f}%")
             if not vol_ok:
                 parts.append(f"LOW_VOLUME: {entry_vol:.0f} < {self.VOLUME_CONFIRM_MULTIPLIER}x avg {avg_vol:.0f}")
+            if not latest_vol_ok:
+                parts.append(f"LATEST_CANDLE_VOL: {latest_vol:.0f} < 1.0x avg {avg_vol:.0f}")
             if not accel_ok:
                 parts.append("FADING_MOVE: recent candles shrinking")
+            if not last2_ok:
+                parts.append("LAST2_NOT_DIRECTIONAL: move fading at tip")
             reason = "ADAPTIVE_GATE: " + ", ".join(parts) + " → SKIP"
 
         return passed, reason, side if passed else None, directional_count, cum_pct, candle_sizes
