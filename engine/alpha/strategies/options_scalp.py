@@ -2508,6 +2508,13 @@ class OptionsScalpStrategy(BaseStrategy):
         """
         sym = option_symbol or self.option_symbol or self.pair
 
+        # Race-condition guard: entry DB write may still be in-flight
+        if not self._db_trade_id:
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if self._db_trade_id:
+                    break
+
         # Resolve actual exit fill price from exchange (not limit order price)
         if order:
             resolved = await self._resolve_fill_price(order, sym)

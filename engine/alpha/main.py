@@ -2410,6 +2410,13 @@ class AlphaBot:
         except Exception:
             logger.exception("DB orphan sweep failed")
 
+        # ── MISSING OPTIONS SYNC ────────────────────────────────────────
+        # Catch live exchange positions that have no DB record (race on entry)
+        try:
+            await self._sync_missing_options_to_db()
+        except Exception:
+            logger.exception("Missing options sync failed")
+
     async def _orphan_sweep_futures(self, all_open: list[dict]) -> None:
         """DISABLED — futures sweep removed (Delta options only mode)."""
         return  # noqa: no futures orphan sweep
@@ -2648,6 +2655,169 @@ class AlphaBot:
 
         if closed:
             logger.info("ORPHAN_STARTUP: closed %d stale options trade(s)", closed)
+
+        # After closing orphans, discover any live positions missing from DB
+        await self._sync_missing_options_to_db()
+
+    async def _sync_missing_options_to_db(self) -> None:
+        """Find live Delta options positions with no DB record and sync them.
+
+        This catches trades where the entry DB write was lost due to race
+        conditions or restarts. Creates the DB record and injects state into
+        the strategy so the bot manages the exit normally.
+        """
+        if not self.delta_options or not self.db.is_connected:
+            return
+
+        # Fetch live options positions
+        try:
+            positions = await self.delta_options.fetch_positions()
+        except Exception as e:
+            logger.debug("Missing options sync: fetch_positions failed: %s", e)
+            return
+
+        live_positions: dict[str, dict[str, Any]] = {}
+        for pos in positions:
+            contracts = float(pos.get("contracts", 0) or 0)
+            if contracts == 0:
+                continue
+            symbol = pos.get("symbol", "")
+            if not symbol:
+                continue
+            live_positions[symbol] = {
+                "contracts": abs(contracts),
+                "entry_price": float(pos.get("entryPrice", 0) or pos.get("mark_price", 0) or 0),
+                "mark_price": float(pos.get("mark_price", 0) or 0),
+            }
+
+        if not live_positions:
+            return
+
+        # Fetch DB open options trades
+        try:
+            all_open = await self.db.get_all_open_trades()
+        except Exception as e:
+            logger.debug("Missing options sync: get_all_open_trades failed: %s", e)
+            return
+
+        db_option_pairs = {
+            t.get("pair") for t in all_open
+            if t.get("strategy") == "options_scalp" and t.get("exchange") == "delta"
+        }
+
+        for symbol, pos in live_positions.items():
+            if symbol in db_option_pairs:
+                continue  # already tracked
+
+            logger.warning(
+                "MISSING OPTIONS SYNC: %s x%.0f @ $%.4f exists on exchange but NOT in DB — creating record",
+                symbol, pos["contracts"], pos["entry_price"],
+            )
+
+            # Parse symbol: e.g. ETH/USD:USD-260331-2100-C
+            base_asset = symbol.split("/")[0] if "/" in symbol else ""
+            option_side = "call" if symbol.endswith("-C") else ("put" if symbol.endswith("-P") else "call")
+
+            # Parse strike
+            strike_price = 0.0
+            parts = symbol.split("-")
+            if len(parts) >= 3:
+                try:
+                    strike_price = float(parts[-2])
+                except ValueError:
+                    pass
+
+            # Parse expiry
+            expiry_dt = None
+            if len(parts) >= 3:
+                try:
+                    expiry_str = parts[-3]
+                    expiry_dt = _dt.datetime.strptime(expiry_str, "%y%m%d").replace(
+                        hour=12, tzinfo=_dt.timezone.utc,
+                    )
+                except (ValueError, IndexError):
+                    pass
+
+            # Find matching strategy
+            opts = None
+            for pair_key, strategy in self._options_strategies.items():
+                if strategy._base_asset == base_asset:
+                    opts = strategy
+                    break
+
+            # Create DB record
+            try:
+                await self.db.log_trade({
+                    "pair": symbol,
+                    "exchange": "delta",
+                    "strategy": "options_scalp",
+                    "side": "buy",
+                    "entry_price": pos["entry_price"],
+                    "contracts": pos["contracts"],
+                    "leverage": 50,
+                    "position_type": "long",
+                    "status": "open",
+                    "opened_at": iso_now(),
+                    "reason": "discovered_by_reconcile",
+                })
+            except Exception as e:
+                logger.error("Missing options sync: failed to insert DB record for %s: %s", symbol, e)
+                continue
+
+            # Inject into strategy memory so bot manages the exit
+            if opts:
+                opts.in_position = True
+                OptionsScalpStrategy._global_in_position = True
+                OptionsScalpStrategy._global_position_asset = base_asset
+                opts.option_symbol = symbol
+                opts.option_side = option_side
+                opts.entry_premium = pos["entry_price"]
+                opts.entry_time = time.monotonic()
+                opts.highest_premium = pos["entry_price"]
+                opts._last_known_premium = pos["mark_price"] or pos["entry_price"]
+                opts._contracts = int(pos["contracts"])
+                opts.strike_price = strike_price
+                opts.expiry_dt = expiry_dt
+                opts._trailing_active = False
+                opts._opt_ratchet_floor = 0.0
+                opts._consecutive_ticker_failures = 0
+                opts._position_verify_failures = 0
+                logger.info(
+                    "Injected missing options position into strategy: %s %s x%d strike=$%.0f",
+                    symbol, option_side, opts._contracts, strike_price,
+                )
+            else:
+                logger.warning(
+                    "Missing options sync: no strategy found for %s — DB record created but not managed",
+                    symbol,
+                )
+
+            # Register with risk manager
+            from alpha.strategies.base import Signal, StrategyName
+            synthetic_signal = Signal(
+                side="buy",
+                price=pos["entry_price"],
+                amount=pos["contracts"],
+                order_type="market",
+                reason="discovered_by_reconcile",
+                strategy=StrategyName.OPTIONS_SCALP,
+                pair=symbol,
+                leverage=50,
+                position_type="long",
+                exchange_id="delta",
+            )
+            self.risk_manager.record_open(synthetic_signal)
+
+            try:
+                await self.alerts.send_orphan_alert(
+                    pair=symbol,
+                    side=option_side,
+                    contracts=pos["contracts"],
+                    action="SYNCED TO DB & STRATEGY",
+                    detail=f"Entry: ${pos['entry_price']:.4f} — discovered live on exchange",
+                )
+            except Exception:
+                pass
 
     async def _reconcile_bybit_positions(self) -> None:
         """DISABLED — Bybit not used (Delta options only mode)."""
