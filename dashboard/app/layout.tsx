@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import '@/styles/dashboard.css';
 import { SupabaseProvider } from '@/components/providers/SupabaseProvider';
 import { SidebarProvider } from '@/components/providers/SidebarProvider';
 import { Sidebar } from '@/components/ui/Sidebar';
@@ -20,7 +21,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className="bg-[#0d1117] text-white antialiased">
+      <body className="bg-[#0a0a0f] text-white antialiased">
         <SupabaseProvider>
           <SidebarProvider>
             <div className="min-h-screen">
