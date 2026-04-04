@@ -28,8 +28,9 @@ def _extract_exit_reason(reason: str) -> str:
         return "UNKNOWN"
     upper = reason.upper()
     for kw in ("OPT_ENTRY_DROP", "OPT_MOMENTUM_FADE", "OPT_DEAD_MOMENTUM",
-               "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET",
+               "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET", "OPT_STALE",
                "OPT_REVERSAL", "OPT_PEAK_TRAIL", "EXPIRED_WORTHLESS",
+               "EXPIRY_GUARD", "SQUEEZE_RELEASE",
                "HARD_TP", "PROFIT_LOCK", "DEAD_MOMENTUM", "DECAY_EMERGENCY",
                "MANUAL_CLOSE", "SPOT_PULLBACK", "SPOT_DECAY", "SPOT_BREAKEVEN",
                "TRAIL", "RATCHET", "SL", "FLAT", "TIMEOUT",
@@ -40,7 +41,8 @@ def _extract_exit_reason(reason: str) -> str:
         "POSITION_GONE": "POSITION_GONE", "PHANTOM_CLEARED": "PHANTOM",
         "SL_EXCHANGE": "SL_EXCHANGE", "TP_EXCHANGE": "TP_EXCHANGE",
         "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE", "ORPHAN": "ORPHAN",
-        "DUST": "DUST",
+        "DUST": "DUST", "VERIFY_GONE": "POSITION_GONE",
+        "VERIFY_EXPIRY": "EXPIRY", "VERIFY_API_FAIL": "POSITION_GONE",
     }
     for key, val in direct.items():
         if key in upper:

@@ -3,6 +3,7 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatShortDate, cn } from '@/lib/utils';
+import { BBOptionsPanel } from './BBOptionsPanel';
 import type { OptionsState, ActivityLogRow, OpenPosition, BotStatus } from '@/lib/types';
 
 // ── Constants ────────────────────────────────────────────────
@@ -183,81 +184,7 @@ function ScanPulse({ updatedAt }: { updatedAt: string | null }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// 2. CandleCountdown — seconds until next 1-min candle
-// ══════════════════════════════════════════════════════════════
-
-function CandleCountdown() {
-  useLiveTick();
-  const now = Date.now() / 1000;
-  const secsLeft = Math.ceil(60 - (now % 60));
-  const isFlash = secsLeft <= 1;
-
-  return (
-    <span className={cn(
-      'text-[9px] font-mono',
-      isFlash ? 'text-amber-400 opts-flash' : 'text-zinc-500',
-    )}>
-      Next candle in: {secsLeft}s
-    </span>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════
-// 3. SignalStrengthBar — visual bar for candle momentum
-// ══════════════════════════════════════════════════════════════
-
-function SignalStrengthBar({ momentum }: {
-  momentum: NonNullable<OptionsState['candle_momentum']>;
-}) {
-  // Use cum_pct vs a threshold (0.25% for BTC, 0.10% for ETH — we'll use
-  // the passed flag to detect if threshold was met)
-  // We infer threshold from the ratio: if passed at cum_pct, that's >= threshold
-  // For display, show a reasonable default
-  const absCum = Math.abs(momentum.cum_pct);
-  // Estimate threshold: engine uses 0.25 for BTC, 0.10 for ETH
-  // Since we don't get threshold from DB, use 0.25 as default display
-  const threshold = 0.25;
-  const fillPct = Math.min((absCum / threshold) * 100, 100);
-
-  let barColor = 'bg-[#ff1744]';         // < 50%
-  if (fillPct >= 100 && momentum.passed) barColor = 'bg-[#00e676]'; // bright green PASS
-  else if (fillPct >= 80) barColor = 'bg-[#00c853]';
-  else if (fillPct >= 50) barColor = 'bg-[#ffd600]';
-
-  return (
-    <div className="mb-2">
-      {/* Bar */}
-      <div className={cn(
-        'relative h-3 rounded-full bg-zinc-800 overflow-hidden',
-        momentum.passed && 'opts-bar-pass',
-      )}>
-        <div
-          className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-700', barColor)}
-          style={{ width: `${fillPct}%` }}
-        />
-        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-mono text-white/80 font-medium">
-          {absCum.toFixed(2)}% / {threshold.toFixed(2)}% needed
-        </span>
-      </div>
-      <div className="flex items-center justify-between mt-0.5">
-        <span className="text-[8px] font-mono text-zinc-500">
-          {fillPct.toFixed(0)}% of threshold
-        </span>
-        <span className={cn(
-          'px-1.5 py-0.5 rounded text-[8px] font-bold uppercase',
-          momentum.passed
-            ? 'bg-[#00c853]/15 text-[#00c853] border border-[#00c853]/30'
-            : 'bg-zinc-800 text-zinc-500 border border-zinc-700',
-        )}>
-          {momentum.passed ? 'PASS' : 'FAIL'}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════
-// 4. BBSqueezeSignalsPanel — BB Squeeze visualization
+// 2. BBSqueezeSignalsPanel — BB Squeeze visualization
 // ══════════════════════════════════════════════════════════════
 
 function BBSqueezeSignalsPanel({ signals }: { signals: import('@/lib/types').SignalsPanel | null | undefined }) {
@@ -414,7 +341,7 @@ function BBSqueezeSignalsPanel({ signals }: { signals: import('@/lib/types').Sig
 }
 
 // ══════════════════════════════════════════════════════════════
-// 5. PremiumTick — premium value + direction arrow + delta
+// 3. PremiumTick — premium value + direction arrow + delta
 // ══════════════════════════════════════════════════════════════
 
 function PremiumTick({ label, value, colorUp, colorDown }: {
@@ -467,7 +394,7 @@ function PremiumTick({ label, value, colorUp, colorDown }: {
 }
 
 // ══════════════════════════════════════════════════════════════
-// 6. PositionLive — live ticking position state
+// 4. PositionLive — live ticking position state
 // ══════════════════════════════════════════════════════════════
 
 function PositionLive({
@@ -580,7 +507,7 @@ function PositionLive({
 }
 
 // ══════════════════════════════════════════════════════════════
-// 7. CooldownDisplay — post-exit cooldown with candle count
+// 5. CooldownDisplay — post-exit cooldown with candle count
 // ══════════════════════════════════════════════════════════════
 
 function CooldownDisplay({
@@ -637,7 +564,7 @@ function CooldownDisplay({
 }
 
 // ══════════════════════════════════════════════════════════════
-// 8. RegimeBadge — flashing regime with duration
+// 6. RegimeBadge — flashing regime with duration
 // ══════════════════════════════════════════════════════════════
 
 function RegimeBadge({ regime, regimeSince }: {
@@ -708,7 +635,6 @@ function PairCard({ ps, botStatus }: { ps: MergedPairState; botStatus: BotStatus
   const trailingActive = s?.trailing_active ?? (hasPositionFromTrades && ps.openTrade!.position_state === 'trailing');
   const highestPremium = s?.highest_premium ?? null;
 
-  const momentum = s?.candle_momentum ?? null;
   const botState = parseBotState(s?.bot_state);
 
   // Target strike + premium
@@ -808,55 +734,6 @@ function PairCard({ ps, botStatus }: { ps: MergedPairState; botStatus: BotStatus
 
           {/* ═══ BB SQUEEZE SIGNALS PANEL ═══ */}
           <BBSqueezeSignalsPanel signals={s.signals_panel} />
-
-          {/* ═══ CANDLE MOMENTUM BOXES + 2. COUNTDOWN + 3. SIGNAL BAR ═══ */}
-          {momentum ? (
-            <div className="mb-2.5">
-              {/* Candle direction boxes */}
-              <div className="flex items-center gap-2 mb-1.5">
-                <div className={cn('flex gap-1', momentum.passed && 'animate-pulse')}>
-                  {Array.from({ length: momentum.total }, (_, i) => (
-                    <div key={i} className={cn(
-                      'w-5 h-4 rounded-sm transition-all duration-500',
-                      i < momentum.count
-                        ? (momentum.direction === 'long'
-                          ? 'bg-[#00c853] shadow-[0_0_6px_rgba(0,200,83,0.4)]'
-                          : 'bg-[#ff1744] shadow-[0_0_6px_rgba(255,23,68,0.4)]')
-                        : 'bg-zinc-700/60',
-                    )} />
-                  ))}
-                </div>
-                <span className="text-[9px] font-mono text-zinc-500">
-                  {momentum.count}/{momentum.total} {momentum.direction === 'long' ? 'green' : momentum.direction === 'short' ? 'red' : '\u2014'}
-                </span>
-                {momentum.passed && momentum.direction && (
-                  <span className={cn(
-                    'text-sm font-bold',
-                    momentum.direction === 'long' ? 'text-[#00c853]' : 'text-[#ff1744]',
-                  )}>
-                    {momentum.direction === 'long' ? 'CALL \u2191' : 'PUT \u2193'}
-                  </span>
-                )}
-              </div>
-
-              {/* 2. Candle countdown */}
-              <div className="mb-1.5">
-                <CandleCountdown />
-              </div>
-
-              {/* 3. Signal strength bar */}
-              <SignalStrengthBar momentum={momentum} />
-
-              {/* Fail reason */}
-              {!momentum.passed && momentum.reason && (
-                <div className="text-[8px] font-mono text-zinc-500 mt-1 truncate">
-                  {momentum.reason.replace(/^EARLY_GATE:\s*/, '').replace(/\s*\u2192\s*SKIP$/, '')}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="text-[9px] font-mono text-zinc-600 mb-2.5">Candles: waiting...</div>
-          )}
 
           {/* ═══ BOT STATE ═══ */}
           <div className={cn(
@@ -1004,17 +881,38 @@ export function OptionsTracker() {
   }, [optionsState, optionsLog, openPositions]);
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
-          BB Squeeze Options
-        </h3>
-        <span className="text-[9px] text-zinc-600 font-mono">Buy Cheap Premium | Hold Breakout</span>
+    <div className="bg-[#0a0a0f] border border-[rgba(255,255,255,0.05)] rounded-2xl p-4 md:p-6">
+      {/* Logo Header */}
+      <div className="flex items-center justify-between mb-6 pb-4 border-b border-[rgba(255,255,255,0.05)]">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-[#00ff88]/20 to-[#00d2ff]/20 border border-[#00ff88]/30">
+            <span className="text-lg font-bold text-[#00ff88]">α</span>
+          </div>
+          <div>
+            <h1 className="text-sm font-bold uppercase tracking-wider text-white">
+              BB SQUEEZE
+            </h1>
+            <p className="text-[10px] text-[#5a5a6a]">
+              Buy Cheap Premium | Hold Breakout
+            </p>
+          </div>
+        </div>
+        <div className="text-[10px] text-[#5a5a6a] font-mono">
+          v0.12.2
+        </div>
       </div>
 
-      <div className="space-y-3">
+      {/* Cards Grid - Responsive */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {pairStates.map((ps) => (
-          <PairCard key={ps.asset} ps={ps} botStatus={botStatus} />
+          <BBOptionsPanel 
+            key={ps.asset} 
+            asset={ps.asset}
+            state={ps.state}
+            openTrade={ps.openTrade}
+            recentEvents={ps.recentEvents}
+            botStatus={botStatus}
+          />
         ))}
       </div>
     </div>

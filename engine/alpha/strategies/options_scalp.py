@@ -812,7 +812,6 @@ class OptionsScalpStrategy(BaseStrategy):
             "highest_premium": highest_prem,
             "chain_calls": chain_calls,
             "chain_puts": chain_puts,
-            "candle_momentum": self._cached_candle_momentum,
             "bot_state": self._cached_bot_state,
             "target_strike": self._cached_target_strike,
             "balance": round(balance, 2) if balance is not None else None,
