@@ -141,6 +141,12 @@ export function LivePositions() {
           ?? pos.current_price
           ?? fallbackPrices.get(asset)
           ?? null;
+        // Last resort: derive approximate current price from bot's current_pnl (%)
+        if (currentPrice == null && pos.current_pnl != null && pos.entry_price > 0) {
+          currentPrice = pos.position_type === 'short'
+            ? pos.entry_price * (1 - pos.current_pnl / 100)
+            : pos.entry_price * (1 + pos.current_pnl / 100);
+        }
       }
 
       // Calculate P&L
@@ -249,6 +255,8 @@ export function LivePositions() {
         deadTimerActive: pos.dead_timer_active ?? false,
         deadElapsed: pos.dead_elapsed ?? null,
         deadRequired: pos.dead_required ?? null,
+        // Raw DB P&L % from bot (fallback display when live prices unavailable)
+        dbCurrentPnlPct: pos.current_pnl ?? null,
       };
     });
   }, [openPositions, livePrices.prices, fallbackPrices, optionsState]);
@@ -436,38 +444,105 @@ export function LivePositions() {
 
               {/* Row 2: Labeled P&L grid */}
               {pos.pricePnlPct != null ? (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1.5 text-xs font-mono">
+                    <div>
+                      <div className="text-[11px] text-zinc-500 uppercase">P&L</div>
+                      <div className={cn('font-bold', pnlColor)}>
+                        {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : '-'}${fmtPnl(pos.pnlUsd)}` : '\u2014'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-zinc-500 uppercase">Return</div>
+                      <div className={cn('font-bold', pnlColor)}>
+                        {pos.capitalPnlPct != null ? `${pos.capitalPnlPct >= 0 ? '+' : ''}${pos.capitalPnlPct.toFixed(1)}%` : '\u2014'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-zinc-500 uppercase">
+                        {pos.isOption ? 'Premium' : 'Entry \u2192 Now'}
+                      </div>
+                      <div className="text-zinc-300">
+                        ${fmtPrice(pos.entryPrice)} &rarr; ${pos.currentPrice != null ? fmtPrice(pos.currentPrice) : '\u2014'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-zinc-500 uppercase">
+                        {pos.isOption ? 'Premium Move' : 'Price Move'}
+                      </div>
+                      <div className={cn(pnlColor)}>
+                        {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(pos.entryPrice < 10 ? 4 : 3)}%
+                      </div>
+                    </div>
+                  </div>
+                  {/* Peak / SL / TP row */}
+                  {((pos.peakPnlPct ?? 0) > 0 || pos.slPrice != null || pos.tpPrice != null) && (
+                    <div className="grid grid-cols-3 gap-x-4 gap-y-1 mt-1 text-xs font-mono">
+                      <div>
+                        <div className="text-[11px] text-zinc-500 uppercase">Peak</div>
+                        <div className="text-[#00c853]">
+                          {(pos.peakPnlPct ?? 0) > 0 ? `+${(pos.peakPnlPct ?? 0).toFixed(2)}%` : '\u2014'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] text-zinc-500 uppercase">SL</div>
+                        <div className="text-[#ff1744]/80">
+                          {pos.slPrice != null ? `$${fmtPrice(pos.slPrice)}` : '\u2014'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] text-zinc-500 uppercase">TP</div>
+                        <div className="text-[#00c853]/80">
+                          {pos.tpPrice != null ? `$${fmtPrice(pos.tpPrice)}` : '\u2014'}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                /* No live price available — show DB-written values from bot */
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1.5 text-xs font-mono">
                   <div>
                     <div className="text-[11px] text-zinc-500 uppercase">P&L</div>
-                    <div className={cn('font-bold', pnlColor)}>
-                      {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : '-'}${fmtPnl(pos.pnlUsd)}` : '\u2014'}
+                    <div className={cn('font-bold',
+                      pos.dbCurrentPnlPct != null
+                        ? (pos.dbCurrentPnlPct >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')
+                        : 'text-zinc-500',
+                    )}>
+                      {pos.dbCurrentPnlPct != null
+                        ? `${pos.dbCurrentPnlPct >= 0 ? '+' : ''}${pos.dbCurrentPnlPct.toFixed(2)}%`
+                        : '\u2014'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-zinc-500 uppercase">Return</div>
-                    <div className={cn('font-bold', pnlColor)}>
-                      {pos.capitalPnlPct != null ? `${pos.capitalPnlPct >= 0 ? '+' : ''}${pos.capitalPnlPct.toFixed(1)}%` : '\u2014'}
+                    <div className="text-[11px] text-zinc-500 uppercase">Peak</div>
+                    <div className="text-[#00c853]">
+                      {(pos.peakPnlPct ?? 0) > 0 ? `+${(pos.peakPnlPct ?? 0).toFixed(2)}%` : '\u2014'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-zinc-500 uppercase">
-                      {pos.isOption ? 'Premium' : 'Entry \u2192 Now'}
-                    </div>
-                    <div className="text-zinc-300">
-                      ${fmtPrice(pos.entryPrice)} &rarr; ${pos.currentPrice != null ? fmtPrice(pos.currentPrice) : '...'}
+                    <div className="text-[11px] text-zinc-500 uppercase">Entry</div>
+                    <div className="text-zinc-300">${fmtPrice(pos.entryPrice)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] text-zinc-500 uppercase">Current</div>
+                    <div className="text-zinc-400">
+                      {pos.currentPrice != null ? `$${fmtPrice(pos.currentPrice)}` : '\u2014'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-zinc-500 uppercase">
-                      {pos.isOption ? 'Premium Move' : 'Price Move'}
+                    <div className="text-[11px] text-zinc-500 uppercase">SL</div>
+                    <div className="text-[#ff1744]/80">
+                      {pos.slPrice != null ? `$${fmtPrice(pos.slPrice)}` : '\u2014'}
                     </div>
-                    <div className={cn(pnlColor)}>
-                      {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(pos.entryPrice < 10 ? 4 : 3)}%
+                  </div>
+                  <div>
+                    <div className="text-[11px] text-zinc-500 uppercase">TP</div>
+                    <div className="text-[#00c853]/80">
+                      {pos.tpPrice != null ? `$${fmtPrice(pos.tpPrice)}` : '\u2014'}
                     </div>
                   </div>
                 </div>
-              ) : (
-                <span className="text-xs text-zinc-500">Calculating...</span>
               )}
 
               {/* Row 3: Position range bar + position size */}

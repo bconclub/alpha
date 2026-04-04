@@ -393,6 +393,17 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
     fetchInitialData();
     fetchViews();
 
+    // Fast poll: refresh open positions every 15s (bot writes current_pnl/price every ~10s)
+    // This ensures live P&L stays fresh even if realtime disconnects silently
+    const livePositionsPoll = setInterval(async () => {
+      const c = getSupabase();
+      if (!c) return;
+      try {
+        const res = await c.from('v_open_positions').select('*');
+        if (res.data) setOpenPositions(res.data as OpenPosition[]);
+      } catch (e) { /* silent */ }
+    }, 15_000);
+
     // Poll every 60s as fallback (realtime may disconnect silently)
     const pollInterval = setInterval(async () => {
       try {
@@ -418,7 +429,10 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       fetchViews();
     }, 60_000);
 
-    return () => clearInterval(pollInterval);
+    return () => {
+      clearInterval(livePositionsPoll);
+      clearInterval(pollInterval);
+    };
   }, [fetchViews, buildInitialFeed]);
 
   // ---------- Realtime subscriptions ----------

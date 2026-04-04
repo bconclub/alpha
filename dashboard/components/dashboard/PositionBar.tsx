@@ -72,6 +72,8 @@ export interface PositionDisplay {
   deadTimerActive?: boolean;
   deadElapsed?: number | null;
   deadRequired?: number | null;
+  // Raw DB-written P&L % from bot (used when live prices unavailable)
+  dbCurrentPnlPct?: number | null;
 }
 
 // ---------------------------------------------------------------------------
