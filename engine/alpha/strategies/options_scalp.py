@@ -1872,13 +1872,13 @@ class OptionsScalpStrategy(BaseStrategy):
                         "[%s] SL_TIGHTEN: 12m stale, SL → %.0f%% (now %.1f%%)",
                         self.option_symbol, self.STALE_SL_12M_BTC, premium_change_pct,
                     )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
                 elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_BTC:
                     self.logger.info(
                         "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
                         self.option_symbol, self.STALE_SL_8M_BTC, premium_change_pct,
                     )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
             else:
                 if hold_min >= self.STALE_EXIT_MIN_ETH:
                     self.logger.info(
@@ -1891,13 +1891,13 @@ class OptionsScalpStrategy(BaseStrategy):
                         "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
                         self.option_symbol, self.STALE_SL_8M_ETH, premium_change_pct,
                     )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
                 elif hold_min >= 5.0 and premium_change_pct < self.STALE_SL_5M_ETH:
                     self.logger.info(
                         "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
                         self.option_symbol, self.STALE_SL_5M_ETH, premium_change_pct,
                     )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE_SL")
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
 
         # ── 12. SIGNAL REVERSAL ─────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):

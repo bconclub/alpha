@@ -149,7 +149,7 @@ def _extract_exit_reason(reason: str) -> str:
         return "UNKNOWN"
     upper = reason.upper()
     for kw in ("OPT_ENTRY_DROP", "OPT_MOMENTUM_FADE", "OPT_DEAD_MOMENTUM",
-               "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET",
+               "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET", "OPT_STALE",
                "OPT_REVERSAL", "OPT_PEAK_TRAIL", "EXPIRED_WORTHLESS",
                "HARD_TP", "PROFIT_LOCK", "DEAD_MOMENTUM", "MOMENTUM_FADE",
                "DECAY_EMERGENCY", "MANUAL_CLOSE", "SPOT_PULLBACK", "SPOT_DECAY",
