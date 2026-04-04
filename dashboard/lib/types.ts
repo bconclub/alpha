@@ -319,6 +319,19 @@ export interface ActivityLogRow {
 
 export type ActivityFilter = 'all' | 'trades' | 'options';
 
+/** BB Squeeze Signals Panel state */
+export interface SignalsPanel {
+  bb_width_pct: number;
+  bb_width_threshold: number;
+  squeeze_status: 'ACTIVE' | 'WAITING';
+  bb_position: number;  // 0-1, where price sits in bands
+  direction_bias: 'CALL' | 'PUT' | 'NEUTRAL';
+  premium_current_ask: number | null;
+  premium_cheap_threshold: number | null;
+  last_action: 'SQUEEZE_FILL' | 'SQUEEZE_NO_FILL' | 'SCANNING';
+  squeeze_duration_candles: number;
+}
+
 /** options_state row from Supabase (engine upserts every ~30s per pair) */
 export interface OptionsState {
   pair: string;
@@ -360,6 +373,8 @@ export interface OptionsState {
   bot_state?: string | null;
   target_strike?: number | null;
   balance?: number | null;
+  // BB Squeeze signals panel (new)
+  signals_panel?: SignalsPanel | null;
   updated_at: string;
 }
 

@@ -10,7 +10,7 @@
    - BB width < 1.0% (ETH) / 0.7% (BTC) for valid squeeze
    - No entries outside squeeze — wait for compression
 
- STEP 2 — DIRECTION BIAS:
+ STEP 2 — DETERMINE DIRECTION BIAS:
    - bb_position < 0.4 → buy CALL (expect upside breakout)
    - bb_position > 0.6 → buy PUT (expect downside breakout)
    - Middle (0.4–0.6) → buy cheaper of ATM call vs put
@@ -24,8 +24,7 @@
 
  STEP 4 — HOLD THROUGH BREAKOUT:
    - Exit system takes over after fill
-   - SQUEEZE_RELEASE: if BB breaks out of KC and premium still below entry
-     after 2 min → wrong direction, exit
+   - SQUEEZE_RELEASE: if BB breaks out of KC and premium still below entry after 2 min → wrong direction, exit
    - No stale SL for first 15 min ETH / 20 min BTC (squeeze takes time)
 
  CONFIDENCE SCORING:
@@ -274,6 +273,17 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_candle_momentum: dict | None = None
         self._cached_bot_state: str = "scanning"
         self._cached_target_strike: float | None = None
+
+        # ── Dashboard signals panel state ─────────────────────────
+        self._squeeze_status: str = "WAITING"           # ACTIVE / WAITING
+        self._bb_width_pct: float = 0.0                 # Current BB width %
+        self._bb_position: float = 0.5                  # Where price sits in bands (0-1)
+        self._direction_bias: str = "NEUTRAL"           # CALL / PUT / NEUTRAL
+        self._premium_current_ask: float = 0.0          # Current ATM ask
+        self._premium_cheap_threshold: float = 0.0      # Cheap threshold price
+        self._last_action: str = "SCANNING"             # SQUEEZE_FILL / SQUEEZE_NO_FILL / SCANNING
+        self._squeeze_duration_candles: int = 0         # How long squeeze has been active
+        self._squeeze_active_since: float | None = None # When squeeze started
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -765,6 +775,22 @@ class OptionsScalpStrategy(BaseStrategy):
                 "breakout_time": self._squeeze_breakout_time,
             }
 
+        # ── Signals panel state ──
+        signals_panel = {
+            "bb_width_pct": round(self._bb_width_pct, 3),
+            "bb_width_threshold": (
+                self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                else self.SQUEEZE_BB_WIDTH_ETH
+            ),
+            "squeeze_status": self._squeeze_status,
+            "bb_position": round(self._bb_position, 2),
+            "direction_bias": self._direction_bias,
+            "premium_current_ask": round(self._premium_current_ask, 4) if self._premium_current_ask > 0 else None,
+            "premium_cheap_threshold": round(self._premium_cheap_threshold, 4) if self._premium_cheap_threshold > 0 else None,
+            "last_action": self._last_action,
+            "squeeze_duration_candles": self._squeeze_duration_candles,
+        }
+
         state = {
             "spot_price": spot_price or None,
             "expiry": expiry_ts,
@@ -791,6 +817,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "target_strike": self._cached_target_strike,
             "balance": round(balance, 2) if balance is not None else None,
             "squeeze_info": squeeze_info,
+            "signals_panel": signals_panel,
         }
 
         await self._db.upsert_options_state(self.pair, state)
@@ -826,7 +853,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "in_position"
             return
 
-        # No-fill cooldown
+        # No-fill cooldown (not used for squeeze, but keep for compatibility)
         if time.monotonic() < self._no_fill_cooldown_until:
             remaining = self._no_fill_cooldown_until - time.monotonic()
             self._cached_bot_state = f"blocked:no_fill_cooldown:{int(remaining)}s"
@@ -1010,6 +1037,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # STEP 1: DETECT BB SQUEEZE
         squeeze_result = await self._detect_squeeze()
         if squeeze_result is None:
+            self._squeeze_status = "WAITING"
+            self._direction_bias = "NEUTRAL"
             return []
 
         is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, _candles_used = squeeze_result
@@ -1018,6 +1047,10 @@ class OptionsScalpStrategy(BaseStrategy):
             else self.SQUEEZE_BB_WIDTH_ETH
         )
 
+        # Update dashboard signals panel
+        self._bb_width_pct = bb_width_pct
+        self._bb_position = bb_position
+
         if self._tick_count % 6 == 0:
             self.logger.info(
                 "[%s] SQUEEZE_SCAN: BB_width=%.3f%% squeeze=%s (thresh=%.1f%%)",
@@ -1025,14 +1058,24 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         if not is_squeeze:
+            self._squeeze_status = "WAITING"
+            self._squeeze_active_since = None
+            self._squeeze_duration_candles = 0
             self._cached_bot_state = "scanning:no_squeeze"
             return []
 
+        # Track squeeze duration
+        if self._squeeze_active_since is None:
+            self._squeeze_active_since = time.monotonic()
+        self._squeeze_duration_candles += 1
+
         # Check if BB width is tight enough
         if bb_width_pct >= bb_width_threshold:
+            self._squeeze_status = "ACTIVE"
             self._cached_bot_state = "scanning:bb_too_wide"
             return []
 
+        self._squeeze_status = "ACTIVE"
         self.logger.info(
             "[%s] SQUEEZE_DETECTED: BB_width=%.3f%% KC_contains_BB=true",
             self.pair, bb_width_pct,
@@ -1041,10 +1084,13 @@ class OptionsScalpStrategy(BaseStrategy):
         # STEP 2: DETERMINE DIRECTION BIAS
         if bb_position < 0.4:
             option_type: str = "call"
+            self._direction_bias = "CALL"
         elif bb_position > 0.6:
             option_type = "put"
+            self._direction_bias = "PUT"
         else:
             option_type = "middle"  # resolved below via premium comparison
+            self._direction_bias = "NEUTRAL"
 
         # Get current price
         current_price = 0.0
@@ -1103,6 +1149,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 option_type = "put"
             else:
                 option_type = "call"
+            self._direction_bias = option_type.upper()
             self.logger.info(
                 "[%s] SQUEEZE_BIAS: bb_pos=%.2f → %s (middle zone, cheaper ATM premium)",
                 self.pair, bb_position, option_type.upper(),
@@ -1152,6 +1199,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:no_affordable_strike"
             return []
 
+        # Update dashboard premium info
+        self._premium_current_ask = current_ask
+
         # Update premium history for cheap-threshold computation
         now_mono = time.monotonic()
         self._premium_history.append((now_mono, current_ask))
@@ -1166,6 +1216,8 @@ class OptionsScalpStrategy(BaseStrategy):
             cheap_threshold = lowest_ask + (highest_ask - lowest_ask) * self.SQUEEZE_CHEAP_PERCENTILE
         else:
             cheap_threshold = current_ask
+
+        self._premium_cheap_threshold = cheap_threshold
 
         limit_price = min(current_ask, cheap_threshold)
         if limit_price < self.MIN_PREMIUM_USD:
@@ -1300,6 +1352,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"{self.pair} — SQUEEZE_NO_FILL: ask=${current_ask:.4f} threshold=${cheap_threshold:.4f}",
                 {"ask": current_ask, "threshold": cheap_threshold},
             )
+            self._last_action = "SQUEEZE_NO_FILL"
             # No cooldown — squeeze setups are rare, don't penalize
             return []
 
@@ -1314,6 +1367,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         premium = fill_price
         self._limit_entry_filled = True
+        self._last_action = "SQUEEZE_FILL"
 
         self.logger.info(
             "[%s] SQUEEZE_FILL: premium=$%.4f range=[$%.4f-$%.4f] threshold=$%.4f",
@@ -1532,16 +1586,24 @@ class OptionsScalpStrategy(BaseStrategy):
                 return gone
 
         # Check for squeeze breakout (for SQUEEZE_RELEASE exit)
+        squeeze_breakout_direction = None
         if self._is_squeeze_entry:
             squeeze_result = await self._detect_squeeze()
             if squeeze_result is not None:
                 is_squeeze, bb_width_pct, bb_position, _, _ = squeeze_result
                 if not is_squeeze and self._squeeze_breakout_time is None:
-                    # Squeeze just released — start timer
+                    # Squeeze just released — determine direction
                     self._squeeze_breakout_time = time.monotonic()
+                    # Determine breakout direction based on BB position
+                    if bb_position > 0.6:
+                        squeeze_breakout_direction = "UP"
+                    elif bb_position < 0.4:
+                        squeeze_breakout_direction = "DOWN"
+                    else:
+                        squeeze_breakout_direction = "UNKNOWN"
                     self.logger.info(
-                        "[%s] SQUEEZE_BREAKOUT: BB left KC, starting 2min timer",
-                        self.option_symbol,
+                        "[%s] SQUEEZE_BREAKOUT: BB left KC (dir=%s), starting 2min timer",
+                        self.option_symbol, squeeze_breakout_direction,
                     )
 
         # Fetch current premium
@@ -1675,10 +1737,19 @@ class OptionsScalpStrategy(BaseStrategy):
             time_since_breakout = time.monotonic() - self._squeeze_breakout_time
             if time_since_breakout >= self.SQUEEZE_RELEASE_WAIT_SEC:
                 if premium_change_pct < 0:
+                    # Determine breakout direction for logging
+                    breakout_dir = "UNKNOWN"
+                    squeeze_result = await self._detect_squeeze()
+                    if squeeze_result is not None:
+                        _, _, bb_position, _, _ = squeeze_result
+                        if bb_position > 0.6:
+                            breakout_dir = "UP"
+                        elif bb_position < 0.4:
+                            breakout_dir = "DOWN"
                     # Breakout went wrong direction
                     self.logger.info(
-                        "[%s] SQUEEZE_RELEASE: breakout wrong dir, premium=%.1f%% after 2min → EXIT",
-                        self.option_symbol, premium_change_pct,
+                        "[%s] SQUEEZE_RELEASE: breakout %s, premium=%.1f%% after 2min → EXIT",
+                        self.option_symbol, breakout_dir, premium_change_pct,
                     )
                     return await self._do_option_exit(current_premium, premium_change_pct, "SQUEEZE_RELEASE")
                 else:
@@ -2110,7 +2181,7 @@ class OptionsScalpStrategy(BaseStrategy):
         pnl_usd = self._calc_options_pnl(self.entry_premium, current_premium, self._contracts)
         reason = (
             f"Option {exit_type} {self.option_side} | "
-            f"${self.entry_premium:.4f} → ${current_premium:.4f} "
+            f"${self.entry_premium:.4f} \u2192 ${current_premium:.4f} "
             f"({pnl_pct:+.1f}%) P&L=${pnl_usd:+.4f}"
         )
         self.logger.info("[%s] OPTIONS EXIT — %s", self.option_symbol, reason)
@@ -2339,6 +2410,11 @@ class OptionsScalpStrategy(BaseStrategy):
             self.pair, exit_reason, self._POSITION_GONE_COOLDOWN_SEC,
         )
 
+        # Build exit signal with proper exit_type for position-gone scenarios
+        peak_pnl_pct = (
+            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+        ) if self.entry_premium > 0 else 0
+
         self.in_position = False
         OptionsScalpStrategy._global_in_position = False
         OptionsScalpStrategy._global_position_asset = None
@@ -2356,7 +2432,25 @@ class OptionsScalpStrategy(BaseStrategy):
         self._is_squeeze_entry = False
         self._squeeze_breakout_time = None
 
-        return []
+        # Return Signal with exit_type so executor knows why we exited
+        return [Signal(
+            side="sell",
+            price=exit_premium,
+            amount=float(self._contracts) if self._contracts else 0.0,
+            order_type="market",
+            reason=f"Option {exit_reason_detail} — position closed externally",
+            strategy=self.name,
+            pair=self.option_symbol or self.pair,
+            leverage=self.OPTIONS_LEVERAGE,
+            position_type="long",
+            reduce_only=True,
+            exchange_id="delta",
+            metadata={
+                "peak_pnl": round(peak_pnl_pct, 4),
+                "exit_type": exit_reason_detail,
+                "db_already_closed": True,
+            },
+        )]
 
     async def _clear_dashboard_position(
         self, exit_type: str = "", pnl_pct: float = 0.0, pnl_usd: float = 0.0,
@@ -2400,6 +2494,20 @@ class OptionsScalpStrategy(BaseStrategy):
             "last_exit_type": exit_type,
             "last_exit_pnl_pct": round(pnl_pct, 2),
             "last_exit_pnl_usd": round(pnl_usd, 4),
+            "signals_panel": {
+                "bb_width_pct": round(self._bb_width_pct, 3),
+                "bb_width_threshold": (
+                    self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                    else self.SQUEEZE_BB_WIDTH_ETH
+                ),
+                "squeeze_status": "WAITING",
+                "bb_position": round(self._bb_position, 2),
+                "direction_bias": "NEUTRAL",
+                "premium_current_ask": None,
+                "premium_cheap_threshold": None,
+                "last_action": "SCANNING",
+                "squeeze_duration_candles": 0,
+            },
         }
 
         try:

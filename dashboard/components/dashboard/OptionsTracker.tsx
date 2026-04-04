@@ -257,7 +257,164 @@ function SignalStrengthBar({ momentum }: {
 }
 
 // ══════════════════════════════════════════════════════════════
-// 4. PremiumTick — premium value + direction arrow + delta
+// 4. BBSqueezeSignalsPanel — BB Squeeze visualization
+// ══════════════════════════════════════════════════════════════
+
+function BBSqueezeSignalsPanel({ signals }: { signals: import('@/lib/types').SignalsPanel | null | undefined }) {
+  if (!signals) return null;
+
+  const {
+    bb_width_pct,
+    bb_width_threshold,
+    squeeze_status,
+    bb_position,
+    direction_bias,
+    premium_current_ask,
+    premium_cheap_threshold,
+    last_action,
+    squeeze_duration_candles,
+  } = signals;
+
+  const isSqueezeActive = squeeze_status === 'ACTIVE';
+  const widthRatio = Math.min((bb_width_pct / bb_width_threshold) * 100, 100);
+  
+  // Determine color based on how tight the squeeze is
+  let widthColor = 'bg-[#ff1744]';  // Wide/red
+  if (bb_width_pct < bb_width_threshold * 0.5) widthColor = 'bg-[#00e676]';  // Very tight
+  else if (bb_width_pct < bb_width_threshold * 0.75) widthColor = 'bg-[#00c853]';  // Tight
+  else if (bb_width_pct < bb_width_threshold) widthColor = 'bg-[#ffd600]';  // Getting tight
+
+  // BB position indicator (0 = lower band, 1 = upper band)
+  const positionPct = Math.max(0, Math.min(100, bb_position * 100));
+  
+  // Direction bias colors
+  const biasColor = direction_bias === 'CALL' 
+    ? 'text-[#00c853]' 
+    : direction_bias === 'PUT' 
+      ? 'text-[#ff1744]' 
+      : 'text-zinc-400';
+  const biasBg = direction_bias === 'CALL' 
+    ? 'bg-[#00c853]/15 border-[#00c853]/30' 
+    : direction_bias === 'PUT' 
+      ? 'bg-[#ff1744]/15 border-[#ff1744]/30' 
+      : 'bg-zinc-800/50 border-zinc-700';
+
+  // Last action color
+  const actionColor = last_action === 'SQUEEZE_FILL' 
+    ? 'text-[#00c853]' 
+    : last_action === 'SQUEEZE_NO_FILL' 
+      ? 'text-[#ff1744]' 
+      : 'text-zinc-500';
+
+  return (
+    <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2.5">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">BB Squeeze</span>
+        <span className={cn(
+          'px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase border',
+          isSqueezeActive 
+            ? 'bg-[#00c853]/15 text-[#00c853] border-[#00c853]/30' 
+            : 'bg-zinc-800 text-zinc-500 border-zinc-700'
+        )}>
+          {squeeze_status}
+        </span>
+      </div>
+
+      {/* BB Width % with threshold bar */}
+      <div className="mb-2.5">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[8px] text-zinc-500">BB Width</span>
+          <span className="text-[8px] font-mono text-zinc-300">{bb_width_pct.toFixed(2)}% / {bb_width_threshold}% threshold</span>
+        </div>
+        <div className="relative h-2 rounded-full bg-zinc-800 overflow-hidden">
+          <div
+            className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-500', widthColor)}
+            style={{ width: `${widthRatio}%` }}
+          />
+          {/* Threshold marker */}
+          <div 
+            className="absolute inset-y-0 w-0.5 bg-white/50"
+            style={{ left: `${Math.min((bb_width_threshold / bb_width_threshold) * 100, 100)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* BB Position indicator (where price sits in bands) */}
+      <div className="mb-2.5">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[8px] text-zinc-500">BB Position</span>
+          <span className="text-[8px] font-mono text-zinc-300">{bb_position.toFixed(2)}</span>
+        </div>
+        <div className="relative h-1.5 rounded-full bg-gradient-to-r from-[#00c853]/30 via-zinc-700 to-[#ff1744]/30 overflow-hidden">
+          <div 
+            className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.5)]"
+            style={{ left: `${positionPct}%`, transform: `translateX(-50%) translateY(-50%)` }}
+          />
+        </div>
+        <div className="flex justify-between text-[7px] text-zinc-600 mt-0.5">
+          <span>Lower</span>
+          <span>Middle</span>
+          <span>Upper</span>
+        </div>
+      </div>
+
+      {/* Direction Bias */}
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[8px] text-zinc-500">Direction Bias</span>
+        <span className={cn(
+          'px-2 py-0.5 rounded text-[9px] font-mono font-bold border',
+          biasBg, biasColor
+        )}>
+          {direction_bias}
+        </span>
+      </div>
+
+      {/* Premium: current ask vs cheap threshold */}
+      {(premium_current_ask != null || premium_cheap_threshold != null) && (
+        <div className="mb-2 p-1.5 bg-zinc-900/50 rounded">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[8px] text-zinc-500">Premium Ask</span>
+            <span className="text-[9px] font-mono text-zinc-300">
+              ${premium_current_ask?.toFixed(4) ?? '—'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[8px] text-zinc-500">Cheap Threshold</span>
+            <span className="text-[9px] font-mono text-[#00c853]">
+              ${premium_cheap_threshold?.toFixed(4) ?? '—'}
+            </span>
+          </div>
+          {premium_current_ask != null && premium_cheap_threshold != null && (
+            <div className="mt-1 text-[7px] font-mono">
+              {premium_current_ask <= premium_cheap_threshold ? (
+                <span className="text-[#00c853]">✓ Below threshold — cheap entry</span>
+              ) : (
+                <span className="text-[#ffd600]">Waiting for cheap entry...</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Squeeze duration */}
+      <div className="flex items-center justify-between text-[8px] font-mono text-zinc-500 mb-1.5">
+        <span>Squeeze duration</span>
+        <span>{squeeze_duration_candles} candles</span>
+      </div>
+
+      {/* Last action */}
+      <div className="flex items-center justify-between text-[8px]">
+        <span className="text-zinc-500">Last action</span>
+        <span className={cn('font-mono font-medium', actionColor)}>
+          {last_action}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 5. PremiumTick — premium value + direction arrow + delta
 // ══════════════════════════════════════════════════════════════
 
 function PremiumTick({ label, value, colorUp, colorDown }: {
@@ -310,7 +467,7 @@ function PremiumTick({ label, value, colorUp, colorDown }: {
 }
 
 // ══════════════════════════════════════════════════════════════
-// 5. PositionLive — live ticking position state
+// 6. PositionLive — live ticking position state
 // ══════════════════════════════════════════════════════════════
 
 function PositionLive({
@@ -423,7 +580,7 @@ function PositionLive({
 }
 
 // ══════════════════════════════════════════════════════════════
-// 6. CooldownDisplay — post-exit cooldown with candle count
+// 7. CooldownDisplay — post-exit cooldown with candle count
 // ══════════════════════════════════════════════════════════════
 
 function CooldownDisplay({
@@ -480,7 +637,7 @@ function CooldownDisplay({
 }
 
 // ══════════════════════════════════════════════════════════════
-// 7. RegimeBadge — flashing regime with duration
+// 8. RegimeBadge — flashing regime with duration
 // ══════════════════════════════════════════════════════════════
 
 function RegimeBadge({ regime, regimeSince }: {
@@ -648,6 +805,9 @@ function PairCard({ ps, botStatus }: { ps: MergedPairState; botStatus: BotStatus
           <div className="mb-2.5">
             <RegimeBadge regime={regime} regimeSince={regimeSince} />
           </div>
+
+          {/* ═══ BB SQUEEZE SIGNALS PANEL ═══ */}
+          <BBSqueezeSignalsPanel signals={s.signals_panel} />
 
           {/* ═══ CANDLE MOMENTUM BOXES + 2. COUNTDOWN + 3. SIGNAL BAR ═══ */}
           {momentum ? (
@@ -847,9 +1007,9 @@ export function OptionsTracker() {
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-amber-400 uppercase tracking-wider">
-          Options Entry Signals
+          BB Squeeze Options
         </h3>
-        <span className="text-[9px] text-zinc-600 font-mono">BTC + ETH | LIVE</span>
+        <span className="text-[9px] text-zinc-600 font-mono">Buy Cheap Premium | Hold Breakout</span>
       </div>
 
       <div className="space-y-3">
