@@ -19,11 +19,33 @@ function fmtPrem(v: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// BB Squeeze Signals Panel (replaces candle momentum)
+// BB Squeeze Signals Panel
 // ---------------------------------------------------------------------------
 
-function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_panel'] }) {
-  if (!signals) {
+type BBSqueezeProps = Pick<OptionsState,
+  | 'bb_width_pct'
+  | 'bb_width_threshold'
+  | 'squeeze_active'
+  | 'bb_position'
+  | 'direction_bias'
+  | 'premium_current_ask'
+  | 'premium_cheap_threshold'
+  | 'last_squeeze_action'
+>;
+
+function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
+  const {
+    bb_width_pct,
+    bb_width_threshold,
+    squeeze_active,
+    bb_position,
+    direction_bias,
+    premium_current_ask,
+    premium_cheap_threshold,
+    last_squeeze_action,
+  } = props;
+
+  if (bb_width_pct == null || bb_width_threshold == null) {
     return (
       <div className="text-[9px] font-mono text-zinc-600 mb-2">
         BB Squeeze: waiting...
@@ -31,21 +53,8 @@ function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_pan
     );
   }
 
-  const {
-    bb_width_pct,
-    bb_width_threshold,
-    squeeze_status,
-    bb_position,
-    direction_bias,
-    premium_current_ask,
-    premium_cheap_threshold,
-    last_action,
-    squeeze_duration_candles,
-  } = signals;
-
-  const isSqueezeActive = squeeze_status === 'ACTIVE';
   const widthRatio = Math.min((bb_width_pct / bb_width_threshold) * 100, 100);
-  
+
   // Determine color based on how tight the squeeze is
   let widthColor = 'bg-[#ff1744]';  // Wide/red
   if (bb_width_pct < bb_width_threshold * 0.5) widthColor = 'bg-[#00e676]';  // Very tight
@@ -53,25 +62,25 @@ function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_pan
   else if (bb_width_pct < bb_width_threshold) widthColor = 'bg-[#ffd600]';  // Getting tight
 
   // BB position indicator (0 = lower band, 1 = upper band)
-  const positionPct = Math.max(0, Math.min(100, bb_position * 100));
-  
+  const positionPct = Math.max(0, Math.min(100, (bb_position ?? 0.5) * 100));
+
   // Direction bias colors
-  const biasColor = direction_bias === 'CALL' 
-    ? 'text-[#00c853]' 
-    : direction_bias === 'PUT' 
-      ? 'text-[#ff1744]' 
+  const biasColor = direction_bias === 'CALL'
+    ? 'text-[#00c853]'
+    : direction_bias === 'PUT'
+      ? 'text-[#ff1744]'
       : 'text-zinc-400';
-  const biasBg = direction_bias === 'CALL' 
-    ? 'bg-[#00c853]/15 border-[#00c853]/30' 
-    : direction_bias === 'PUT' 
-      ? 'bg-[#ff1744]/15 border-[#ff1744]/30' 
+  const biasBg = direction_bias === 'CALL'
+    ? 'bg-[#00c853]/15 border-[#00c853]/30'
+    : direction_bias === 'PUT'
+      ? 'bg-[#ff1744]/15 border-[#ff1744]/30'
       : 'bg-zinc-800/50 border-zinc-700';
 
   // Last action color
-  const actionColor = last_action === 'SQUEEZE_FILL' 
-    ? 'text-[#00c853]' 
-    : last_action === 'SQUEEZE_NO_FILL' 
-      ? 'text-[#ff1744]' 
+  const actionColor = last_squeeze_action === 'SQUEEZE_FILL'
+    ? 'text-[#00c853]'
+    : last_squeeze_action === 'SQUEEZE_NO_FILL'
+      ? 'text-[#ff1744]'
       : 'text-zinc-500';
 
   return (
@@ -81,11 +90,11 @@ function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_pan
         <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">BB Squeeze</span>
         <span className={cn(
           'px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase border',
-          isSqueezeActive 
-            ? 'bg-[#00c853]/15 text-[#00c853] border-[#00c853]/30' 
+          squeeze_active
+            ? 'bg-[#00c853]/15 text-[#00c853] border-[#00c853]/30'
             : 'bg-zinc-800 text-zinc-500 border-zinc-700'
         )}>
-          {squeeze_status}
+          {squeeze_active ? 'ACTIVE' : 'WAITING'}
         </span>
       </div>
 
@@ -100,8 +109,8 @@ function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_pan
             className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-500', widthColor)}
             style={{ width: `${widthRatio}%` }}
           />
-          {/* Threshold marker */}
-          <div 
+          {/* Threshold marker at 100% */}
+          <div
             className="absolute inset-y-0 w-0.5 bg-white/50"
             style={{ left: '100%' }}
           />
@@ -112,12 +121,12 @@ function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_pan
       <div className="mb-2.5">
         <div className="flex items-center justify-between mb-1">
           <span className="text-[8px] text-zinc-500">BB Position</span>
-          <span className="text-[8px] font-mono text-zinc-300">{bb_position.toFixed(2)}</span>
+          <span className="text-[8px] font-mono text-zinc-300">{(bb_position ?? 0).toFixed(2)}</span>
         </div>
         <div className="relative h-1.5 rounded-full bg-gradient-to-r from-[#00c853]/30 via-zinc-700 to-[#ff1744]/30 overflow-hidden">
-          <div 
+          <div
             className="absolute top-1/2 w-2 h-2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.5)]"
-            style={{ left: `${positionPct}%`, transform: `translateX(-50%) translateY(-50%)` }}
+            style={{ left: `${positionPct}%`, transform: 'translateX(-50%) translateY(-50%)' }}
           />
         </div>
         <div className="flex justify-between text-[7px] text-zinc-600 mt-0.5">
@@ -134,7 +143,7 @@ function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_pan
           'px-2 py-0.5 rounded text-[9px] font-mono font-bold border',
           biasBg, biasColor
         )}>
-          {direction_bias}
+          {direction_bias ?? 'NEUTRAL'}
         </span>
       </div>
 
@@ -165,17 +174,11 @@ function BBSqueezeSignalsPanel({ signals }: { signals: OptionsState['signals_pan
         </div>
       )}
 
-      {/* Squeeze duration */}
-      <div className="flex items-center justify-between text-[8px] font-mono text-zinc-500 mb-1.5">
-        <span>Squeeze duration</span>
-        <span>{squeeze_duration_candles} candles</span>
-      </div>
-
       {/* Last action */}
       <div className="flex items-center justify-between text-[8px]">
         <span className="text-zinc-500">Last action</span>
         <span className={cn('font-mono font-medium', actionColor)}>
-          {last_action}
+          {last_squeeze_action ?? 'SCANNING'}
         </span>
       </div>
     </div>
@@ -364,7 +367,16 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
       </div>
 
       {/* BB Squeeze Signals Panel */}
-      <BBSqueezeSignalsPanel signals={state.signals_panel} />
+      <BBSqueezeSignalsPanel
+        bb_width_pct={state.bb_width_pct}
+        bb_width_threshold={state.bb_width_threshold}
+        squeeze_active={state.squeeze_active}
+        bb_position={state.bb_position}
+        direction_bias={state.direction_bias}
+        premium_current_ask={state.premium_current_ask}
+        premium_cheap_threshold={state.premium_cheap_threshold}
+        last_squeeze_action={state.last_squeeze_action}
+      />
 
       {/* Bot State */}
       <BotStateBadge state={botState} />

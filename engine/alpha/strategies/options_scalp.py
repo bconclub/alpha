@@ -818,6 +818,18 @@ class OptionsScalpStrategy(BaseStrategy):
             "balance": round(balance, 2) if balance is not None else None,
             "squeeze_info": squeeze_info,
             "signals_panel": signals_panel,
+            # Top-level squeeze fields (read directly by dashboard)
+            "bb_width_pct": round(self._bb_width_pct, 3),
+            "bb_width_threshold": (
+                self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                else self.SQUEEZE_BB_WIDTH_ETH
+            ),
+            "squeeze_active": self._squeeze_status == "ACTIVE",
+            "bb_position": round(self._bb_position, 2),
+            "direction_bias": self._direction_bias,
+            "premium_current_ask": round(self._premium_current_ask, 4) if self._premium_current_ask > 0 else None,
+            "premium_cheap_threshold": round(self._premium_cheap_threshold, 4) if self._premium_cheap_threshold > 0 else None,
+            "last_squeeze_action": self._last_action,
         }
 
         await self._db.upsert_options_state(self.pair, state)
@@ -2508,6 +2520,18 @@ class OptionsScalpStrategy(BaseStrategy):
                 "last_action": "SCANNING",
                 "squeeze_duration_candles": 0,
             },
+            # Top-level squeeze fields (read directly by dashboard)
+            "bb_width_pct": round(self._bb_width_pct, 3),
+            "bb_width_threshold": (
+                self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                else self.SQUEEZE_BB_WIDTH_ETH
+            ),
+            "squeeze_active": False,
+            "bb_position": round(self._bb_position, 2),
+            "direction_bias": "NEUTRAL",
+            "premium_current_ask": None,
+            "premium_cheap_threshold": None,
+            "last_squeeze_action": "SCANNING",
         }
 
         try:

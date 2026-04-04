@@ -375,6 +375,15 @@ export interface OptionsState {
   balance?: number | null;
   // BB Squeeze signals panel (new)
   signals_panel?: SignalsPanel | null;
+  // Top-level BB Squeeze fields (wired directly for dashboard panel)
+  bb_width_pct?: number | null;
+  bb_width_threshold?: number | null;
+  squeeze_active?: boolean | null;
+  bb_position?: number | null;
+  direction_bias?: 'CALL' | 'PUT' | 'NEUTRAL' | null;
+  premium_current_ask?: number | null;
+  premium_cheap_threshold?: number | null;
+  last_squeeze_action?: 'SQUEEZE_FILL' | 'SQUEEZE_NO_FILL' | 'SCANNING' | null;
   updated_at: string;
 }
 
