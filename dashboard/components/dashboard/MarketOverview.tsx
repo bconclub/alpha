@@ -65,7 +65,7 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
 
   return (
     <div className={cn(
-      'bg-[#0f0f14] border rounded-lg p-4',
+      'bg-[#0f0f14] border rounded-lg p-3 sm:p-4',
       inTrade
         ? positionSide === 'short'
           ? 'border-[#ff1744]/20'
@@ -79,7 +79,7 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
 
       {/* Price */}
       <div className="mb-1.5">
-        <span className="text-2xl font-bold font-mono text-white">
+        <span className="text-lg sm:text-2xl font-bold font-mono text-white leading-tight">
           {card.currentPrice != null ? `$${formatNumber(card.currentPrice)}` : '—'}
         </span>
       </div>
@@ -91,7 +91,7 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
       </div>
 
       {/* Indicators */}
-      <div className="grid grid-cols-3 gap-1.5 text-xs">
+      <div className="grid grid-cols-3 gap-1 text-xs">
         <div>
           <span className="text-zinc-500 text-[10px] block">RSI</span>
           <span className={cn('font-mono font-medium text-xs', rsiColor)}>
@@ -181,7 +181,7 @@ export function MarketOverview() {
   }, [strategyLog, openPositions]);
 
   return (
-    <div className="bg-[#141419] border border-white/5 rounded-xl p-6">
+    <div className="bg-[#141419] border border-white/5 rounded-xl p-4 sm:p-6">
       <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">
         Market Overview
       </h2>

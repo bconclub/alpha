@@ -108,34 +108,34 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
       state.leftBorder
     )}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-lg font-bold text-white">{asset.asset}</span>
-          <span className="text-sm text-gray-400 font-mono">
+      <div className="flex items-start justify-between gap-2 mb-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-lg font-bold text-white shrink-0">{asset.asset}</span>
+          <span className="text-sm text-gray-400 font-mono truncate">
             {asset.price != null ? `$${formatNumber(asset.price)}` : '—'}
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 shrink-0">
           <span className={cn(
             'w-2 h-2 rounded-full',
             state.dotColor,
             state.pulse && 'animate-pulse'
           )} />
           <span className={cn(
-            'px-2 py-0.5 rounded text-[10px] font-bold border',
+            'px-1.5 py-0.5 rounded text-[10px] font-bold border',
             state.badgeColor
           )}>
             {state.label}
           </span>
-          <span className="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">Delta</span>
+          <span className="hidden sm:inline text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">Delta</span>
         </div>
       </div>
 
       {/* BB Width */}
       <div className="mb-3">
-        <div className="flex justify-between text-xs mb-1">
-          <span className="text-gray-400">BB Width</span>
-          <span className="font-mono text-gray-300">
+        <div className="flex justify-between text-xs mb-1 gap-2">
+          <span className="text-gray-400 shrink-0">BB Width</span>
+          <span className="font-mono text-gray-300 truncate text-right">
             {asset.bbWidth != null ? `${asset.bbWidth.toFixed(2)}%` : '--%'} / {threshold}%
           </span>
         </div>
@@ -481,7 +481,7 @@ export default function DashboardPage() {
   }, [trades, capitalTimeframe]);
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white p-4 md:p-6 pb-24 md:pb-6">
+    <div className="min-h-screen bg-[#0a0a0f] text-white p-3 sm:p-4 md:p-6 pb-24 md:pb-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
