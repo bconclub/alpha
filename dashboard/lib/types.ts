@@ -385,7 +385,14 @@ export interface OptionsState {
   direction_bias?: 'CALL' | 'PUT' | 'NEUTRAL' | null;
   premium_current_ask?: number | null;
   premium_cheap_threshold?: number | null;
-  last_squeeze_action?: 'SQUEEZE_FILL' | 'SQUEEZE_NO_FILL' | 'SCANNING' | null;
+  premium_lowest_ask?: number | null;
+  premium_highest_ask?: number | null;
+  last_squeeze_action?: 'SQUEEZE_FILL' | 'SQUEEZE_NO_FILL' | 'BREAKOUT_CONFIRMED' | 'BREAKOUT_FAKEOUT' | 'BREAKOUT_NO_FILL' | 'SCANNING' | null;
+  last_action_at?: string | null;
+  /** 'UP' | 'DOWN' when in 60s confirmation window, null otherwise */
+  breakout_state?: 'UP' | 'DOWN' | null;
+  /** Seconds remaining in the 60s confirmation window */
+  breakout_confirmation_seconds_remaining?: number | null;
   updated_at: string;
 }
 

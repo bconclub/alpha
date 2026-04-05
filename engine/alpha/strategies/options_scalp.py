@@ -223,6 +223,9 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_skip_time: float = 0.0
         self._SKIP_LOG_INTERVAL = 5 * 60  # 5 minutes
 
+        # Last-action timestamp (wall-clock) for dashboard "X seconds ago" display
+        self._last_action_at: float = 0.0
+
         # Dashboard state write interval
         self._STATE_WRITE_INTERVAL = 30  # Write to DB every 30 seconds
         self._last_state_write: float = 0.0
@@ -847,6 +850,25 @@ class OptionsScalpStrategy(BaseStrategy):
             "premium_current_ask": round(self._premium_current_ask, 4) if self._premium_current_ask > 0 else None,
             "premium_cheap_threshold": round(self._premium_cheap_threshold, 4) if self._premium_cheap_threshold > 0 else None,
             "last_squeeze_action": self._last_action,
+            "last_action_at": (
+                datetime.fromtimestamp(self._last_action_at, tz=timezone.utc).isoformat()
+                if self._last_action_at > 0 else None
+            ),
+            # Breakout confirmation state
+            "breakout_state": self._breakout_direction if self._breakout_pending else None,
+            "breakout_confirmation_seconds_remaining": (
+                max(0, int(self.BREAKOUT_CONFIRM_SEC - (time.monotonic() - self._breakout_time)))
+                if self._breakout_pending and self._breakout_time is not None else None
+            ),
+            # 30-min premium range (actual low/high from history)
+            "premium_lowest_ask": (
+                round(min(a for _, a in self._premium_history), 4)
+                if self._premium_history else None
+            ),
+            "premium_highest_ask": (
+                round(max(a for _, a in self._premium_history), 4)
+                if self._premium_history else None
+            ),
         }
 
         await self._db.upsert_options_state(self.pair, state)
@@ -1327,6 +1349,7 @@ class OptionsScalpStrategy(BaseStrategy):
                  "entry_ask": self._breakout_entry_ask, "elapsed": round(elapsed, 1)},
             )
             self._last_action = "BREAKOUT_FAKEOUT"
+            self._last_action_at = time.time()
             self._reset_breakout_state()
             return []
 
@@ -1503,6 +1526,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 {"ask": limit_price, "direction": self._breakout_direction},
             )
             self._last_action = "BREAKOUT_NO_FILL"
+            self._last_action_at = time.time()
             self._reset_breakout_state()
             return []
 
@@ -1518,6 +1542,7 @@ class OptionsScalpStrategy(BaseStrategy):
         premium = fill_price
         self._limit_entry_filled = True
         self._last_action = "SQUEEZE_FILL"
+        self._last_action_at = time.time()
 
         self.logger.info(
             "[%s] BREAKOUT_FILL: dir=%s premium=$%.4f",

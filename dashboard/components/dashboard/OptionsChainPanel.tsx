@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useEffect, useState } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { OptionsState } from '@/lib/types';
@@ -30,8 +30,28 @@ type BBSqueezeProps = Pick<OptionsState,
   | 'direction_bias'
   | 'premium_current_ask'
   | 'premium_cheap_threshold'
+  | 'premium_lowest_ask'
+  | 'premium_highest_ask'
   | 'last_squeeze_action'
+  | 'last_action_at'
+  | 'breakout_state'
+  | 'breakout_confirmation_seconds_remaining'
 >;
+
+function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
+  const [secs, setSecs] = useState<number | null>(null);
+  useEffect(() => {
+    if (!isoTimestamp) { setSecs(null); return; }
+    const update = () => {
+      const diff = Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000);
+      setSecs(diff);
+    };
+    update();
+    const id = setInterval(update, 5000);
+    return () => clearInterval(id);
+  }, [isoTimestamp]);
+  return secs;
+}
 
 function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
   const {
@@ -42,8 +62,15 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
     direction_bias,
     premium_current_ask,
     premium_cheap_threshold,
+    premium_lowest_ask,
+    premium_highest_ask,
     last_squeeze_action,
+    last_action_at,
+    breakout_state,
+    breakout_confirmation_seconds_remaining,
   } = props;
+
+  const actionSecsAgo = useSecondsAgo(last_action_at);
 
   if (bb_width_pct == null || bb_width_threshold == null) {
     return (
@@ -55,16 +82,13 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
 
   const widthRatio = Math.min((bb_width_pct / bb_width_threshold) * 100, 100);
 
-  // Determine color based on how tight the squeeze is
-  let widthColor = 'bg-[#ff1744]';  // Wide/red
-  if (bb_width_pct < bb_width_threshold * 0.5) widthColor = 'bg-[#00e676]';  // Very tight
-  else if (bb_width_pct < bb_width_threshold * 0.75) widthColor = 'bg-[#00c853]';  // Tight
-  else if (bb_width_pct < bb_width_threshold) widthColor = 'bg-[#ffd600]';  // Getting tight
+  let widthColor = 'bg-[#ff1744]';
+  if (bb_width_pct < bb_width_threshold * 0.5) widthColor = 'bg-[#00e676]';
+  else if (bb_width_pct < bb_width_threshold * 0.75) widthColor = 'bg-[#00c853]';
+  else if (bb_width_pct < bb_width_threshold) widthColor = 'bg-[#ffd600]';
 
-  // BB position indicator (0 = lower band, 1 = upper band)
   const positionPct = Math.max(0, Math.min(100, (bb_position ?? 0.5) * 100));
 
-  // Direction bias colors
   const biasColor = direction_bias === 'CALL'
     ? 'text-[#00c853]'
     : direction_bias === 'PUT'
@@ -76,12 +100,25 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
       ? 'bg-[#ff1744]/15 border-[#ff1744]/30'
       : 'bg-zinc-800/50 border-zinc-700';
 
-  // Last action color
-  const actionColor = last_squeeze_action === 'SQUEEZE_FILL'
+  const actionColor = last_squeeze_action === 'SQUEEZE_FILL' || last_squeeze_action === 'BREAKOUT_CONFIRMED'
     ? 'text-[#00c853]'
-    : last_squeeze_action === 'SQUEEZE_NO_FILL'
+    : last_squeeze_action === 'SQUEEZE_NO_FILL' || last_squeeze_action === 'BREAKOUT_FAKEOUT' || last_squeeze_action === 'BREAKOUT_NO_FILL'
       ? 'text-[#ff1744]'
       : 'text-zinc-500';
+
+  // Premium range bar: show where current ask sits in the 30-min low/high
+  const hasRange = premium_lowest_ask != null && premium_highest_ask != null
+    && premium_highest_ask > premium_lowest_ask;
+  const rangePct = hasRange && premium_current_ask != null
+    ? Math.max(0, Math.min(100,
+        (premium_current_ask - premium_lowest_ask!) / (premium_highest_ask! - premium_lowest_ask!) * 100
+      ))
+    : null;
+  const threshPct = hasRange && premium_cheap_threshold != null
+    ? Math.max(0, Math.min(100,
+        (premium_cheap_threshold - premium_lowest_ask!) / (premium_highest_ask! - premium_lowest_ask!) * 100
+      ))
+    : null;
 
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2.5">
@@ -98,41 +135,70 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
         </span>
       </div>
 
-      {/* BB Width % with threshold bar */}
+      {/* Breakout confirmation banner */}
+      {breakout_state != null && (
+        <div className={cn(
+          'flex items-center justify-between mb-2 px-2 py-1.5 rounded border',
+          breakout_state === 'UP'
+            ? 'bg-[#00c853]/10 border-[#00c853]/30'
+            : 'bg-[#ff1744]/10 border-[#ff1744]/30'
+        )}>
+          <div className="flex items-center gap-1.5">
+            <span className={cn(
+              'text-[9px] font-mono font-bold',
+              breakout_state === 'UP' ? 'text-[#00c853]' : 'text-[#ff1744]'
+            )}>
+              ▶ BREAKOUT {breakout_state}
+            </span>
+            <span className="text-[8px] text-zinc-500">
+              ({breakout_state === 'UP' ? 'CALL' : 'PUT'})
+            </span>
+          </div>
+          {breakout_confirmation_seconds_remaining != null && (
+            <span className={cn(
+              'text-[9px] font-mono font-bold tabular-nums',
+              breakout_confirmation_seconds_remaining <= 10
+                ? 'text-[#ffd600] animate-pulse'
+                : 'text-zinc-300'
+            )}>
+              {breakout_confirmation_seconds_remaining}s
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* BB Width bar */}
       <div className="mb-2.5">
         <div className="flex items-center justify-between mb-1">
           <span className="text-[8px] text-zinc-500">BB Width</span>
-          <span className="text-[8px] font-mono text-zinc-300">{bb_width_pct.toFixed(2)}% / {bb_width_threshold}% thresh</span>
+          <span className="text-[8px] font-mono text-zinc-300">
+            {bb_width_pct.toFixed(2)}% / {bb_width_threshold}% thresh
+          </span>
         </div>
         <div className="relative h-2 rounded-full bg-zinc-800 overflow-hidden">
           <div
             className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-500', widthColor)}
             style={{ width: `${widthRatio}%` }}
           />
-          {/* Threshold marker at 100% */}
-          <div
-            className="absolute inset-y-0 w-0.5 bg-white/50"
-            style={{ left: '100%' }}
-          />
         </div>
       </div>
 
-      {/* BB Position indicator (where price sits in bands) */}
+      {/* BB Position bar: 0.0 = bottom → 1.0 = top */}
       <div className="mb-2.5">
         <div className="flex items-center justify-between mb-1">
           <span className="text-[8px] text-zinc-500">BB Position</span>
           <span className="text-[8px] font-mono text-zinc-300">{(bb_position ?? 0).toFixed(2)}</span>
         </div>
-        <div className="relative h-1.5 rounded-full bg-gradient-to-r from-[#00c853]/30 via-zinc-700 to-[#ff1744]/30 overflow-hidden">
+        <div className="relative h-1.5 rounded-full bg-gradient-to-r from-[#00c853]/30 via-zinc-700 to-[#ff1744]/30">
           <div
             className="absolute top-1/2 w-2 h-2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.5)]"
             style={{ left: `${positionPct}%`, transform: 'translateX(-50%) translateY(-50%)' }}
           />
         </div>
         <div className="flex justify-between text-[7px] text-zinc-600 mt-0.5">
-          <span>Lower</span>
-          <span>Middle</span>
-          <span>Upper</span>
+          <span>bottom</span>
+          <span>mid</span>
+          <span>top</span>
         </div>
       </div>
 
@@ -147,38 +213,65 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
         </span>
       </div>
 
-      {/* Premium: current ask vs cheap threshold */}
-      {(premium_current_ask != null || premium_cheap_threshold != null) && (
-        <div className="mb-2 p-1.5 bg-zinc-900/50 rounded">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[8px] text-zinc-500">Premium Ask</span>
-            <span className="text-[9px] font-mono text-zinc-300">
-              ${premium_current_ask?.toFixed(4) ?? '—'}
+      {/* Premium ask / threshold + 30-min range bar */}
+      <div className="mb-2 p-1.5 bg-zinc-900/50 rounded">
+        {/* Ask / Threshold on one row */}
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[8px] text-zinc-500">Ask / Threshold</span>
+          <span className="text-[9px] font-mono">
+            <span className="text-zinc-300">
+              {premium_current_ask != null ? `$${premium_current_ask.toFixed(4)}` : '—'}
             </span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-[8px] text-zinc-500">Cheap Threshold</span>
-            <span className="text-[9px] font-mono text-[#00c853]">
-              ${premium_cheap_threshold?.toFixed(4) ?? '—'}
+            <span className="text-zinc-600 mx-1">/</span>
+            <span className="text-[#00c853]">
+              {premium_cheap_threshold != null ? `$${premium_cheap_threshold.toFixed(4)}` : '—'}
             </span>
-          </div>
-          {premium_current_ask != null && premium_cheap_threshold != null && (
-            <div className="mt-1 text-[7px] font-mono">
-              {premium_current_ask <= premium_cheap_threshold ? (
-                <span className="text-[#00c853]">✓ Below threshold — cheap entry</span>
-              ) : (
-                <span className="text-[#ffd600]">Waiting for cheap entry...</span>
+          </span>
+        </div>
+
+        {/* 30-min range bar */}
+        {hasRange && (
+          <>
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-[7px] text-zinc-600">
+                30m range: ${premium_lowest_ask!.toFixed(4)} – ${premium_highest_ask!.toFixed(4)}
+              </span>
+            </div>
+            <div className="relative h-2 rounded-full bg-zinc-800">
+              {/* Cheap-threshold marker */}
+              {threshPct != null && (
+                <div
+                  className="absolute inset-y-0 w-0.5 bg-[#00c853]/60 rounded-full"
+                  style={{ left: `${threshPct}%` }}
+                />
+              )}
+              {/* Current-ask dot */}
+              {rangePct != null && (
+                <div
+                  className="absolute top-1/2 w-2 h-2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.7)]"
+                  style={{ left: `${rangePct}%`, transform: 'translateX(-50%) translateY(-50%)' }}
+                />
               )}
             </div>
-          )}
-        </div>
-      )}
+            <div className="flex justify-between text-[7px] text-zinc-700 mt-0.5">
+              <span>low</span>
+              <span className="text-[#00c853]/60">threshold</span>
+              <span>high</span>
+            </div>
+          </>
+        )}
+      </div>
 
-      {/* Last action */}
+      {/* Last action + seconds ago */}
       <div className="flex items-center justify-between text-[8px]">
         <span className="text-zinc-500">Last action</span>
         <span className={cn('font-mono font-medium', actionColor)}>
           {last_squeeze_action ?? 'SCANNING'}
+          {actionSecsAgo != null && actionSecsAgo < 3600 && last_squeeze_action && last_squeeze_action !== 'SCANNING' && (
+            <span className="text-zinc-600 ml-1">
+              {actionSecsAgo < 60 ? `${actionSecsAgo}s ago` : `${Math.round(actionSecsAgo / 60)}m ago`}
+            </span>
+          )}
         </span>
       </div>
     </div>
@@ -375,7 +468,12 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         direction_bias={state.direction_bias}
         premium_current_ask={state.premium_current_ask}
         premium_cheap_threshold={state.premium_cheap_threshold}
+        premium_lowest_ask={state.premium_lowest_ask}
+        premium_highest_ask={state.premium_highest_ask}
         last_squeeze_action={state.last_squeeze_action}
+        last_action_at={state.last_action_at}
+        breakout_state={state.breakout_state}
+        breakout_confirmation_seconds_remaining={state.breakout_confirmation_seconds_remaining}
       />
 
       {/* Bot State */}
