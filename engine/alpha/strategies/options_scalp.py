@@ -691,13 +691,17 @@ class OptionsScalpStrategy(BaseStrategy):
             if self._available_strikes and spot_price > 0:
                 atm_strike = min(self._available_strikes, key=lambda s: abs(s - spot_price))
 
+                raw_call_ask: float = 0.0
+                raw_put_ask: float = 0.0
+
                 try:
                     call_sym = self._build_option_symbol(
                         atm_strike, "call", self._selected_expiry,
                     )
                     if call_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(call_sym)
-                        call_premium = t.get("last") or t.get("ask") or None
+                        raw_call_ask = float(t.get("ask") or t.get("last") or 0)
+                        call_premium = raw_call_ask or None
                 except Exception:
                     pass
 
@@ -707,9 +711,21 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     if put_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(put_sym)
-                        put_premium = t.get("last") or t.get("ask") or None
+                        raw_put_ask = float(t.get("ask") or t.get("last") or 0)
+                        put_premium = raw_put_ask or None
                 except Exception:
                     pass
+
+                # Keep premium_current_ask live during scan phase (raw ask, not last price)
+                if not self.in_position and not self._breakout_pending and raw_call_ask > 0:
+                    self._premium_current_ask = raw_call_ask
+
+                if raw_call_ask > 0 or raw_put_ask > 0:
+                    self.logger.info(
+                        "[%s] SQUEEZE_SCAN: %s ATM_call_ask=$%.2f ATM_put_ask=$%.2f strike=%s",
+                        self.pair, self._base_asset,
+                        raw_call_ask, raw_put_ask, atm_strike,
+                    )
 
         # ── Chain data: top 5 calls + puts near ATM ──
         chain_calls: list[dict] = []
@@ -1129,8 +1145,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if self._tick_count % 6 == 0:
             self.logger.info(
-                "[%s] SQUEEZE_SCAN: BB_width=%.3f%% squeeze=%s (thresh=%.1f%%)",
+                "[%s] SQUEEZE_SCAN: BB_width=%.3f%% squeeze=%s (thresh=%.1f%%) "
+                "atm_ask=$%.2f strike=%s",
                 self.pair, bb_width_pct, is_squeeze, bb_width_threshold,
+                self._premium_current_ask, self._cached_target_strike,
             )
 
         if not is_squeeze:
