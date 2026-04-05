@@ -399,6 +399,8 @@ export interface OptionsState {
   breakout_detected_at?: string | null;
   /** Premium price at the moment breakout was detected */
   breakout_premium_at_detection?: number | null;
+  /** ISO timestamp when the current option position was opened */
+  position_opened_at?: string | null;
   updated_at: string;
 }
 

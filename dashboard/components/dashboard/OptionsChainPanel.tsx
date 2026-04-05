@@ -13,39 +13,16 @@ function fmtSpot(v: number | null): string {
   return `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
 }
 
-function fmtPrem(v: number): string {
-  if (v <= 0) return '—';
+function fmtPrem(v: number | null | undefined): string {
+  if (v == null || v <= 0) return '—';
   return `$${v.toFixed(2)}`;
 }
-
-// ---------------------------------------------------------------------------
-// BB Squeeze Signals Panel
-// ---------------------------------------------------------------------------
-
-type BBSqueezeProps = Pick<OptionsState,
-  | 'bb_width_pct'
-  | 'bb_width_threshold'
-  | 'squeeze_active'
-  | 'bb_position'
-  | 'direction_bias'
-  | 'premium_current_ask'
-  | 'premium_cheap_threshold'
-  | 'premium_lowest_ask'
-  | 'premium_highest_ask'
-  | 'last_squeeze_action'
-  | 'last_action_at'
-  | 'breakout_state'
-  | 'breakout_confirmation_secs_remaining'
->;
 
 function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
   const [secs, setSecs] = useState<number | null>(null);
   useEffect(() => {
     if (!isoTimestamp) { setSecs(null); return; }
-    const update = () => {
-      const diff = Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000);
-      setSecs(diff);
-    };
+    const update = () => setSecs(Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000));
     update();
     const id = setInterval(update, 5000);
     return () => clearInterval(id);
@@ -53,77 +30,45 @@ function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
   return secs;
 }
 
-function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
-  const {
-    bb_width_pct,
-    bb_width_threshold,
-    squeeze_active,
-    bb_position,
-    direction_bias,
-    premium_current_ask,
-    premium_cheap_threshold,
-    premium_lowest_ask,
-    premium_highest_ask,
-    last_squeeze_action,
-    last_action_at,
-    breakout_state,
-    breakout_confirmation_secs_remaining,
-  } = props;
+function useHoldTime(isoTimestamp: string | null | undefined): string | null {
+  const [display, setDisplay] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isoTimestamp) { setDisplay(null); return; }
+    const update = () => {
+      const secs = Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000);
+      if (secs < 60) setDisplay(`${secs}s`);
+      else if (secs < 3600) setDisplay(`${Math.floor(secs / 60)}m ${secs % 60}s`);
+      else setDisplay(`${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`);
+    };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [isoTimestamp]);
+  return display;
+}
 
-  const actionSecsAgo = useSecondsAgo(last_action_at);
+// ---------------------------------------------------------------------------
+// Squeeze Bar
+// ---------------------------------------------------------------------------
 
+function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
+  bb_width_pct: number | null | undefined;
+  bb_width_threshold: number | null | undefined;
+  squeeze_active: boolean | null | undefined;
+}) {
   if (bb_width_pct == null || bb_width_threshold == null) {
-    return (
-      <div className="text-[9px] font-mono text-zinc-600 mb-2">
-        BB Squeeze: waiting...
-      </div>
-    );
+    return <div className="text-[9px] font-mono text-zinc-600 mb-2">BB: waiting...</div>;
   }
 
-  const widthRatio = Math.min((bb_width_pct / bb_width_threshold) * 100, 100);
-
-  let widthColor = 'bg-[#ff1744]';
-  if (bb_width_pct < bb_width_threshold * 0.5) widthColor = 'bg-[#00e676]';
-  else if (bb_width_pct < bb_width_threshold * 0.75) widthColor = 'bg-[#00c853]';
-  else if (bb_width_pct < bb_width_threshold) widthColor = 'bg-[#ffd600]';
-
-  const positionPct = Math.max(0, Math.min(100, (bb_position ?? 0.5) * 100));
-
-  const biasColor = direction_bias === 'CALL'
-    ? 'text-[#00c853]'
-    : direction_bias === 'PUT'
-      ? 'text-[#ff1744]'
-      : 'text-zinc-400';
-  const biasBg = direction_bias === 'CALL'
-    ? 'bg-[#00c853]/15 border-[#00c853]/30'
-    : direction_bias === 'PUT'
-      ? 'bg-[#ff1744]/15 border-[#ff1744]/30'
-      : 'bg-zinc-800/50 border-zinc-700';
-
-  const actionColor = last_squeeze_action === 'SQUEEZE_FILL' || last_squeeze_action === 'BREAKOUT_CONFIRMED'
-    ? 'text-[#00c853]'
-    : last_squeeze_action === 'SQUEEZE_NO_FILL' || last_squeeze_action === 'BREAKOUT_FAKEOUT' || last_squeeze_action === 'BREAKOUT_NO_FILL'
-      ? 'text-[#ff1744]'
-      : 'text-zinc-500';
-
-  // Premium range bar: show where current ask sits in the 30-min low/high
-  const hasRange = premium_lowest_ask != null && premium_highest_ask != null
-    && premium_highest_ask > premium_lowest_ask;
-  const rangePct = hasRange && premium_current_ask != null
-    ? Math.max(0, Math.min(100,
-        (premium_current_ask - premium_lowest_ask!) / (premium_highest_ask! - premium_lowest_ask!) * 100
-      ))
-    : null;
-  const threshPct = hasRange && premium_cheap_threshold != null
-    ? Math.max(0, Math.min(100,
-        (premium_cheap_threshold - premium_lowest_ask!) / (premium_highest_ask! - premium_lowest_ask!) * 100
-      ))
-    : null;
+  const ratio = Math.min(bb_width_pct / bb_width_threshold, 1);
+  let barColor = 'bg-[#ff1744]';
+  if (ratio < 0.5) barColor = 'bg-[#00e676]';
+  else if (ratio < 0.75) barColor = 'bg-[#00c853]';
+  else if (ratio < 1) barColor = 'bg-[#ffd600]';
 
   return (
-    <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2.5">
-      {/* Header: Title + Status Badge */}
-      <div className="flex items-center justify-between mb-2">
+    <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
+      <div className="flex items-center justify-between mb-1.5">
         <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">BB Squeeze</span>
         <span className={cn(
           'px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase border',
@@ -134,182 +79,223 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
           {squeeze_active ? 'ACTIVE' : 'WAITING'}
         </span>
       </div>
-
-      {/* Breakout confirmation banner */}
-      {breakout_state != null && (
-        <div className={cn(
-          'flex items-center justify-between mb-2 px-2 py-1.5 rounded border',
-          breakout_state === 'UP'
-            ? 'bg-[#00c853]/10 border-[#00c853]/30'
-            : 'bg-[#ff1744]/10 border-[#ff1744]/30'
-        )}>
-          <div className="flex items-center gap-1.5">
-            <span className={cn(
-              'text-[9px] font-mono font-bold',
-              breakout_state === 'UP' ? 'text-[#00c853]' : 'text-[#ff1744]'
-            )}>
-              ▶ BREAKOUT {breakout_state}
-            </span>
-            <span className="text-[8px] text-zinc-500">
-              ({breakout_state === 'UP' ? 'CALL' : 'PUT'})
-            </span>
-          </div>
-          {breakout_confirmation_secs_remaining != null && (
-            <span className={cn(
-              'text-[9px] font-mono font-bold tabular-nums',
-              breakout_confirmation_secs_remaining <= 10
-                ? 'text-[#ffd600] animate-pulse'
-                : 'text-zinc-300'
-            )}>
-              {breakout_confirmation_secs_remaining}s
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* BB Width bar */}
-      <div className="mb-2.5">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-[8px] text-zinc-500">BB Width</span>
-          <span className="text-[8px] font-mono text-zinc-300">
-            {bb_width_pct.toFixed(2)}% / {bb_width_threshold}% thresh
-          </span>
-        </div>
-        <div className="relative h-2 rounded-full bg-zinc-800 overflow-hidden">
-          <div
-            className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-500', widthColor)}
-            style={{ width: `${widthRatio}%` }}
-          />
-        </div>
-      </div>
-
-      {/* BB Position bar: 0.0 = bottom → 1.0 = top */}
-      <div className="mb-2.5">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-[8px] text-zinc-500">BB Position</span>
-          <span className="text-[8px] font-mono text-zinc-300">{(bb_position ?? 0).toFixed(2)}</span>
-        </div>
-        <div className="relative h-1.5 rounded-full bg-gradient-to-r from-[#00c853]/30 via-zinc-700 to-[#ff1744]/30">
-          <div
-            className="absolute top-1/2 w-2 h-2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.5)]"
-            style={{ left: `${positionPct}%`, transform: 'translateX(-50%) translateY(-50%)' }}
-          />
-        </div>
-        <div className="flex justify-between text-[7px] text-zinc-600 mt-0.5">
-          <span>bottom</span>
-          <span>mid</span>
-          <span>top</span>
-        </div>
-      </div>
-
-      {/* Direction Bias */}
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[8px] text-zinc-500">Direction Bias</span>
-        <span className={cn(
-          'px-2 py-0.5 rounded text-[9px] font-mono font-bold border',
-          biasBg, biasColor
-        )}>
-          {direction_bias ?? 'NEUTRAL'}
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[8px] text-zinc-500">Width</span>
+        <span className="text-[8px] font-mono text-zinc-300">
+          {bb_width_pct.toFixed(2)}% / {bb_width_threshold}% thresh
         </span>
       </div>
-
-      {/* Premium ask / threshold + 30-min range bar */}
-      <div className="mb-2 p-1.5 bg-zinc-900/50 rounded">
-        {/* Ask / Threshold on one row */}
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-[8px] text-zinc-500">Ask / Threshold</span>
-          <span className="text-[9px] font-mono">
-            <span className="text-zinc-300">
-              {premium_current_ask != null ? `$${premium_current_ask.toFixed(4)}` : '—'}
-            </span>
-            <span className="text-zinc-600 mx-1">/</span>
-            <span className="text-[#00c853]">
-              {premium_cheap_threshold != null ? `$${premium_cheap_threshold.toFixed(4)}` : '—'}
-            </span>
-          </span>
-        </div>
-
-        {/* 30-min range bar */}
-        {hasRange && (
-          <>
-            <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[7px] text-zinc-600">
-                30m range: ${premium_lowest_ask!.toFixed(4)} – ${premium_highest_ask!.toFixed(4)}
-              </span>
-            </div>
-            <div className="relative h-2 rounded-full bg-zinc-800">
-              {/* Cheap-threshold marker */}
-              {threshPct != null && (
-                <div
-                  className="absolute inset-y-0 w-0.5 bg-[#00c853]/60 rounded-full"
-                  style={{ left: `${threshPct}%` }}
-                />
-              )}
-              {/* Current-ask dot */}
-              {rangePct != null && (
-                <div
-                  className="absolute top-1/2 w-2 h-2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.7)]"
-                  style={{ left: `${rangePct}%`, transform: 'translateX(-50%) translateY(-50%)' }}
-                />
-              )}
-            </div>
-            <div className="flex justify-between text-[7px] text-zinc-700 mt-0.5">
-              <span>low</span>
-              <span className="text-[#00c853]/60">threshold</span>
-              <span>high</span>
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* Last action + seconds ago */}
-      <div className="flex items-center justify-between text-[8px]">
-        <span className="text-zinc-500">Last action</span>
-        <span className={cn('font-mono font-medium', actionColor)}>
-          {last_squeeze_action ?? 'SCANNING'}
-          {actionSecsAgo != null && actionSecsAgo < 3600 && last_squeeze_action && last_squeeze_action !== 'SCANNING' && (
-            <span className="text-zinc-600 ml-1">
-              {actionSecsAgo < 60 ? `${actionSecsAgo}s ago` : `${Math.round(actionSecsAgo / 60)}m ago`}
-            </span>
-          )}
-        </span>
+      <div className="h-2 rounded-full bg-zinc-800 overflow-hidden">
+        <div
+          className={cn('h-full rounded-full transition-all duration-500', barColor)}
+          style={{ width: `${ratio * 100}%` }}
+        />
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Bot State Badge
+// Breakout Row — always visible, shows NONE when inactive
 // ---------------------------------------------------------------------------
 
-function BotStateBadge({ state }: { state: string }) {
-  let label = state;
-  let colorClass = 'bg-zinc-800 text-zinc-400 border-zinc-700';
+function BreakoutRow({ breakout_state, breakout_direction, secs_remaining }: {
+  breakout_state: string | null | undefined;
+  breakout_direction: string | null | undefined;
+  secs_remaining: number | null | undefined;
+}) {
+  const state = breakout_state ?? 'NONE';
+  const dir = breakout_direction;
+  const isDetected = state === 'DETECTED';
+  const isConfirmed = state === 'BREAKOUT_CONFIRMED';
+  const isFakeout = state === 'BREAKOUT_FAKEOUT' || state === 'BREAKOUT_NO_FILL';
 
-  if (state === 'scanning') {
-    label = 'SCANNING';
-  } else if (state === 'ready') {
-    label = 'READY';
-    colorClass = 'bg-[#00c853]/15 text-[#00c853] border-[#00c853]/30';
-  } else if (state === 'in_position') {
-    label = 'IN POSITION';
-    colorClass = 'bg-[#7c4dff]/15 text-[#7c4dff] border-[#7c4dff]/30';
-  } else if (state.startsWith('blocked:')) {
-    const parts = state.replace('blocked:', '').split(':');
-    const reason = parts[0].replace(/_/g, ' ');
-    const timer = parts[1] ?? null;
-    label = timer ? `BLOCKED: ${reason} (${timer})` : `BLOCKED: ${reason}`;
-    colorClass = 'bg-[#ff1744]/10 text-[#ff1744]/80 border-[#ff1744]/20';
+  let label: string;
+  let labelColor: string;
+  let rowBg: string;
+  let rowBorder: string;
+
+  if (isDetected) {
+    label = dir === 'UP' ? 'DETECTED UP (CALL)' : dir === 'DOWN' ? 'DETECTED DOWN (PUT)' : 'DETECTED';
+    labelColor = dir === 'UP' ? 'text-[#00c853]' : 'text-[#ff1744]';
+    rowBg = dir === 'UP' ? 'bg-[#00c853]/8' : 'bg-[#ff1744]/8';
+    rowBorder = dir === 'UP' ? 'border-[#00c853]/25' : 'border-[#ff1744]/25';
+  } else if (isConfirmed) {
+    label = 'CONFIRMED';
+    labelColor = 'text-[#00c853]';
+    rowBg = 'bg-[#00c853]/8';
+    rowBorder = 'border-[#00c853]/25';
+  } else if (isFakeout) {
+    label = state === 'BREAKOUT_NO_FILL' ? 'NO FILL' : 'FAKEOUT';
+    labelColor = 'text-[#ff6d00]';
+    rowBg = 'bg-[#ff6d00]/8';
+    rowBorder = 'border-[#ff6d00]/25';
+  } else {
+    label = 'NONE';
+    labelColor = 'text-zinc-600';
+    rowBg = 'bg-transparent';
+    rowBorder = 'border-zinc-800';
   }
 
   return (
-    <div className="mb-2">
-      <span className={cn(
-        'inline-flex items-center px-2 py-0.5 rounded text-[9px] font-mono font-medium border',
-        colorClass,
-      )}>
-        {label}
-      </span>
+    <div className={cn('flex items-center justify-between px-2.5 py-2 rounded border mb-2', rowBg, rowBorder)}>
+      <div className="flex items-center gap-2">
+        <span className="text-[8px] text-zinc-500 uppercase tracking-wide">Breakout</span>
+        <span className={cn('text-[9px] font-mono font-bold', labelColor)}>
+          {isDetected && <span className="mr-0.5">▶</span>}
+          {label}
+        </span>
+      </div>
+      {isDetected && secs_remaining != null && (
+        <div className="flex items-center gap-1.5">
+          <div className="w-16 h-1 rounded-full bg-zinc-800 overflow-hidden">
+            <div
+              className={cn(
+                'h-full rounded-full transition-all duration-1000',
+                secs_remaining <= 10 ? 'bg-[#ffd600]' : dir === 'UP' ? 'bg-[#00c853]' : 'bg-[#ff1744]'
+              )}
+              style={{ width: `${(secs_remaining / 60) * 100}%` }}
+            />
+          </div>
+          <span className={cn(
+            'text-[9px] font-mono font-bold tabular-nums w-6 text-right',
+            secs_remaining <= 10 ? 'text-[#ffd600] animate-pulse' : 'text-zinc-300'
+          )}>
+            {secs_remaining}s
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Premium Row — ATM call/put ask vs cheap threshold
+// ---------------------------------------------------------------------------
+
+function PremiumRow({ call_ask, put_ask, threshold }: {
+  call_ask: number | null | undefined;
+  put_ask: number | null | undefined;
+  threshold: number | null | undefined;
+}) {
+  const callCheap = call_ask != null && call_ask > 0 && threshold != null && call_ask <= threshold;
+  const putCheap  = put_ask  != null && put_ask  > 0 && threshold != null && put_ask  <= threshold;
+
+  return (
+    <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">ATM Premiums</span>
+        {threshold != null && threshold > 0 && (
+          <span className="text-[8px] font-mono text-zinc-500">
+            cheap ≤ {fmtPrem(threshold)}
+          </span>
+        )}
+      </div>
+      <div className="flex gap-4">
+        <div className="flex-1">
+          <div className="text-[7px] text-[#00c853]/60 uppercase mb-0.5">Call ask</div>
+          <div className="flex items-baseline gap-1">
+            <span className={cn('text-[12px] font-mono font-semibold', callCheap ? 'text-[#00c853]' : 'text-zinc-300')}>
+              {fmtPrem(call_ask)}
+            </span>
+            {callCheap && (
+              <span className="text-[7px] font-mono text-[#00c853] bg-[#00c853]/10 px-1 rounded">CHEAP</span>
+            )}
+          </div>
+        </div>
+        <div className="flex-1">
+          <div className="text-[7px] text-[#ff1744]/60 uppercase mb-0.5">Put ask</div>
+          <div className="flex items-baseline gap-1">
+            <span className={cn('text-[12px] font-mono font-semibold', putCheap ? 'text-[#00c853]' : 'text-zinc-300')}>
+              {fmtPrem(put_ask)}
+            </span>
+            {putCheap && (
+              <span className="text-[7px] font-mono text-[#00c853] bg-[#00c853]/10 px-1 rounded">CHEAP</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Position Panel — shows when in_position
+// ---------------------------------------------------------------------------
+
+function PositionPanel({ state }: { state: OptionsState }) {
+  const holdTime = useHoldTime(state.position_opened_at);
+
+  if (!state.position_side) return null;
+
+  const isCall = state.position_side === 'call';
+  const pnlPct = state.pnl_pct ?? null;
+  const pnlPositive = pnlPct != null && pnlPct >= 0;
+  const accentColor = isCall ? '#00c853' : '#ff1744';
+  const pnlColor = pnlPct == null ? 'text-zinc-500' : pnlPositive ? 'text-[#00c853]' : 'text-[#ff1744]';
+
+  return (
+    <div
+      className="rounded border p-2.5 mb-2"
+      style={{
+        backgroundColor: `${accentColor}0d`,
+        borderColor: `${accentColor}30`,
+      }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5">
+          <span
+            className="w-1.5 h-1.5 rounded-full animate-pulse"
+            style={{ backgroundColor: accentColor }}
+          />
+          <span className="text-[9px] font-semibold text-white uppercase tracking-wide">
+            Position Open: {state.position_side.toUpperCase()}
+          </span>
+        </div>
+        <span className="text-[9px] font-mono" style={{ color: accentColor }}>
+          ${(state.position_strike ?? 0).toLocaleString()}
+        </span>
+      </div>
+
+      {/* Entry / Current / P&L grid */}
+      <div className="grid grid-cols-3 gap-x-2 text-[8px] mb-1.5">
+        <div>
+          <div className="text-zinc-600 mb-0.5">Entry</div>
+          <div className="font-mono text-zinc-400">{fmtPrem(state.entry_premium)}</div>
+        </div>
+        <div>
+          <div className="text-zinc-600 mb-0.5">Current</div>
+          <div className="font-mono text-zinc-200">{fmtPrem(state.current_premium)}</div>
+        </div>
+        <div>
+          <div className="text-zinc-600 mb-0.5">P&L</div>
+          <div className={cn('font-mono font-semibold', pnlColor)}>
+            {pnlPct != null
+              ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`
+              : '—'}
+          </div>
+        </div>
+      </div>
+
+      {/* Hold time + USD P&L + trailing badge */}
+      <div className="flex items-center justify-between text-[8px]">
+        <span className="text-zinc-600">
+          Hold: <span className="text-zinc-400 font-mono">{holdTime ?? '—'}</span>
+        </span>
+        <div className="flex items-center gap-2">
+          {state.pnl_usd != null && (
+            <span className={cn('font-mono', pnlColor)}>
+              {state.pnl_usd >= 0 ? '+' : ''}${state.pnl_usd.toFixed(2)}
+            </span>
+          )}
+          {state.trailing_active && (
+            <span className="px-1.5 py-0.5 rounded text-[7px] font-mono bg-[#7c4dff]/20 text-[#7c4dff] border border-[#7c4dff]/30">
+              TRAIL
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -348,7 +334,7 @@ function ChainTable({
   }
 
   const textColor = isCall ? 'text-[#00c853]' : 'text-[#ff1744]';
-  const dimColor = isCall ? 'text-[#00c853]/60' : 'text-[#ff1744]/60';
+  const dimColor  = isCall ? 'text-[#00c853]/60' : 'text-[#ff1744]/60';
 
   return (
     <div className="mb-2">
@@ -368,7 +354,7 @@ function ChainTable({
         </thead>
         <tbody>
           {entries.map((e) => {
-            const isTarget = targetStrike != null && e.strike === targetStrike;
+            const isTarget   = targetStrike != null && e.strike === targetStrike;
             const collateral = e.ask > 0 ? e.ask / OPTIONS_LEVERAGE : 0;
             const unaffordable = collateral > affordableLimit;
             const otmPct = spotPrice && spotPrice > 0
@@ -430,6 +416,8 @@ function ChainTable({
 // ---------------------------------------------------------------------------
 
 function ChainCard({ asset, state }: { asset: string; state: OptionsState | null }) {
+  const scanSecsAgo = useSecondsAgo(state?.updated_at);
+
   if (!state) {
     return (
       <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3">
@@ -439,9 +427,9 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
     );
   }
 
-  const balance = state.balance ?? null;
-  const botState = state.bot_state ?? 'scanning';
-  const targetStrike = state.target_strike ?? null;
+  const inPosition     = !!state.position_side;
+  const balance        = state.balance ?? null;
+  const targetStrike   = state.target_strike ?? null;
   const affordableLimit = balance != null ? balance * 0.40 : Infinity;
 
   return (
@@ -450,36 +438,53 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-white">{asset}</span>
-          <span className="text-[10px] font-mono text-zinc-500">
-            {fmtSpot(state.spot_price)}
+          <span className="text-[10px] font-mono text-zinc-500">{fmtSpot(state.spot_price)}</span>
+          <span className={cn(
+            'px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase border',
+            inPosition
+              ? 'bg-[#7c4dff]/15 text-[#7c4dff] border-[#7c4dff]/30'
+              : 'bg-zinc-800/50 text-zinc-500 border-zinc-700'
+          )}>
+            {inPosition ? 'POSITION OPEN' : 'MONITORING'}
           </span>
         </div>
-        <span className="text-[9px] font-mono text-zinc-600 truncate max-w-[160px]">
-          {state.expiry_label ?? '—'}
-        </span>
+        <div className="text-right">
+          <div className="text-[9px] font-mono text-zinc-600 truncate max-w-[150px]">
+            {state.expiry_label ?? '—'}
+          </div>
+          {scanSecsAgo != null && (
+            <div className="text-[8px] font-mono text-zinc-700">
+              scan {scanSecsAgo < 60 ? `${scanSecsAgo}s` : `${Math.round(scanSecsAgo / 60)}m`} ago
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* BB Squeeze Signals Panel */}
-      <BBSqueezeSignalsPanel
+      {/* Position panel (only when open) */}
+      <PositionPanel state={state} />
+
+      {/* BB Squeeze compression bar */}
+      <SqueezeBar
         bb_width_pct={state.bb_width_pct}
         bb_width_threshold={state.bb_width_threshold}
         squeeze_active={state.squeeze_active}
-        bb_position={state.bb_position}
-        direction_bias={state.direction_bias}
-        premium_current_ask={state.premium_current_ask}
-        premium_cheap_threshold={state.premium_cheap_threshold}
-        premium_lowest_ask={state.premium_lowest_ask}
-        premium_highest_ask={state.premium_highest_ask}
-        last_squeeze_action={state.last_squeeze_action}
-        last_action_at={state.last_action_at}
-        breakout_state={state.breakout_state}
-        breakout_confirmation_secs_remaining={state.breakout_confirmation_secs_remaining}
       />
 
-      {/* Bot State */}
-      <BotStateBadge state={botState} />
+      {/* Breakout state (always visible) */}
+      <BreakoutRow
+        breakout_state={state.breakout_state}
+        breakout_direction={state.breakout_direction}
+        secs_remaining={state.breakout_confirmation_secs_remaining}
+      />
 
-      {/* CALLS Table */}
+      {/* ATM call/put ask vs cheap threshold */}
+      <PremiumRow
+        call_ask={state.call_premium}
+        put_ask={state.put_premium}
+        threshold={state.premium_cheap_threshold}
+      />
+
+      {/* CALLS chain */}
       <ChainTable
         label="CALLS"
         entries={state.chain_calls ?? []}
@@ -489,7 +494,7 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         spotPrice={state.spot_price}
       />
 
-      {/* PUTS Table */}
+      {/* PUTS chain */}
       <ChainTable
         label="PUTS"
         entries={state.chain_puts ?? []}
@@ -499,7 +504,6 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         spotPrice={state.spot_price}
       />
 
-      {/* Balance Footer */}
       {balance != null && (
         <div className="text-[9px] font-mono text-zinc-600 mt-2 pt-1.5 border-t border-zinc-800/30 text-right">
           Delta balance: ${balance.toFixed(2)}
@@ -518,7 +522,7 @@ export function OptionsChainPanel() {
 
   const pairData = useMemo(() => {
     return OPTIONS_ASSETS.map(asset => {
-      const pair = `${asset}/USD:USD`;
+      const pair  = `${asset}/USD:USD`;
       const state = optionsState.find(s => s.pair === pair) ?? null;
       return { asset, state };
     });

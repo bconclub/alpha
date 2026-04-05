@@ -305,6 +305,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_action: str = "SCANNING"             # SQUEEZE_FILL / SQUEEZE_NO_FILL / SCANNING
         self._squeeze_duration_candles: int = 0         # How long squeeze has been active
         self._squeeze_active_since: float | None = None # When squeeze started
+        self._position_opened_at: str | None = None     # ISO timestamp when position was entered
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -410,6 +411,9 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.option_symbol = trade_pair
                 self.entry_premium = trade.get("entry_price", 0)
                 self.entry_time = time.monotonic()
+                self._position_opened_at = (
+                    trade.get("opened_at") or datetime.now(timezone.utc).isoformat()
+                )
                 self.highest_premium = max(
                     self.entry_premium,
                     trade.get("current_price") or self.entry_premium,
@@ -691,13 +695,17 @@ class OptionsScalpStrategy(BaseStrategy):
             if self._available_strikes and spot_price > 0:
                 atm_strike = min(self._available_strikes, key=lambda s: abs(s - spot_price))
 
+                raw_call_ask: float = 0.0
+                raw_put_ask: float = 0.0
+
                 try:
                     call_sym = self._build_option_symbol(
                         atm_strike, "call", self._selected_expiry,
                     )
                     if call_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(call_sym)
-                        call_premium = t.get("last") or t.get("ask") or None
+                        raw_call_ask = float(t.get("ask") or t.get("last") or 0)
+                        call_premium = raw_call_ask or None
                 except Exception:
                     pass
 
@@ -707,9 +715,21 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     if put_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(put_sym)
-                        put_premium = t.get("last") or t.get("ask") or None
+                        raw_put_ask = float(t.get("ask") or t.get("last") or 0)
+                        put_premium = raw_put_ask or None
                 except Exception:
                     pass
+
+                # Keep premium_current_ask live during scan phase (raw ask, not last price)
+                if not self.in_position and not self._breakout_pending and raw_call_ask > 0:
+                    self._premium_current_ask = raw_call_ask
+
+                if raw_call_ask > 0 or raw_put_ask > 0:
+                    self.logger.info(
+                        "[%s] SQUEEZE_SCAN: %s ATM_call_ask=$%.2f ATM_put_ask=$%.2f strike=%s",
+                        self.pair, self._base_asset,
+                        raw_call_ask, raw_put_ask, atm_strike,
+                    )
 
         # ── Chain data: top 5 calls + puts near ATM ──
         chain_calls: list[dict] = []
@@ -831,6 +851,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "pnl_usd": round(pnl_usd, 4) if pnl_usd is not None else None,
             "trailing_active": trailing_active,
             "highest_premium": highest_prem,
+            "position_opened_at": self._position_opened_at,
             "chain_calls": chain_calls,
             "chain_puts": chain_puts,
             "bot_state": self._cached_bot_state,
@@ -1129,8 +1150,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if self._tick_count % 6 == 0:
             self.logger.info(
-                "[%s] SQUEEZE_SCAN: BB_width=%.3f%% squeeze=%s (thresh=%.1f%%)",
+                "[%s] SQUEEZE_SCAN: BB_width=%.3f%% squeeze=%s (thresh=%.1f%%) "
+                "atm_ask=$%.2f strike=%s",
                 self.pair, bb_width_pct, is_squeeze, bb_width_threshold,
+                self._premium_current_ask, self._cached_target_strike,
             )
 
         if not is_squeeze:
@@ -1567,6 +1590,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.option_symbol = selected_symbol
         self.option_side = option_type
         self.entry_time = time.monotonic()
+        self._position_opened_at = datetime.now(timezone.utc).isoformat()
         self.highest_premium = fill_price
         self._last_known_premium = fill_price
         self.strike_price = selected_strike
@@ -2591,6 +2615,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.highest_premium = 0.0
         self._last_known_premium = 0.0
         self._trailing_active = False
+        self._position_opened_at = None
         self.strike_price = 0.0
         self.expiry_dt = None
         self._consecutive_ticker_failures = 0
@@ -2727,6 +2752,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.option_symbol = signal.pair
             self.entry_premium = fill_price
             self.entry_time = time.monotonic()
+            self._position_opened_at = datetime.now(timezone.utc).isoformat()
             self.highest_premium = fill_price
             self._last_known_premium = fill_price
             self._trailing_active = False
@@ -2811,6 +2837,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_premium = 0.0
             self.highest_premium = 0.0
             self._trailing_active = False
+            self._position_opened_at = None
             self.strike_price = 0.0
             self.expiry_dt = None
             self._contracts = 1
@@ -2839,6 +2866,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_premium = 0.0
             self.highest_premium = 0.0
             self._trailing_active = False
+            self._position_opened_at = None
             self.strike_price = 0.0
             self.expiry_dt = None
             self._last_state_write = 0.0
