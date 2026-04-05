@@ -12,6 +12,7 @@ interface SqueezeAsset {
   bbWidth: number | null;
   squeezeState: 'no_squeeze' | 'forming' | 'active' | 'firing';
   isActive: boolean;
+  lastTimestamp: string | null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
