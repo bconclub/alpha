@@ -2686,7 +2686,16 @@ class OptionsScalpStrategy(BaseStrategy):
             "direction_bias": "NEUTRAL",
             "premium_current_ask": None,
             "premium_cheap_threshold": None,
+            "premium_lowest_ask": None,
+            "premium_highest_ask": None,
             "last_squeeze_action": "SCANNING",
+            "last_action_at": None,
+            # Reset breakout state
+            "breakout_state": "NONE",
+            "breakout_direction": None,
+            "breakout_confirmation_secs_remaining": None,
+            "breakout_detected_at": None,
+            "breakout_premium_at_detection": None,
         }
 
         try:
