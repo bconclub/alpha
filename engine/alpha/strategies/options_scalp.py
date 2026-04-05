@@ -362,7 +362,7 @@ class OptionsScalpStrategy(BaseStrategy):
             _no_stale,
             self.STALE_EXIT_MIN_BTC if self._base_asset == "BTC" else self.STALE_EXIT_MIN_ETH,
             self.PHASE1_HANDS_OFF_SEC,
-            f"{self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 20)}%",
+            f"{int(self.CAPITAL_PER_TRADE_MIN_PCT * 100)}-{int(self.CAPITAL_PER_TRADE_MAX_PCT * 100)}% per trade",
             f" | RESTORED: {self.option_side} {self.option_symbol}" if self.in_position else "",
         )
 
