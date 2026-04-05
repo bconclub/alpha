@@ -35,7 +35,7 @@ type BBSqueezeProps = Pick<OptionsState,
   | 'last_squeeze_action'
   | 'last_action_at'
   | 'breakout_state'
-  | 'breakout_confirmation_seconds_remaining'
+  | 'breakout_confirmation_secs_remaining'
 >;
 
 function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
@@ -67,7 +67,7 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
     last_squeeze_action,
     last_action_at,
     breakout_state,
-    breakout_confirmation_seconds_remaining,
+    breakout_confirmation_secs_remaining,
   } = props;
 
   const actionSecsAgo = useSecondsAgo(last_action_at);
@@ -154,14 +154,14 @@ function BBSqueezeSignalsPanel(props: BBSqueezeProps) {
               ({breakout_state === 'UP' ? 'CALL' : 'PUT'})
             </span>
           </div>
-          {breakout_confirmation_seconds_remaining != null && (
+          {breakout_confirmation_secs_remaining != null && (
             <span className={cn(
               'text-[9px] font-mono font-bold tabular-nums',
-              breakout_confirmation_seconds_remaining <= 10
+              breakout_confirmation_secs_remaining <= 10
                 ? 'text-[#ffd600] animate-pulse'
                 : 'text-zinc-300'
             )}>
-              {breakout_confirmation_seconds_remaining}s
+              {breakout_confirmation_secs_remaining}s
             </span>
           )}
         </div>
@@ -473,7 +473,7 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         last_squeeze_action={state.last_squeeze_action}
         last_action_at={state.last_action_at}
         breakout_state={state.breakout_state}
-        breakout_confirmation_seconds_remaining={state.breakout_confirmation_seconds_remaining}
+        breakout_confirmation_secs_remaining={state.breakout_confirmation_secs_remaining}
       />
 
       {/* Bot State */}
