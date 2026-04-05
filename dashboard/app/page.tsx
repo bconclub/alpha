@@ -24,6 +24,10 @@ interface SqueezeAsset {
   fillTimer?: number;
   positionPnl?: number;
   lastUpdate: string | null;
+  // NEW: Visual indicator props
+  strikePrice?: number;
+  optionType?: 'CALL' | 'PUT';
+  expiration?: string;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -82,6 +86,45 @@ function getDirectionEmoji(direction: SqueezeAsset['direction']) {
   }
 }
 
+// NEW: Visual arrow component for direction
+function DirectionArrow({ direction, size = 'md' }: { direction: SqueezeAsset['direction']; size?: 'sm' | 'md' | 'lg' }) {
+  const isLong = direction === 'long';
+  const isShort = direction === 'short';
+  const isNeutral = direction === 'neutral';
+  
+  const sizeClasses = {
+    sm: 'w-5 h-5 text-xs',
+    md: 'w-8 h-8 text-sm',
+    lg: 'w-10 h-10 text-base'
+  };
+  
+  const strokeWidth = size === 'sm' ? 2.5 : 3;
+  
+  return (
+    <div className={cn(
+      'rounded-full flex items-center justify-center border-2',
+      sizeClasses[size],
+      isLong ? 'bg-green-500/20 border-green-500 text-green-500' : 
+      isShort ? 'bg-red-500/20 border-red-500 text-red-500' : 
+      'bg-yellow-500/20 border-yellow-500 text-yellow-500'
+    )}>
+      {isLong ? (
+        <svg width={size === 'sm' ? 12 : 16} height={size === 'sm' ? 12 : 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
+          <path d="M12 19V5M5 12l7-7 7 7"/>
+        </svg>
+      ) : isShort ? (
+        <svg width={size === 'sm' ? 12 : 16} height={size === 'sm' ? 12 : 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
+          <path d="M12 5v14M5 12l7 7 7-7"/>
+        </svg>
+      ) : (
+        <svg width={size === 'sm' ? 12 : 16} height={size === 'sm' ? 12 : 16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
+          <path d="M5 12h14"/>
+        </svg>
+      )}
+    </div>
+  );
+}
+
 function formatTimeRemaining(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -102,19 +145,53 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
     ? Math.min(100, (asset.bbWidth / threshold) * 100)
     : 0;
 
+  // NEW: Updated badge colors per spec
+  const getStatusBadgeClass = () => {
+    switch (asset.state) {
+      case 'squeeze_active':
+        return 'bg-transparent border-2 border-blue-500 text-blue-400';
+      case 'filling':
+        return 'bg-amber-500/20 border-2 border-amber-500 text-amber-400 animate-pulse';
+      case 'position_open':
+        return 'bg-green-500 text-white border-2 border-green-500';
+      default:
+        return 'bg-gray-500/20 border-2 border-gray-600 text-gray-500';
+    }
+  };
+
   return (
     <div className={cn(
       'bg-[#141419] border border-white/5 rounded-xl p-4 border-l-4',
       state.leftBorder
     )}>
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2 mb-3">
+      {/* Header - NEW DESIGN with Direction Arrow & Strike */}
+      <div className="flex items-center justify-between gap-2 mb-3">
         <div className="flex items-center gap-2 min-w-0">
+          {/* Asset & Price */}
           <span className="text-lg font-bold text-white shrink-0">{asset.asset}</span>
           <span className="text-sm text-gray-400 font-mono truncate">
             {asset.price != null ? `$${formatNumber(asset.price)}` : '—'}
           </span>
+          
+          {/* Direction Arrow - NEW */}
+          {!isNoSqueeze && (
+            <DirectionArrow direction={asset.direction} size="sm" />
+          )}
+          
+          {/* Strike Price Badge - NEW */}
+          {asset.strikePrice && (
+            <div className="hidden sm:flex bg-white/10 px-2 py-1 rounded-lg border border-white/20 items-center gap-1">
+              <span className="text-xs font-mono font-bold text-white">
+                ${asset.strikePrice.toLocaleString()}
+              </span>
+              {asset.optionType && (
+                <span className="text-[10px] text-gray-400 uppercase">{asset.optionType}</span>
+              )}
+            </div>
+          )}
         </div>
+        
+        {/* Status Badge - UPDATED COLORS */}
         <div className="flex items-center gap-1.5 shrink-0">
           <span className={cn(
             'w-2 h-2 rounded-full',
@@ -122,12 +199,11 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
             state.pulse && 'animate-pulse'
           )} />
           <span className={cn(
-            'px-1.5 py-0.5 rounded text-[10px] font-bold border',
-            state.badgeColor
+            'px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded',
+            getStatusBadgeClass()
           )}>
-            {state.label}
+            {asset.state === 'position_open' ? 'OPEN' : state.label}
           </span>
-          <span className="hidden sm:inline text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">Delta</span>
         </div>
       </div>
 
@@ -176,20 +252,28 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
         </div>
       ) : isActive && asset.premiumRange ? (
         <>
-          {/* Direction Bias */}
-          <div className="flex items-center justify-between mb-3 p-2 bg-white/5 rounded">
+          {/* Direction Bias - NEW DESIGN with Visual Arrow */}
+          <div className="flex items-center justify-between mb-3 p-2 bg-white/5 rounded border border-white/5">
             <div className="flex items-center gap-2">
-              <span>{getDirectionEmoji(asset.direction)}</span>
+              {/* Mini Arrow Icon */}
+              <div className={cn(
+                'w-5 h-5 rounded flex items-center justify-center text-xs font-bold',
+                asset.direction === 'long' ? 'bg-green-500/20 text-green-500' : 
+                asset.direction === 'short' ? 'bg-red-500/20 text-red-500' : 
+                'bg-yellow-500/20 text-yellow-500'
+              )}>
+                {asset.direction === 'long' ? '↗' : asset.direction === 'short' ? '↘' : '→'}
+              </div>
               <span className="text-xs text-gray-300">Bias</span>
             </div>
             <div className="text-right">
-              <span className={cn(
-                'text-xs font-bold uppercase',
+              <div className={cn(
+                'font-bold',
                 asset.direction === 'long' ? 'text-green-400' : 
-                asset.direction === 'short' ? 'text-red-400' : 'text-gray-400'
+                asset.direction === 'short' ? 'text-red-400' : 'text-yellow-400'
               )}>
                 {asset.direction}
-              </span>
+              </div>
               <div className="text-[10px] text-gray-500">{(asset.confidence / 100).toFixed(1)} conf</div>
             </div>
           </div>
@@ -417,6 +501,11 @@ export default function DashboardPage() {
         ? (latest.rsi < 40 ? 'long' : latest.rsi > 60 ? 'short' : 'neutral')
         : 'neutral';
       
+      // Extract strike and option type from position if available
+      const strikePrice = position?.stop_loss ?? undefined;
+      const optionType = position?.pair?.endsWith('-C') ? 'CALL' : 
+                        position?.pair?.endsWith('-P') ? 'PUT' : undefined;
+      
       assets.push({
         asset: assetName,
         price: latest?.current_price ?? null,
@@ -426,6 +515,10 @@ export default function DashboardPage() {
         confidence: latest?.rsi != null ? Math.abs(50 - latest.rsi) * 2 : 50,
         premiumRange,
         lastUpdate: latest?.timestamp ?? null,
+        // NEW: Visual indicator props
+        strikePrice,
+        optionType,
+        expiration: '12h', // TODO: Calculate from position expiry
       });
     }
     
