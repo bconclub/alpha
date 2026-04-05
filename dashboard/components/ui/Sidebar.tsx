@@ -21,7 +21,7 @@ const navItems = [
     ),
   },
   {
-    name: 'Trade',
+    name: 'Trades',
     href: '/trades',
     icon: (
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -29,6 +29,17 @@ const navItems = [
         <path d="M3 8C3 7.44772 3.44772 7 4 7H16C16.5523 7 17 7.44772 17 8C17 8.55228 16.5523 9 16 9H4C3.44772 9 3 8.55228 3 8Z" fill="currentColor" />
         <path d="M4 11C3.44772 11 3 11.4477 3 12C3 12.5523 3.44772 13 4 13H16C16.5523 13 17 12.5523 17 12C17 11.4477 16.5523 11 16 11H4Z" fill="currentColor" />
         <path d="M3 16C3 15.4477 3.44772 15 4 15H16C16.5523 15 17 15.4477 17 16C17 16.5523 16.5523 17 16 17H4C3.44772 17 3 16.5523 3 16Z" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    name: 'P&L',
+    href: '/pnl',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M2 5L8 15" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+        <path d="M8 5L14 15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.6"/>
+        <path d="M14 5L18 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" opacity="0.4"/>
       </svg>
     ),
   },
@@ -46,24 +57,17 @@ const navItems = [
       </svg>
     ),
   },
-  {
-    name: 'P&L',
-    href: '/pnl',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="2" y="2" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3" />
-        <rect x="8" y="2" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
-        <rect x="14" y="2" width="4" height="4" rx="0.5" fill="currentColor" />
-        <rect x="2" y="8" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
-        <rect x="8" y="8" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3" />
-        <rect x="14" y="8" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
-        <rect x="2" y="14" width="4" height="4" rx="0.5" fill="currentColor" />
-        <rect x="8" y="14" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.6" />
-        <rect x="14" y="14" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3" />
-      </svg>
-    ),
-  },
 ];
+
+// Squeeze icon
+const squeezeIcon = (
+  <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="2" y="6" width="16" height="2" rx="1" fill="currentColor" opacity="0.4"/>
+    <rect x="3" y="9" width="14" height="2" rx="1" fill="currentColor" opacity="0.6"/>
+    <rect x="4" y="12" width="12" height="2" rx="1" fill="currentColor" opacity="0.8"/>
+    <rect x="5" y="15" width="10" height="2" rx="1" fill="currentColor"/>
+  </svg>
+);
 
 // Bottom nav items — subset for mobile (matches desktop)
 const bottomNavItems = [
