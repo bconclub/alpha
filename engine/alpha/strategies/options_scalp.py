@@ -305,6 +305,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_action: str = "SCANNING"             # SQUEEZE_FILL / SQUEEZE_NO_FILL / SCANNING
         self._squeeze_duration_candles: int = 0         # How long squeeze has been active
         self._squeeze_active_since: float | None = None # When squeeze started
+        self._position_opened_at: str | None = None     # ISO timestamp when position was entered
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -410,6 +411,9 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.option_symbol = trade_pair
                 self.entry_premium = trade.get("entry_price", 0)
                 self.entry_time = time.monotonic()
+                self._position_opened_at = (
+                    trade.get("opened_at") or datetime.now(timezone.utc).isoformat()
+                )
                 self.highest_premium = max(
                     self.entry_premium,
                     trade.get("current_price") or self.entry_premium,
@@ -847,6 +851,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "pnl_usd": round(pnl_usd, 4) if pnl_usd is not None else None,
             "trailing_active": trailing_active,
             "highest_premium": highest_prem,
+            "position_opened_at": self._position_opened_at,
             "chain_calls": chain_calls,
             "chain_puts": chain_puts,
             "bot_state": self._cached_bot_state,
@@ -1585,6 +1590,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.option_symbol = selected_symbol
         self.option_side = option_type
         self.entry_time = time.monotonic()
+        self._position_opened_at = datetime.now(timezone.utc).isoformat()
         self.highest_premium = fill_price
         self._last_known_premium = fill_price
         self.strike_price = selected_strike
@@ -2609,6 +2615,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.highest_premium = 0.0
         self._last_known_premium = 0.0
         self._trailing_active = False
+        self._position_opened_at = None
         self.strike_price = 0.0
         self.expiry_dt = None
         self._consecutive_ticker_failures = 0
@@ -2745,6 +2752,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.option_symbol = signal.pair
             self.entry_premium = fill_price
             self.entry_time = time.monotonic()
+            self._position_opened_at = datetime.now(timezone.utc).isoformat()
             self.highest_premium = fill_price
             self._last_known_premium = fill_price
             self._trailing_active = False
@@ -2829,6 +2837,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_premium = 0.0
             self.highest_premium = 0.0
             self._trailing_active = False
+            self._position_opened_at = None
             self.strike_price = 0.0
             self.expiry_dt = None
             self._contracts = 1
@@ -2857,6 +2866,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_premium = 0.0
             self.highest_premium = 0.0
             self._trailing_active = False
+            self._position_opened_at = None
             self.strike_price = 0.0
             self.expiry_dt = None
             self._last_state_write = 0.0
