@@ -1,5 +1,6 @@
 export type Exchange = 'binance' | 'delta' | 'bybit' | 'kraken';
 export type PositionType = 'spot' | 'long' | 'short';
+export type OptionSide = 'call' | 'put' | null;
 
 // Strategy values as stored in the database (lowercase)
 export type Strategy = string;
@@ -33,6 +34,7 @@ export interface Trade {
   order_id?: string;
   setup_type?: string;  // Entry setup classification (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
   exit_reason?: string; // Clean exit type: TRAIL, SL, FLAT, MANUAL, etc.
+  option_side?: OptionSide; // 'call' or 'put' for options trades
   // Live position state (written by bot every ~10s for open trades)
   position_state?: 'holding' | 'trailing' | null;
   trail_stop_price?: number | null;

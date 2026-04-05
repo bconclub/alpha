@@ -230,21 +230,49 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
   );
 }
 
-function RecentTradeCard({ trade }: { trade: { pair: string; position_type: string; pnl: number; entry_price?: number | null; exit_price?: number | null; exit_reason?: string | null; timestamp: string } }) {
+function RecentTradeCard({ trade }: { trade: { pair: string; position_type: string; option_side?: 'call' | 'put' | null; pnl: number; entry_price?: number | null; exit_price?: number | null; exit_reason?: string | null; timestamp: string } }) {
   const pairShort = trade.pair.replace(/USD.*/, '').replace('/', '');
   const isProfit = trade.pnl > 0;
   const timeAgo = Math.floor((Date.now() - new Date(trade.timestamp).getTime()) / 60000);
   const timeText = timeAgo < 60 ? `${timeAgo}m ago` : `${Math.floor(timeAgo / 60)}h ago`;
+  
+  // Determine option side: use option_side field or extract from pair symbol
+  const getOptionSide = (): { label: string; isCall: boolean } => {
+    // If option_side is explicitly set, use it
+    if (trade.option_side) {
+      return { 
+        label: trade.option_side === 'call' ? 'CALL' : 'PUT',
+        isCall: trade.option_side === 'call'
+      };
+    }
+    
+    // Fallback: extract from pair symbol (e.g., "ETH-27MAR25-2100-P" or "ETH 2040P")
+    const pairUpper = trade.pair.toUpperCase();
+    if (pairUpper.endsWith('-C') || pairUpper.endsWith('C') || pairUpper.includes('-CALL')) {
+      return { label: 'CALL', isCall: true };
+    }
+    if (pairUpper.endsWith('-P') || pairUpper.endsWith('P') || pairUpper.includes('-PUT')) {
+      return { label: 'PUT', isCall: false };
+    }
+    
+    // Default based on position_type (legacy fallback)
+    return { 
+      label: trade.position_type === 'long' ? 'CALL' : 'PUT',
+      isCall: trade.position_type === 'long'
+    };
+  };
+  
+  const optionDisplay = getOptionSide();
   
   return (
     <div className="bg-[#141419] border border-white/5 rounded-lg p-3 min-w-[200px]">
       <div className="flex items-center justify-between mb-2">
         <span className="font-bold text-sm">{pairShort}</span>
         <span className={cn(
-          'text-xs font-bold',
-          trade.position_type === 'long' ? 'text-green-400' : 'text-red-400'
+          'text-xs font-bold px-2 py-0.5 rounded',
+          optionDisplay.isCall ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
         )}>
-          {trade.position_type.toUpperCase()}
+          {optionDisplay.label}
         </span>
       </div>
       <div className="flex items-center justify-between mb-1">
