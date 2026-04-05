@@ -65,7 +65,7 @@ function PnLChart({ trades, range }: { trades: any[]; range: TimeRange }) {
 
   const min = Math.min(...chartData.map(d => d.cumulative), 0);
   const max = Math.max(...chartData.map(d => d.cumulative), 0);
-  const range = max - min || 1;
+  const valueRange = max - min || 1;
 
   const width = 100;
   const height = 48;
@@ -73,7 +73,7 @@ function PnLChart({ trades, range }: { trades: any[]; range: TimeRange }) {
 
   const points = chartData.map((d, i) => {
     const x = padding + (i / (chartData.length - 1 || 1)) * (width - padding * 2);
-    const y = padding + (1 - (d.cumulative - min) / range) * (height - padding * 2);
+    const y = padding + (1 - (d.cumulative - min) / valueRange) * (height - padding * 2);
     return `${x},${y}`;
   });
 
