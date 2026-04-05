@@ -447,6 +447,39 @@ export default function DashboardPage() {
     return `${m}m`;
   };
 
+  // Timeframe selection for Total Capital card
+  const [capitalTimeframe, setCapitalTimeframe] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
+  
+  // Calculate P&L for selected timeframe
+  const timeframeStats = useMemo(() => {
+    const now = Date.now();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    
+    let cutoffMs: number;
+    if (capitalTimeframe === '24h') {
+      const istNow = new Date(now + istOffsetMs);
+      const todayIST = istNow.toISOString().slice(0, 10);
+      cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
+    } else {
+      const days = capitalTimeframe === '7d' ? 7 : capitalTimeframe === '14d' ? 14 : 30;
+      cutoffMs = now - days * 24 * 60 * 60 * 1000;
+    }
+
+    let pnl = 0;
+    let total = 0;
+    
+    for (const t of trades) {
+      if (t.status !== 'closed') continue;
+      const tradeTime = new Date(t.timestamp).getTime();
+      if (tradeTime >= cutoffMs) {
+        pnl += t.pnl ?? 0;
+        total++;
+      }
+    }
+    
+    return { pnl, total };
+  }, [trades, capitalTimeframe]);
+
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white p-4 md:p-6 pb-24 md:pb-6">
       {/* Header */}
@@ -461,29 +494,73 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Balance & Regime Row */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-        {/* Balance Card */}
+      {/* 3-Card Row: Delta Balance | Total Capital + Timeframe | Market Regime */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+        {/* Card 1: Delta Balance */}
         <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-xs text-gray-500 uppercase mb-1">Delta Balance</div>
-              <div className="text-2xl font-bold font-mono">{formatCurrency(deltaBalance)}</div>
-              <div className="text-xs text-gray-500 mt-1">
-                {todayStats.wins}W / {todayStats.losses}L • {todayStats.winRate.toFixed(0)}% WR • {todayStats.total} trades
-              </div>
-              <div className="text-xs mt-1">
-                <span className={todayStats.grossPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
-                  {todayStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(todayStats.grossPnl)} P&L
-                </span>
-                <span className="text-gray-600"> • </span>
-                <span className="text-gray-500">${todayStats.fees.toFixed(2)} fees</span>
-              </div>
-            </div>
+          <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">Delta Balance</div>
+          <div className="text-2xl font-bold font-mono">{formatCurrency(deltaBalance)}</div>
+          <div className="text-xs text-gray-500 mt-1">
+            {todayStats.wins}W / {todayStats.losses}L • {todayStats.winRate.toFixed(0)}% WR • {todayStats.total} trades
+          </div>
+          <div className="text-xs mt-1">
+            <span className={todayStats.grossPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+              {todayStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(todayStats.grossPnl)} P&L
+            </span>
+            <span className="text-gray-600"> • </span>
+            <span className="text-gray-500">${todayStats.fees.toFixed(2)} fees</span>
           </div>
         </div>
 
-        {/* Market Regime Card */}
+        {/* Card 2: Total Capital + Timeframe Toggle */}
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs text-gray-500 uppercase tracking-wider">Total Capital</span>
+            <div className="flex gap-1">
+              {(['24h', '7d', '14d', '30d'] as const).map((tf) => (
+                <button
+                  key={tf}
+                  onClick={() => setCapitalTimeframe(tf)}
+                  className={cn(
+                    'px-2 py-0.5 text-[10px] font-medium rounded transition-colors',
+                    capitalTimeframe === tf
+                      ? 'bg-white/10 text-white'
+                      : 'border border-white/10 text-gray-500 hover:text-gray-300'
+                  )}
+                >
+                  {tf.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="text-2xl font-bold font-mono">
+            {formatCurrency(totalCapital)}
+          </div>
+          {capitalInr > 0 && (
+            <div className="text-xs text-gray-500">₹{capitalInr.toLocaleString('en-IN')}</div>
+          )}
+          <div className="flex items-center justify-between mt-2">
+            <div className="flex items-center gap-2">
+              <span className={cn('w-2 h-2 rounded-full', botState === 'running' ? 'bg-green-500' : 'bg-yellow-500')} />
+              <span className={cn('text-xs', botState === 'running' ? 'text-green-500' : 'text-yellow-500')}>
+                {botState === 'running' ? 'Running' : 'Paused'}
+              </span>
+              {uptimeSeconds > 0 && (
+                <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>
+              )}
+            </div>
+            {timeframeStats.total > 0 && (
+              <span className={cn(
+                'text-xs font-mono font-bold',
+                timeframeStats.pnl >= 0 ? 'text-green-400' : 'text-red-400'
+              )}>
+                {timeframeStats.pnl >= 0 ? '+' : ''}{formatCurrency(timeframeStats.pnl)}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Card 3: Market Regime */}
         <div className={cn('rounded-xl p-4 border', rc.bg, 'border-white/5')}>
           <div className="flex items-center gap-2 mb-2">
             <span className={cn('text-lg', rc.color)}>{rc.icon}</span>
@@ -509,32 +586,6 @@ export default function DashboardPage() {
               <span className="text-gray-400">{regimeDuration || '—'}</span>
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Total Capital */}
-      <div className="flex items-center justify-between bg-[#141419] border border-white/5 rounded-xl p-4 mb-4">
-        <div>
-          <div className="text-xs text-gray-500 uppercase">Total Capital</div>
-          <div className="text-xl font-bold">
-            {formatCurrency(totalCapital)}
-            {capitalInr > 0 && (
-              <span className="text-sm text-gray-500 ml-2">₹{capitalInr.toLocaleString('en-IN')}</span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 mt-1">
-            <span className={cn('w-2 h-2 rounded-full', botState === 'running' ? 'bg-green-500' : 'bg-yellow-500')} />
-            <span className={cn('text-xs', botState === 'running' ? 'text-green-500' : 'text-yellow-500')}>
-              {botState === 'running' ? 'Running' : 'Paused'}
-            </span>
-            {uptimeSeconds > 0 && (
-              <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>
-            )}
-          </div>
-        </div>
-        <div className="text-right text-xs text-gray-500">
-          <div>Strategies: <span className="text-blue-400 font-mono">{liveStrategyCount}</span></div>
-          <div>Total Trades: <span className="text-gray-300 font-mono">{totalTrades}</span></div>
         </div>
       </div>
 

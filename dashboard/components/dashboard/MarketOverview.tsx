@@ -59,14 +59,6 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
     : 'text-amber-400'
     : 'text-zinc-600';
 
-  const h1 = card.priceChange1h;
-  const trendArrow = h1 != null && h1 > 0.05 ? '↑'
-    : h1 != null && h1 < -0.05 ? '↓'
-    : '→';
-  const trendColor = h1 != null && h1 > 0.05 ? 'text-[#00c853]'
-    : h1 != null && h1 < -0.05 ? 'text-[#ff1744]'
-    : 'text-zinc-400';
-
   const pos = card.activePosition;
   const inTrade = pos != null;
   const positionSide = pos?.position_type;
@@ -80,10 +72,9 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
           : 'border-[#00c853]/20'
         : 'border-white/5',
     )}>
-      {/* Header: Asset + trend */}
-      <div className="flex items-center justify-between mb-2">
+      {/* Header: Asset only (no trend arrow) */}
+      <div className="mb-2">
         <span className="font-bold text-white">{card.asset}</span>
-        <span className={cn('text-lg', trendColor)}>{trendArrow}</span>
       </div>
 
       {/* Price */}
@@ -142,8 +133,8 @@ export function MarketOverview() {
   const { strategyLog, openPositions } = useSupabase();
 
   const assetCards = useMemo(() => {
-    // ONLY BTC and ETH - no other coins
-    const ACTIVE_ASSETS = new Set(['BTC', 'ETH']);
+    // 4 assets: BTC, ETH, SOL, XRP
+    const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
 
     // Group latest strategy_log by base asset, prefer Delta exchange
     const latestByAsset = new Map<string, StrategyLog>();
@@ -179,8 +170,8 @@ export function MarketOverview() {
       });
     }
 
-    // Sort: BTC, ETH (fixed order for consistency)
-    const order = ['BTC', 'ETH'];
+    // Sort: BTC, ETH, SOL, XRP (fixed order for consistency)
+    const order = ['BTC', 'ETH', 'SOL', 'XRP'];
     cards.sort((a, b) => {
       const ai = order.indexOf(a.asset);
       const bi = order.indexOf(b.asset);
@@ -199,7 +190,7 @@ export function MarketOverview() {
         <p className="text-sm text-zinc-500 text-center py-8">No market data yet</p>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {assetCards.map((card) => (
               <AssetCardComponent key={card.asset} card={card} />
             ))}
