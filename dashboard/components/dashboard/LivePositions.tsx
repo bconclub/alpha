@@ -118,6 +118,12 @@ export function LivePositions() {
   const positions: PositionDisplay[] = useMemo(() => {
     if (!openPositions || openPositions.length === 0) return [];
 
+    // Debug: log raw DB data for open positions
+    console.log('[LivePositions] openPositions raw data:', openPositions.map((p) => ({
+      id: p.id, pair: p.pair, current_price: p.current_price, current_pnl: p.current_pnl,
+      peak_pnl: p.peak_pnl, stop_loss: p.stop_loss, take_profit: p.take_profit,
+    })));
+
     return openPositions.map((pos) => {
       const asset = extractBaseAsset(pos.pair);
       const isOption = isOptionPosition(pos);
@@ -131,9 +137,16 @@ export function LivePositions() {
       if (isOption) {
         const pairKey = `${asset}/USD:USD`;
         const optState = optionsState.find((s) => s.pair === pairKey);
-        currentPrice = optState?.current_premium ?? null;
+        // Priority: live options state → DB current_price → derive from current_pnl
+        currentPrice = optState?.current_premium ?? pos.current_price ?? null;
         optionStrike = optState?.position_strike ?? null;
         optionExpiry = optState?.expiry_label ?? null;
+        // Last resort: derive approximate premium from bot's current_pnl (%)
+        if (currentPrice == null && pos.current_pnl != null && pos.entry_price > 0) {
+          currentPrice = pos.position_type === 'short'
+            ? pos.entry_price * (1 - pos.current_pnl / 100)
+            : pos.entry_price * (1 + pos.current_pnl / 100);
+        }
       } else {
         // Priority: live API price (3s) → bot DB price (~10s) → strategy_log (~5min)
         currentPrice =
@@ -196,11 +209,14 @@ export function LivePositions() {
 
       // Use ACTUAL position state from bot (written to DB every ~10s)
       // Options trail activates at 15% premium gain, futures at 0.15% spot
-      const peakPnlPct = pos.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
+      // peak_pnl from DB is authoritative; fall back to live pricePnlPct only if DB value absent
+      const peakPnlPct = pos.peak_pnl != null
+        ? pos.peak_pnl
+        : (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : null);
       const trailThreshold = isOption ? OPT_TRAIL_ACTIVATION_PCT : TRAIL_ACTIVATION_PCT;
       const trailActive = (
         pos.position_state === 'trailing'
-        && peakPnlPct >= trailThreshold
+        && (peakPnlPct ?? 0) >= trailThreshold
       );
 
       // Use ACTUAL trail stop price from bot, or estimate if not available
@@ -476,24 +492,26 @@ export function LivePositions() {
                     </div>
                   </div>
                   {/* Peak / SL / TP row */}
-                  {((pos.peakPnlPct ?? 0) > 0 || pos.slPrice != null || pos.tpPrice != null) && (
+                  {(
                     <div className="grid grid-cols-3 gap-x-4 gap-y-1 mt-1 text-xs font-mono">
                       <div>
                         <div className="text-[11px] text-zinc-500 uppercase">Peak</div>
                         <div className="text-[#00c853]">
-                          {(pos.peakPnlPct ?? 0) > 0 ? `+${(pos.peakPnlPct ?? 0).toFixed(2)}%` : '\u2014'}
+                          {pos.peakPnlPct != null && pos.peakPnlPct !== 0
+                            ? `${pos.peakPnlPct > 0 ? '+' : ''}${pos.peakPnlPct.toFixed(2)}%`
+                            : '\u2014'}
                         </div>
                       </div>
                       <div>
                         <div className="text-[11px] text-zinc-500 uppercase">SL</div>
                         <div className="text-[#ff1744]/80">
-                          {pos.slPrice != null ? `$${fmtPrice(pos.slPrice)}` : '\u2014'}
+                          {pos.slPrice != null ? `$${fmtPrice(pos.slPrice)}` : 'Not set'}
                         </div>
                       </div>
                       <div>
                         <div className="text-[11px] text-zinc-500 uppercase">TP</div>
                         <div className="text-[#00c853]/80">
-                          {pos.tpPrice != null ? `$${fmtPrice(pos.tpPrice)}` : '\u2014'}
+                          {pos.tpPrice != null ? `$${fmtPrice(pos.tpPrice)}` : 'Not set'}
                         </div>
                       </div>
                     </div>
@@ -517,7 +535,9 @@ export function LivePositions() {
                   <div>
                     <div className="text-[11px] text-zinc-500 uppercase">Peak</div>
                     <div className="text-[#00c853]">
-                      {(pos.peakPnlPct ?? 0) > 0 ? `+${(pos.peakPnlPct ?? 0).toFixed(2)}%` : '\u2014'}
+                      {pos.peakPnlPct != null && pos.peakPnlPct !== 0
+                        ? `${pos.peakPnlPct > 0 ? '+' : ''}${pos.peakPnlPct.toFixed(2)}%`
+                        : '\u2014'}
                     </div>
                   </div>
                   <div>
@@ -533,13 +553,13 @@ export function LivePositions() {
                   <div>
                     <div className="text-[11px] text-zinc-500 uppercase">SL</div>
                     <div className="text-[#ff1744]/80">
-                      {pos.slPrice != null ? `$${fmtPrice(pos.slPrice)}` : '\u2014'}
+                      {pos.slPrice != null ? `$${fmtPrice(pos.slPrice)}` : 'Not set'}
                     </div>
                   </div>
                   <div>
                     <div className="text-[11px] text-zinc-500 uppercase">TP</div>
                     <div className="text-[#00c853]/80">
-                      {pos.tpPrice != null ? `$${fmtPrice(pos.tpPrice)}` : '\u2014'}
+                      {pos.tpPrice != null ? `$${fmtPrice(pos.tpPrice)}` : 'Not set'}
                     </div>
                   </div>
                 </div>
