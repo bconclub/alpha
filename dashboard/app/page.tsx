@@ -230,7 +230,7 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
   );
 }
 
-function RecentTradeCard({ trade }: { trade: { pair: string; position_type: string; pnl: number; entry_price: number; exit_price?: number; exit_reason?: string; timestamp: string } }) {
+function RecentTradeCard({ trade }: { trade: { pair: string; position_type: string; pnl: number; entry_price?: number; exit_price?: number; exit_reason?: string; timestamp: string } }) {
   const pairShort = trade.pair.replace(/USD.*/, '').replace('/', '');
   const isProfit = trade.pnl > 0;
   const timeAgo = Math.floor((Date.now() - new Date(trade.timestamp).getTime()) / 60000);
@@ -248,7 +248,7 @@ function RecentTradeCard({ trade }: { trade: { pair: string; position_type: stri
         </span>
       </div>
       <div className="flex items-center justify-between mb-1">
-        <span className="text-xs text-gray-500">${trade.entry_price.toFixed(2)}</span>
+        <span className="text-xs text-gray-500">${trade.entry_price?.toFixed(2) ?? '—'}</span>
         <span className="text-xs text-gray-400">→</span>
         <span className="text-xs text-gray-500">${trade.exit_price?.toFixed(2) ?? '—'}</span>
       </div>
