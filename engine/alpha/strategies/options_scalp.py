@@ -1,31 +1,29 @@
-"""Alpha Options Scalp — Buy cheap premium during BB squeeze, hold through breakout.
+"""Alpha Options Scalp — Wait for BB squeeze breakout confirmation before entry.
 
 ═══════════════════════════════════════════════════════════════
- ENTRY: BB SQUEEZE STRATEGY
+ ENTRY: BB SQUEEZE BREAKOUT STRATEGY (GPFC #20)
 ═══════════════════════════════════════════════════════════════
 
  STEP 1 — DETECT BB SQUEEZE (every scan tick, ~30s):
    - Bollinger Bands (20 period, 2 std dev) + Keltner Channel (20 period, 1.5×ATR)
    - SQUEEZE = BB upper < KC upper AND BB lower > KC lower
    - BB width < 1.0% (ETH) / 0.7% (BTC) for valid squeeze
-   - No entries outside squeeze — wait for compression
+   - Log SQUEEZE_SCAN, do nothing else — wait for breakout
 
- STEP 2 — DETERMINE DIRECTION BIAS:
-   - bb_position < 0.4 → buy CALL (expect upside breakout)
-   - bb_position > 0.6 → buy PUT (expect downside breakout)
-   - Middle (0.4–0.6) → buy cheaper of ATM call vs put
+ STEP 2 — DETECT BREAKOUT (when BB leaves KC):
+   - BB_upper > KC_upper → breakout UP → buy CALL
+   - BB_lower < KC_lower → breakout DOWN → buy PUT
+   - Log SQUEEZE_BREAKOUT: dir=UP/DOWN
+   - Start 60s confirmation window — do NOT enter yet
+   - direction_bias stays NEUTRAL until confirmed
 
- STEP 3 — BUY CHEAP PREMIUM:
-   - Track ATM ask over last 30 min during squeeze scans
-   - cheap_threshold = lowest_ask + range × 0.25 (bottom 25% of range)
-   - Place limit at min(current_ask, cheap_threshold)
-   - Wait up to 5 min for fill (check every 30s)
-   - No-fill → cancel, no cooldown (squeeze setups are rare)
-
- STEP 4 — HOLD THROUGH BREAKOUT:
-   - Exit system takes over after fill
-   - SQUEEZE_RELEASE: if BB breaks out of KC and premium still below entry after 2 min → wrong direction, exit
-   - No stale SL for first 15 min ETH / 20 min BTC (squeeze takes time)
+ STEP 3 — CONFIRM BREAKOUT (60s window):
+   - Every tick during window: check if current ask >= entry_ask at breakout
+   - CALL/PUT: ask must stay >= breakout ask (premium rising or holding)
+   - If ask drops below breakout ask → BREAKOUT_FAKEOUT, abort, reset
+   - After 60s with premium holding → BREAKOUT_CONFIRMED
+   - Place limit order at current ask, wait 5 min for fill
+   - Log BREAKOUT_CONFIRMED: dir=UP/DOWN premium=$ask
 
  CONFIDENCE SCORING:
    - Tightness: BB_width < 0.5% = 1.0 | < 0.75% = 0.7 | < 1.0% = 0.4
@@ -40,12 +38,11 @@
 
 ═══════════════════════════════════════════════════════════════
 
-Exit (keeps all existing exit logic):
+Exit (all original exits kept except SQUEEZE_RELEASE which is no longer needed):
   1. OPT_SL:           -30% premium (always active, even Phase 1)
   2. OPT_ENTRY_DROP:   -8% in first 60s — bad entry, cut fast
   3. Ratchet/Trail:    lock profit at tiers, trail at +8%, TP at +30%
   4. EXPIRY_GUARD:     < 30 min → always exit; < 2h + pnl < +10% → exit
-  5. SQUEEZE_RELEASE:  BB breaks KC + premium still below entry after 2 min → exit
   - Progressive SL for stale trades after squeeze hold time:
       ETH: 5m → -10%, 8m → -5%, 12m → OPT_STALE (starts at 15m post-entry)
       BTC: 8m → -15%, 12m → -10%, 18m → OPT_STALE (starts at 20m post-entry)
@@ -120,7 +117,7 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_HISTORY_MIN = 30             # Track premium history for 30 min
     SQUEEZE_NO_STALE_MIN_ETH = 15        # No stale SL for first 15 min after squeeze fill (ETH)
     SQUEEZE_NO_STALE_MIN_BTC = 20        # No stale SL for first 20 min after squeeze fill (BTC)
-    SQUEEZE_RELEASE_WAIT_SEC = 120       # Wait 2 min after KC release before exiting on wrong direction
+    BREAKOUT_CONFIRM_SEC = 60            # 60s confirmation window after breakout detected
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
@@ -226,6 +223,9 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_skip_time: float = 0.0
         self._SKIP_LOG_INTERVAL = 5 * 60  # 5 minutes
 
+        # Last-action timestamp (wall-clock) for dashboard "X seconds ago" display
+        self._last_action_at: float = 0.0
+
         # Dashboard state write interval
         self._STATE_WRITE_INTERVAL = 30  # Write to DB every 30 seconds
         self._last_state_write: float = 0.0
@@ -265,8 +265,30 @@ class OptionsScalpStrategy(BaseStrategy):
         self._premium_history: deque[tuple[float, float]] = deque(maxlen=360)
         # True when current position was entered on a squeeze signal
         self._is_squeeze_entry: bool = False
-        # Monotonic time when squeeze breakout was detected (BB left KC)
+        # Monotonic time when confirmed breakout entry was placed
         self._squeeze_breakout_time: float | None = None
+
+        # ── Breakout confirmation state (GPFC #20) ─────────────────
+        # True while waiting for 60s confirmation window to complete
+        self._breakout_pending: bool = False
+        # "UP" or "DOWN"
+        self._breakout_direction: str | None = None
+        # Monotonic time when breakout was first detected
+        self._breakout_time: float | None = None
+        # Premium ask at the moment breakout was detected
+        self._breakout_entry_ask: float = 0.0
+        # Option symbol selected at breakout detection
+        self._breakout_symbol: str | None = None
+        # Strike selected at breakout detection
+        self._breakout_strike: float | None = None
+        # "call" or "put"
+        self._breakout_option_type: str | None = None
+        # Number of contracts calculated at breakout detection
+        self._breakout_contracts: int = 0
+        # Confidence score at breakout detection
+        self._breakout_confidence: float = 0.0
+        # BB width at breakout detection (for logging)
+        self._breakout_bb_width: float = 0.0
 
         # Dashboard chain panel cached state
         self._cached_candle_momentum: dict | None = None
@@ -828,6 +850,25 @@ class OptionsScalpStrategy(BaseStrategy):
             "premium_current_ask": round(self._premium_current_ask, 4) if self._premium_current_ask > 0 else None,
             "premium_cheap_threshold": round(self._premium_cheap_threshold, 4) if self._premium_cheap_threshold > 0 else None,
             "last_squeeze_action": self._last_action,
+            "last_action_at": (
+                datetime.fromtimestamp(self._last_action_at, tz=timezone.utc).isoformat()
+                if self._last_action_at > 0 else None
+            ),
+            # Breakout confirmation state
+            "breakout_state": self._breakout_direction if self._breakout_pending else None,
+            "breakout_confirmation_seconds_remaining": (
+                max(0, int(self.BREAKOUT_CONFIRM_SEC - (time.monotonic() - self._breakout_time)))
+                if self._breakout_pending and self._breakout_time is not None else None
+            ),
+            # 30-min premium range (actual low/high from history)
+            "premium_lowest_ask": (
+                round(min(a for _, a in self._premium_history), 4)
+                if self._premium_history else None
+            ),
+            "premium_highest_ask": (
+                round(max(a for _, a in self._premium_history), 4)
+                if self._premium_history else None
+            ),
         }
 
         await self._db.upsert_options_state(self.pair, state)
@@ -915,11 +956,12 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.debug("[%s] fetch_ohlcv failed: %s", self.pair, e)
             return None
 
-    async def _detect_squeeze(self) -> tuple[bool, float, float, float, int] | None:
+    async def _detect_squeeze(self) -> tuple[bool, float, float, float, int, float, float, float, float] | None:
         """Detect BB Squeeze: BB width < threshold and BB contained within KC.
-        
+
         Returns:
-            (is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, candles_used)
+            (is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, candles_used,
+             bb_upper, bb_lower, kc_upper, kc_lower)
             or None if data unavailable
         """
         ohlcv = await self._get_ohlcv_for_squeeze()
@@ -975,7 +1017,7 @@ class OptionsScalpStrategy(BaseStrategy):
         recent_vol = mean(volumes[-5:])
         avg_vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 1.0
 
-        return is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, len(candles)
+        return is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, len(candles), bb_upper, bb_lower, kc_upper, kc_lower
 
     def _compute_squeeze_confidence(
         self,
@@ -1030,7 +1072,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
 
     async def _check_option_entry(self) -> list[Signal]:
-        """BB Squeeze entry: detect compression, buy cheap premium, hold through breakout."""
+        """BB Squeeze breakout entry — scan for squeeze, wait for breakout, confirm, then enter."""
         self._cached_bot_state = "scanning"
         self._cached_target_strike = None
 
@@ -1055,6 +1097,10 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return []
 
+        # STEP 3: If breakout detected, run confirmation window check
+        if self._breakout_pending:
+            return await self._check_breakout_confirmation()
+
         # STEP 1: DETECT BB SQUEEZE
         squeeze_result = await self._detect_squeeze()
         if squeeze_result is None:
@@ -1062,7 +1108,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._direction_bias = "NEUTRAL"
             return []
 
-        is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, _candles_used = squeeze_result
+        is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, _candles_used, bb_upper, bb_lower, kc_upper, kc_lower = squeeze_result
         bb_width_threshold = (
             self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
             else self.SQUEEZE_BB_WIDTH_ETH
@@ -1079,9 +1125,16 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         if not is_squeeze:
+            # STEP 2: Was squeeze active? Check for breakout direction before resetting state.
+            if self._squeeze_active_since is not None:
+                await self._handle_squeeze_breakout(
+                    bb_upper, bb_lower, kc_upper, kc_lower, bb_width_pct, avg_vol_ratio,
+                )
+
             self._squeeze_status = "WAITING"
             self._squeeze_active_since = None
             self._squeeze_duration_candles = 0
+            self._direction_bias = "NEUTRAL"
             self._cached_bot_state = "scanning:no_squeeze"
             return []
 
@@ -1093,96 +1146,71 @@ class OptionsScalpStrategy(BaseStrategy):
         # Check if BB width is tight enough
         if bb_width_pct >= bb_width_threshold:
             self._squeeze_status = "ACTIVE"
+            self._direction_bias = "NEUTRAL"
             self._cached_bot_state = "scanning:bb_too_wide"
             return []
 
         self._squeeze_status = "ACTIVE"
-        self.logger.info(
-            "[%s] SQUEEZE_DETECTED: BB_width=%.3f%% KC_contains_BB=true",
-            self.pair, bb_width_pct,
-        )
+        self._direction_bias = "NEUTRAL"  # No bias until breakout is confirmed
+        if self._tick_count % 6 == 0:
+            self.logger.info(
+                "[%s] SQUEEZE_DETECTED: BB_width=%.3f%% KC_contains_BB=true — waiting for breakout",
+                self.pair, bb_width_pct,
+            )
+        self._cached_bot_state = "squeeze:waiting_for_breakout"
+        return []
 
-        # STEP 2: DETERMINE DIRECTION BIAS
-        if bb_position < 0.4:
-            option_type: str = "call"
-            self._direction_bias = "CALL"
-        elif bb_position > 0.6:
-            option_type = "put"
-            self._direction_bias = "PUT"
+    async def _handle_squeeze_breakout(
+        self,
+        bb_upper: float,
+        bb_lower: float,
+        kc_upper: float,
+        kc_lower: float,
+        bb_width_pct: float,
+        avg_vol_ratio: float,
+    ) -> None:
+        """Called when squeeze ends — determine breakout direction and start 60s confirmation window."""
+        # Determine direction from which band exited KC
+        if bb_upper > kc_upper and bb_lower < kc_lower:
+            # Both bands outside — pick the side with larger exceedance
+            up_excess = bb_upper - kc_upper
+            dn_excess = kc_lower - bb_lower
+            direction = "UP" if up_excess >= dn_excess else "DOWN"
+        elif bb_upper > kc_upper:
+            direction = "UP"
+        elif bb_lower < kc_lower:
+            direction = "DOWN"
         else:
-            option_type = "middle"  # resolved below via premium comparison
-            self._direction_bias = "NEUTRAL"
+            # Squeeze ended but no clear KC exit yet — skip
+            return
 
-        # Get current price
+        option_type = "call" if direction == "UP" else "put"
+
+        # Need current price and exchange data to select strike
         current_price = 0.0
         try:
             price_ticker = await self.futures_exchange.fetch_ticker(self.pair)
             current_price = float(price_ticker.get("last", 0) or 0)
             self._last_spot_price = current_price
         except Exception as e:
-            self.logger.debug("[%s] Price fetch failed: %s", self.pair, e)
+            self.logger.debug("[%s] Price fetch for breakout failed: %s", self.pair, e)
+            return
 
         if current_price <= 0:
-            self._cached_bot_state = "blocked:no_price"
-            return []
+            return
 
-        # Check expiry validity
         if self._selected_expiry is None:
-            self._cached_bot_state = "blocked:no_expiry"
-            return []
-        hours_to_expiry = (
-            self._selected_expiry - datetime.now(timezone.utc)
-        ).total_seconds() / 3600
+            return
+        hours_to_expiry = (self._selected_expiry - datetime.now(timezone.utc)).total_seconds() / 3600
         if hours_to_expiry < self.MIN_EXPIRY_HOURS:
-            self._cached_bot_state = "blocked:expiry_close"
-            return []
+            return
 
-        # Get ATM strike
         atm_strike = self._get_atm_strike(current_price)
         if atm_strike is None:
-            self._cached_bot_state = "blocked:no_strikes"
-            return []
+            return
         self._cached_target_strike = atm_strike
 
-        # Resolve middle-zone direction: buy the cheaper of ATM call vs put
-        if option_type == "middle":
-            _call_ask = 0.0
-            _put_ask = 0.0
-            try:
-                _cs = self._build_option_symbol(atm_strike, "call", self._selected_expiry)
-                if _cs and self.options_exchange:
-                    _t = await self.options_exchange.fetch_ticker(_cs)
-                    _call_ask = float(_t.get("ask") or _t.get("last") or 0)
-            except Exception:
-                pass
-            try:
-                _ps = self._build_option_symbol(atm_strike, "put", self._selected_expiry)
-                if _ps and self.options_exchange:
-                    _t = await self.options_exchange.fetch_ticker(_ps)
-                    _put_ask = float(_t.get("ask") or _t.get("last") or 0)
-            except Exception:
-                pass
-            if _call_ask > 0 and _put_ask > 0:
-                option_type = "call" if _call_ask <= _put_ask else "put"
-            elif _call_ask > 0:
-                option_type = "call"
-            elif _put_ask > 0:
-                option_type = "put"
-            else:
-                option_type = "call"
-            self._direction_bias = option_type.upper()
-            self.logger.info(
-                "[%s] SQUEEZE_BIAS: bb_pos=%.2f → %s (middle zone, cheaper ATM premium)",
-                self.pair, bb_position, option_type.upper(),
-            )
-        else:
-            self.logger.info(
-                "[%s] SQUEEZE_BIAS: bb_pos=%.2f → %s",
-                self.pair, bb_position, option_type.upper(),
-            )
-
-        # STEP 3: BUY CHEAP PREMIUM
-        # Strike selection: ATM only for both ETH and BTC (MAX_OTM_STRIKES = 1)
+        # Select strike
         strikes_to_try = [atm_strike]
         if self._base_asset == "BTC":
             otm_candidates = self._get_otm_candidates(atm_strike, option_type)
@@ -1205,7 +1233,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 continue
             if ask < self.MIN_PREMIUM_USD:
                 continue
-            n = self._calculate_option_contracts(ask, confidence=0.7)  # Default confidence for affordability check
+            n = self._calculate_option_contracts(ask, confidence=0.7)
             if n >= 1:
                 selected_strike = strike
                 selected_symbol = sym
@@ -1213,17 +1241,13 @@ class OptionsScalpStrategy(BaseStrategy):
                 break
 
         if selected_strike is None or selected_symbol is None:
-            await self._log_skip(
-                f"{self.pair} — SQUEEZE SKIP: no affordable strike (ATM=${atm_strike:.0f})",
-                {"option_type": option_type, "atm_strike": atm_strike},
+            self.logger.info(
+                "[%s] SQUEEZE_BREAKOUT dir=%s: no affordable strike — skip",
+                self.pair, direction,
             )
-            self._cached_bot_state = "blocked:no_affordable_strike"
-            return []
+            return
 
-        # Update dashboard premium info
-        self._premium_current_ask = current_ask
-
-        # Update premium history for cheap-threshold computation
+        # Build confidence using squeeze tightness + premium history at breakout
         now_mono = time.monotonic()
         self._premium_history.append((now_mono, current_ask))
         cutoff = now_mono - self.SQUEEZE_HISTORY_MIN * 60
@@ -1233,18 +1257,13 @@ class OptionsScalpStrategy(BaseStrategy):
         hist_asks = [a for _, a in self._premium_history]
         lowest_ask = min(hist_asks) if hist_asks else current_ask
         highest_ask = max(hist_asks) if hist_asks else current_ask
-        if highest_ask > lowest_ask:
-            cheap_threshold = lowest_ask + (highest_ask - lowest_ask) * self.SQUEEZE_CHEAP_PERCENTILE
-        else:
-            cheap_threshold = current_ask
-
+        self._premium_current_ask = current_ask
+        cheap_threshold = (
+            lowest_ask + (highest_ask - lowest_ask) * self.SQUEEZE_CHEAP_PERCENTILE
+            if highest_ask > lowest_ask else current_ask
+        )
         self._premium_cheap_threshold = cheap_threshold
 
-        limit_price = min(current_ask, cheap_threshold)
-        if limit_price < self.MIN_PREMIUM_USD:
-            limit_price = current_ask
-
-        # Confidence scoring (tightness × cheapness × volume)
         entry_confidence = self._compute_squeeze_confidence(
             bb_width_pct, current_ask, lowest_ask, highest_ask, avg_vol_ratio,
         )
@@ -1253,34 +1272,166 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if entry_confidence < 0.6:
             self.logger.info(
-                "[%s] SQUEEZE confidence=%.2f (tight/cheap/vol) → SKIP (below 0.6)",
-                self.pair, entry_confidence,
+                "[%s] SQUEEZE_BREAKOUT dir=%s: confidence=%.2f < 0.6 — skip",
+                self.pair, direction, entry_confidence,
             )
-            self._cached_bot_state = "blocked:low_confidence"
+            return
+
+        opt_contracts = self._calculate_option_contracts(current_ask, entry_confidence)
+        if opt_contracts < 1:
+            self.logger.info(
+                "[%s] SQUEEZE_BREAKOUT dir=%s: 0 contracts affordable — skip",
+                self.pair, direction,
+            )
+            return
+
+        # Store breakout state — do NOT enter yet
+        self._breakout_pending = True
+        self._breakout_direction = direction
+        self._breakout_time = time.monotonic()
+        self._breakout_entry_ask = current_ask
+        self._breakout_symbol = selected_symbol
+        self._breakout_strike = selected_strike
+        self._breakout_option_type = option_type
+        self._breakout_contracts = opt_contracts
+        self._breakout_confidence = entry_confidence
+        self._breakout_bb_width = bb_width_pct
+
+        self.logger.info(
+            "[%s] SQUEEZE_BREAKOUT: dir=%s %s $%.0f ask=$%.4f conf=%.2f "
+            "— 60s confirmation window started",
+            self.pair, direction, option_type.upper(), selected_strike,
+            current_ask, entry_confidence,
+        )
+        await self._log_activity(
+            "options_skip",
+            f"{self.pair} — SQUEEZE_BREAKOUT: dir={direction} premium=${current_ask:.4f} — confirming 60s",
+            {"direction": direction, "ask": current_ask, "strike": selected_strike,
+             "confidence": round(entry_confidence, 3)},
+        )
+        self._cached_bot_state = f"breakout:confirming:{direction}:0s"
+
+    async def _check_breakout_confirmation(self) -> list[Signal]:
+        """Check 60s confirmation window. Enter if premium holds; abort on fakeout."""
+        if not self._breakout_pending or self._breakout_time is None:
+            self._reset_breakout_state()
             return []
 
-        # Contract sizing based on confidence (20-30% capital allocation)
-        # Confidence scales allocation: 0.6 conf = 20%, 1.0 conf = 30%
-        opt_contracts = self._calculate_option_contracts(limit_price, entry_confidence)
+        elapsed = time.monotonic() - self._breakout_time
 
-        # Log capital utilization
+        # Fetch current ask for the selected symbol
+        current_ask = 0.0
+        try:
+            ticker = await self.options_exchange.fetch_ticker(self._breakout_symbol)
+            current_ask = float(ticker.get("ask") or ticker.get("last") or 0)
+        except Exception as e:
+            self.logger.debug("[%s] Confirmation tick fetch failed: %s", self.pair, e)
+            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{int(elapsed)}s"
+            return []
+
+        if current_ask <= 0:
+            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{int(elapsed)}s"
+            return []
+
+        self._premium_current_ask = current_ask
+
+        # FAKEOUT: premium dropped below the ask at breakout detection
+        if current_ask < self._breakout_entry_ask:
+            self.logger.info(
+                "[%s] BREAKOUT_FAKEOUT: dir=%s ask=$%.4f < entry_ask=$%.4f after %.0fs — abort",
+                self.pair, self._breakout_direction, current_ask, self._breakout_entry_ask, elapsed,
+            )
+            await self._log_activity(
+                "options_skip",
+                f"{self.pair} — BREAKOUT_FAKEOUT: dir={self._breakout_direction} "
+                f"ask=${current_ask:.4f} < entry=${self._breakout_entry_ask:.4f}",
+                {"direction": self._breakout_direction, "ask": current_ask,
+                 "entry_ask": self._breakout_entry_ask, "elapsed": round(elapsed, 1)},
+            )
+            self._last_action = "BREAKOUT_FAKEOUT"
+            self._last_action_at = time.time()
+            self._reset_breakout_state()
+            return []
+
+        # Still in window — wait
+        if elapsed < self.BREAKOUT_CONFIRM_SEC:
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] BREAKOUT_CONFIRM_WAIT: dir=%s ask=$%.4f >= entry=$%.4f (%.0fs/60s)",
+                    self.pair, self._breakout_direction,
+                    current_ask, self._breakout_entry_ask, elapsed,
+                )
+            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{int(elapsed)}s"
+            return []
+
+        # 60s passed with premium holding — CONFIRMED, enter now
+        self._direction_bias = self._breakout_option_type.upper()
+        self.logger.info(
+            "[%s] BREAKOUT_CONFIRMED: dir=%s premium=$%.4f — placing limit order",
+            self.pair, self._breakout_direction, current_ask,
+        )
+        await self._log_activity(
+            "options_skip",
+            f"{self.pair} — BREAKOUT_CONFIRMED: dir={self._breakout_direction} premium=${current_ask:.4f}",
+            {"direction": self._breakout_direction, "ask": current_ask,
+             "entry_ask": self._breakout_entry_ask},
+        )
+        return await self._execute_breakout_entry(current_ask)
+
+    def _reset_breakout_state(self) -> None:
+        """Clear all breakout confirmation state."""
+        self._breakout_pending = False
+        self._breakout_direction = None
+        self._breakout_time = None
+        self._breakout_entry_ask = 0.0
+        self._breakout_symbol = None
+        self._breakout_strike = None
+        self._breakout_option_type = None
+        self._breakout_contracts = 0
+        self._breakout_confidence = 0.0
+        self._breakout_bb_width = 0.0
+        self._direction_bias = "NEUTRAL"
+
+    async def _execute_breakout_entry(self, confirmed_ask: float) -> list[Signal]:
+        """Place limit order after breakout is confirmed. Mirrors original fill/poll logic."""
+        option_type = self._breakout_option_type or "call"
+        selected_symbol = self._breakout_symbol
+        selected_strike = self._breakout_strike
+        opt_contracts = self._breakout_contracts
+        entry_confidence = self._breakout_confidence
+        bb_width_pct = self._breakout_bb_width
+
+        # Recalculate contracts at confirmed ask price
+        opt_contracts = self._calculate_option_contracts(confirmed_ask, entry_confidence)
+        if opt_contracts < 1:
+            self.logger.info(
+                "[%s] BREAKOUT_CONFIRMED: no affordable contracts at $%.4f — abort",
+                self.pair, confirmed_ask,
+            )
+            self._reset_breakout_state()
+            return []
+
+        limit_price = confirmed_ask  # Enter at current market ask after confirmation
+
+        # Get current price for logging/metadata
+        current_price = self._last_spot_price
+        atm_strike = self._cached_target_strike or selected_strike
+
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (entry_confidence * 
+        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (entry_confidence *
                          (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT))
         collateral_usd = exchange_capital * allocation_pct
-        
+
         self.logger.info(
-            "[%s] SQUEEZE: %s $%.0f | BB_width=%.3f%% bb_pos=%.2f | "
-            "ask=$%.4f range=[$%.4f-$%.4f] thresh=$%.4f limit=$%.4f | "
-            "conf=%.2f → %d contracts ($%.2f collateral, %.1f%% of $%.2f capital)",
+            "[%s] BREAKOUT_ENTRY: %s $%.0f | BB_width=%.3f%% dir=%s | "
+            "ask=$%.4f | conf=%.2f → %d contracts ($%.2f collateral, %.1f%% of $%.2f)",
             self.pair, option_type.upper(), selected_strike,
-            bb_width_pct, bb_position,
-            current_ask, lowest_ask, highest_ask, cheap_threshold, limit_price,
-            entry_confidence, opt_contracts, collateral_usd, allocation_pct * 100, exchange_capital,
+            bb_width_pct, self._breakout_direction,
+            limit_price, entry_confidence, opt_contracts,
+            collateral_usd, allocation_pct * 100, exchange_capital,
         )
 
-        # Place limit order
-        self._cached_bot_state = "squeeze:placing_order"
+        self._cached_bot_state = "breakout:placing_order"
         limit_order_id: str | None = None
         try:
             limit_order = await self.options_exchange.create_order(
@@ -1292,11 +1443,12 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             limit_order_id = limit_order.get("id")
             self.logger.info(
-                "[%s] SQUEEZE: limit order %s placed — %d contracts @ $%.4f",
+                "[%s] BREAKOUT: limit order %s placed — %d contracts @ $%.4f",
                 self.pair, limit_order_id, opt_contracts, limit_price,
             )
         except Exception as e:
-            self.logger.info("[%s] SQUEEZE: order placement failed: %s — SKIP", self.pair, e)
+            self.logger.info("[%s] BREAKOUT: order placement failed: %s — SKIP", self.pair, e)
+            self._reset_breakout_state()
             return []
 
         # Poll for fill up to 5 min, every 30s
@@ -1317,17 +1469,17 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     limit_filled = True
                     self.logger.info(
-                        "[%s] SQUEEZE: FILLED @ $%.4f (%d contracts) — poll %d/%d",
+                        "[%s] BREAKOUT: FILLED @ $%.4f (%d contracts) — poll %d/%d",
                         self.pair, fill_price, opt_contracts, _poll + 1, polls,
                     )
                     break
                 elif _filled_qty > 0:
                     self.logger.debug(
-                        "[%s] SQUEEZE: partial fill %.1f/%d — poll %d/%d",
+                        "[%s] BREAKOUT: partial fill %.1f/%d — poll %d/%d",
                         self.pair, _filled_qty, opt_contracts, _poll + 1, polls,
                     )
             except Exception as e:
-                self.logger.debug("[%s] SQUEEZE: poll failed: %s", self.pair, e)
+                self.logger.debug("[%s] BREAKOUT: poll failed: %s", self.pair, e)
 
         if not limit_filled and _filled_qty > 0:
             # Partial fill — keep it, cancel residual
@@ -1339,12 +1491,12 @@ class OptionsScalpStrategy(BaseStrategy):
             fill_price = limit_price
             limit_filled = True
             self.logger.info(
-                "[%s] SQUEEZE: PARTIAL FILL — %d contracts @ ~$%.4f",
+                "[%s] BREAKOUT: PARTIAL FILL — %d contracts @ ~$%.4f",
                 self.pair, opt_contracts, fill_price,
             )
 
         if not limit_filled:
-            # No fill — cancel and move on. NO cooldown penalty for squeeze no-fills.
+            # No fill — cancel and move on
             try:
                 await self.options_exchange.cancel_order(limit_order_id, selected_symbol)
             except Exception as _ce:
@@ -1359,21 +1511,23 @@ class OptionsScalpStrategy(BaseStrategy):
                     pass
                 if not limit_filled:
                     self.logger.info(
-                        "[%s] SQUEEZE: cancel failed: %s — SKIP", self.pair, _ce,
+                        "[%s] BREAKOUT: cancel failed: %s — SKIP", self.pair, _ce,
                     )
+                    self._reset_breakout_state()
                     return []
 
         if not limit_filled:
             self.logger.info(
-                "[%s] SQUEEZE_NO_FILL: ask=$%.4f > threshold=$%.4f, cancelled",
-                self.pair, current_ask, cheap_threshold,
+                "[%s] BREAKOUT_NO_FILL: ask=$%.4f cancelled",
+                self.pair, limit_price,
             )
             await self._log_skip(
-                f"{self.pair} — SQUEEZE_NO_FILL: ask=${current_ask:.4f} threshold=${cheap_threshold:.4f}",
-                {"ask": current_ask, "threshold": cheap_threshold},
+                f"{self.pair} — BREAKOUT_NO_FILL: ask=${limit_price:.4f}",
+                {"ask": limit_price, "direction": self._breakout_direction},
             )
-            self._last_action = "SQUEEZE_NO_FILL"
-            # No cooldown — squeeze setups are rare, don't penalize
+            self._last_action = "BREAKOUT_NO_FILL"
+            self._last_action_at = time.time()
+            self._reset_breakout_state()
             return []
 
         # Re-fetch for Delta's actual fill price
@@ -1388,13 +1542,14 @@ class OptionsScalpStrategy(BaseStrategy):
         premium = fill_price
         self._limit_entry_filled = True
         self._last_action = "SQUEEZE_FILL"
+        self._last_action_at = time.time()
 
         self.logger.info(
-            "[%s] SQUEEZE_FILL: premium=$%.4f range=[$%.4f-$%.4f] threshold=$%.4f",
-            self.pair, premium, lowest_ask, highest_ask, cheap_threshold,
+            "[%s] BREAKOUT_FILL: dir=%s premium=$%.4f",
+            self.pair, self._breakout_direction, premium,
         )
 
-        # SET POSITION STATE IMMEDIATELY
+        # SET POSITION STATE
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -1407,19 +1562,20 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_known_premium = fill_price
         self.strike_price = selected_strike
         self._is_squeeze_entry = True
-        self._squeeze_breakout_time = None
+        self._squeeze_breakout_time = time.monotonic()
         if self._selected_expiry:
             self.expiry_dt = self._selected_expiry
+
         self.logger.info(
-            "[%s] POSITION LOCKED — %s x%d @ $%.4f (squeeze entry, no stale for %dm)",
+            "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed, no stale for %dm)",
             self.pair, option_type.upper(), opt_contracts, fill_price,
             self.SQUEEZE_NO_STALE_MIN_BTC if self._base_asset == "BTC"
             else self.SQUEEZE_NO_STALE_MIN_ETH,
         )
 
         self._entry_context = (
-            f"BB_SQUEEZE BB_width={bb_width_pct:.3f}% bb_pos={bb_position:.2f} "
-            f"ask=${premium:.4f} range=[${lowest_ask:.4f}-${highest_ask:.4f}] conf={entry_confidence:.2f}"
+            f"BB_SQUEEZE_BREAKOUT dir={self._breakout_direction} BB_width={bb_width_pct:.3f}% "
+            f"ask=${premium:.4f} conf={entry_confidence:.2f}"
         )
 
         expiry_str = self._selected_expiry.strftime('%b %d %H:%M')
@@ -1428,14 +1584,17 @@ class OptionsScalpStrategy(BaseStrategy):
         await self._log_activity(
             "options_entry",
             f"{self.pair} — OPTIONS: {option_type.upper()} {strike_label} ${selected_strike:.0f} | "
-            f"premium=${premium:.4f} | expiry={expiry_str} | BB_SQUEEZE width={bb_width_pct:.3f}%",
+            f"premium=${premium:.4f} | expiry={expiry_str} | BREAKOUT dir={self._breakout_direction}",
             {"option_type": option_type, "strike": selected_strike, "premium": premium,
              "strike_label": strike_label,
              "expiry": self._selected_expiry.isoformat() if self._selected_expiry else "",
              "underlying_price": current_price, "symbol": selected_symbol,
-             "setup_type": "BB_SQUEEZE", "contracts": opt_contracts,
-             "bb_width_pct": round(bb_width_pct, 4), "confidence": round(entry_confidence, 3)},
+             "setup_type": "BB_SQUEEZE_BREAKOUT", "contracts": opt_contracts,
+             "bb_width_pct": round(bb_width_pct, 4), "confidence": round(entry_confidence, 3),
+             "breakout_direction": self._breakout_direction},
         )
+
+        self._reset_breakout_state()
 
         return self._build_entry_signal(
             option_type=option_type,
@@ -1443,9 +1602,9 @@ class OptionsScalpStrategy(BaseStrategy):
             selected_strike=selected_strike,
             premium=premium,
             strength=0,
-            signals_str=f"BB_SQUEEZE width={bb_width_pct:.3f}%",
+            signals_str=f"BB_SQUEEZE_BREAKOUT dir={self._breakout_direction} width={bb_width_pct:.3f}%",
             current_price=current_price,
-            setup_type="BB_SQUEEZE",
+            setup_type="BB_SQUEEZE_BREAKOUT",
             expiry_str=expiry_str,
             strike_label=strike_label,
             contracts=opt_contracts,
@@ -1629,27 +1788,6 @@ class OptionsScalpStrategy(BaseStrategy):
             if gone:
                 return gone
 
-        # Check for squeeze breakout (for SQUEEZE_RELEASE exit)
-        squeeze_breakout_direction = None
-        if self._is_squeeze_entry:
-            squeeze_result = await self._detect_squeeze()
-            if squeeze_result is not None:
-                is_squeeze, bb_width_pct, bb_position, _, _ = squeeze_result
-                if not is_squeeze and self._squeeze_breakout_time is None:
-                    # Squeeze just released — determine direction
-                    self._squeeze_breakout_time = time.monotonic()
-                    # Determine breakout direction based on BB position
-                    if bb_position > 0.6:
-                        squeeze_breakout_direction = "UP"
-                    elif bb_position < 0.4:
-                        squeeze_breakout_direction = "DOWN"
-                    else:
-                        squeeze_breakout_direction = "UNKNOWN"
-                    self.logger.info(
-                        "[%s] SQUEEZE_BREAKOUT: BB left KC (dir=%s), starting 2min timer",
-                        self.option_symbol, squeeze_breakout_direction,
-                    )
-
         # Fetch current premium
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
@@ -1775,30 +1913,6 @@ class OptionsScalpStrategy(BaseStrategy):
         # ── Phase 1 hands-off ─────
         if in_phase1:
             return []
-
-        # ── SQUEEZE_RELEASE exit ───
-        if self._is_squeeze_entry and self._squeeze_breakout_time is not None:
-            time_since_breakout = time.monotonic() - self._squeeze_breakout_time
-            if time_since_breakout >= self.SQUEEZE_RELEASE_WAIT_SEC:
-                if premium_change_pct < 0:
-                    # Determine breakout direction for logging
-                    breakout_dir = "UNKNOWN"
-                    squeeze_result = await self._detect_squeeze()
-                    if squeeze_result is not None:
-                        _, _, bb_position, _, _ = squeeze_result
-                        if bb_position > 0.6:
-                            breakout_dir = "UP"
-                        elif bb_position < 0.4:
-                            breakout_dir = "DOWN"
-                    # Breakout went wrong direction
-                    self.logger.info(
-                        "[%s] SQUEEZE_RELEASE: breakout %s, premium=%.1f%% after 2min → EXIT",
-                        self.option_symbol, breakout_dir, premium_change_pct,
-                    )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "SQUEEZE_RELEASE")
-                else:
-                    # Breakout went right direction, clear breakout time
-                    self._squeeze_breakout_time = None
 
         # ── 5. PEAK TRAIL ───────────
         if peak_pnl_pct >= 8.0:
