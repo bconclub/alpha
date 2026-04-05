@@ -123,11 +123,10 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_RELEASE_WAIT_SEC = 120       # Wait 2 min after KC release before exiting on wrong direction
 
     # ── Dynamic option sizing ──────────────────────────────────────
-    OPT_PAIR_ALLOC_PCT: dict[str, float] = {
-        "ETH": 60.0,
-        "BTC": 50.0,
-    }
-    OPT_MAX_COLLATERAL_PCT = 40.0        # never use >40% of balance on 1 option
+    # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
+    # allocation_pct = 0.20 + (confidence * 0.10)  # 20% at conf=0.0, 30% at conf=1.0
+    CAPITAL_PER_TRADE_MIN_PCT = 0.20     # 20% minimum per trade (low confidence)
+    CAPITAL_PER_TRADE_MAX_PCT = 0.30     # 30% maximum per trade (high confidence)
     OPT_SURVIVAL_BALANCE = 20.0          # below this, cap allocation at 30%
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
@@ -841,6 +840,17 @@ class OptionsScalpStrategy(BaseStrategy):
         """Main tick: refresh chain, check for entry/exit."""
         self._tick_count += 1
 
+        # Log capital utilization periodically (every 10 ticks ≈ 50 seconds)
+        if self._tick_count % 10 == 0:
+            total_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+            available = self.risk_manager.get_available_balance(self._exchange_id)
+            if total_capital > 0:
+                utilization = (total_capital - available) / total_capital * 100
+                self.logger.info(
+                    "CAPITAL_UTIL: %s %.1f%% deployed, $%.2f free / $%.2f total",
+                    self.pair, utilization, available, total_capital
+                )
+
         # Periodic chain refresh
         await self._refresh_option_chain()
 
@@ -1195,7 +1205,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 continue
             if ask < self.MIN_PREMIUM_USD:
                 continue
-            n = self._calculate_option_contracts(ask)
+            n = self._calculate_option_contracts(ask, confidence=0.7)  # Default confidence for affordability check
             if n >= 1:
                 selected_strike = strike
                 selected_symbol = sym
@@ -1249,25 +1259,24 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:low_confidence"
             return []
 
-        # Contract sizing with confidence multiplier
-        base_contracts = self._calculate_option_contracts(limit_price)
-        if entry_confidence >= 0.9:
-            conf_mult = 1.0
-        elif entry_confidence >= 0.8:
-            conf_mult = 0.5
-        elif entry_confidence >= 0.7:
-            conf_mult = 0.3
-        else:
-            conf_mult = 0.15
-        opt_contracts = max(1, int(base_contracts * conf_mult))
+        # Contract sizing based on confidence (20-30% capital allocation)
+        # Confidence scales allocation: 0.6 conf = 20%, 1.0 conf = 30%
+        opt_contracts = self._calculate_option_contracts(limit_price, entry_confidence)
 
+        # Log capital utilization
+        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (entry_confidence * 
+                         (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT))
+        collateral_usd = exchange_capital * allocation_pct
+        
         self.logger.info(
             "[%s] SQUEEZE: %s $%.0f | BB_width=%.3f%% bb_pos=%.2f | "
-            "ask=$%.4f range=[$%.4f-$%.4f] thresh=$%.4f limit=$%.4f | conf=%.2f → %d contracts",
+            "ask=$%.4f range=[$%.4f-$%.4f] thresh=$%.4f limit=$%.4f | "
+            "conf=%.2f → %d contracts ($%.2f collateral, %.1f%% of $%.2f capital)",
             self.pair, option_type.upper(), selected_strike,
             bb_width_pct, bb_position,
             current_ask, lowest_ask, highest_ask, cheap_threshold, limit_price,
-            entry_confidence, opt_contracts,
+            entry_confidence, opt_contracts, collateral_usd, allocation_pct * 100, exchange_capital,
         )
 
         # Place limit order
@@ -1440,6 +1449,7 @@ class OptionsScalpStrategy(BaseStrategy):
             expiry_str=expiry_str,
             strike_label=strike_label,
             contracts=opt_contracts,
+            confidence=entry_confidence,
         )
 
     def _build_entry_signal(
@@ -1455,18 +1465,26 @@ class OptionsScalpStrategy(BaseStrategy):
         expiry_str: str,
         strike_label: str,
         contracts: int = 1,
+        confidence: float = 0.7,
     ) -> list[Signal]:
         """Build the entry Signal for an option trade."""
         self._contracts = contracts
         already_filled = getattr(self, "_limit_entry_filled", False)
         self._limit_entry_filled = False
 
+        # Calculate sizing info for alert
+        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (confidence * 
+                         (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT))
+        collateral_usd = exchange_capital * allocation_pct
+        
         reason = (
             f"OPTIONS {option_type.upper()} | BB_SQUEEZE "
             f"({signals_str or 'squeeze_detected'}) | "
             f"{strike_label} Strike=${selected_strike:.0f} "
             f"Exp={expiry_str} "
-            f"Premium=${premium:.4f} x{contracts}"
+            f"Premium=${premium:.4f} x{contracts} | "
+            f"Sizing: {contracts} contracts (${collateral_usd:.2f}, {allocation_pct:.1%} of capital)"
         )
         self.logger.info("[%s] OPTIONS ENTRY — %s (setup=%s)", self.pair, reason, setup_type)
 
@@ -1505,37 +1523,52 @@ class OptionsScalpStrategy(BaseStrategy):
     # DYNAMIC OPTION SIZING
     # ==================================================================
 
-    def _calculate_option_contracts(self, premium: float) -> int:
-        """Dynamic sizing: contracts based on balance, pair allocation, leverage."""
+    def _calculate_option_contracts(self, premium: float, confidence: float = 0.7) -> int:
+        """Dynamic sizing: allocate 20-30% of capital per trade based on confidence.
+        
+        Higher confidence = higher allocation (closer to 30%)
+        Lower confidence = lower allocation (closer to 20%)
+        """
         import math
 
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         if exchange_capital <= 0 or premium <= 0:
             return 0
 
-        alloc_pct = self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 50.0)
-
+        # Scale allocation: 20% + (confidence * 10%) = 20-30% range
+        # confidence 0.6 → 26%, confidence 1.0 → 30%
+        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (confidence * 
+                         (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT))
+        
+        # Cap at 30% max per trade
+        allocation_pct = min(allocation_pct, self.CAPITAL_PER_TRADE_MAX_PCT)
+        
+        # Survival mode: if balance is very low, cap allocation
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
-            alloc_pct = min(alloc_pct, self.OPT_SURVIVAL_MAX_ALLOC)
+            allocation_pct = min(allocation_pct, self.OPT_SURVIVAL_MAX_ALLOC / 100)
 
-        collateral_available = exchange_capital * (alloc_pct / 100)
-        max_collateral = exchange_capital * (self.OPT_MAX_COLLATERAL_PCT / 100)
-        collateral_available = min(collateral_available, max_collateral)
-
+        # Calculate collateral to use (this is the premium we'll pay)
+        collateral_usd = exchange_capital * allocation_pct
+        
+        # Calculate collateral required per contract
+        # collateral_per_contract = premium / leverage
         collateral_per_contract = premium / self.OPTIONS_LEVERAGE
         if collateral_per_contract <= 0:
             return 0
-
-        contracts = math.floor(collateral_available / collateral_per_contract)
+        
+        # Calculate contracts: collateral_usd / collateral_per_contract
+        contracts = math.floor(collateral_usd / collateral_per_contract)
         contracts = max(contracts, 0)
-
-        if exchange_capital < 5.0 and contracts > 5:
-            self.logger.info(
-                "[%s] SURVIVAL_MODE: bal=$%.2f < $5 — capping %d → 5 contracts",
-                self.pair, exchange_capital, contracts,
+        
+        # Check if we have enough capital for meaningful position (at least 1 contract)
+        if contracts < 1:
+            self.logger.warning(
+                "[%s] INSUFFICIENT_CAPITAL: bal=$%.2f, need $%.2f for 1 contract @ $%.4f",
+                self.pair, exchange_capital, collateral_per_contract, premium,
             )
-            contracts = 5
-
+            return 0
+        
+        # Hard cap on contracts per asset
         hard_cap = 40 if self._base_asset == "ETH" else 999
         if contracts > hard_cap:
             self.logger.info(
@@ -1543,7 +1576,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.pair, contracts, hard_cap,
             )
             contracts = hard_cap
-
+        
+        # Safety: ensure max SL loss doesn't exceed 25% of balance
         multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
         max_sl_loss = contracts * premium * (self.SL_PREMIUM_LOSS_PCT / 100) * multiplier
         max_allowed_loss = exchange_capital * 0.25
@@ -1556,13 +1590,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.pair, contracts, safe_contracts, max_sl_loss, exchange_capital,
             )
             contracts = max(safe_contracts, 1)
-
+        
         self.logger.info(
             "[%s] OPT_SIZING: %d contracts @ $%.4f "
-            "(collateral=$%.2f, alloc=%.0f%%, bal=$%.2f, per_ct=$%.4f)",
+            "(collateral=$%.2f, alloc=%.1f%%, conf=%.2f, bal=$%.2f)",
             self.pair, contracts, premium,
-            collateral_available, alloc_pct, exchange_capital,
-            collateral_per_contract,
+            collateral_usd, allocation_pct * 100, confidence, exchange_capital,
         )
         return contracts
 
