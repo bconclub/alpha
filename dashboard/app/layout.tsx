@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import '@/styles/dashboard.css';
 import { SupabaseProvider } from '@/components/providers/SupabaseProvider';
 import { SidebarProvider } from '@/components/providers/SidebarProvider';
 import { Sidebar } from '@/components/ui/Sidebar';

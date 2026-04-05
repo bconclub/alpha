@@ -60,9 +60,9 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
     : 'text-zinc-600';
 
   const h1 = card.priceChange1h;
-  const trendArrow = h1 != null && h1 > 0.05 ? '\u2191'
-    : h1 != null && h1 < -0.05 ? '\u2193'
-    : '\u2192';
+  const trendArrow = h1 != null && h1 > 0.05 ? '↑'
+    : h1 != null && h1 < -0.05 ? '↓'
+    : '→';
   const trendColor = h1 != null && h1 > 0.05 ? 'text-[#00c853]'
     : h1 != null && h1 < -0.05 ? 'text-[#ff1744]'
     : 'text-zinc-400';
@@ -73,22 +73,22 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
 
   return (
     <div className={cn(
-      'bg-zinc-900/60 border rounded-xl p-3 md:p-4',
+      'bg-[#0f0f14] border rounded-lg p-4',
       inTrade
         ? positionSide === 'short'
           ? 'border-[#ff1744]/20'
           : 'border-[#00c853]/20'
-        : 'border-zinc-800',
+        : 'border-white/5',
     )}>
       {/* Header: Asset + trend */}
       <div className="flex items-center justify-between mb-2">
-        <span className="text-base md:text-lg font-bold text-white">{card.asset}</span>
-        <span className={cn('text-lg md:text-xl', trendColor)}>{trendArrow}</span>
+        <span className="font-bold text-white">{card.asset}</span>
+        <span className={cn('text-lg', trendColor)}>{trendArrow}</span>
       </div>
 
       {/* Price */}
       <div className="mb-1.5">
-        <span className="text-xl md:text-2xl font-bold font-mono text-white">
+        <span className="text-2xl font-bold font-mono text-white">
           {card.currentPrice != null ? `$${formatNumber(card.currentPrice)}` : '—'}
         </span>
       </div>
@@ -142,7 +142,8 @@ export function MarketOverview() {
   const { strategyLog, openPositions } = useSupabase();
 
   const assetCards = useMemo(() => {
-    const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
+    // ONLY BTC and ETH - no other coins
+    const ACTIVE_ASSETS = new Set(['BTC', 'ETH']);
 
     // Group latest strategy_log by base asset, prefer Delta exchange
     const latestByAsset = new Map<string, StrategyLog>();
@@ -178,8 +179,8 @@ export function MarketOverview() {
       });
     }
 
-    // Sort: BTC, ETH, SOL, XRP (fixed order for consistency)
-    const order = ['BTC', 'ETH', 'SOL', 'XRP'];
+    // Sort: BTC, ETH (fixed order for consistency)
+    const order = ['BTC', 'ETH'];
     cards.sort((a, b) => {
       const ai = order.indexOf(a.asset);
       const bi = order.indexOf(b.asset);
@@ -189,22 +190,22 @@ export function MarketOverview() {
   }, [strategyLog, openPositions]);
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-      <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
+    <div className="bg-[#141419] border border-white/5 rounded-xl p-6">
+      <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">
         Market Overview
-      </h3>
+      </h2>
 
       {assetCards.length === 0 ? (
         <p className="text-sm text-zinc-500 text-center py-8">No market data yet</p>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
+          <div className="grid grid-cols-2 gap-4">
             {assetCards.map((card) => (
               <AssetCardComponent key={card.asset} card={card} />
             ))}
           </div>
           {assetCards[0]?.lastTimestamp && (
-            <p className="text-[10px] text-zinc-600 mt-3">
+            <p className="text-xs text-zinc-600 mt-4">
               Last analysis: {formatTimeAgo(assetCards[0].lastTimestamp)}
             </p>
           )}

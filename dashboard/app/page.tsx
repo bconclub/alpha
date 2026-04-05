@@ -1,386 +1,342 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
-import { BBsqueezeCard, type SqueezeData } from '@/components/dashboard/BBsqueezeCard';
-import { PremiumRange } from '@/components/dashboard/PremiumRange';
-import { DirectionBias, DirectionBiasMeter, type BiasType } from '@/components/dashboard/DirectionBias';
+import { formatCurrency, formatNumber, cn } from '@/lib/utils';
+import { MarketOverview } from '@/components/dashboard/MarketOverview';
+import { BBSqueezePanel } from '@/components/dashboard/BBSqueezePanel';
+import { LivePositions } from '@/components/dashboard/LivePositions';
+import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
 
-// Import the new CSS
-import '@/styles/dashboard.css';
+// IST Clock component
+function ISTClock() {
+  const [time, setTime] = useState('');
 
-// Sample data for demonstration - replace with real data from your API
-const SAMPLE_ASSETS: SqueezeData[] = [
-  { symbol: 'BTCUSDT', price: 67245.32, squeezeValue: 92, bias: 'long', bbPosition: 85, momentum: 78, change24h: 3.45, isActive: true },
-  { symbol: 'ETHUSDT', price: 3521.18, squeezeValue: 87, bias: 'long', bbPosition: 72, momentum: 65, change24h: 2.12, isActive: true },
-  { symbol: 'SOLUSDT', price: 148.92, squeezeValue: 45, bias: 'neutral', bbPosition: 15, momentum: -12, change24h: -0.85 },
-  { symbol: 'BNBUSDT', price: 612.45, squeezeValue: 78, bias: 'short', bbPosition: -45, momentum: -55, change24h: -1.23 },
-  { symbol: 'XRPUSDT', price: 0.6234, squeezeValue: 34, bias: 'neutral', bbPosition: -5, momentum: 8, change24h: 0.45 },
-  { symbol: 'ADAUSDT', price: 0.4521, squeezeValue: 89, bias: 'long', bbPosition: 68, momentum: 72, change24h: 4.56, isActive: true },
-  { symbol: 'DOGEUSDT', price: 0.1234, squeezeValue: 23, bias: 'short', bbPosition: -65, momentum: -35, change24h: -2.34 },
-  { symbol: 'DOTUSDT', price: 7.89, squeezeValue: 67, bias: 'neutral', bbPosition: 25, momentum: 15, change24h: 1.12 },
-];
+  useEffect(() => {
+    const tick = () => {
+      const now = new Date();
+      const istStr = now.toLocaleTimeString('en-GB', {
+        timeZone: 'Asia/Kolkata',
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      setTime(istStr + ' IST');
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
 
-/**
- * Status Pill Component
- */
-function StatusPill({ 
-  label, 
-  color, 
-  pulse = false 
-}: { 
-  label: string; 
-  color: 'green' | 'amber' | 'red' | 'blue' | 'neutral';
-  pulse?: boolean;
-}) {
-  const colorMap = {
-    green: 'bg-[rgba(0,255,136,0.15)] text-[#00ff88] border-[rgba(0,255,136,0.3)]',
-    amber: 'bg-[rgba(255,184,0,0.15)] text-[#ffb800] border-[rgba(255,184,0,0.3)]',
-    red: 'bg-[rgba(255,71,87,0.15)] text-[#ff4757] border-[rgba(255,71,87,0.3)]',
-    blue: 'bg-[rgba(59,130,246,0.15)] text-[#3b82f6] border-[rgba(59,130,246,0.3)]',
-    neutral: 'bg-[rgba(255,255,255,0.05)] text-[#9ca3af] border-[rgba(255,255,255,0.1)]',
-  };
-
-  return (
-    <span className={`
-      inline-flex items-center gap-1.5 px-3 py-1.5 
-      rounded-full text-[11px] font-semibold border
-      ${colorMap[color]}
-    `}>
-      {pulse && (
-        <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-      )}
-      {label}
-    </span>
-  );
+  return <span className="font-mono text-xs text-zinc-500">{time}</span>;
 }
 
-/**
- * Filter Section Component
- */
-function FilterSection({
-  minSqueeze,
-  setMinSqueeze,
-  selectedBias,
-  setSelectedBias,
-  showActiveOnly,
-  setShowActiveOnly,
-}: {
-  minSqueeze: number;
-  setMinSqueeze: (v: number) => void;
-  selectedBias: BiasType | 'all';
-  setSelectedBias: (v: BiasType | 'all') => void;
-  showActiveOnly: boolean;
-  setShowActiveOnly: (v: boolean) => void;
-}) {
-  return (
-    <div className="glass-elevated p-4 rounded-[14px] space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-white">Filters</h3>
-        <button
-          onClick={() => {
-            setMinSqueeze(0);
-            setSelectedBias('all');
-            setShowActiveOnly(false);
-          }}
-          className="text-[11px] text-[#9ca3af] hover:text-white transition-colors"
-        >
-          Reset
-        </button>
-      </div>
+// Mini sparkline for P&L chart
+function MiniSparkline({ data, color }: { data: number[]; color: string }) {
+  if (data.length < 2) return null;
 
-      {/* Squeeze Threshold Slider */}
-      <PremiumRange
-        label="Min Squeeze %"
-        min={0}
-        max={100}
-        step={5}
-        value={minSqueeze}
-        onChange={setMinSqueeze}
-        variant="blue"
-        size="sm"
+  const width = 100;
+  const height = 80;
+  const padding = 2;
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+
+  const points = data.map((v, i) => {
+    const x = padding + (i / (data.length - 1)) * (width - padding * 2);
+    const y = padding + (1 - (v - min) / range) * (height - padding * 2);
+    return `${x},${y}`;
+  });
+
+  const firstX = padding;
+  const lastX = padding + ((data.length - 1) / (data.length - 1)) * (width - padding * 2);
+  const areaPoints = `${firstX},${height} ${points.join(' ')} ${lastX},${height}`;
+
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="shrink-0">
+      <defs>
+        <linearGradient id={`spark-${color.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+          <stop offset="100%" stopColor={color} stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <polygon points={areaPoints} fill={`url(#spark-${color.replace('#', '')})`} />
+      <polyline
+        points={points.join(' ')}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
-
-      {/* Bias Filter */}
-      <div className="space-y-2">
-        <span className="text-[11px] font-medium text-[#9ca3af] uppercase tracking-wide">Bias</span>
-        <div className="flex flex-wrap gap-2">
-          {(['all', 'long', 'short', 'neutral'] as const).map((bias) => (
-            <button
-              key={bias}
-              onClick={() => setSelectedBias(bias)}
-              className={`
-                px-3 py-1.5 rounded-lg text-[11px] font-medium capitalize
-                transition-all duration-150
-                ${selectedBias === bias 
-                  ? 'bg-white text-[#0a0a0f]' 
-                  : 'bg-[rgba(255,255,255,0.05)] text-[#9ca3af] hover:bg-[rgba(255,255,255,0.1)]'
-                }
-              `}
-            >
-              {bias}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Active Only Toggle */}
-      <label className="flex items-center gap-3 cursor-pointer group">
-        <div className="relative">
-          <input
-            type="checkbox"
-            checked={showActiveOnly}
-            onChange={(e) => setShowActiveOnly(e.target.checked)}
-            className="sr-only"
-          />
-          <div className={`
-            w-10 h-5 rounded-full transition-colors duration-200
-            ${showActiveOnly ? 'bg-[#00ff88]' : 'bg-[rgba(255,255,255,0.1)]'}
-          `}>
-            <div className={`
-              absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white
-              transition-transform duration-200
-              ${showActiveOnly ? 'translate-x-5' : 'translate-x-0'}
-            `} />
-          </div>
-        </div>
-        <span className="text-xs text-[#9ca3af] group-hover:text-white transition-colors">
-          Active signals only
-        </span>
-      </label>
-    </div>
+    </svg>
   );
 }
 
-/**
- * Stats Overview Component
- */
-function StatsOverview({ assets }: { assets: SqueezeData[] }) {
-  const stats = useMemo(() => {
-    const active = assets.filter(a => a.isActive).length;
-    const long = assets.filter(a => a.bias === 'long').length;
-    const short = assets.filter(a => a.bias === 'short').length;
-    const avgSqueeze = assets.reduce((acc, a) => acc + a.squeezeValue, 0) / assets.length;
-    
-    return { active, long, short, avgSqueeze };
-  }, [assets]);
-
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-      <div className="glass-card p-3 rounded-xl">
-        <div className="text-[10px] font-medium text-[#6b7280] uppercase tracking-wide mb-1">Active</div>
-        <div className="text-xl font-bold text-white font-mono">{stats.active}</div>
-      </div>
-      <div className="glass-card p-3 rounded-xl">
-        <div className="text-[10px] font-medium text-[#6b7280] uppercase tracking-wide mb-1">Long Bias</div>
-        <div className="text-xl font-bold text-[#00ff88] font-mono">{stats.long}</div>
-      </div>
-      <div className="glass-card p-3 rounded-xl">
-        <div className="text-[10px] font-medium text-[#6b7280] uppercase tracking-wide mb-1">Short Bias</div>
-        <div className="text-xl font-bold text-[#ff4757] font-mono">{stats.short}</div>
-      </div>
-      <div className="glass-card p-3 rounded-xl">
-        <div className="text-[10px] font-medium text-[#6b7280] uppercase tracking-wide mb-1">Avg Squeeze</div>
-        <div className="text-xl font-bold text-[#3b82f6] font-mono">{stats.avgSqueeze.toFixed(0)}%</div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Main Dashboard Page
- */
 export default function DashboardPage() {
-  const { isConnected, trades, botStatus } = useSupabase();
+  const { botStatus, isConnected, trades, dailyPnL } = useSupabase();
   
-  // Filter states
-  const [minSqueeze, setMinSqueeze] = useState(50);
-  const [selectedBias, setSelectedBias] = useState<BiasType | 'all'>('all');
-  const [showActiveOnly, setShowActiveOnly] = useState(false);
-  const [selectedAsset, setSelectedAsset] = useState<SqueezeData | null>(null);
+  const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
 
   // Bot state
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
-  const openPositions = botStatus?.open_positions ?? 0;
-  const leverageLevel = botStatus?.leverage ?? 1;
+  const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
+  
+  // Market regime
+  const regime = botStatus?.market_regime ?? 'SIDEWAYS';
+  const chopScore = botStatus?.chop_score ?? 0;
+  const atrRatio = botStatus?.atr_ratio ?? 1;
+  const netChange = botStatus?.net_change_30m ?? 0;
+  const regimeSince = botStatus?.regime_since;
 
-  // Filter assets
-  const filteredAssets = useMemo(() => {
-    return SAMPLE_ASSETS.filter(asset => {
-      if (asset.squeezeValue < minSqueeze) return false;
-      if (selectedBias !== 'all' && asset.bias !== selectedBias) return false;
-      if (showActiveOnly && !asset.isActive) return false;
-      return true;
+  const regimeConfig: Record<string, { label: string; icon: string; color: string }> = {
+    TRENDING_UP:   { label: 'TRENDING UP',   icon: '↗', color: 'text-emerald-400' },
+    TRENDING_DOWN: { label: 'TRENDING DOWN', icon: '↘', color: 'text-red-400' },
+    SIDEWAYS:      { label: 'SIDEWAYS',      icon: '↔', color: 'text-amber-400' },
+    CHOPPY:        { label: 'CHOPPY',        icon: '⚡', color: 'text-red-400' },
+  };
+  const rc = regimeConfig[regime] ?? regimeConfig.SIDEWAYS;
+
+  const regimeDuration = useMemo(() => {
+    if (!regimeSince) return '';
+    const elapsed = Math.max(0, Math.floor((Date.now() - new Date(regimeSince).getTime()) / 1000));
+    if (elapsed < 60) return `${elapsed}s`;
+    if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m`;
+    return `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
+  }, [regimeSince]);
+
+  // Delta balance
+  const deltaBalance = Number(botStatus?.delta_balance ?? 0);
+  const inrRate = botStatus?.inr_usd_rate ?? 86.5;
+  const totalCapital = deltaBalance > 0 ? deltaBalance : (botStatus?.capital || 0);
+  const capitalInr = Math.round(totalCapital * inrRate);
+
+  // P&L stats
+  const pnlStats = useMemo(() => {
+    const now = Date.now();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+
+    let cutoffMs: number;
+    if (pnlRange === '24h') {
+      const istNow = new Date(now + istOffsetMs);
+      const todayIST = istNow.toISOString().slice(0, 10);
+      cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
+    } else {
+      const days = pnlRange === '7d' ? 7 : pnlRange === '14d' ? 14 : 30;
+      cutoffMs = now - days * 24 * 60 * 60 * 1000;
+    }
+
+    let pnl = 0;
+    let total = 0;
+    let wins = 0;
+    let fees = 0;
+    let grossPnl = 0;
+    
+    for (const t of trades) {
+      if (t.status !== 'closed') continue;
+      const tradeTime = new Date(t.timestamp).getTime();
+      if (tradeTime >= cutoffMs) {
+        pnl += t.pnl ?? 0;
+        total++;
+        if ((t.pnl ?? 0) > 0) wins++;
+        const tradeFees = (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
+        fees += tradeFees;
+        grossPnl += t.gross_pnl != null ? t.gross_pnl : ((t.pnl ?? 0) + tradeFees);
+      }
+    }
+    
+    const winRate = total > 0 ? (wins / total) * 100 : 0;
+    return { pnl, total, wins, losses: total - wins, winRate, fees, grossPnl };
+  }, [trades, pnlRange]);
+
+  // Sparkline data
+  const sparklineData = useMemo(() => {
+    const now = Date.now();
+    const days = pnlRange === '24h' ? 1 : pnlRange === '7d' ? 7 : pnlRange === '14d' ? 14 : 30;
+    const cutoffMs = now - days * 24 * 60 * 60 * 1000;
+
+    const filtered = dailyPnL
+      .filter((d) => new Date(d.trade_date).getTime() >= cutoffMs)
+      .sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+
+    if (filtered.length === 0) return [];
+
+    let cumulative = 0;
+    return filtered.map((d) => {
+      cumulative += d.daily_pnl;
+      return cumulative;
     });
-  }, [minSqueeze, selectedBias, showActiveOnly]);
+  }, [dailyPnL, pnlRange]);
+
+  const sparkColor = pnlStats.pnl >= 0 ? '#00c853' : '#ff1744';
+
+  // Format uptime
+  const formatUptime = (seconds: number): string => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
+
+  // Total trades count
+  const totalTrades = trades.filter(t => t.status === 'closed').length;
+  const liveStrategyCount = useMemo(() => {
+    const strategies = new Set(trades.map((t) => t.strategy));
+    return strategies.size || 1;
+  }, [trades]);
 
   return (
-    <div className="min-h-screen pb-safe">
-      {/* Header */}
-      <header className="sticky top-0 z-40 backdrop-blur-xl bg-[rgba(10,10,15,0.8)] border-b border-[rgba(255,255,255,0.06)]">
-        <div className="px-4 py-4">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">GPFC Dashboard</h1>
-              <p className="text-xs text-[#6b7280] mt-0.5">Bollinger Bands Squeeze Monitor</p>
-            </div>
-            
-            {/* Status Pills */}
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusPill 
-                label={botState === 'running' ? 'Live' : 'Paused'} 
-                color={botState === 'running' ? 'green' : 'amber'}
-                pulse={botState === 'running'}
-              />
-              {openPositions > 0 && (
-                <StatusPill label={`${openPositions} Open`} color="blue" />
-              )}
-              <StatusPill label={`${leverageLevel}x Lev`} color="neutral" />
-            </div>
+    <div className="min-h-screen bg-[#0a0a0f] text-white p-4 md:p-6">
+      {/* TOP ROW — Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        {/* Delta Balance Card */}
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className={cn(
+              'w-2 h-2 rounded-full',
+              isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
+            )} />
+            <span className="text-xs uppercase tracking-wider text-gray-400">Delta</span>
+          </div>
+          <div className="text-2xl font-bold font-mono">{formatCurrency(deltaBalance)}</div>
+          <div className="text-xs text-gray-500 mt-1">
+            {pnlStats.wins}W / {pnlStats.losses}L • {pnlStats.winRate.toFixed(0)}% WR • {pnlStats.total} trades
+          </div>
+          <div className="text-xs mt-1">
+            <span className={pnlStats.grossPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+              {pnlStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.grossPnl)} P&L
+            </span>
+            <span className="text-gray-600"> • </span>
+            <span className="text-gray-500">${pnlStats.fees.toFixed(2)} fees</span>
           </div>
         </div>
-      </header>
 
-      {/* Main Content */}
-      <main className="px-4 py-4 space-y-4">
-        {/* Stats Overview */}
-        <StatsOverview assets={filteredAssets} />
-
-        {/* Mobile: Stacked Layout */}
-        <div className="block lg:hidden space-y-4">
-          {/* Filters */}
-          <FilterSection
-            minSqueeze={minSqueeze}
-            setMinSqueeze={setMinSqueeze}
-            selectedBias={selectedBias}
-            setSelectedBias={setSelectedBias}
-            showActiveOnly={showActiveOnly}
-            setShowActiveOnly={setShowActiveOnly}
-          />
-
-          {/* Asset Grid */}
-          <div className="asset-grid">
-            {filteredAssets.map((asset, index) => (
-              <BBsqueezeCard
-                key={asset.symbol}
-                data={asset}
-                onClick={setSelectedAsset}
-                className={`animate-slide-up stagger-${Math.min(index + 1, 6)}`}
-              />
-            ))}
-          </div>
-
-          {filteredAssets.length === 0 && (
-            <div className="text-center py-12">
-              <p className="text-sm text-[#6b7280]">No assets match your filters</p>
-              <button
-                onClick={() => {
-                  setMinSqueeze(0);
-                  setSelectedBias('all');
-                  setShowActiveOnly(false);
-                }}
-                className="mt-3 text-xs text-[#3b82f6] hover:underline"
-              >
-                Clear filters
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Desktop: Side-by-side Layout */}
-        <div className="hidden lg:grid lg:grid-cols-12 gap-4">
-          {/* Left Panel - Filters & Stats */}
-          <div className="lg:col-span-3 space-y-4">
-            <FilterSection
-              minSqueeze={minSqueeze}
-              setMinSqueeze={setMinSqueeze}
-              selectedBias={selectedBias}
-              setSelectedBias={setSelectedBias}
-              showActiveOnly={showActiveOnly}
-              setShowActiveOnly={setShowActiveOnly}
-            />
-
-            {/* Selected Asset Detail */}
-            {selectedAsset && (
-              <div className="glass-card p-4 rounded-[14px] space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-white">{selectedAsset.symbol}</h3>
-                  <button
-                    onClick={() => setSelectedAsset(null)}
-                    className="text-[#6b7280] hover:text-white transition-colors"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-
-                <div className="space-y-4">
-                  <div>
-                    <div className="text-[10px] text-[#6b7280] uppercase tracking-wide mb-1">Price</div>
-                    <div className="text-2xl font-bold text-white font-mono">
-                      ${selectedAsset.price.toLocaleString()}
-                    </div>
-                    <div className={`text-xs ${selectedAsset.change24h && selectedAsset.change24h >= 0 ? 'text-[#00ff88]' : 'text-[#ff4757]'}`}>
-                      {selectedAsset.change24h && selectedAsset.change24h >= 0 ? '+' : ''}{selectedAsset.change24h?.toFixed(2)}%
-                    </div>
-                  </div>
-
-                  <DirectionBiasMeter 
-                    value={selectedAsset.bias === 'long' ? selectedAsset.momentum : selectedAsset.bias === 'short' ? -selectedAsset.momentum : 0}
-                    size="md"
-                  />
-
-                  <div className="pt-2 border-t border-[rgba(255,255,255,0.06)]">
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div>
-                        <span className="text-[#6b7280]">Squeeze</span>
-                        <div className="font-mono font-semibold text-white">{selectedAsset.squeezeValue}%</div>
-                      </div>
-                      <div>
-                        <span className="text-[#6b7280]">Momentum</span>
-                        <div className={`font-mono font-semibold ${selectedAsset.momentum > 0 ? 'text-[#00ff88]' : 'text-[#ff4757]'}`}>
-                          {selectedAsset.momentum > 0 ? '+' : ''}{selectedAsset.momentum}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right Panel - Asset Grid */}
-          <div className="lg:col-span-9">
-            <div className="asset-grid">
-              {filteredAssets.map((asset, index) => (
-                <BBsqueezeCard
-                  key={asset.symbol}
-                  data={asset}
-                  onClick={setSelectedAsset}
-                  className={`animate-slide-up stagger-${Math.min(index + 1, 6)}`}
-                />
+        {/* P&L Chart Card */}
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4 md:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex gap-2">
+              {(['24h', '7d', '14d', '30d'] as const).map((period) => (
+                <button 
+                  key={period}
+                  onClick={() => setPnlRange(period)}
+                  className={cn(
+                    'px-3 py-1 text-xs rounded transition-colors',
+                    pnlRange === period ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'
+                  )}
+                >
+                  {period.toUpperCase()}
+                </button>
               ))}
             </div>
+            <span className="text-xs text-gray-500">P&L</span>
+          </div>
+          
+          <div className="flex items-end gap-4">
+            <div className="flex-1">
+              {sparklineData.length > 0 ? (
+                <MiniSparkline data={sparklineData} color={sparkColor} />
+              ) : (
+                <div className="h-20 bg-gray-800/30 rounded flex items-center justify-center">
+                  <span className="text-xs text-gray-600">No data</span>
+                </div>
+              )}
+            </div>
+          </div>
+          
+          <div className="flex justify-between mt-2">
+            <span className={cn(
+              'text-xs',
+              pnlStats.pnl >= 0 ? 'text-green-400' : 'text-red-400'
+            )}>
+              {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)} {pnlStats.total > 0 ? Math.round((pnlStats.pnl / Math.abs(totalCapital || 1)) * 100) : 0}%
+            </span>
+            <span className="text-xs text-gray-500">
+              {pnlStats.wins}W / {pnlStats.losses}L • {pnlStats.winRate.toFixed(0)}% WR • {pnlStats.total} trades
+            </span>
+          </div>
+        </div>
 
-            {filteredAssets.length === 0 && (
-              <div className="text-center py-16">
-                <p className="text-sm text-[#6b7280]">No assets match your filters</p>
-                <button
-                  onClick={() => {
-                    setMinSqueeze(0);
-                    setSelectedBias('all');
-                    setShowActiveOnly(false);
-                  }}
-                  className="mt-3 text-xs text-[#3b82f6] hover:underline"
-                >
-                  Clear filters
-                </button>
+        {/* Market Regime Card */}
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className={cn('text-lg', rc.color)}>{rc.icon}</span>
+            <span className={cn('text-sm font-bold', rc.color)}>{rc.label}</span>
+          </div>
+          <div className="text-xs text-gray-400 space-y-1">
+            <div className="flex justify-between">
+              <span>Chop:</span>
+              <span className="font-mono">{chopScore.toFixed(2)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>ATR:</span>
+              <span className="font-mono">{atrRatio.toFixed(1)}x</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Net:</span>
+              <span className={netChange >= 0 ? 'text-green-400' : 'text-red-400'}>
+                {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%
+              </span>
+            </div>
+            {regimeDuration && (
+              <div className="flex justify-between text-gray-500">
+                <span>Since</span>
+                <span>{regimeDuration}</span>
               </div>
             )}
           </div>
         </div>
-      </main>
+      </div>
+
+      {/* SECOND ROW — Total Capital & Status */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 px-2 gap-4">
+        <div>
+          <div className="text-xs text-gray-500 uppercase tracking-wider">Total Capital</div>
+          <div className="text-2xl font-bold">
+            {formatCurrency(totalCapital)}
+            {capitalInr > 0 && (
+              <span className="text-sm text-gray-500 ml-2">₹{capitalInr.toLocaleString('en-IN')}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-1">
+            <span className={cn(
+              'w-2 h-2 rounded-full',
+              botState === 'running' ? 'bg-green-500' : 'bg-yellow-500'
+            )} />
+            <span className={cn(
+              'text-xs',
+              botState === 'running' ? 'text-green-500' : 'text-yellow-500'
+            )}>
+              {botState === 'running' ? 'Running' : 'Paused'}
+            </span>
+            {uptimeSeconds > 0 && (
+              <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>
+            )}
+          </div>
+        </div>
+        
+        <div className="text-right">
+          <div className="text-xs text-gray-500">Strategies: <span className="text-blue-400 font-mono">{liveStrategyCount}</span></div>
+          <div className="text-xs text-gray-500">Total Trades: <span className="text-gray-300 font-mono">{totalTrades}</span></div>
+          <div className="text-xs text-gray-600">Alpha v{process.env.ALPHA_VERSION ?? '0.12.2'}</div>
+          <ISTClock />
+        </div>
+      </div>
+
+      {/* Live Positions (if any) */}
+      <LivePositions />
+
+      {/* THIRD ROW — Market Overview + BB Squeeze */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+        <MarketOverview />
+        <BBSqueezePanel />
+      </div>
+
+      {/* Performance Panel */}
+      <div className="mt-6">
+        <PerformancePanel />
+      </div>
     </div>
   );
 }
