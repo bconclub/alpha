@@ -855,11 +855,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 if self._last_action_at > 0 else None
             ),
             # Breakout confirmation state
-            "breakout_state": self._breakout_direction if self._breakout_pending else None,
-            "breakout_confirmation_seconds_remaining": (
+            "breakout_state": (
+                "DETECTED" if self._breakout_pending else 
+                (self._last_action if self._last_action in ("BREAKOUT_CONFIRMED", "BREAKOUT_FAKEOUT", "BREAKOUT_NO_FILL") else "NONE")
+            ),
+            "breakout_direction": self._breakout_direction,
+            "breakout_confirmation_secs_remaining": (
                 max(0, int(self.BREAKOUT_CONFIRM_SEC - (time.monotonic() - self._breakout_time)))
                 if self._breakout_pending and self._breakout_time is not None else None
             ),
+            "breakout_detected_at": (
+                datetime.fromtimestamp(self._breakout_time, tz=timezone.utc).isoformat()
+                if self._breakout_time else None
+            ),
+            "breakout_premium_at_detection": round(self._breakout_entry_ask, 6) if self._breakout_entry_ask > 0 else None,
             # 30-min premium range (actual low/high from history)
             "premium_lowest_ask": (
                 round(min(a for _, a in self._premium_history), 4)

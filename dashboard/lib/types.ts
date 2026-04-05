@@ -389,10 +389,16 @@ export interface OptionsState {
   premium_highest_ask?: number | null;
   last_squeeze_action?: 'SQUEEZE_FILL' | 'SQUEEZE_NO_FILL' | 'BREAKOUT_CONFIRMED' | 'BREAKOUT_FAKEOUT' | 'BREAKOUT_NO_FILL' | 'SCANNING' | null;
   last_action_at?: string | null;
-  /** 'UP' | 'DOWN' when in 60s confirmation window, null otherwise */
-  breakout_state?: 'UP' | 'DOWN' | null;
+  /** Full breakout state machine: NONE → DETECTED → CONFIRMED/FAKEOUT */
+  breakout_state?: 'NONE' | 'DETECTED' | 'CONFIRMED' | 'FAKEOUT' | 'UP' | 'DOWN' | null;
+  /** Breakout direction: UP (CALL) or DOWN (PUT) */
+  breakout_direction?: 'UP' | 'DOWN' | null;
   /** Seconds remaining in the 60s confirmation window */
-  breakout_confirmation_seconds_remaining?: number | null;
+  breakout_confirmation_secs_remaining?: number | null;
+  /** ISO timestamp when breakout was detected */
+  breakout_detected_at?: string | null;
+  /** Premium price at the moment breakout was detected */
+  breakout_premium_at_detection?: number | null;
   updated_at: string;
 }
 

@@ -760,6 +760,126 @@ function PositionCard({
 }
 
 // ═══════════════════════════════════════════════════════════════
+// BREAKOUT STATUS (GPFC #20)
+// ═══════════════════════════════════════════════════════════════
+
+function BreakoutStatus({
+  breakoutState,
+  breakoutDirection,
+  confirmationSecsRemaining,
+  premiumAtDetection,
+  currentPremium,
+}: {
+  breakoutState: string | null;
+  breakoutDirection: string | null;
+  confirmationSecsRemaining: number | null;
+  premiumAtDetection: number | null;
+  currentPremium: number | null;
+}) {
+  // Handle legacy format where breakoutState is just the direction
+  const isLegacyFormat = breakoutState === 'UP' || breakoutState === 'DOWN';
+  const effectiveState = isLegacyFormat ? 'DETECTED' : breakoutState;
+  const effectiveDirection = isLegacyFormat ? breakoutState : breakoutDirection;
+  
+  if (!effectiveState || effectiveState === 'NONE') return null;
+  
+  const isUp = effectiveDirection === 'UP';
+  const directionColor = isUp ? 'text-green-500' : 'text-red-500';
+  const directionBg = isUp ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30';
+  const arrowIcon = isUp ? '↑' : '↓';
+  
+  if (effectiveState === 'DETECTED' && confirmationSecsRemaining !== null) {
+    const mins = Math.floor(confirmationSecsRemaining / 60);
+    const secs = confirmationSecsRemaining % 60;
+    
+    return (
+      <div className={cn("rounded-xl p-4 mb-4 border", directionBg)}>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <span className={cn("text-lg", directionColor)}>{arrowIcon}</span>
+            <span className={cn("text-sm font-bold uppercase", directionColor)}>
+              BREAKOUT {effectiveDirection}
+            </span>
+          </div>
+          <span className="px-2 py-1 rounded-full text-[10px] font-semibold uppercase bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse">
+            Confirming...
+          </span>
+        </div>
+        
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-gray-400">Confirmation Window</span>
+            <span className="font-mono text-amber-400">
+              {mins}:{secs.toString().padStart(2, '0')} remaining
+            </span>
+          </div>
+          
+          {premiumAtDetection !== null && (
+            <>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Premium at Detection</span>
+                <span className="font-mono text-white">${premiumAtDetection.toFixed(4)}</span>
+              </div>
+              
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Current Premium</span>
+                <span className={cn("font-mono", 
+                  currentPremium && premiumAtDetection && currentPremium >= premiumAtDetection 
+                    ? 'text-green-500' 
+                    : 'text-red-500'
+                )}>
+                  ${currentPremium?.toFixed(4) ?? '—'}
+                </span>
+              </div>
+            </>
+          )}
+          
+          <div className="text-[10px] text-gray-500 mt-2">
+            Waiting for 60s confirmation. Premium must not drop below detection level.
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
+  if (effectiveState === 'CONFIRMED' || effectiveState === 'BREAKOUT_CONFIRMED') {
+    return (
+      <div className="rounded-xl p-4 mb-4 bg-green-500/10 border border-green-500/30">
+        <div className="flex items-center gap-2">
+          <span className="text-lg text-green-500">{arrowIcon}</span>
+          <span className="text-sm font-bold uppercase text-green-500">
+            BREAKOUT CONFIRMED
+          </span>
+          <span className="px-2 py-1 rounded-full text-[10px] font-semibold uppercase bg-green-500 text-white">
+            Entering
+          </span>
+        </div>
+      </div>
+    );
+  }
+  
+  if (effectiveState === 'FAKEOUT' || effectiveState === 'BREAKOUT_FAKEOUT') {
+    return (
+      <div className="rounded-xl p-4 mb-4 bg-red-500/10 border border-red-500/30">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-bold uppercase text-red-500">
+            BREAKOUT FAKEOUT
+          </span>
+          <span className="px-2 py-1 rounded-full text-[10px] font-semibold uppercase bg-red-500 text-white">
+            Aborted
+          </span>
+        </div>
+        <div className="text-[10px] text-gray-500 mt-2">
+          Premium dropped during confirmation. Waiting for next squeeze.
+        </div>
+      </div>
+    );
+  }
+  
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // LOGO HEADER
 // ═══════════════════════════════════════════════════════════════
 
@@ -889,6 +1009,14 @@ export function BBOptionsPanel({ asset, state, openTrade, recentEvents, botStatu
             bbWidthMax={bbWidthMax}
             kcContainsBB={kcContainsBB}
             isActive={isSqueezeActive}
+          />
+          
+          <BreakoutStatus
+            breakoutState={state?.breakout_state ?? null}
+            breakoutDirection={state?.breakout_direction ?? null}
+            confirmationSecsRemaining={state?.breakout_confirmation_secs_remaining ?? null}
+            premiumAtDetection={state?.breakout_premium_at_detection ?? null}
+            currentPremium={premiumAsk}
           />
           
           <PremiumRange
