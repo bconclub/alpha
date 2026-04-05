@@ -893,7 +893,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # Log capital utilization periodically (every 10 ticks ≈ 50 seconds)
         if self._tick_count % 10 == 0:
             total_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-            available = self.risk_manager.get_available_balance(self._exchange_id)
+            available = self.risk_manager.get_available_capital(self._exchange_id)
             if total_capital > 0:
                 utilization = (total_capital - available) / total_capital * 100
                 self.logger.info(
