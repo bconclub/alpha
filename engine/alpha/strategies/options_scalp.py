@@ -1,7 +1,7 @@
-"""Alpha Options Scalp — Wait for BB squeeze breakout confirmation before entry.
+"""Alpha Options Scalp — Dynamic Breakout Entry (GPFC #21).
 
 ═══════════════════════════════════════════════════════════════
- ENTRY: BB SQUEEZE BREAKOUT STRATEGY (GPFC #20)
+ ENTRY: DYNAMIC BREAKOUT STRATEGY (GPFC #21 — Fast + Smart)
 ═══════════════════════════════════════════════════════════════
 
  STEP 1 — DETECT BB SQUEEZE (every scan tick, ~30s):
@@ -13,17 +13,24 @@
  STEP 2 — DETECT BREAKOUT (when BB leaves KC):
    - BB_upper > KC_upper → breakout UP → buy CALL
    - BB_lower < KC_lower → breakout DOWN → buy PUT
-   - Log SQUEEZE_BREAKOUT: dir=UP/DOWN
-   - Start 60s confirmation window — do NOT enter yet
-   - direction_bias stays NEUTRAL until confirmed
+   - Record breakout_premium_ask at detection moment
+   - Calculate breakout_velocity = % price move in last 3 candles
+   - Log BREAKOUT_DETECTED: dir=UP/DOWN velocity=X% confirmation=Xs
 
- STEP 3 — CONFIRM BREAKOUT (60s window):
-   - Every tick during window: check if current ask >= entry_ask at breakout
-   - CALL/PUT: ask must stay >= breakout ask (premium rising or holding)
-   - If ask drops below breakout ask → BREAKOUT_FAKEOUT, abort, reset
-   - After 60s with premium holding → BREAKOUT_CONFIRMED
-   - Place limit order at current ask, wait 5 min for fill
-   - Log BREAKOUT_CONFIRMED: dir=UP/DOWN premium=$ask
+ STEP 3 — DYNAMIC CONFIRMATION WINDOW (GPFC #21):
+   Based on breakout velocity:
+   - velocity >= 0.3% in 3 candles → confirmation = 0s (enter immediately)
+   - velocity 0.15-0.3% → confirmation = 20s
+   - velocity < 0.15% → confirmation = 60s (weak, wait)
+   
+   During confirmation window, check every 10s:
+   - Premium must be >= breakout_premium_ask * 0.95 (not falling > 5%)
+   - If premium drops > 5% from breakout ask → BREAKOUT_FAKEOUT, abort, reset
+   - If window passes with premium stable/rising → BREAKOUT_CONFIRMED, enter
+
+ STEP 4 — ENTRY:
+   - Place limit at current ask, wait 5 min for fill
+   - No cooldown after no-fill
 
  CONFIDENCE SCORING:
    - Tightness: BB_width < 0.5% = 1.0 | < 0.75% = 0.7 | < 1.0% = 0.4
@@ -38,7 +45,7 @@
 
 ═══════════════════════════════════════════════════════════════
 
-Exit (all original exits kept except SQUEEZE_RELEASE which is no longer needed):
+Exit (GPFC #21 — SQUEEZE_RELEASE removed, replaced by BREAKOUT_FAKEOUT):
   1. OPT_SL:           -30% premium (always active, even Phase 1)
   2. OPT_ENTRY_DROP:   -8% in first 60s — bad entry, cut fast
   3. Ratchet/Trail:    lock profit at tiers, trail at +8%, TP at +30%
@@ -117,7 +124,14 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_HISTORY_MIN = 30             # Track premium history for 30 min
     SQUEEZE_NO_STALE_MIN_ETH = 15        # No stale SL for first 15 min after squeeze fill (ETH)
     SQUEEZE_NO_STALE_MIN_BTC = 20        # No stale SL for first 20 min after squeeze fill (BTC)
-    BREAKOUT_CONFIRM_SEC = 60            # 60s confirmation window after breakout detected
+    # Dynamic confirmation window thresholds (GPFC #21)
+    BREAKOUT_CONFIRM_IMMEDIATE_VELOCITY = 0.3   # >= 0.3% → 0s confirmation (immediate entry)
+    BREAKOUT_CONFIRM_MED_VELOCITY = 0.15        # 0.15-0.3% → 20s confirmation
+    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.0         # < 0.15% → 60s confirmation (weak move)
+    BREAKOUT_CONFIRM_SEC_IMMEDIATE = 0          # Immediate for strong moves
+    BREAKOUT_CONFIRM_SEC_MED = 20               # Medium wait for medium moves
+    BREAKOUT_CONFIRM_SEC_MAX = 60               # Max wait for weak moves
+    BREAKOUT_FAKEOUT_DROP_PCT = 5.0             # Premium drop > 5% from breakout = fakeout
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
@@ -268,8 +282,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # Monotonic time when confirmed breakout entry was placed
         self._squeeze_breakout_time: float | None = None
 
-        # ── Breakout confirmation state (GPFC #20) ─────────────────
-        # True while waiting for 60s confirmation window to complete
+        # ── Breakout confirmation state (GPFC #21 — Dynamic Breakout) ─────────────────
+        # True while waiting for dynamic confirmation window to complete
         self._breakout_pending: bool = False
         # "UP" or "DOWN"
         self._breakout_direction: str | None = None
@@ -289,6 +303,12 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_confidence: float = 0.0
         # BB width at breakout detection (for logging)
         self._breakout_bb_width: float = 0.0
+        # Velocity of breakout: % price move in last 3 candles (GPFC #21)
+        self._breakout_velocity_pct: float = 0.0
+        # Dynamic confirmation window in seconds (GPFC #21)
+        self._breakout_confirmation_secs: int = 60
+        # Last spot price when breakout was detected (for velocity calc)
+        self._breakout_spot_price: float = 0.0
 
         # Dashboard chain panel cached state
         self._cached_candle_momentum: dict | None = None
@@ -306,6 +326,9 @@ class OptionsScalpStrategy(BaseStrategy):
         self._squeeze_duration_candles: int = 0         # How long squeeze has been active
         self._squeeze_active_since: float | None = None # When squeeze started
         self._position_opened_at: str | None = None     # ISO timestamp when position was entered
+
+        # ── GPFC #21: Breakout state for dashboard ─────────────────
+        self._breakout_state: str = "NONE"              # NONE/DETECTED/CONFIRMED/FAKEOUT
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -875,14 +898,15 @@ class OptionsScalpStrategy(BaseStrategy):
                 datetime.fromtimestamp(self._last_action_at, tz=timezone.utc).isoformat()
                 if self._last_action_at > 0 else None
             ),
-            # Breakout confirmation state
-            "breakout_state": (
+            # Breakout confirmation state (GPFC #21)
+            "breakout_state": self._breakout_state if self._breakout_state else (
                 "DETECTED" if self._breakout_pending else 
                 (self._last_action if self._last_action in ("BREAKOUT_CONFIRMED", "BREAKOUT_FAKEOUT", "BREAKOUT_NO_FILL") else "NONE")
             ),
             "breakout_direction": self._breakout_direction,
+            "breakout_velocity_pct": round(self._breakout_velocity_pct * 100, 3) if self._breakout_velocity_pct > 0 else None,
             "breakout_confirmation_secs_remaining": (
-                max(0, int(self.BREAKOUT_CONFIRM_SEC - (time.monotonic() - self._breakout_time)))
+                max(0, int(self._breakout_confirmation_secs - (time.monotonic() - self._breakout_time)))
                 if self._breakout_pending and self._breakout_time is not None else None
             ),
             "breakout_detected_at": (
@@ -945,7 +969,8 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "in_position"
             return
 
-        # No-fill cooldown (not used for squeeze, but keep for compatibility)
+        # GPFC #21: No cooldown after no-fill (removed for dynamic breakout)
+        # Keeping check for compatibility with other strategies
         if time.monotonic() < self._no_fill_cooldown_until:
             remaining = self._no_fill_cooldown_until - time.monotonic()
             self._cached_bot_state = f"blocked:no_fill_cooldown:{int(remaining)}s"
@@ -1098,6 +1123,47 @@ class OptionsScalpStrategy(BaseStrategy):
         return confidence
 
     # ==================================================================
+    # DYNAMIC CONFIRMATION HELPERS (GPFC #21)
+    # ==================================================================
+
+    async def _calculate_breakout_velocity(self) -> float:
+        """Calculate % price move in last 3 candles for breakout velocity (GPFC #21).
+        
+        Returns velocity as decimal (e.g., 0.003 = 0.3% move).
+        """
+        ohlcv = await self._get_ohlcv_for_squeeze()
+        if not ohlcv or len(ohlcv) < 4:
+            return 0.0
+        
+        # Use last 4 candles to calculate move over last 3 periods
+        # Velocity = |current close - close 3 candles ago| / close 3 candles ago
+        recent_candles = ohlcv[-4:]
+        old_close = recent_candles[0][4]  # Close 3 candles ago
+        new_close = recent_candles[-1][4]  # Most recent close
+        
+        if old_close <= 0:
+            return 0.0
+        
+        velocity = abs(new_close - old_close) / old_close
+        return velocity
+
+    def _get_confirmation_secs(self, velocity_pct: float) -> int:
+        """Get dynamic confirmation window based on breakout velocity (GPFC #21).
+        
+        velocity >= 0.3% in 3 candles → 0s (enter immediately, strong move)
+        velocity 0.15-0.3% → 20s
+        velocity < 0.15% → 60s (weak, wait)
+        """
+        velocity_pct_actual = velocity_pct * 100  # Convert to percentage
+        
+        if velocity_pct_actual >= self.BREAKOUT_CONFIRM_IMMEDIATE_VELOCITY:
+            return self.BREAKOUT_CONFIRM_SEC_IMMEDIATE
+        elif velocity_pct_actual >= self.BREAKOUT_CONFIRM_MED_VELOCITY:
+            return self.BREAKOUT_CONFIRM_SEC_MED
+        else:
+            return self.BREAKOUT_CONFIRM_SEC_MAX
+
+    # ==================================================================
     # ENTRY LOGIC
     # ==================================================================
 
@@ -1201,7 +1267,7 @@ class OptionsScalpStrategy(BaseStrategy):
         bb_width_pct: float,
         avg_vol_ratio: float,
     ) -> None:
-        """Called when squeeze ends — determine breakout direction and start 60s confirmation window."""
+        """Called when squeeze ends — determine breakout direction, calc velocity, start dynamic confirmation (GPFC #21)."""
         # Determine direction from which band exited KC
         if bb_upper > kc_upper and bb_lower < kc_lower:
             # Both bands outside — pick the side with larger exceedance
@@ -1230,6 +1296,15 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if current_price <= 0:
             return
+
+        # GPFC #21: Calculate breakout velocity from last 3 candles
+        velocity_pct = await self._calculate_breakout_velocity()
+        self._breakout_velocity_pct = velocity_pct
+        
+        # GPFC #21: Set dynamic confirmation window based on velocity
+        confirmation_secs = self._get_confirmation_secs(velocity_pct)
+        self._breakout_confirmation_secs = confirmation_secs
+        self._breakout_spot_price = current_price
 
         if self._selected_expiry is None:
             return
@@ -1304,7 +1379,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if entry_confidence < 0.6:
             self.logger.info(
-                "[%s] SQUEEZE_BREAKOUT dir=%s: confidence=%.2f < 0.6 — skip",
+                "[%s] BREAKOUT_DETECTED dir=%s: confidence=%.2f < 0.6 — skip",
                 self.pair, direction, entry_confidence,
             )
             return
@@ -1312,12 +1387,12 @@ class OptionsScalpStrategy(BaseStrategy):
         opt_contracts = self._calculate_option_contracts(current_ask, entry_confidence)
         if opt_contracts < 1:
             self.logger.info(
-                "[%s] SQUEEZE_BREAKOUT dir=%s: 0 contracts affordable — skip",
+                "[%s] BREAKOUT_DETECTED dir=%s: 0 contracts affordable — skip",
                 self.pair, direction,
             )
             return
 
-        # Store breakout state — do NOT enter yet
+        # Store breakout state — do NOT enter yet (GPFC #21)
         self._breakout_pending = True
         self._breakout_direction = direction
         self._breakout_time = time.monotonic()
@@ -1328,23 +1403,25 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_contracts = opt_contracts
         self._breakout_confidence = entry_confidence
         self._breakout_bb_width = bb_width_pct
+        self._breakout_state = "DETECTED"
 
+        # GPFC #21: Log BREAKOUT_DETECTED with velocity and confirmation window
         self.logger.info(
-            "[%s] SQUEEZE_BREAKOUT: dir=%s %s $%.0f ask=$%.4f conf=%.2f "
-            "— 60s confirmation window started",
-            self.pair, direction, option_type.upper(), selected_strike,
-            current_ask, entry_confidence,
+            "[%s] BREAKOUT_DETECTED: dir=%s velocity=%.2f%% confirmation=%ds — %s $%.0f ask=$%.4f conf=%.2f",
+            self.pair, direction, velocity_pct * 100, confirmation_secs,
+            option_type.upper(), selected_strike, current_ask, entry_confidence,
         )
         await self._log_activity(
             "options_skip",
-            f"{self.pair} — SQUEEZE_BREAKOUT: dir={direction} premium=${current_ask:.4f} — confirming 60s",
+            f"{self.pair} — BREAKOUT_DETECTED: dir={direction} velocity={velocity_pct*100:.2f}% confirmation={confirmation_secs}s",
             {"direction": direction, "ask": current_ask, "strike": selected_strike,
-             "confidence": round(entry_confidence, 3)},
+             "confidence": round(entry_confidence, 3), "velocity_pct": round(velocity_pct * 100, 2),
+             "confirmation_secs": confirmation_secs},
         )
-        self._cached_bot_state = f"breakout:confirming:{direction}:0s"
+        self._cached_bot_state = f"breakout:confirming:{direction}:{confirmation_secs}s"
 
     async def _check_breakout_confirmation(self) -> list[Signal]:
-        """Check 60s confirmation window. Enter if premium holds; abort on fakeout."""
+        """Check dynamic confirmation window. Enter if premium holds; abort on fakeout (GPFC #21)."""
         if not self._breakout_pending or self._breakout_time is None:
             self._reset_breakout_state()
             return []
@@ -1358,55 +1435,65 @@ class OptionsScalpStrategy(BaseStrategy):
             current_ask = float(ticker.get("ask") or ticker.get("last") or 0)
         except Exception as e:
             self.logger.debug("[%s] Confirmation tick fetch failed: %s", self.pair, e)
-            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{int(elapsed)}s"
+            remaining = max(0, self._breakout_confirmation_secs - int(elapsed))
+            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            self._breakout_state = "DETECTED"
             return []
 
         if current_ask <= 0:
-            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{int(elapsed)}s"
+            remaining = max(0, self._breakout_confirmation_secs - int(elapsed))
+            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            self._breakout_state = "DETECTED"
             return []
 
         self._premium_current_ask = current_ask
 
-        # FAKEOUT: premium dropped below the ask at breakout detection
-        if current_ask < self._breakout_entry_ask:
+        # FAKEOUT: premium dropped > 5% from breakout ask (GPFC #21)
+        drop_pct = (self._breakout_entry_ask - current_ask) / self._breakout_entry_ask * 100
+        if drop_pct > self.BREAKOUT_FAKEOUT_DROP_PCT:
             self.logger.info(
-                "[%s] BREAKOUT_FAKEOUT: dir=%s ask=$%.4f < entry_ask=$%.4f after %.0fs — abort",
-                self.pair, self._breakout_direction, current_ask, self._breakout_entry_ask, elapsed,
+                "[%s] BREAKOUT_FAKEOUT: dir=%s premium dropped %.1f%% (ask=$%.4f < entry_ask=$%.4f * 0.95) — abort",
+                self.pair, self._breakout_direction, drop_pct, current_ask, self._breakout_entry_ask,
             )
             await self._log_activity(
                 "options_skip",
                 f"{self.pair} — BREAKOUT_FAKEOUT: dir={self._breakout_direction} "
-                f"ask=${current_ask:.4f} < entry=${self._breakout_entry_ask:.4f}",
+                f"premium dropped {drop_pct:.1f}% — aborting",
                 {"direction": self._breakout_direction, "ask": current_ask,
-                 "entry_ask": self._breakout_entry_ask, "elapsed": round(elapsed, 1)},
+                 "entry_ask": self._breakout_entry_ask, "drop_pct": round(drop_pct, 2),
+                 "elapsed": round(elapsed, 1)},
             )
             self._last_action = "BREAKOUT_FAKEOUT"
             self._last_action_at = time.time()
+            self._breakout_state = "FAKEOUT"
             self._reset_breakout_state()
             return []
 
         # Still in window — wait
-        if elapsed < self.BREAKOUT_CONFIRM_SEC:
+        if elapsed < self._breakout_confirmation_secs:
+            remaining = self._breakout_confirmation_secs - int(elapsed)
             if self._tick_count % 6 == 0:
                 self.logger.info(
-                    "[%s] BREAKOUT_CONFIRM_WAIT: dir=%s ask=$%.4f >= entry=$%.4f (%.0fs/60s)",
+                    "[%s] BREAKOUT_CONFIRM_WAIT: dir=%s ask=$%.4f >= entry=$%.4f (%.0fs/%ds)",
                     self.pair, self._breakout_direction,
-                    current_ask, self._breakout_entry_ask, elapsed,
+                    current_ask, self._breakout_entry_ask, elapsed, self._breakout_confirmation_secs,
                 )
-            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{int(elapsed)}s"
+            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            self._breakout_state = "DETECTED"
             return []
 
-        # 60s passed with premium holding — CONFIRMED, enter now
+        # Dynamic window passed with premium holding — CONFIRMED, enter now
         self._direction_bias = self._breakout_option_type.upper()
+        self._breakout_state = "CONFIRMED"
         self.logger.info(
-            "[%s] BREAKOUT_CONFIRMED: dir=%s premium=$%.4f — placing limit order",
+            "[%s] BREAKOUT_CONFIRMED: dir=%s premium=$%.4f — entering now",
             self.pair, self._breakout_direction, current_ask,
         )
         await self._log_activity(
             "options_skip",
             f"{self.pair} — BREAKOUT_CONFIRMED: dir={self._breakout_direction} premium=${current_ask:.4f}",
             {"direction": self._breakout_direction, "ask": current_ask,
-             "entry_ask": self._breakout_entry_ask},
+             "entry_ask": self._breakout_entry_ask, "velocity_pct": round(self._breakout_velocity_pct, 3)},
         )
         return await self._execute_breakout_entry(current_ask)
 
@@ -1422,7 +1509,11 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_contracts = 0
         self._breakout_confidence = 0.0
         self._breakout_bb_width = 0.0
+        self._breakout_velocity_pct = 0.0
+        self._breakout_confirmation_secs = 60
+        self._breakout_spot_price = 0.0
         self._direction_bias = "NEUTRAL"
+        # Note: _breakout_state is preserved until next detection for dashboard visibility
 
     async def _execute_breakout_entry(self, confirmed_ask: float) -> list[Signal]:
         """Place limit order after breakout is confirmed. Mirrors original fill/poll logic."""
@@ -2715,9 +2806,10 @@ class OptionsScalpStrategy(BaseStrategy):
             "premium_highest_ask": None,
             "last_squeeze_action": "SCANNING",
             "last_action_at": None,
-            # Reset breakout state
+            # Reset breakout state (GPFC #21)
             "breakout_state": "NONE",
             "breakout_direction": None,
+            "breakout_velocity_pct": None,
             "breakout_confirmation_secs_remaining": None,
             "breakout_detected_at": None,
             "breakout_premium_at_detection": None,
