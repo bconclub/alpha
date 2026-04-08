@@ -124,14 +124,16 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_HISTORY_MIN = 30             # Track premium history for 30 min
     SQUEEZE_NO_STALE_MIN_ETH = 15        # No stale SL for first 15 min after squeeze fill (ETH)
     SQUEEZE_NO_STALE_MIN_BTC = 20        # No stale SL for first 20 min after squeeze fill (BTC)
-    # Dynamic confirmation window thresholds (GPFC #21)
-    BREAKOUT_CONFIRM_IMMEDIATE_VELOCITY = 0.3   # >= 0.3% → 0s confirmation (immediate entry)
-    BREAKOUT_CONFIRM_MED_VELOCITY = 0.15        # 0.15-0.3% → 20s confirmation
+    # Dynamic confirmation window thresholds (GPFC #21) — UPDATED
+    # velocity >= 0.3% → 20s, 0.15-0.3% → 40s, < 0.15% → 60s
+    BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3        # >= 0.3% → 20s confirmation
+    BREAKOUT_CONFIRM_MED_VELOCITY = 0.15        # 0.15-0.3% → 40s confirmation
     BREAKOUT_CONFIRM_MIN_VELOCITY = 0.0         # < 0.15% → 60s confirmation (weak move)
-    BREAKOUT_CONFIRM_SEC_IMMEDIATE = 0          # Immediate for strong moves
-    BREAKOUT_CONFIRM_SEC_MED = 20               # Medium wait for medium moves
+    BREAKOUT_CONFIRM_SEC_HIGH = 20              # Fast for strong moves
+    BREAKOUT_CONFIRM_SEC_MED = 40               # Medium wait for medium moves
     BREAKOUT_CONFIRM_SEC_MAX = 60               # Max wait for weak moves
     BREAKOUT_FAKEOUT_DROP_PCT = 5.0             # Premium drop > 5% from breakout = fakeout
+    BREAKOUT_OVERPRICED_RISE_PCT = 15.0         # Premium rise > 15% = overpriced, abort
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
@@ -1157,16 +1159,16 @@ class OptionsScalpStrategy(BaseStrategy):
         return velocity
 
     def _get_confirmation_secs(self, velocity_pct: float) -> int:
-        """Get dynamic confirmation window based on breakout velocity (GPFC #21).
+        """Get dynamic confirmation window based on breakout velocity (GPFC #21) — UPDATED.
         
-        velocity >= 0.3% in 3 candles → 0s (enter immediately, strong move)
-        velocity 0.15-0.3% → 20s
-        velocity < 0.15% → 60s (weak, wait)
+        velocity >= 0.3% → 20s (was 0s)
+        velocity 0.15-0.3% → 40s (was 20s)
+        velocity < 0.15% → 60s (unchanged)
         """
         velocity_pct_actual = velocity_pct * 100  # Convert to percentage
         
-        if velocity_pct_actual >= self.BREAKOUT_CONFIRM_IMMEDIATE_VELOCITY:
-            return self.BREAKOUT_CONFIRM_SEC_IMMEDIATE
+        if velocity_pct_actual >= self.BREAKOUT_CONFIRM_HIGH_VELOCITY:
+            return self.BREAKOUT_CONFIRM_SEC_HIGH
         elif velocity_pct_actual >= self.BREAKOUT_CONFIRM_MED_VELOCITY:
             return self.BREAKOUT_CONFIRM_SEC_MED
         else:
@@ -1475,6 +1477,27 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_action = "BREAKOUT_FAKEOUT"
             self._last_action_at = time.time()
             self._breakout_state = "FAKEOUT"
+            self._reset_breakout_state()
+            return []
+
+        # OVERPRICED: premium rose > 15% from breakout ask — don't chase pumped premium
+        rise_pct = (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
+        if rise_pct > self.BREAKOUT_OVERPRICED_RISE_PCT:
+            self.logger.info(
+                "[%s] BREAKOUT_OVERPRICED: dir=%s premium rose %.1f%% (ask=$%.4f > entry_ask=$%.4f * 1.15) — abort, don't chase",
+                self.pair, self._breakout_direction, rise_pct, current_ask, self._breakout_entry_ask,
+            )
+            await self._log_activity(
+                "options_skip",
+                f"{self.pair} — BREAKOUT_OVERPRICED: dir={self._breakout_direction} "
+                f"premium rose {rise_pct:.1f}% — aborting, don't chase",
+                {"direction": self._breakout_direction, "ask": current_ask,
+                 "entry_ask": self._breakout_entry_ask, "rise_pct": round(rise_pct, 2),
+                 "elapsed": round(elapsed, 1)},
+            )
+            self._last_action = "BREAKOUT_OVERPRICED"
+            self._last_action_at = time.time()
+            self._breakout_state = "OVERPRICED"
             self._reset_breakout_state()
             return []
 
