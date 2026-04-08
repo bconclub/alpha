@@ -757,17 +757,36 @@ export default function TradeTable({ trades }: TradeTableProps) {
     }
 
     if (trade.status === 'open') {
-      // Options: use pnl_usd / pnl_pct from options_state (engine-calculated).
-      // The engine writes real wallet P&L (already accounts for contract multiplier
-      // and leverage). Do NOT recalculate with (premium * contracts / leverage).
+      // Options: calculate live P&L from current_premium in options_state
+      // Formula: (current_premium - entry_price) × contracts × multiplier
       if (isOptionTrade(trade) && trade.price > 0) {
         const asset = extractBaseAsset(trade.pair);
         const pairKey = `${asset}/USD:USD`;
         const optState = optionsState.find((s) => s.pair === pairKey);
-
-        // Use engine-calculated pnl_usd / pnl_pct from options_state
+        
+        const entryPrice = trade.price;
+        const contracts = trade.contracts ?? trade.amount ?? 0;
+        const multiplier = OPTION_CONTRACT_MULTIPLIER[asset] ?? 0.01;
+        
+        // Priority 1: Use engine-calculated pnl_usd from options_state if available
         if (optState?.pnl_usd != null) {
           return { pnl: optState.pnl_usd, pnlPct: optState.pnl_pct ?? 0, grossPnl: optState.pnl_usd, isUnrealized: true };
+        }
+        
+        // Priority 2: Calculate from current_premium in options_state
+        const currentPremium = optState?.current_premium ?? null;
+        if (currentPremium != null && currentPremium > 0 && contracts > 0) {
+          const grossPnl = (currentPremium - entryPrice) * contracts * multiplier;
+          const pnlPct = entryPrice > 0 ? ((currentPremium - entryPrice) / entryPrice) * 100 : 0;
+          return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
+        }
+        
+        // Priority 3: Try live prices API as fallback
+        const currentPrice = livePrices.prices[trade.pair] ?? trade.current_price ?? null;
+        if (currentPrice != null && currentPrice > 0 && contracts > 0) {
+          const grossPnl = (currentPrice - entryPrice) * contracts * multiplier;
+          const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+          return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
         }
 
         // Last fallback: show zeros with "live" tag so user knows it's updating
