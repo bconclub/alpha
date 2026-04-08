@@ -476,6 +476,18 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
   const scanSecsAgo = useSecondsAgo(state?.updated_at);
   const hoursRemaining = fmtHoursRemaining(state?.expiry);
 
+  // Debug: Log options_state for BTC to diagnose premium value issue
+  if (asset === 'BTC' && state) {
+    console.log('[BB Squeeze Debug] BTC options_state:', {
+      pair: state.pair,
+      call_premium: state.call_premium,
+      put_premium: state.put_premium,
+      atm_strike: state.atm_strike,
+      spot_price: state.spot_price,
+      updated_at: state.updated_at,
+    });
+  }
+
   if (!state) {
     return (
       <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3">
