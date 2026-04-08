@@ -1,17 +1,14 @@
--- Exchange on/off toggles — persisted in bot_status
-ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS bybit_enabled boolean NOT NULL DEFAULT true;
-ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS delta_enabled boolean NOT NULL DEFAULT true;
-ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS kraken_enabled boolean NOT NULL DEFAULT true;
+-- GPFC #22 Part 1 — Fix DB crash: Add missing columns to options_state
+-- Run this on Supabase immediately
 
--- contracts column for trades (added in e827e6a but migration was missing)
-ALTER TABLE trades ADD COLUMN IF NOT EXISTS contracts numeric(20,8);
+ALTER TABLE options_state 
+ADD COLUMN IF NOT EXISTS breakout_velocity_pct float,
+ADD COLUMN IF NOT EXISTS breakout_confirmation_secs_remaining int,
+ADD COLUMN IF NOT EXISTS breakout_direction text,
+ADD COLUMN IF NOT EXISTS breakout_state text DEFAULT 'NONE';
 
--- Also fix gross_pnl for older trades that are missing it
-UPDATE trades
-SET gross_pnl = pnl + COALESCE(entry_fee, 0) + COALESCE(exit_fee, 0)
-WHERE status = 'closed'
-  AND gross_pnl = 0
-  AND pnl != 0;
-
--- Rename legacy setup type
-UPDATE trades SET setup_type = 'ANTIC' WHERE setup_type = 'TIER1_ANTICIPATORY';
+-- Add comment for documentation
+COMMENT ON COLUMN options_state.breakout_velocity_pct IS 'Breakout velocity: % price move in last 3 candles (GPFC #21)';
+COMMENT ON COLUMN options_state.breakout_confirmation_secs_remaining IS 'Seconds remaining in confirmation window (GPFC #21)';
+COMMENT ON COLUMN options_state.breakout_direction IS 'Breakout direction: UP or DOWN (GPFC #21)';
+COMMENT ON COLUMN options_state.breakout_state IS 'Breakout state: NONE, DETECTED, CONFIRMED, FAKEOUT (GPFC #21)';

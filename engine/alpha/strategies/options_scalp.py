@@ -330,6 +330,11 @@ class OptionsScalpStrategy(BaseStrategy):
         # ── GPFC #21: Breakout state for dashboard ─────────────────
         self._breakout_state: str = "NONE"              # NONE/DETECTED/CONFIRMED/FAKEOUT
 
+        # ── GPFC #22 Part 2: Momentum tracking for "let winners ride" ─────────────────
+        self._momentum_price_history: deque[tuple[float, float]] = deque(maxlen=20)  # (time, price)
+        self._MOMENTUM_CHECK_WINDOW_SEC = 60.0          # Look back 60s for momentum
+        self._MOMENTUM_THRESHOLD_PCT = 0.1              # Min 0.1% momentum to ride
+
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
         self._cached_ohlcv: list[list[float]] | None = None
@@ -925,7 +930,11 @@ class OptionsScalpStrategy(BaseStrategy):
             ),
         }
 
-        await self._db.upsert_options_state(self.pair, state)
+        # GPFC #22 Part 1: Wrap options_state upsert in try/except — never crash the bot
+        try:
+            await self._db.upsert_options_state(self.pair, state)
+        except Exception as e:
+            self.logger.warning("[%s] options_state upsert failed (non-critical): %s", self.pair, e)
 
     # ==================================================================
     # MAIN CHECK LOOP
@@ -1897,6 +1906,67 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._opt_ratchet_floor = floor
 
     # ==================================================================
+    # GPFC #22 Part 2: Let Winners Ride — Momentum Check
+    # ==================================================================
+
+    def _update_momentum_history(self, current_price: float) -> None:
+        """Track price history for momentum calculations."""
+        now = time.monotonic()
+        self._momentum_price_history.append((now, current_price))
+
+    def _should_ride_momentum(self, current_pnl_pct: float) -> bool:
+        """Check if we should skip exit and ride the momentum.
+        
+        Returns True if:
+        - Current P&L is positive (we're winning)
+        - Underlying price momentum in position direction > 0.1% over last 60s
+        
+        Hard override: Always exit if peak > +50% AND pullback > 60% of peak gain
+        """
+        if current_pnl_pct <= 0:
+            return False  # Only ride momentum when profitable
+        
+        if len(self._momentum_price_history) < 2:
+            return False  # Not enough data
+        
+        now = time.monotonic()
+        cutoff = now - self._MOMENTUM_CHECK_WINDOW_SEC
+        
+        # Find price from ~60s ago
+        old_price = None
+        for t, price in reversed(self._momentum_price_history):
+            if t <= cutoff:
+                old_price = price
+                break
+        
+        if old_price is None or old_price <= 0:
+            return False
+        
+        # Get current price
+        current_price = self._momentum_price_history[-1][1]
+        
+        # Calculate momentum %
+        momentum_pct = (current_price - old_price) / old_price * 100
+        
+        # Check if momentum is in our favor
+        # For CALL: positive momentum is good
+        # For PUT: negative momentum is good
+        if self.option_side == "call":
+            momentum_favorable = momentum_pct >= self._MOMENTUM_THRESHOLD_PCT
+        elif self.option_side == "put":
+            momentum_favorable = momentum_pct <= -self._MOMENTUM_THRESHOLD_PCT
+        else:
+            return False
+        
+        if momentum_favorable:
+            self.logger.debug(
+                "[%s] RIDE_MOMENTUM check: momentum=%+.2f%% threshold=%.2f%% — RIDING",
+                self.option_symbol, momentum_pct, self._MOMENTUM_THRESHOLD_PCT,
+            )
+        
+        return momentum_favorable
+
+    # ==================================================================
     # EXIT LOGIC
     # ==================================================================
 
@@ -1950,6 +2020,17 @@ class OptionsScalpStrategy(BaseStrategy):
             if self.expiry_dt and datetime.now(timezone.utc) >= self.expiry_dt:
                 return await self._do_option_exit(0, -100.0, "EXPIRED_WORTHLESS")
             return []
+
+        # GPFC #22 Part 2: Update momentum history with spot price
+        try:
+            if self.futures_exchange:
+                spot_ticker = await self.futures_exchange.fetch_ticker(self.pair)
+                spot_price = spot_ticker.get("last") or 0
+                if spot_price > 0:
+                    self._last_spot_price = spot_price
+                    self._update_momentum_history(spot_price)
+        except Exception:
+            pass  # Non-critical, continue without momentum data
 
         # Track peak premium
         self.highest_premium = max(self.highest_premium, current_premium)
@@ -2019,11 +2100,18 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── 3. RATCHET EXIT ─────────
         if self._opt_ratchet_floor != 0.0 and premium_change_pct < self._opt_ratchet_floor:
-            self.logger.info(
-                "[%s] OPT_RATCHET — pnl +%.1f%% fell below floor +%.1f%%",
-                self.option_symbol, premium_change_pct, self._opt_ratchet_floor,
-            )
-            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_RATCHET")
+            # GPFC #22 Part 2: Check momentum before firing RATCHET exit — let winners ride
+            if self._should_ride_momentum(premium_change_pct):
+                self.logger.info(
+                    "[%s] RIDE_MOMENTUM: pnl=+%.1f%% ratchet_floor=%+.1f%% — skipping RATCHET, holding",
+                    self.option_symbol, premium_change_pct, self._opt_ratchet_floor,
+                )
+            else:
+                self.logger.info(
+                    "[%s] OPT_RATCHET — pnl +%.1f%% fell below floor +%.1f%%",
+                    self.option_symbol, premium_change_pct, self._opt_ratchet_floor,
+                )
+                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_RATCHET")
 
         # ── 4. STOP LOSS ────────────
         if premium_change_pct <= -self.SL_PREMIUM_LOSS_PCT:
@@ -2095,11 +2183,26 @@ class OptionsScalpStrategy(BaseStrategy):
         if peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT and premium_change_pct > 0:
             pct_of_peak_lost = ((peak_pnl_pct - premium_change_pct) / peak_pnl_pct) * 100
             if pct_of_peak_lost >= self.PULLBACK_EXIT_PCT:
-                self.logger.info(
-                    "[%s] OPTION PULLBACK — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
-                    self.option_symbol, peak_pnl_pct, premium_change_pct, pct_of_peak_lost,
-                )
-                return await self._do_option_exit(current_premium, premium_change_pct, "PULLBACK")
+                # GPFC #22 Part 2: Check momentum before firing PULLBACK — let winners ride
+                # Hard override: always exit if peak > +50% AND pullback > 60% of peak gain
+                hard_override = peak_pnl_pct > 50.0 and pct_of_peak_lost > 60.0
+                if not hard_override and self._should_ride_momentum(premium_change_pct):
+                    self.logger.info(
+                        "[%s] RIDE_MOMENTUM: pnl=+%.1f%% peak=+%.1f%% lost=%.0f%% — skipping PULLBACK, holding",
+                        self.option_symbol, premium_change_pct, peak_pnl_pct, pct_of_peak_lost,
+                    )
+                else:
+                    if hard_override:
+                        self.logger.info(
+                            "[%s] OPTION PULLBACK (HARD OVERRIDE) — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
+                            self.option_symbol, peak_pnl_pct, premium_change_pct, pct_of_peak_lost,
+                        )
+                    else:
+                        self.logger.info(
+                            "[%s] OPTION PULLBACK — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
+                            self.option_symbol, peak_pnl_pct, premium_change_pct, pct_of_peak_lost,
+                        )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "PULLBACK")
 
         # ── 10. DECAY ───────────────
         if peak_pnl_pct >= 10.0 and premium_change_pct <= self.DECAY_THRESHOLD_PCT:
