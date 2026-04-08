@@ -254,129 +254,137 @@ export default function PnLPage() {
         ))}
       </div>
 
-      {/* P&L Chart */}
-      <div className="mb-6">
-        <PnLChart trades={trades} range={range} />
-      </div>
+      {/* Two-column layout for desktop: Chart/Stats left, Calendar right */}
+      <div className="lg:grid lg:grid-cols-2 lg:gap-6">
+        {/* Left Column: P&L Chart + Performance Metrics */}
+        <div className="space-y-6">
+          {/* P&L Chart */}
+          <div>
+            <PnLChart trades={trades} range={range} />
+          </div>
 
-      {/* Summary Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <StatCard 
-          label="Net P&L" 
-          value={formatPnL(stats.netPnl)}
-          subtext={`${stats.total} trades`}
-          color={stats.netPnl >= 0 ? 'text-green-400' : 'text-red-400'}
-        />
-        <StatCard 
-          label="Gross P&L" 
-          value={formatPnL(stats.grossPnl)}
-          subtext={`${((stats.grossPnl / (Math.abs(stats.grossPnl) + 0.001)) * 100).toFixed(0)}% win ratio`}
-          color={stats.grossPnl >= 0 ? 'text-green-400' : 'text-red-400'}
-        />
-        <StatCard 
-          label="Total Fees" 
-          value={`$${stats.totalFees.toFixed(2)}`}
-          subtext={stats.total > 0 ? `$${(stats.totalFees / stats.total).toFixed(4)}/trade` : undefined}
-          color="text-gray-400"
-        />
-        <StatCard 
-          label="Win Rate" 
-          value={`${stats.winRate.toFixed(1)}%`}
-          subtext={`${stats.wins}W / ${stats.losses}L`}
-          color="text-blue-400"
-        />
-      </div>
+          {/* Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <StatCard 
+              label="Net P&L" 
+              value={formatPnL(stats.netPnl)}
+              subtext={`${stats.total} trades`}
+              color={stats.netPnl >= 0 ? 'text-green-400' : 'text-red-400'}
+            />
+            <StatCard 
+              label="Gross P&L" 
+              value={formatPnL(stats.grossPnl)}
+              subtext={`${((stats.grossPnl / (Math.abs(stats.grossPnl) + 0.001)) * 100).toFixed(0)}% win ratio`}
+              color={stats.grossPnl >= 0 ? 'text-green-400' : 'text-red-400'}
+            />
+            <StatCard 
+              label="Total Fees" 
+              value={`$${stats.totalFees.toFixed(2)}`}
+              subtext={stats.total > 0 ? `$${(stats.totalFees / stats.total).toFixed(4)}/trade` : undefined}
+              color="text-gray-400"
+            />
+            <StatCard 
+              label="Win Rate" 
+              value={`${stats.winRate.toFixed(1)}%`}
+              subtext={`${stats.wins}W / ${stats.losses}L`}
+              color="text-blue-400"
+            />
+          </div>
 
-      {/* Performance Metrics */}
-      <div className="bg-[#141419] border border-white/5 rounded-xl p-4 mb-6">
-        <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">Performance Metrics</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Best Trade</div>
-            <div className="text-sm font-mono text-green-400">+{formatPnL(stats.bestTrade)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Worst Trade</div>
-            <div className="text-sm font-mono text-red-400">{formatPnL(stats.worstTrade)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Avg Winner</div>
-            <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Avg Loser</div>
-            <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Profit Factor</div>
-            <div className={cn(
-              'text-sm font-mono',
-              stats.profitFactor >= 1 ? 'text-green-400' : 'text-red-400'
-            )}>
-              {stats.profitFactor.toFixed(2)}
+          {/* Performance Metrics */}
+          <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+            <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">Performance Metrics</h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Best Trade</div>
+                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.bestTrade)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Worst Trade</div>
+                <div className="text-sm font-mono text-red-400">{formatPnL(stats.worstTrade)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Avg Winner</div>
+                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Avg Loser</div>
+                <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Profit Factor</div>
+                <div className={cn(
+                  'text-sm font-mono',
+                  stats.profitFactor >= 1 ? 'text-green-400' : 'text-red-400'
+                )}>
+                  {stats.profitFactor.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Expectancy</div>
+                <div className={cn(
+                  'text-sm font-mono',
+                  stats.expectancy >= 0 ? 'text-green-400' : 'text-red-400'
+                )}>
+                  {formatPnL(stats.expectancy)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Win Amount</div>
+                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner * stats.wins)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Loss Amount</div>
+                <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser * stats.losses)}</div>
+              </div>
             </div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Expectancy</div>
-            <div className={cn(
-              'text-sm font-mono',
-              stats.expectancy >= 0 ? 'text-green-400' : 'text-red-400'
-            )}>
-              {formatPnL(stats.expectancy)}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Win Amount</div>
-            <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner * stats.wins)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-gray-500 mb-1">Loss Amount</div>
-            <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser * stats.losses)}</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Daily P&L Calendar */}
-      <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Daily P&L Calendar</h3>
-            <div className="text-xs text-gray-600 mt-1">
-              <span className="text-red-400">{lossDays} loss days</span>
-              <span className="mx-2">/</span>
-              <span className="text-green-400">{winDays} profit days</span>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={prevMonth} className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/5 transition-colors">
-              <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
-              </svg>
-            </button>
-            <span className="text-sm font-medium text-white min-w-[100px] text-center">{monthLabel}</span>
-            <button onClick={nextMonth} className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/5 transition-colors">
-              <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-              </svg>
-            </button>
           </div>
         </div>
 
-        <PnLCalendar dailyStats={dailyStats} year={year} month={month} />
+        {/* Right Column: Daily P&L Calendar */}
+        <div className="mt-6 lg:mt-0">
+          <div className="bg-[#141419] border border-white/5 rounded-xl p-4 h-full">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Daily P&L Calendar</h3>
+                <div className="text-xs text-gray-600 mt-1">
+                  <span className="text-red-400">{lossDays} loss days</span>
+                  <span className="mx-2">/</span>
+                  <span className="text-green-400">{winDays} profit days</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={prevMonth} className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/5 transition-colors">
+                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                </button>
+                <span className="text-sm font-medium text-white min-w-[100px] text-center">{monthLabel}</span>
+                <button onClick={nextMonth} className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/5 transition-colors">
+                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+            </div>
 
-        {/* Legend */}
-        <div className="flex items-center justify-center gap-2 mt-4 text-[10px] text-gray-500">
-          <span>Loss</span>
-          <div className="flex gap-0.5">
-            <div className="w-3 h-3 rounded bg-red-500" />
-            <div className="w-3 h-3 rounded bg-red-500/70" />
-            <div className="w-3 h-3 rounded bg-red-500/40" />
-            <div className="w-3 h-3 rounded bg-gray-800" />
-            <div className="w-3 h-3 rounded bg-green-500/40" />
-            <div className="w-3 h-3 rounded bg-green-500/70" />
-            <div className="w-3 h-3 rounded bg-green-500" />
+            <PnLCalendar dailyStats={dailyStats} year={year} month={month} />
+
+            {/* Legend */}
+            <div className="flex items-center justify-center gap-2 mt-4 text-[10px] text-gray-500">
+              <span>Loss</span>
+              <div className="flex gap-0.5">
+                <div className="w-3 h-3 rounded bg-red-500" />
+                <div className="w-3 h-3 rounded bg-red-500/70" />
+                <div className="w-3 h-3 rounded bg-red-500/40" />
+                <div className="w-3 h-3 rounded bg-gray-800" />
+                <div className="w-3 h-3 rounded bg-green-500/40" />
+                <div className="w-3 h-3 rounded bg-green-500/70" />
+                <div className="w-3 h-3 rounded bg-green-500" />
+              </div>
+              <span>Profit</span>
+            </div>
           </div>
-          <span>Profit</span>
         </div>
       </div>
     </div>
