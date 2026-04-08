@@ -18,6 +18,21 @@ function fmtPrem(v: number | null | undefined): string {
   return `$${v.toFixed(2)}`;
 }
 
+function fmtHoursRemaining(expiryIso: string | null | undefined): string | null {
+  if (!expiryIso) return null;
+  const expiry = new Date(expiryIso).getTime();
+  const now = Date.now();
+  const msRemaining = expiry - now;
+  if (msRemaining <= 0) return 'Expired';
+  const hours = Math.floor(msRemaining / (1000 * 60 * 60));
+  const mins = Math.floor((msRemaining % (1000 * 60 * 60)) / (1000 * 60));
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  }
+  return `${hours}h ${mins}m`;
+}
+
 function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
   const [secs, setSecs] = useState<number | null>(null);
   useEffect(() => {
@@ -96,19 +111,25 @@ function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
 }
 
 // ---------------------------------------------------------------------------
-// Breakout Row — always visible, shows NONE when inactive
+// Breakout Row — shows state, velocity, and confirmation timer
 // ---------------------------------------------------------------------------
 
-function BreakoutRow({ breakout_state, breakout_direction, secs_remaining }: {
+function BreakoutRow({ 
+  breakout_state, 
+  breakout_direction, 
+  secs_remaining,
+  velocity_pct,
+}: { 
   breakout_state: string | null | undefined;
   breakout_direction: string | null | undefined;
   secs_remaining: number | null | undefined;
+  velocity_pct?: number | null;
 }) {
   const state = breakout_state ?? 'NONE';
   const dir = breakout_direction;
   const isDetected = state === 'DETECTED';
-  const isConfirmed = state === 'BREAKOUT_CONFIRMED';
-  const isFakeout = state === 'BREAKOUT_FAKEOUT' || state === 'BREAKOUT_NO_FILL';
+  const isConfirmed = state === 'CONFIRMED' || state === 'BREAKOUT_CONFIRMED';
+  const isFakeout = state === 'FAKEOUT' || state === 'BREAKOUT_FAKEOUT' || state === 'BREAKOUT_NO_FILL';
 
   let label: string;
   let labelColor: string;
@@ -116,20 +137,20 @@ function BreakoutRow({ breakout_state, breakout_direction, secs_remaining }: {
   let rowBorder: string;
 
   if (isDetected) {
-    label = dir === 'UP' ? 'DETECTED UP (CALL)' : dir === 'DOWN' ? 'DETECTED DOWN (PUT)' : 'DETECTED';
+    label = dir === 'UP' ? 'DETECTED UP → CALL' : dir === 'DOWN' ? 'DETECTED DOWN → PUT' : 'DETECTED';
     labelColor = dir === 'UP' ? 'text-[#00c853]' : 'text-[#ff1744]';
-    rowBg = dir === 'UP' ? 'bg-[#00c853]/8' : 'bg-[#ff1744]/8';
-    rowBorder = dir === 'UP' ? 'border-[#00c853]/25' : 'border-[#ff1744]/25';
+    rowBg = dir === 'UP' ? 'bg-[#00c853]/10' : 'bg-[#ff1744]/10';
+    rowBorder = dir === 'UP' ? 'border-[#00c853]/30' : 'border-[#ff1744]/30';
   } else if (isConfirmed) {
-    label = 'CONFIRMED';
+    label = 'CONFIRMED → ENTERING';
     labelColor = 'text-[#00c853]';
-    rowBg = 'bg-[#00c853]/8';
-    rowBorder = 'border-[#00c853]/25';
+    rowBg = 'bg-[#00c853]/10';
+    rowBorder = 'border-[#00c853]/30';
   } else if (isFakeout) {
-    label = state === 'BREAKOUT_NO_FILL' ? 'NO FILL' : 'FAKEOUT';
+    label = state === 'BREAKOUT_NO_FILL' ? 'NO FILL' : 'FAKEOUT → ABORT';
     labelColor = 'text-[#ff6d00]';
-    rowBg = 'bg-[#ff6d00]/8';
-    rowBorder = 'border-[#ff6d00]/25';
+    rowBg = 'bg-[#ff6d00]/10';
+    rowBorder = 'border-[#ff6d00]/30';
   } else {
     label = 'NONE';
     labelColor = 'text-zinc-600';
@@ -137,46 +158,75 @@ function BreakoutRow({ breakout_state, breakout_direction, secs_remaining }: {
     rowBorder = 'border-zinc-800';
   }
 
+  // Determine total confirmation secs based on velocity for progress bar
+  const totalSecs = velocity_pct != null 
+    ? (velocity_pct >= 0.3 ? 0 : velocity_pct >= 0.15 ? 20 : 60)
+    : 60;
+
   return (
-    <div className={cn('flex items-center justify-between px-2.5 py-2 rounded border mb-2', rowBg, rowBorder)}>
-      <div className="flex items-center gap-2">
-        <span className="text-[8px] text-zinc-500 uppercase tracking-wide">Breakout</span>
-        <span className={cn('text-[9px] font-mono font-bold', labelColor)}>
-          {isDetected && <span className="mr-0.5">▶</span>}
-          {label}
-        </span>
-      </div>
-      {isDetected && secs_remaining != null && (
-        <div className="flex items-center gap-1.5">
-          <div className="w-16 h-1 rounded-full bg-zinc-800 overflow-hidden">
-            <div
-              className={cn(
-                'h-full rounded-full transition-all duration-1000',
-                secs_remaining <= 10 ? 'bg-[#ffd600]' : dir === 'UP' ? 'bg-[#00c853]' : 'bg-[#ff1744]'
-              )}
-              style={{ width: `${(secs_remaining / 60) * 100}%` }}
-            />
-          </div>
-          <span className={cn(
-            'text-[9px] font-mono font-bold tabular-nums w-6 text-right',
-            secs_remaining <= 10 ? 'text-[#ffd600] animate-pulse' : 'text-zinc-300'
-          )}>
-            {secs_remaining}s
+    <div className={cn('rounded border mb-2 overflow-hidden', rowBg, rowBorder)}>
+      <div className="flex items-center justify-between px-2.5 py-2">
+        <div className="flex items-center gap-2">
+          <span className="text-[8px] text-zinc-500 uppercase tracking-wide">Breakout</span>
+          <span className={cn('text-[9px] font-mono font-bold', labelColor)}>
+            {(isDetected || isConfirmed) && <span className="mr-0.5">▶</span>}
+            {label}
           </span>
         </div>
-      )}
+        <div className="flex items-center gap-3">
+          {/* Velocity badge */}
+          {velocity_pct != null && velocity_pct > 0 && (
+            <span className={cn(
+              'text-[8px] font-mono px-1.5 py-0.5 rounded',
+              velocity_pct >= 0.3 
+                ? 'bg-[#00c853]/20 text-[#00c853]' 
+                : velocity_pct >= 0.15 
+                  ? 'bg-[#ffd600]/20 text-[#ffd600]' 
+                  : 'bg-zinc-800 text-zinc-400'
+            )}>
+              {velocity_pct.toFixed(2)}%
+            </span>
+          )}
+          {/* Confirmation timer */}
+          {isDetected && secs_remaining != null && totalSecs > 0 && (
+            <div className="flex items-center gap-1.5">
+              <div className="w-16 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                <div
+                  className={cn(
+                    'h-full rounded-full transition-all duration-1000',
+                    secs_remaining <= 5 ? 'bg-[#ff1744]' : secs_remaining <= 10 ? 'bg-[#ffd600]' : dir === 'UP' ? 'bg-[#00c853]' : 'bg-[#ff1744]'
+                  )}
+                  style={{ width: `${(secs_remaining / totalSecs) * 100}%` }}
+                />
+              </div>
+              <span className={cn(
+                'text-[9px] font-mono font-bold tabular-nums w-6 text-right',
+                secs_remaining <= 10 ? 'text-[#ffd600] animate-pulse' : 'text-zinc-300'
+              )}>
+                {secs_remaining}s
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Premium Row — ATM call/put ask vs cheap threshold
+// Premium Row — ATM call/put ask with strike being watched
 // ---------------------------------------------------------------------------
 
-function PremiumRow({ call_ask, put_ask, threshold }: {
+function PremiumRow({ 
+  call_ask, 
+  put_ask, 
+  threshold,
+  atm_strike,
+}: { 
   call_ask: number | null | undefined;
   put_ask: number | null | undefined;
   threshold: number | null | undefined;
+  atm_strike: number | null | undefined;
 }) {
   const callCheap = call_ask != null && call_ask > 0 && threshold != null && call_ask <= threshold;
   const putCheap  = put_ask  != null && put_ask  > 0 && threshold != null && put_ask  <= threshold;
@@ -184,7 +234,14 @@ function PremiumRow({ call_ask, put_ask, threshold }: {
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">ATM Premiums</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">ATM Premiums</span>
+          {atm_strike != null && atm_strike > 0 && (
+            <span className="text-[9px] font-mono text-amber-400">
+              Strike: ${atm_strike.toLocaleString()}
+            </span>
+          )}
+        </div>
         {threshold != null && threshold > 0 && (
           <span className="text-[8px] font-mono text-zinc-500">
             cheap ≤ {fmtPrem(threshold)}
@@ -195,7 +252,7 @@ function PremiumRow({ call_ask, put_ask, threshold }: {
         <div className="flex-1">
           <div className="text-[7px] text-[#00c853]/60 uppercase mb-0.5">Call ask</div>
           <div className="flex items-baseline gap-1">
-            <span className={cn('text-[12px] font-mono font-semibold', callCheap ? 'text-[#00c853]' : 'text-zinc-300')}>
+            <span className={cn('text-[14px] font-mono font-semibold', callCheap ? 'text-[#00c853]' : 'text-zinc-200')}>
               {fmtPrem(call_ask)}
             </span>
             {callCheap && (
@@ -206,7 +263,7 @@ function PremiumRow({ call_ask, put_ask, threshold }: {
         <div className="flex-1">
           <div className="text-[7px] text-[#ff1744]/60 uppercase mb-0.5">Put ask</div>
           <div className="flex items-baseline gap-1">
-            <span className={cn('text-[12px] font-mono font-semibold', putCheap ? 'text-[#00c853]' : 'text-zinc-300')}>
+            <span className={cn('text-[14px] font-mono font-semibold', putCheap ? 'text-[#00c853]' : 'text-zinc-200')}>
               {fmtPrem(put_ask)}
             </span>
             {putCheap && (
@@ -417,6 +474,7 @@ function ChainTable({
 
 function ChainCard({ asset, state }: { asset: string; state: OptionsState | null }) {
   const scanSecsAgo = useSecondsAgo(state?.updated_at);
+  const hoursRemaining = fmtHoursRemaining(state?.expiry);
 
   if (!state) {
     return (
@@ -449,8 +507,15 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
           </span>
         </div>
         <div className="text-right">
-          <div className="text-[9px] font-mono text-zinc-600 truncate max-w-[150px]">
-            {state.expiry_label ?? '—'}
+          <div className="flex items-center gap-2 justify-end">
+            {hoursRemaining && (
+              <span className="text-[9px] font-mono text-zinc-400">
+                Exp: {hoursRemaining}
+              </span>
+            )}
+            <span className="text-[9px] font-mono text-zinc-600 truncate max-w-[150px]">
+              {state.expiry_label ?? '—'}
+            </span>
           </div>
           {scanSecsAgo != null && (
             <div className="text-[8px] font-mono text-zinc-700">
@@ -470,18 +535,20 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         squeeze_active={state.squeeze_active}
       />
 
-      {/* Breakout state (always visible) */}
+      {/* Breakout state with velocity and timer */}
       <BreakoutRow
         breakout_state={state.breakout_state}
         breakout_direction={state.breakout_direction}
         secs_remaining={state.breakout_confirmation_secs_remaining}
+        velocity_pct={state.breakout_velocity_pct}
       />
 
-      {/* ATM call/put ask vs cheap threshold */}
+      {/* ATM call/put ask with strike being watched */}
       <PremiumRow
         call_ask={state.call_premium}
         put_ask={state.put_premium}
         threshold={state.premium_cheap_threshold}
+        atm_strike={state.atm_strike}
       />
 
       {/* CALLS chain */}
