@@ -365,6 +365,19 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
   const scanSecsAgo = useSecondsAgo(state?.updated_at);
   const hoursRemaining = fmtHoursRemaining(state?.expiry);
 
+  // Debug logging
+  useEffect(() => {
+    if (state) {
+      console.log(`[ChainCard ${asset}]`, {
+        bb_width_pct: state.bb_width_pct,
+        bb_width_threshold: state.bb_width_threshold,
+        squeeze_active: state.squeeze_active,
+        breakout_state: state.breakout_state,
+        updated_at: state.updated_at,
+      });
+    }
+  }, [state, asset]);
+
   if (!state) {
     return (
       <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3">
@@ -500,16 +513,29 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
 
 export function OptionsChainPanel() {
   const { optionsState, setOptionsState } = useSupabase();
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   
   // Auto-refresh: poll options_state every 10s
   useEffect(() => {
     const fetchOptionsState = async () => {
       const client = getSupabase();
-      if (!client) return;
+      if (!client) {
+        console.log('[OptionsChainPanel] No Supabase client');
+        return;
+      }
       try {
         const res = await client.from('options_state').select('*');
-        if (res.data) setOptionsState(res.data as OptionsState[]);
-      } catch (e) { /* silent */ }
+        if (res.data) {
+          console.log('[OptionsChainPanel] Fetched', res.data.length, 'rows');
+          setOptionsState(res.data as OptionsState[]);
+          setLastUpdate(new Date());
+        }
+        if (res.error) {
+          console.error('[OptionsChainPanel] Error:', res.error);
+        }
+      } catch (e) { 
+        console.error('[OptionsChainPanel] Exception:', e);
+      }
     };
     
     // Initial fetch
@@ -528,12 +554,29 @@ export function OptionsChainPanel() {
       return { asset, state };
     });
   }, [optionsState]);
+  
+  // Show stale data warning if no update in 30s
+  const isStale = !lastUpdate || (Date.now() - lastUpdate.getTime()) > 30000;
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
-      <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
-        Options Chain
-      </h3>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
+          Options Chain
+        </h3>
+        {isStale && (
+          <span style={{ 
+            fontSize: '10px', 
+            color: '#ef4444',
+            backgroundColor: 'rgba(239,68,68,0.2)',
+            padding: '2px 8px',
+            borderRadius: '4px',
+            fontFamily: 'monospace'
+          }}>
+            STALE DATA
+          </span>
+        )}
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {pairData.map(pd => (
           <ChainCard key={pd.asset} asset={pd.asset} state={pd.state} />
