@@ -50,9 +50,10 @@ Exit (GPFC #21 — SQUEEZE_RELEASE removed, replaced by BREAKOUT_FAKEOUT):
   2. OPT_ENTRY_DROP:   -8% in first 60s — bad entry, cut fast
   3. Ratchet/Trail:    lock profit at tiers, trail at +8%, TP at +30%
   4. EXPIRY_GUARD:     < 30 min → always exit; < 2h + pnl < +10% → exit
-  - Progressive SL for stale trades after squeeze hold time:
-      ETH: 5m → -10%, 8m → -5%, 12m → OPT_STALE (starts at 15m post-entry)
-      BTC: 8m → -15%, 12m → -10%, 18m → OPT_STALE (starts at 20m post-entry)
+  - Progressive SL for stale trades after squeeze hold time (GPFC #23):
+      ETH: 5m → -10%, 8m → -5%, 12m → OPT_STALE check (starts at 25m post-entry)
+      BTC: 8m → -15%, 12m → -10%, 18m → OPT_STALE check (starts at 35m post-entry)
+      If squeeze still active (bb_width < threshold) → STALE_HOLD, don't exit
 
 Expected: 2–5 entries/day, premium $3–8, 70% lose small / 30% gain 200–400%.
 """
@@ -122,8 +123,9 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_FILL_POLL_SEC = 30           # Poll every 30s during fill wait
     SQUEEZE_CHEAP_PERCENTILE = 0.25      # Buy bottom 25% of 30-min premium range
     SQUEEZE_HISTORY_MIN = 30             # Track premium history for 30 min
-    SQUEEZE_NO_STALE_MIN_ETH = 15        # No stale SL for first 15 min after squeeze fill (ETH)
-    SQUEEZE_NO_STALE_MIN_BTC = 20        # No stale SL for first 20 min after squeeze fill (BTC)
+    # GPFC #23: Extended stale windows for squeeze entries (squeezes need time to resolve)
+    SQUEEZE_NO_STALE_MIN_ETH = 25        # No stale SL for first 25 min after squeeze fill (ETH)
+    SQUEEZE_NO_STALE_MIN_BTC = 35        # No stale SL for first 35 min after squeeze fill (BTC)
     # Dynamic confirmation window thresholds (GPFC #21) — UPDATED
     # velocity >= 0.3% → 20s, 0.15-0.3% → 40s, < 0.15% → 60s
     BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3        # >= 0.3% → 20s confirmation
@@ -403,10 +405,10 @@ class OptionsScalpStrategy(BaseStrategy):
         _bb_w = self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC" else self.SQUEEZE_BB_WIDTH_ETH
         _no_stale = self.SQUEEZE_NO_STALE_MIN_BTC if self._base_asset == "BTC" else self.SQUEEZE_NO_STALE_MIN_ETH
         self.logger.info(
-            "[%s] OPTIONS SCALP ACTIVE — BB_SQUEEZE strategy | "
+            "[%s] OPTIONS SCALP ACTIVE — BB_SQUEEZE strategy (GPFC #23) | "
             "BB_width<%.1f%% KC_squeeze fill_wait=%ds "
             "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
-            "NoStale=%dm Stale=%dm Phase1=%ds Alloc=%s%s",
+            "NoStale=%dm StaleCheck=%dm Phase1=%ds Alloc=%s%s",
             self.pair,
             _bb_w, self.SQUEEZE_FILL_WAIT_SEC,
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
@@ -2236,10 +2238,10 @@ class OptionsScalpStrategy(BaseStrategy):
             return await self._do_option_exit(current_premium, premium_change_pct, "DECAY")
 
         # ── 11. PROGRESSIVE SL TIGHTENING (stale trade protection) ────
-        # For squeeze entries: no stale for first 15m ETH / 20m BTC
+        # GPFC #23: Smarter stale exit for squeeze setups
         abs_move_pct = abs(premium_change_pct)
         
-        # Determine no-stale threshold based on asset
+        # Determine no-stale threshold based on asset (extended for squeeze entries)
         no_stale_threshold = (
             self.SQUEEZE_NO_STALE_MIN_BTC * 60 if self._is_squeeze_entry and self._base_asset == "BTC"
             else self.SQUEEZE_NO_STALE_MIN_ETH * 60 if self._is_squeeze_entry
@@ -2256,44 +2258,76 @@ class OptionsScalpStrategy(BaseStrategy):
         if is_stale:
             hold_min = hold_seconds / 60
             _is_btc = self._base_asset == "BTC"
+            
+            # GPFC #23: Before firing OPT_STALE, check if squeeze is still active
+            squeeze_still_active = False
+            if self._is_squeeze_entry:
+                squeeze_result = await self._detect_squeeze()
+                if squeeze_result:
+                    is_squeeze, bb_width_pct, *_ = squeeze_result
+                    bb_width_threshold = (
+                        self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                        else self.SQUEEZE_BB_WIDTH_ETH
+                    )
+                    # Squeeze is "still active" if BB width is still tight (< threshold)
+                    squeeze_still_active = bb_width_pct < bb_width_threshold
+                    if squeeze_still_active:
+                        self.logger.info(
+                            "[%s] STALE_HOLD: squeeze still forming (bb_width=%.2f%% < %.1f%%), "
+                            "keeping position — %.0fm held",
+                            self.option_symbol, bb_width_pct, bb_width_threshold, hold_min,
+                        )
+            
             if _is_btc:
                 if hold_min >= self.STALE_EXIT_MIN_BTC:
-                    self.logger.info(
-                        "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
-                        self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
-                    )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                    if squeeze_still_active:
+                        # Squeeze still active → don't exit
+                        pass
+                    else:
+                        self.logger.info(
+                            "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
+                            self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
+                        )
+                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
                 elif hold_min >= 12.0 and premium_change_pct < self.STALE_SL_12M_BTC:
-                    self.logger.info(
-                        "[%s] SL_TIGHTEN: 12m stale, SL → %.0f%% (now %.1f%%)",
-                        self.option_symbol, self.STALE_SL_12M_BTC, premium_change_pct,
-                    )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                    if not squeeze_still_active:
+                        self.logger.info(
+                            "[%s] SL_TIGHTEN: 12m stale, SL → %.0f%% (now %.1f%%)",
+                            self.option_symbol, self.STALE_SL_12M_BTC, premium_change_pct,
+                        )
+                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
                 elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_BTC:
-                    self.logger.info(
-                        "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
-                        self.option_symbol, self.STALE_SL_8M_BTC, premium_change_pct,
-                    )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                    if not squeeze_still_active:
+                        self.logger.info(
+                            "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
+                            self.option_symbol, self.STALE_SL_8M_BTC, premium_change_pct,
+                        )
+                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
             else:
                 if hold_min >= self.STALE_EXIT_MIN_ETH:
-                    self.logger.info(
-                        "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
-                        self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
-                    )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                    if squeeze_still_active:
+                        # Squeeze still active → don't exit
+                        pass
+                    else:
+                        self.logger.info(
+                            "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
+                            self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
+                        )
+                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
                 elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_ETH:
-                    self.logger.info(
-                        "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
-                        self.option_symbol, self.STALE_SL_8M_ETH, premium_change_pct,
-                    )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                    if not squeeze_still_active:
+                        self.logger.info(
+                            "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
+                            self.option_symbol, self.STALE_SL_8M_ETH, premium_change_pct,
+                        )
+                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
                 elif hold_min >= 5.0 and premium_change_pct < self.STALE_SL_5M_ETH:
-                    self.logger.info(
-                        "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
-                        self.option_symbol, self.STALE_SL_5M_ETH, premium_change_pct,
-                    )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                    if not squeeze_still_active:
+                        self.logger.info(
+                            "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
+                            self.option_symbol, self.STALE_SL_5M_ETH, premium_change_pct,
+                        )
+                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
 
         # ── 12. SIGNAL REVERSAL ─────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
