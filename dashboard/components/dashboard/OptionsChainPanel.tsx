@@ -72,10 +72,7 @@ function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
     return <div className="text-[9px] font-mono text-zinc-600 mb-2">BB: waiting...</div>;
   }
   
-  // Color: red 0-40%, yellow 40-70%, green 70%+
-  let barColor = 'bg-[#ff1744]'; // red
-  if (ratio >= 0.7) barColor = 'bg-[#00c853]'; // green
-  else if (ratio >= 0.4) barColor = 'bg-[#ffd600]'; // yellow
+  const confidence = ratio;
 
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
@@ -99,11 +96,12 @@ function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
       <div className="flex items-center gap-2">
         <div className="flex-1 h-2 rounded-full bg-zinc-800 overflow-hidden">
           <div
-            className={cn('h-full rounded-full', barColor)}
-            style={{ 
-              width: `${ratio * 100}%`,
+            style={{
+              width: `${Math.round((confidence || 0) * 100)}%`,
+              height: '100%',
               transition: 'width 0.5s ease',
-              backgroundColor: ratio >= 0.7 ? '#00c853' : ratio >= 0.4 ? '#ffd600' : '#ff1744'
+              backgroundColor: (confidence || 0) >= 0.7 ? '#22c55e' : (confidence || 0) >= 0.4 ? '#eab308' : '#ef4444',
+              borderRadius: '4px'
             }}
           />
         </div>
@@ -233,6 +231,14 @@ function ChainTable({
 // Breakout Badge Component
 // ---------------------------------------------------------------------------
 
+const breakoutStyle: Record<string, React.CSSProperties> = {
+  NONE: { backgroundColor: '#374151', color: '#9ca3af', border: '1px solid #4b5563', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase' },
+  DETECTED_UP: { backgroundColor: '#14532d', color: '#4ade80', border: '1px solid #22c55e', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase', animation: 'pulse 1.5s infinite' },
+  DETECTED_DOWN: { backgroundColor: '#450a0a', color: '#f87171', border: '1px solid #ef4444', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase', animation: 'pulse 1.5s infinite' },
+  CONFIRMED: { backgroundColor: '#14532d', color: '#22c55e', border: '1px solid #22c55e', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase' },
+  FAKEOUT: { backgroundColor: '#431407', color: '#fb923c', border: '1px solid #f97316', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase' },
+};
+
 function BreakoutBadge({ 
   state, 
   direction, 
@@ -242,83 +248,33 @@ function BreakoutBadge({
   direction: 'UP' | 'DOWN' | null | undefined; 
   velocity: number | null | undefined;
 }) {
-  // NONE = grey pill
-  if (state === 'NONE' || !state) {
-    return (
-      <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-zinc-800 text-zinc-500 border-zinc-700">
-        NONE
-      </span>
-    );
-  }
+  const normalizedState = state === 'NONE' || !state ? 'NONE' :
+    state === 'DETECTED_UP' || state === 'BREAKOUT_UP' || (state === 'DETECTED' && direction === 'UP') ? 'DETECTED_UP' :
+    state === 'DETECTED_DOWN' || state === 'BREAKOUT_DOWN' || (state === 'DETECTED' && direction === 'DOWN') ? 'DETECTED_DOWN' :
+    state === 'CONFIRMED' || state === 'BREAKOUT_CONFIRMED' ? 'CONFIRMED' :
+    state === 'FAKEOUT' || state === 'BREAKOUT_FAKEOUT' ? 'FAKEOUT' : 'NONE';
   
-  // DETECTED UP / BREAKOUT_UP = pulsing green arrow
-  if (state === 'DETECTED_UP' || state === 'BREAKOUT_UP' || (state === 'DETECTED' && direction === 'UP')) {
-    return (
-      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#00c853]/20 text-[#00c853] border-[#00c853]/40 animate-pulse">
-        <span className="text-xs">↑</span>
-        DETECTED UP
-        {velocity != null && <span className="text-[8px] opacity-80">({velocity.toFixed(2)}%)</span>}
-      </span>
-    );
-  }
+  const style = breakoutStyle[normalizedState];
   
-  // DETECTED DOWN / BREAKOUT_DOWN = pulsing red arrow
-  if (state === 'DETECTED_DOWN' || state === 'BREAKOUT_DOWN' || (state === 'DETECTED' && direction === 'DOWN')) {
-    return (
-      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#ff1744]/20 text-[#ff1744] border-[#ff1744]/40 animate-pulse">
-        <span className="text-xs">↓</span>
-        DETECTED DOWN
-        {velocity != null && <span className="text-[8px] opacity-80">({velocity.toFixed(2)}%)</span>}
-      </span>
-    );
-  }
+  // Get arrow/checkmark/X
+  const icon = normalizedState === 'DETECTED_UP' ? '↑ ' :
+    normalizedState === 'DETECTED_DOWN' ? '↓ ' :
+    normalizedState === 'CONFIRMED' ? '✓ ' :
+    normalizedState === 'FAKEOUT' ? '✗ ' : '';
   
-  // DETECTED (no direction)
-  if (state === 'DETECTED') {
-    return (
-      <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-amber-500/20 text-amber-400 border-amber-500/40 animate-pulse">
-        DETECTED
-      </span>
-    );
-  }
+  const label = normalizedState === 'DETECTED_UP' ? 'DETECTED UP' :
+    normalizedState === 'DETECTED_DOWN' ? 'DETECTED DOWN' :
+    normalizedState;
   
-  // CONFIRMED = bright green checkmark
-  if (state === 'CONFIRMED' || state === 'BREAKOUT_CONFIRMED') {
-    return (
-      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#00c853]/30 text-[#00c853] border-[#00c853]/50">
-        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-        </svg>
-        CONFIRMED
-      </span>
-    );
-  }
-  
-  // FAKEOUT = orange X
-  if (state === 'FAKEOUT' || state === 'BREAKOUT_FAKEOUT') {
-    return (
-      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#ff6d00]/20 text-[#ff6d00] border-[#ff6d00]/40">
-        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
-        </svg>
-        FAKEOUT
-      </span>
-    );
-  }
-  
-  // NO FILL
-  if (state === 'BREAKOUT_NO_FILL') {
-    return (
-      <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-zinc-800 text-zinc-500 border-zinc-700">
-        NO FILL
-      </span>
-    );
-  }
-  
-  // Default
   return (
-    <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-zinc-800 text-zinc-500 border-zinc-700">
-      {state}
+    <span style={style}>
+      <span className="inline-flex items-center gap-1">
+        <span>{icon}</span>
+        <span>{label}</span>
+        {velocity != null && normalizedState.startsWith('DETECTED') && (
+          <span style={{ opacity: 0.8, fontSize: '8px' }}>({velocity.toFixed(2)}%)</span>
+        )}
+      </span>
     </span>
   );
 }
@@ -330,33 +286,29 @@ function BreakoutBadge({
 function PremiumBox({ 
   type, 
   premium, 
-  isBreakout 
+  breakout_state 
 }: { 
   type: 'call' | 'put'; 
   premium: number | null; 
-  isBreakout: boolean;
+  breakout_state: string;
 }) {
   const isCall = type === 'call';
   const colorClass = isCall ? 'text-[#00c853]' : 'text-[#ff1744]';
   const dimColorClass = isCall ? 'text-[#00c853]/60' : 'text-[#ff1744]/60';
-  const borderColor = isBreakout
-    ? isCall ? 'rgba(0,200,83,0.6)' : 'rgba(255,23,68,0.6)'
-    : 'rgba(63,63,70,0.6)';
-  const boxShadow = isBreakout
-    ? isCall 
-      ? '0 0 15px rgba(0,200,83,0.4), inset 0 0 10px rgba(0,200,83,0.1)'
-      : '0 0 15px rgba(255,23,68,0.4), inset 0 0 10px rgba(255,23,68,0.1)'
-    : 'none';
+  
+  const isGlowing = ['DETECTED_UP', 'DETECTED_DOWN', 'CONFIRMED', 'BREAKOUT_CONFIRMED'].includes(breakout_state);
+  const glowColor = breakout_state === 'DETECTED_DOWN' ? '#ef4444' : '#22c55e';
   
   return (
     <div 
       className={cn(
-        'bg-zinc-800/40 rounded p-2 transition-all duration-300',
-        isBreakout && 'animate-pulse'
+        'bg-zinc-800/40 rounded p-2',
+        isGlowing && 'animate-pulse'
       )}
       style={{
-        border: `1px solid ${borderColor}`,
-        boxShadow
+        border: '1px solid rgba(63,63,70,0.6)',
+        boxShadow: isGlowing ? `0 0 12px ${glowColor}` : 'none',
+        transition: 'box-shadow 0.3s ease'
       }}
     >
       <div className={cn('text-[7px] uppercase mb-0.5', dimColorClass)}>
@@ -469,12 +421,12 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         <PremiumBox 
           type="call" 
           premium={state.call_premium} 
-          isBreakout={isBreakoutActive} 
+          breakout_state={breakoutState}
         />
         <PremiumBox 
           type="put" 
           premium={state.put_premium} 
-          isBreakout={isBreakoutActive} 
+          breakout_state={breakoutState}
         />
       </div>
 
