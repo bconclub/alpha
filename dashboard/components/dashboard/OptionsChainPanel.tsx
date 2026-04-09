@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo, useEffect, useState } from 'react';
+import { useMemo, useEffect, useState, useCallback } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { OptionsState } from '@/lib/types';
+import { getSupabase } from '@/lib/supabase';
 
 const OPTIONS_ASSETS = ['BTC', 'ETH'] as const;
 const OPTIONS_LEVERAGE = 50;
@@ -39,14 +40,14 @@ function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
     if (!isoTimestamp) { setSecs(null); return; }
     const update = () => setSecs(Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000));
     update();
-    const id = setInterval(update, 5000);
+    const id = setInterval(update, 1000); // Tick every second for live counter
     return () => clearInterval(id);
   }, [isoTimestamp]);
   return secs;
 }
 
 // ---------------------------------------------------------------------------
-// Squeeze Bar
+// Squeeze Bar with animated fill and percentage
 // ---------------------------------------------------------------------------
 
 function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
@@ -54,20 +55,32 @@ function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
   bb_width_threshold: number | null | undefined;
   squeeze_active: boolean | null | undefined;
 }) {
+  const [displayPct, setDisplayPct] = useState(0);
+  
+  // Calculate values safely
+  const ratio = bb_width_pct != null && bb_width_threshold != null 
+    ? Math.min(bb_width_pct / bb_width_threshold, 1) 
+    : 0;
+  const targetPct = Math.round(ratio * 100);
+  
+  // Animate the percentage number - must be called before any early return
+  useEffect(() => {
+    setDisplayPct(targetPct);
+  }, [targetPct]);
+  
   if (bb_width_pct == null || bb_width_threshold == null) {
     return <div className="text-[9px] font-mono text-zinc-600 mb-2">BB: waiting...</div>;
   }
-
-  const ratio = Math.min(bb_width_pct / bb_width_threshold, 1);
-  let barColor = 'bg-[#ff1744]';
-  if (ratio < 0.5) barColor = 'bg-[#00e676]';
-  else if (ratio < 0.75) barColor = 'bg-[#00c853]';
-  else if (ratio < 1) barColor = 'bg-[#ffd600]';
+  
+  // Color: red 0-40%, yellow 40-70%, green 70%+
+  let barColor = 'bg-[#ff1744]'; // red
+  if (ratio >= 0.7) barColor = 'bg-[#00c853]'; // green
+  else if (ratio >= 0.4) barColor = 'bg-[#ffd600]'; // yellow
 
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">BB Squeeze</span>
+        <span className="text-[9px] font-semibold text-zinc-400 uppercase tracking-wide">Signal Strength</span>
         <span className={cn(
           'px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase border',
           squeeze_active
@@ -78,16 +91,24 @@ function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
         </span>
       </div>
       <div className="flex items-center justify-between mb-1">
-        <span className="text-[8px] text-zinc-500">Width</span>
+        <span className="text-[8px] text-zinc-500">BB Width</span>
         <span className="text-[8px] font-mono text-zinc-300">
           {bb_width_pct.toFixed(2)}% / {bb_width_threshold}% thresh
         </span>
       </div>
-      <div className="h-2 rounded-full bg-zinc-800 overflow-hidden">
-        <div
-          className={cn('h-full rounded-full transition-all duration-500', barColor)}
-          style={{ width: `${ratio * 100}%` }}
-        />
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-2 rounded-full bg-zinc-800 overflow-hidden">
+          <div
+            className={cn('h-full rounded-full transition-all duration-500 ease-out', barColor)}
+            style={{ width: `${ratio * 100}%` }}
+          />
+        </div>
+        <span className={cn(
+          'text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300',
+          ratio >= 0.7 ? 'text-[#00c853]' : ratio >= 0.4 ? 'text-[#ffd600]' : 'text-[#ff1744]'
+        )}>
+          {displayPct}%
+        </span>
       </div>
     </div>
   );
@@ -205,15 +226,179 @@ function ChainTable({
 }
 
 // ---------------------------------------------------------------------------
+// Breakout Badge Component
+// ---------------------------------------------------------------------------
+
+function BreakoutBadge({ 
+  state, 
+  direction, 
+  velocity 
+}: { 
+  state: string; 
+  direction: 'UP' | 'DOWN' | null | undefined; 
+  velocity: number | null | undefined;
+}) {
+  // NONE = grey pill
+  if (state === 'NONE' || !state) {
+    return (
+      <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-zinc-800 text-zinc-500 border-zinc-700">
+        NONE
+      </span>
+    );
+  }
+  
+  // DETECTED UP = pulsing green arrow
+  if (state === 'DETECTED' && direction === 'UP') {
+    return (
+      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#00c853]/20 text-[#00c853] border-[#00c853]/40 animate-pulse">
+        <span className="text-xs">↑</span>
+        DETECTED UP
+        {velocity != null && <span className="text-[8px] opacity-80">({velocity.toFixed(2)}%)</span>}
+      </span>
+    );
+  }
+  
+  // DETECTED DOWN = pulsing red arrow
+  if (state === 'DETECTED' && direction === 'DOWN') {
+    return (
+      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#ff1744]/20 text-[#ff1744] border-[#ff1744]/40 animate-pulse">
+        <span className="text-xs">↓</span>
+        DETECTED DOWN
+        {velocity != null && <span className="text-[8px] opacity-80">({velocity.toFixed(2)}%)</span>}
+      </span>
+    );
+  }
+  
+  // DETECTED (no direction)
+  if (state === 'DETECTED') {
+    return (
+      <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-amber-500/20 text-amber-400 border-amber-500/40 animate-pulse">
+        DETECTED
+      </span>
+    );
+  }
+  
+  // CONFIRMED = bright green checkmark
+  if (state === 'CONFIRMED' || state === 'BREAKOUT_CONFIRMED') {
+    return (
+      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#00c853]/30 text-[#00c853] border-[#00c853]/50">
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+        </svg>
+        CONFIRMED
+      </span>
+    );
+  }
+  
+  // FAKEOUT = orange X
+  if (state === 'FAKEOUT' || state === 'BREAKOUT_FAKEOUT') {
+    return (
+      <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#ff6d00]/20 text-[#ff6d00] border-[#ff6d00]/40">
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+        </svg>
+        FAKEOUT
+      </span>
+    );
+  }
+  
+  // NO FILL
+  if (state === 'BREAKOUT_NO_FILL') {
+    return (
+      <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-zinc-800 text-zinc-500 border-zinc-700">
+        NO FILL
+      </span>
+    );
+  }
+  
+  // Default
+  return (
+    <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-zinc-800 text-zinc-500 border-zinc-700">
+      {state}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Premium Box with glow effect during breakout
+// ---------------------------------------------------------------------------
+
+function PremiumBox({ 
+  type, 
+  premium, 
+  isBreakout 
+}: { 
+  type: 'call' | 'put'; 
+  premium: number | null; 
+  isBreakout: boolean;
+}) {
+  const isCall = type === 'call';
+  const colorClass = isCall ? 'text-[#00c853]' : 'text-[#ff1744]';
+  const dimColorClass = isCall ? 'text-[#00c853]/60' : 'text-[#ff1744]/60';
+  const glowClass = isBreakout 
+    ? isCall 
+      ? 'animate-pulse shadow-[0_0_15px_rgba(0,200,83,0.4)] border-[#00c853]/60'
+      : 'animate-pulse shadow-[0_0_15px_rgba(255,23,68,0.4)] border-[#ff1744]/60'
+    : 'border-zinc-800/60';
+  
+  return (
+    <div className={cn(
+      'bg-zinc-800/40 rounded p-2 transition-all duration-300',
+      glowClass
+    )}>
+      <div className={cn('text-[7px] uppercase mb-0.5', dimColorClass)}>
+        {isCall ? 'Call' : 'Put'}
+      </div>
+      <div className={cn('text-[14px] font-mono font-semibold text-zinc-200', colorClass)}>
+        {fmtPrem(premium)}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live Counter Component
+// ---------------------------------------------------------------------------
+
+function LiveCounter({ seconds }: { seconds: number | null }) {
+  const [liveSecs, setLiveSecs] = useState(seconds ?? 0);
+  
+  useEffect(() => {
+    setLiveSecs(seconds ?? 0);
+  }, [seconds]);
+  
+  useEffect(() => {
+    if (seconds == null) return;
+    const id = setInterval(() => {
+      setLiveSecs(s => s + 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [seconds]);
+  
+  if (seconds == null) return null;
+  
+  const mins = Math.floor(liveSecs / 60);
+  const secs = liveSecs % 60;
+  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+  
+  // Color coding: <30s green, 30-60s yellow, >60s red
+  const colorClass = liveSecs < 30 ? 'text-[#00c853]' : liveSecs < 60 ? 'text-[#ffd600]' : 'text-[#ff1744]';
+  
+  return (
+    <div className="mb-3 text-[8px] font-mono text-right">
+      <span className="text-zinc-600">Last scan: </span>
+      <span className={cn('transition-colors duration-300', colorClass)}>{timeStr} ago</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Chain Card (one per asset)
 // ---------------------------------------------------------------------------
 
 function ChainCard({ asset, state }: { asset: string; state: OptionsState | null }) {
   const scanSecsAgo = useSecondsAgo(state?.updated_at);
   const hoursRemaining = fmtHoursRemaining(state?.expiry);
-
-  // Debug: Log options_state row for BTC to diagnose premium value issue
-  console.log(`BB Squeeze Panel - ${asset} options_state row:`, state);
 
   if (!state) {
     return (
@@ -229,29 +414,9 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
   const targetStrike   = state.target_strike ?? null;
   const affordableLimit = balance != null ? balance * 0.40 : Infinity;
 
-  // Breakout state badge
+  // Breakout detection for glow effect
   const breakoutState = state.breakout_state ?? 'NONE';
-  const breakoutDir = state.breakout_direction;
-  const getBreakoutBadge = () => {
-    if (breakoutState === 'DETECTED') {
-      const label = breakoutDir === 'UP' ? 'DETECTED UP' : breakoutDir === 'DOWN' ? 'DETECTED DOWN' : 'DETECTED';
-      const color = breakoutDir === 'UP' ? 'bg-[#00c853]/20 text-[#00c853] border-[#00c853]/40' : 
-                    breakoutDir === 'DOWN' ? 'bg-[#ff1744]/20 text-[#ff1744] border-[#ff1744]/40' :
-                    'bg-zinc-800 text-zinc-400 border-zinc-700';
-      return { label, color };
-    }
-    if (breakoutState === 'CONFIRMED' || breakoutState === 'BREAKOUT_CONFIRMED') {
-      return { label: 'CONFIRMED', color: 'bg-[#00c853]/20 text-[#00c853] border-[#00c853]/40' };
-    }
-    if (breakoutState === 'FAKEOUT' || breakoutState === 'BREAKOUT_FAKEOUT') {
-      return { label: 'FAKEOUT', color: 'bg-[#ff6d00]/20 text-[#ff6d00] border-[#ff6d00]/40' };
-    }
-    if (breakoutState === 'BREAKOUT_NO_FILL') {
-      return { label: 'NO FILL', color: 'bg-zinc-800 text-zinc-500 border-zinc-700' };
-    }
-    return { label: 'NONE', color: 'bg-zinc-800 text-zinc-600 border-zinc-700' };
-  };
-  const breakoutBadge = getBreakoutBadge();
+  const isBreakoutActive = ['DETECTED', 'CONFIRMED', 'BREAKOUT_CONFIRMED'].includes(breakoutState);
 
   return (
     <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3">
@@ -270,7 +435,7 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         </div>
       </div>
 
-      {/* 1. Compression progress bar */}
+      {/* 1. Signal Strength bar */}
       <SqueezeBar
         bb_width_pct={state.bb_width_pct}
         bb_width_threshold={state.bb_width_threshold}
@@ -286,20 +451,18 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         </div>
       )}
 
-      {/* 3. CALL and PUT premium boxes - price only */}
+      {/* 3. CALL and PUT premium boxes with glow on breakout */}
       <div className="grid grid-cols-2 gap-2 mb-2">
-        <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2">
-          <div className="text-[7px] text-[#00c853]/60 uppercase mb-0.5">Call</div>
-          <div className="text-[14px] font-mono font-semibold text-zinc-200">
-            {fmtPrem(state.call_premium)}
-          </div>
-        </div>
-        <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2">
-          <div className="text-[7px] text-[#ff1744]/60 uppercase mb-0.5">Put</div>
-          <div className="text-[14px] font-mono font-semibold text-zinc-200">
-            {fmtPrem(state.put_premium)}
-          </div>
-        </div>
+        <PremiumBox 
+          type="call" 
+          premium={state.call_premium} 
+          isBreakout={isBreakoutActive} 
+        />
+        <PremiumBox 
+          type="put" 
+          premium={state.put_premium} 
+          isBreakout={isBreakoutActive} 
+        />
       </div>
 
       {/* 4. Position Active bar */}
@@ -314,33 +477,28 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         </div>
       )}
 
-      {/* 5. Breakout state row */}
+      {/* 5. Breakout state row with animated badge */}
       <div className="flex items-center justify-between mb-2 px-2 py-1.5 bg-zinc-800/30 rounded">
         <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Breakout</span>
-        <span className={cn(
-          'px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border',
-          breakoutBadge.color
-        )}>
-          {breakoutBadge.label}
-        </span>
+        <BreakoutBadge 
+          state={breakoutState} 
+          direction={state.breakout_direction} 
+          velocity={state.breakout_velocity_pct}
+        />
       </div>
 
-      {/* 6. Strike being watched */}
+      {/* 6. Strike display - bold monospace, larger font */}
       {state.atm_strike != null && state.atm_strike > 0 && (
         <div className="mb-2 px-2 py-1.5 bg-zinc-800/30 rounded">
           <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Strike Watching</span>
-          <span className="ml-2 text-[11px] font-mono font-semibold text-amber-400">
-            ATM: ${state.atm_strike.toLocaleString()}
+          <span className="ml-2 text-[14px] font-mono font-bold text-amber-400">
+            STRIKE ${state.atm_strike.toLocaleString()}
           </span>
         </div>
       )}
 
-      {/* 7. Last scan timestamp */}
-      {scanSecsAgo != null && (
-        <div className="mb-3 text-[8px] font-mono text-zinc-600 text-right">
-          Last scan: {scanSecsAgo < 60 ? `${scanSecsAgo}s` : `${Math.round(scanSecsAgo / 60)}m`} ago
-        </div>
-      )}
+      {/* 7. Last scan timestamp - live ticking counter */}
+      <LiveCounter seconds={scanSecsAgo} />
 
       {/* CALLS chain */}
       <ChainTable
@@ -376,7 +534,27 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
 // ---------------------------------------------------------------------------
 
 export function OptionsChainPanel() {
-  const { optionsState } = useSupabase();
+  const { optionsState, setOptionsState } = useSupabase();
+  
+  // Auto-refresh: poll options_state every 10s
+  useEffect(() => {
+    const fetchOptionsState = async () => {
+      const client = getSupabase();
+      if (!client) return;
+      try {
+        const res = await client.from('options_state').select('*');
+        if (res.data) setOptionsState(res.data as OptionsState[]);
+      } catch (e) { /* silent */ }
+    };
+    
+    // Initial fetch
+    fetchOptionsState();
+    
+    // Poll every 10 seconds
+    const intervalId = setInterval(fetchOptionsState, 10000);
+    
+    return () => clearInterval(intervalId);
+  }, [setOptionsState]);
 
   const pairData = useMemo(() => {
     return OPTIONS_ASSETS.map(asset => {

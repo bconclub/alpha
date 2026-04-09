@@ -118,6 +118,7 @@ interface SupabaseContextValue {
   activityFeed: ActivityEvent[];
   optionsLog: ActivityLogRow[];
   optionsState: OptionsState[];
+  setOptionsState: (state: OptionsState[]) => void;
   refreshViews: () => void;
   // Control Panel
   pairConfigs: PairConfig[];
@@ -146,6 +147,7 @@ const EMPTY_CONTEXT: SupabaseContextValue = {
   activityFeed: [],
   optionsLog: [],
   optionsState: [],
+  setOptionsState: () => {},
   refreshViews: () => {},
   pairConfigs: [],
   setupConfigs: [],
@@ -578,6 +580,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       activityFeed,
       optionsLog,
       optionsState,
+      setOptionsState,
       refreshViews: fetchViews,
       pairConfigs,
       setupConfigs,
@@ -588,7 +591,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       trades, recentTrades, botStatus, strategyLog, isConnected,
       exchangeFilter, filteredTrades,
       openPositions, pnlByExchange, futuresPositions, dailyPnL, strategyPerformance,
-      activityFeed, optionsLog, optionsState, fetchViews,
+      activityFeed, optionsLog, optionsState, setOptionsState, fetchViews,
       pairConfigs, setupConfigs, signalStates, deposits,
     ],
   );
