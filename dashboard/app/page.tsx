@@ -5,7 +5,7 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatCurrency, formatNumber, cn } from '@/lib/utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
-import { ArrowUp, ArrowDown, Clock, Check, Zap, Target, Timer, Scan } from 'lucide-react';
+import { ArrowUp, ArrowDown, Scan } from 'lucide-react';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -25,14 +25,15 @@ interface SqueezeAsset {
   fillTimer?: number;
   positionPnl?: number;
   lastUpdate: string | null;
-  // NEW: Rich data display props
+  // Signal panel redesign props
   strikePrice?: number;
   optionType?: 'CALL' | 'PUT';
-  expiration?: string;
   callPremium?: number;
   putPremium?: number;
-  callIV?: number;
-  putIV?: number;
+  // Breakout state from options_state
+  breakoutState?: 'NONE' | 'DETECTED' | 'CONFIRMED' | 'FAKEOUT' | 'OVERPRICED' | 'BREAKOUT_NO_FILL';
+  breakoutDirection?: 'UP' | 'DOWN';
+  breakoutVelocity?: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -106,73 +107,63 @@ function getLastScanSeconds(lastUpdate: string | null): number {
 
 function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
   const state = getStateConfig(asset.state);
-  const isFilling = asset.state === 'filling';
-  const isActive = asset.state === 'squeeze_active';
-  const hasPosition = asset.state === 'position_open';
-  
-  const threshold = asset.asset === 'BTC' ? 0.7 : 1.0;
-  const isSqueeze = asset.bbWidth != null && asset.bbWidth < threshold;
-  
-  // Calculate compression progress
-  const compressionProgress = asset.bbWidth != null 
-    ? Math.min(100, (threshold / asset.bbWidth) * 100)
-    : 0;
-  
   const lastScanSecs = getLastScanSeconds(asset.lastUpdate);
   
-  // Determine which option is cheaper for preview
+  // Determine which option is cheaper
   const isCallCheaper = asset.callPremium != null && asset.putPremium != null 
     ? asset.callPremium <= asset.putPremium 
     : true;
+  const cheaperPremium = isCallCheaper ? asset.callPremium : asset.putPremium;
+  
+  // Signal strength bar color based on confidence
+  const getSignalColor = (confidence: number) => {
+    if (confidence < 50) return 'bg-red-500';
+    if (confidence < 70) return 'bg-yellow-500';
+    return 'bg-green-500';
+  };
+  
+  // Breakout status display
+  const getBreakoutDisplay = () => {
+    const { breakoutState, breakoutDirection, breakoutVelocity } = asset;
+    
+    switch (breakoutState) {
+      case 'DETECTED':
+        const arrow = breakoutDirection === 'UP' ? '↑' : '↓';
+        const color = breakoutDirection === 'UP' ? 'text-green-500' : 'text-red-500';
+        return { 
+          label: `DETECTED ${breakoutDirection} ${arrow}`, 
+          color,
+          extra: breakoutVelocity ? `${breakoutVelocity.toFixed(2)}%` : undefined
+        };
+      case 'CONFIRMED':
+        return { label: 'CONFIRMED ✓', color: 'text-green-500' };
+      case 'FAKEOUT':
+      case 'BREAKOUT_NO_FILL':
+        return { label: 'FAKEOUT ✗', color: 'text-red-500' };
+      case 'OVERPRICED':
+        return { label: 'OVERPRICED ✗', color: 'text-amber-500' };
+      default:
+        return { label: 'NONE', color: 'text-gray-500' };
+    }
+  };
+  
+  const breakoutDisplay = getBreakoutDisplay();
 
   return (
     <div className={cn(
       'bg-[#141419] border border-white/5 rounded-xl p-4 border-l-4',
       state.leftBorder
     )}>
-      {/* Header - Always show strike and option preview */}
+      {/* 1. Asset + price + status badge */}
       <div className="flex items-center justify-between gap-2 mb-4">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          {/* Asset & Price */}
-          <span className="text-lg font-bold text-white shrink-0">{asset.asset}</span>
-          <span className="text-sm text-gray-400 font-mono truncate">
+        <div className="flex items-center gap-2">
+          <span className="text-lg font-bold text-white">{asset.asset}</span>
+          <span className="text-sm text-gray-400 font-mono">
             {asset.price != null ? `$${formatNumber(asset.price)}` : '—'}
           </span>
-          
-          {/* Cheaper Option Preview with Arrow */}
-          <div className={cn(
-            "flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold shrink-0",
-            isCallCheaper 
-              ? "bg-green-500/10 text-green-500 border border-green-500/30" 
-              : "bg-red-500/10 text-red-500 border border-red-500/30"
-          )}>
-            {isCallCheaper ? (
-              <>
-                <ArrowUp className="w-3 h-3" />
-                <span>CALL ${asset.callPremium ?? '--'}</span>
-              </>
-            ) : (
-              <>
-                <ArrowDown className="w-3 h-3" />
-                <span>PUT ${asset.putPremium ?? '--'}</span>
-              </>
-            )}
-          </div>
         </div>
         
-        {/* Strike Price - Always Visible */}
-        {asset.strikePrice && (
-          <div className="flex items-center gap-2 bg-white/5 px-3 py-1 rounded-lg shrink-0">
-            <span className="text-xs text-gray-500 hidden sm:inline">Strike</span>
-            <span className="font-mono font-bold text-lg">${asset.strikePrice.toLocaleString()}</span>
-            {asset.optionType && (
-              <span className="text-xs text-gray-600">{asset.optionType}</span>
-            )}
-          </div>
-        )}
-        
-        {/* Status Badge */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5">
           <span className={cn(
             'w-2 h-2 rounded-full',
             state.dotColor,
@@ -187,159 +178,69 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
         </div>
       </div>
 
-      {/* BB Width Compression Progress */}
+      {/* 2. Signal strength bar */}
       <div className="mb-4">
-        <div className="flex justify-between text-xs mb-1 gap-2">
-          <span className="text-gray-400 shrink-0">Compression Progress</span>
-          <span className={cn(
-            "font-mono",
-            isSqueeze ? "text-green-500" : "text-amber-500"
-          )}>
-            {asset.bbWidth != null ? `${asset.bbWidth.toFixed(2)}%` : '--%'} 
-            <span className="text-gray-600">→ need {threshold}%</span>
-          </span>
+        <div className="flex justify-between text-xs mb-1">
+          <span className="text-gray-400">Signal</span>
+          <span className="font-mono text-white">{asset.confidence.toFixed(0)}%</span>
         </div>
         <div className="relative h-2 bg-gray-800 rounded-full overflow-hidden">
           <div 
-            className={cn("h-full rounded-full transition-all duration-500", state.barColor)}
-            style={{ width: `${compressionProgress}%` }}
+            className={cn("h-full rounded-full transition-all duration-500", getSignalColor(asset.confidence))}
+            style={{ width: `${Math.min(100, asset.confidence)}%` }}
           />
         </div>
-        <div className="text-xs text-gray-500 mt-1">
-          {isSqueeze 
-            ? "Squeeze active! Ready to enter." 
-            : asset.bbWidth != null 
-              ? `Need ${(asset.bbWidth - threshold).toFixed(2)}% more compression`
-              : "Waiting for data..."
-          }
-        </div>
       </div>
 
-      {/* Current Options Grid - Always Show */}
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        {/* CALL Option */}
-        <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3">
-          <div className="flex items-center gap-2 mb-1">
-            <ArrowUp className="w-4 h-4 text-green-500" />
-            <span className="text-sm font-bold text-green-500">CALL</span>
-            <span className="text-[10px] text-gray-500">
-              ${asset.strikePrice ? (asset.strikePrice / 1000).toFixed(1) + 'k' : 'ATM'}
-            </span>
-          </div>
-          <div className="text-2xl font-mono font-bold text-white">
-            ${asset.callPremium ?? '--'}
-          </div>
-          <div className="text-xs text-gray-500">IV: {asset.callIV ?? '--'}%</div>
-        </div>
-        
-        {/* PUT Option */}
-        <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-3">
-          <div className="flex items-center gap-2 mb-1">
-            <ArrowDown className="w-4 h-4 text-red-500" />
-            <span className="text-sm font-bold text-red-500">PUT</span>
-            <span className="text-[10px] text-gray-500">
-              ${asset.strikePrice ? (asset.strikePrice / 1000).toFixed(1) + 'k' : 'ATM'}
-            </span>
-          </div>
-          <div className="text-2xl font-mono font-bold text-white">
-            ${asset.putPremium ?? '--'}
-          </div>
-          <div className="text-xs text-gray-500">IV: {asset.putIV ?? '--'}%</div>
-        </div>
-      </div>
-
-      {/* Squeeze Active Mode - Show Entry Zone */}
-      {isActive && asset.premiumRange && (
-        <div className="mb-4 p-3 bg-green-500/5 border border-green-500/20 rounded-lg">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-sm font-bold text-green-500">Selected: CALL ${asset.strikePrice?.toLocaleString() ?? '--'} (cheaper)</span>
-          </div>
-          <div className="flex justify-between text-xs mb-1">
-            <span className="text-gray-400">Entry Zone</span>
-            <span className="text-green-500">
-              ${asset.premiumRange.threshold.toFixed(0)}-${(asset.premiumRange.threshold * 1.2).toFixed(0)} 
-              (current: ${asset.premiumRange.current.toFixed(0)}) ✓
-            </span>
-          </div>
-          <div className="relative h-2 bg-gray-800 rounded-full overflow-hidden">
-            <div className="absolute left-0 top-0 bottom-0 w-1/4 bg-green-500/30" />
-            <div 
-              className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border-2 border-green-500"
-              style={{ 
-                left: `${Math.min(95, Math.max(5, ((asset.premiumRange.current - asset.premiumRange.min) / 
-                  (asset.premiumRange.max - asset.premiumRange.min || 1)) * 100))}%` 
-              }}
-            />
-          </div>
+      {/* 3. Strike */}
+      {asset.strikePrice && (
+        <div className="mb-3 flex items-center gap-2">
+          <span className="text-xs text-gray-500 uppercase">Strike</span>
+          <span className="font-mono font-bold text-white">${asset.strikePrice.toLocaleString()}</span>
         </div>
       )}
 
-      {/* Filling Mode */}
-      {isFilling && (
-        <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Timer className="w-4 h-4 text-amber-500 animate-pulse" />
-              <span className="text-sm font-bold text-amber-500">Placing limit order...</span>
-            </div>
-            <span className="font-mono text-amber-500">
-              {asset.fillTimer ? formatTimeRemaining(asset.fillTimer) : '...'}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Position Mode */}
-      {hasPosition && (
-        <div className="mb-4 p-3 bg-purple-500/10 border border-purple-500/30 rounded-lg">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Target className="w-4 h-4 text-purple-500" />
-              <span className="text-sm font-bold text-purple-500">Position Active</span>
-            </div>
-            <span className={cn(
-              'font-mono font-bold',
-              asset.positionPnl && asset.positionPnl >= 0 ? 'text-green-400' : 'text-red-400'
-            )}>
-              {asset.positionPnl != null 
-                ? `${asset.positionPnl >= 0 ? '+' : ''}${formatCurrency(asset.positionPnl)}`
-                : '—'}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* "What We're Watching" Section - Always Show */}
-      <div className="mt-3 bg-white/5 rounded-lg p-3 border border-white/5">
-        <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Watching For</div>
-        <ul className="text-sm space-y-1.5">
-          <li className="flex items-center gap-2">
-            {isSqueeze ? (
-              <Check className="w-3 h-3 text-green-500" />
+      {/* 4. Cheaper side - only show the cheaper one */}
+      {cheaperPremium != null && (
+        <div className={cn(
+          "mb-3 p-2 rounded-lg border",
+          isCallCheaper 
+            ? "bg-green-500/10 border-green-500/30" 
+            : "bg-red-500/10 border-red-500/30"
+        )}>
+          <div className="flex items-center gap-2">
+            {isCallCheaper ? (
+              <>
+                <ArrowUp className="w-4 h-4 text-green-500" />
+                <span className="text-sm font-bold text-green-500">CALL</span>
+                <span className="text-lg font-mono font-bold text-white">${cheaperPremium}</span>
+              </>
             ) : (
-              <Clock className="w-3 h-3 text-amber-500" />
+              <>
+                <ArrowDown className="w-4 h-4 text-red-500" />
+                <span className="text-sm font-bold text-red-500">PUT</span>
+                <span className="text-lg font-mono font-bold text-white">${cheaperPremium}</span>
+              </>
             )}
-            <span className={isSqueeze ? "text-green-500" : "text-gray-400"}>
-              BB width {isSqueeze ? "compressed ✓" : `compression to ${threshold}%`}
-            </span>
-          </li>
-          <li className="flex items-center gap-2">
-            <Clock className="w-3 h-3 text-gray-600" />
-            <span className="text-gray-400">
-              Premium in bottom 25% of 30m range
-            </span>
-          </li>
-          <li className="flex items-center gap-2">
-            <Clock className="w-3 h-3 text-gray-600" />
-            <span className="text-gray-400">
-              Direction confirmation (BB position)
-            </span>
-          </li>
-        </ul>
+          </div>
+        </div>
+      )}
+
+      {/* 5. Breakout status */}
+      <div className="mb-3 flex items-center justify-between px-3 py-2 bg-white/5 rounded-lg">
+        <span className="text-xs text-gray-500 uppercase">Breakout</span>
+        <div className="flex items-center gap-2">
+          <span className={cn("text-sm font-bold", breakoutDisplay.color)}>
+            {breakoutDisplay.label}
+          </span>
+          {breakoutDisplay.extra && (
+            <span className="text-xs font-mono text-gray-400">{breakoutDisplay.extra}</span>
+          )}
+        </div>
       </div>
 
-      {/* Last Update Time - Always Show */}
-      <div className="flex justify-between items-center mt-3 text-xs text-gray-600">
+      {/* 6. Last scan */}
+      <div className="flex justify-between items-center text-xs text-gray-600">
         <span>Last scan: {lastScanSecs < 60 ? `${lastScanSecs}s` : `${Math.floor(lastScanSecs / 60)}m ${lastScanSecs % 60}s`} ago</span>
         <span className="flex items-center gap-1">
           <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
@@ -421,7 +322,7 @@ function RecentTradeCard({ trade }: { trade: { pair: string; position_type: stri
 // ── Main Dashboard Page ─────────────────────────────────────────────────
 
 export default function DashboardPage() {
-  const { botStatus, isConnected, trades, strategyLog, openPositions } = useSupabase();
+  const { botStatus, isConnected, trades, strategyLog, openPositions, optionsState } = useSupabase();
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -500,17 +401,21 @@ export default function DashboardPage() {
     return strategies.size || 1;
   }, [trades]);
 
-  // Squeeze data
+  // Squeeze data with options_state integration
   const squeezeAssets = useMemo((): SqueezeAsset[] => {
     const assets: SqueezeAsset[] = [];
     
     for (const assetName of ['BTC', 'ETH'] as const) {
+      const pair = `${assetName}/USD:USD`;
       const logs = strategyLog
         .filter(l => l.pair && extractBaseAsset(l.pair) === assetName)
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
       
       const latest = logs[0];
       const position = openPositions?.find(p => extractBaseAsset(p.pair) === assetName);
+      
+      // Get options_state for this pair
+      const optState = optionsState?.find(s => s.pair === pair);
       
       const bbWidth = latest?.bb_upper != null && latest?.bb_lower != null && latest?.current_price
         ? ((latest.bb_upper - latest.bb_lower) / latest.current_price) * 100
@@ -538,9 +443,18 @@ export default function DashboardPage() {
         : 'neutral';
       
       // Extract strike and option type from position if available
-      const strikePrice = position?.stop_loss ?? undefined;
+      const strikePrice = optState?.atm_strike ?? position?.stop_loss ?? undefined;
       const optionType = position?.pair?.endsWith('-C') ? 'CALL' : 
                         position?.pair?.endsWith('-P') ? 'PUT' : undefined;
+      
+      // Get premiums from options_state
+      const callPremium = optState?.call_premium ?? undefined;
+      const putPremium = optState?.put_premium ?? undefined;
+      
+      // Get breakout state from options_state
+      const breakoutState = optState?.breakout_state as SqueezeAsset['breakoutState'] ?? 'NONE';
+      const breakoutDirection = optState?.breakout_direction as SqueezeAsset['breakoutDirection'] ?? undefined;
+      const breakoutVelocity = optState?.breakout_velocity_pct ?? undefined;
       
       assets.push({
         asset: assetName,
@@ -551,20 +465,18 @@ export default function DashboardPage() {
         confidence: latest?.rsi != null ? Math.abs(50 - latest.rsi) * 2 : 50,
         premiumRange,
         lastUpdate: latest?.timestamp ?? null,
-        // NEW: Visual indicator props
         strikePrice,
         optionType,
-        expiration: '12h', // TODO: Calculate from position expiry
-        // NEW: Rich data display
-        callPremium: state === 'squeeze_active' ? Math.floor(Math.random() * 40) + 60 : Math.floor(Math.random() * 30) + 80,
-        putPremium: state === 'squeeze_active' ? Math.floor(Math.random() * 40) + 65 : Math.floor(Math.random() * 30) + 85,
-        callIV: Math.floor(Math.random() * 20) + 40,
-        putIV: Math.floor(Math.random() * 20) + 45,
+        callPremium,
+        putPremium,
+        breakoutState,
+        breakoutDirection,
+        breakoutVelocity,
       });
     }
     
     return assets;
-  }, [strategyLog, openPositions, currentTime]);
+  }, [strategyLog, openPositions, optionsState, currentTime]);
 
   // Recent trades (last 5)
   const recentTrades = useMemo(() => {
