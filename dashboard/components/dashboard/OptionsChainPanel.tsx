@@ -50,29 +50,37 @@ function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
 // Squeeze Bar with animated fill and percentage
 // ---------------------------------------------------------------------------
 
-function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
+function SqueezeBar({ 
+  bb_width_pct, 
+  bb_width_threshold, 
+  squeeze_active,
+  signal_strength 
+}: {
   bb_width_pct: number | null | undefined;
   bb_width_threshold: number | null | undefined;
   squeeze_active: boolean | null | undefined;
+  signal_strength?: number | null;
 }) {
   const [displayPct, setDisplayPct] = useState(0);
   
-  // Calculate values safely
-  const ratio = bb_width_pct != null && bb_width_threshold != null 
-    ? Math.min(bb_width_pct / bb_width_threshold, 1) 
-    : 0;
-  const targetPct = Math.round(ratio * 100);
+  // Use signal_strength if available (0-1), otherwise calculate from bb_width
+  const rawConfidence = signal_strength != null 
+    ? signal_strength 
+    : bb_width_pct != null && bb_width_threshold != null 
+      ? Math.min(bb_width_pct / bb_width_threshold, 1) 
+      : 0;
+  
+  // Clamp to 0-1 range
+  const confidence = Math.max(0, Math.min(1, rawConfidence));
+  const targetPct = Math.round(confidence * 100);
   
   // Animate the percentage number - must be called before any early return
   useEffect(() => {
     setDisplayPct(targetPct);
   }, [targetPct]);
   
-  if (bb_width_pct == null || bb_width_threshold == null) {
-    return <div className="text-[9px] font-mono text-zinc-600 mb-2">BB: waiting...</div>;
-  }
-  
-  const confidence = ratio;
+  // Determine color based on confidence
+  const barColor = confidence >= 0.7 ? '#22c55e' : confidence >= 0.4 ? '#eab308' : '#ef4444';
 
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
@@ -90,24 +98,25 @@ function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
       <div className="flex items-center justify-between mb-1">
         <span className="text-[8px] text-zinc-500">BB Width</span>
         <span className="text-[8px] font-mono text-zinc-300">
-          {bb_width_pct.toFixed(2)}% / {bb_width_threshold}% thresh
+          {bb_width_pct?.toFixed(2) ?? '--'}% / {bb_width_threshold ?? '--'}% thresh
         </span>
       </div>
       <div className="flex items-center gap-2">
         <div className="flex-1 h-2 rounded-full bg-zinc-800 overflow-hidden">
+          {/* Signal bar fill - inline styles for reliable colors */}
           <div
             style={{
-              width: `${Math.round((confidence || 0) * 100)}%`,
+              width: `${targetPct}%`,
               height: '100%',
               transition: 'width 0.5s ease',
-              backgroundColor: (confidence || 0) >= 0.7 ? '#22c55e' : (confidence || 0) >= 0.4 ? '#eab308' : '#ef4444',
+              backgroundColor: barColor,
               borderRadius: '4px'
             }}
           />
         </div>
         <span className={cn(
           'text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300',
-          ratio >= 0.7 ? 'text-[#00c853]' : ratio >= 0.4 ? 'text-[#ffd600]' : 'text-[#ff1744]'
+          confidence >= 0.7 ? 'text-[#22c55e]' : confidence >= 0.4 ? 'text-[#eab308]' : 'text-[#ef4444]'
         )}>
           {displayPct}%
         </span>
@@ -365,15 +374,17 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
   const scanSecsAgo = useSecondsAgo(state?.updated_at);
   const hoursRemaining = fmtHoursRemaining(state?.expiry);
 
-  // Debug logging
+  // Debug logging - check what fields are available
   useEffect(() => {
     if (state) {
+      console.log('[ChainCard fields]', Object.keys(state || {}));
+      console.log('[SignalBar] confidence value:', (state as any)?.confidence, (state as any)?.signal_strength, (state as any)?.bb_confidence);
       console.log(`[ChainCard ${asset}]`, {
         bb_width_pct: state.bb_width_pct,
         bb_width_threshold: state.bb_width_threshold,
+        signal_strength: (state as any).signal_strength,
         squeeze_active: state.squeeze_active,
         breakout_state: state.breakout_state,
-        updated_at: state.updated_at,
       });
     }
   }, [state, asset]);
@@ -418,6 +429,7 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         bb_width_pct={state.bb_width_pct}
         bb_width_threshold={state.bb_width_threshold}
         squeeze_active={state.squeeze_active}
+        signal_strength={(state as any).signal_strength}
       />
 
       {/* 2. Squeeze active message */}
