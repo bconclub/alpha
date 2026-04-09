@@ -390,7 +390,7 @@ export interface OptionsState {
   last_squeeze_action?: 'SQUEEZE_FILL' | 'SQUEEZE_NO_FILL' | 'BREAKOUT_CONFIRMED' | 'BREAKOUT_FAKEOUT' | 'BREAKOUT_NO_FILL' | 'SCANNING' | null;
   last_action_at?: string | null;
   /** Full breakout state machine: NONE → DETECTED → CONFIRMED/FAKEOUT */
-  breakout_state?: 'NONE' | 'DETECTED' | 'CONFIRMED' | 'FAKEOUT' | 'UP' | 'DOWN' | null;
+  breakout_state?: 'NONE' | 'DETECTED' | 'CONFIRMED' | 'FAKEOUT' | 'UP' | 'DOWN' | 'BREAKOUT_CONFIRMED' | 'BREAKOUT_FAKEOUT' | 'BREAKOUT_NO_FILL' | null;
   /** Breakout direction: UP (CALL) or DOWN (PUT) */
   breakout_direction?: 'UP' | 'DOWN' | null;
   /** Seconds remaining in the confirmation window (dynamic based on velocity) */
