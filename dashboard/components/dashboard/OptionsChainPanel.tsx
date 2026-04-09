@@ -99,8 +99,12 @@ function SqueezeBar({ bb_width_pct, bb_width_threshold, squeeze_active }: {
       <div className="flex items-center gap-2">
         <div className="flex-1 h-2 rounded-full bg-zinc-800 overflow-hidden">
           <div
-            className={cn('h-full rounded-full transition-all duration-500 ease-out', barColor)}
-            style={{ width: `${ratio * 100}%` }}
+            className={cn('h-full rounded-full', barColor)}
+            style={{ 
+              width: `${ratio * 100}%`,
+              transition: 'width 0.5s ease',
+              backgroundColor: ratio >= 0.7 ? '#00c853' : ratio >= 0.4 ? '#ffd600' : '#ff1744'
+            }}
           />
         </div>
         <span className={cn(
@@ -247,8 +251,8 @@ function BreakoutBadge({
     );
   }
   
-  // DETECTED UP = pulsing green arrow
-  if (state === 'DETECTED' && direction === 'UP') {
+  // DETECTED UP / BREAKOUT_UP = pulsing green arrow
+  if (state === 'DETECTED_UP' || state === 'BREAKOUT_UP' || (state === 'DETECTED' && direction === 'UP')) {
     return (
       <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#00c853]/20 text-[#00c853] border-[#00c853]/40 animate-pulse">
         <span className="text-xs">↑</span>
@@ -258,8 +262,8 @@ function BreakoutBadge({
     );
   }
   
-  // DETECTED DOWN = pulsing red arrow
-  if (state === 'DETECTED' && direction === 'DOWN') {
+  // DETECTED DOWN / BREAKOUT_DOWN = pulsing red arrow
+  if (state === 'DETECTED_DOWN' || state === 'BREAKOUT_DOWN' || (state === 'DETECTED' && direction === 'DOWN')) {
     return (
       <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase border bg-[#ff1744]/20 text-[#ff1744] border-[#ff1744]/40 animate-pulse">
         <span className="text-xs">↓</span>
@@ -335,17 +339,26 @@ function PremiumBox({
   const isCall = type === 'call';
   const colorClass = isCall ? 'text-[#00c853]' : 'text-[#ff1744]';
   const dimColorClass = isCall ? 'text-[#00c853]/60' : 'text-[#ff1744]/60';
-  const glowClass = isBreakout 
+  const borderColor = isBreakout
+    ? isCall ? 'rgba(0,200,83,0.6)' : 'rgba(255,23,68,0.6)'
+    : 'rgba(63,63,70,0.6)';
+  const boxShadow = isBreakout
     ? isCall 
-      ? 'animate-pulse shadow-[0_0_15px_rgba(0,200,83,0.4)] border-[#00c853]/60'
-      : 'animate-pulse shadow-[0_0_15px_rgba(255,23,68,0.4)] border-[#ff1744]/60'
-    : 'border-zinc-800/60';
+      ? '0 0 15px rgba(0,200,83,0.4), inset 0 0 10px rgba(0,200,83,0.1)'
+      : '0 0 15px rgba(255,23,68,0.4), inset 0 0 10px rgba(255,23,68,0.1)'
+    : 'none';
   
   return (
-    <div className={cn(
-      'bg-zinc-800/40 rounded p-2 transition-all duration-300',
-      glowClass
-    )}>
+    <div 
+      className={cn(
+        'bg-zinc-800/40 rounded p-2 transition-all duration-300',
+        isBreakout && 'animate-pulse'
+      )}
+      style={{
+        border: `1px solid ${borderColor}`,
+        boxShadow
+      }}
+    >
       <div className={cn('text-[7px] uppercase mb-0.5', dimColorClass)}>
         {isCall ? 'Call' : 'Put'}
       </div>
