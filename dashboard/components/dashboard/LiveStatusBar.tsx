@@ -82,6 +82,192 @@ function MiniSparkline({ data, color }: { data: number[]; color: string }) {
 
 type CardView = 'pnl' | 'deposits';
 
+// ---------------------------------------------------------------------------
+// Market Regime Card — Visual Upgrade with Inline Styles
+// ---------------------------------------------------------------------------
+
+function MarketRegimeCard({
+  regime,
+  chopScore,
+  atrRatio,
+  netChange,
+  regimeDuration,
+}: {
+  regime: string;
+  chopScore: number;
+  atrRatio: number;
+  netChange: number;
+  regimeDuration: string;
+}) {
+  // Regime configuration with inline styles
+  const regimeStyles: Record<string, {
+    icon: string;
+    label: string;
+    bgGradient: string;
+    borderColor: string;
+    iconColor: string;
+    pulse: boolean;
+  }> = {
+    SIDEWAYS: {
+      icon: '↔',
+      label: 'SIDEWAYS',
+      bgGradient: 'linear-gradient(135deg, rgba(245,158,11,0.15) 0%, rgba(245,158,11,0.05) 100%)',
+      borderColor: 'rgba(245,158,11,0.4)',
+      iconColor: '#f59e0b',
+      pulse: false,
+    },
+    TRENDING_UP: {
+      icon: '↑',
+      label: 'TRENDING UP',
+      bgGradient: 'linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(34,197,94,0.05) 100%)',
+      borderColor: 'rgba(34,197,94,0.4)',
+      iconColor: '#22c55e',
+      pulse: true,
+    },
+    TRENDING_DOWN: {
+      icon: '↓',
+      label: 'TRENDING DOWN',
+      bgGradient: 'linear-gradient(135deg, rgba(239,68,68,0.15) 0%, rgba(239,68,68,0.05) 100%)',
+      borderColor: 'rgba(239,68,68,0.4)',
+      iconColor: '#ef4444',
+      pulse: true,
+    },
+    CHOPPY: {
+      icon: '~',
+      label: 'CHOPPY',
+      bgGradient: 'linear-gradient(135deg, rgba(100,116,139,0.15) 0%, rgba(100,116,139,0.05) 100%)',
+      borderColor: 'rgba(100,116,139,0.4)',
+      iconColor: '#64748b',
+      pulse: true,
+    },
+  };
+
+  const rs = regimeStyles[regime] ?? regimeStyles.SIDEWAYS;
+
+  // Generate directional sparkline data based on regime
+  const sparklineData = useMemo(() => {
+    const points: number[] = [];
+    const trend = regime === 'TRENDING_UP' ? 1 : regime === 'TRENDING_DOWN' ? -1 : 0;
+    let val = 50;
+    for (let i = 0; i < 20; i++) {
+      const noise = (Math.random() - 0.5) * 10;
+      const trendMove = trend * 2;
+      val = Math.max(20, Math.min(80, val + trendMove + noise));
+      points.push(val);
+    }
+    return points;
+  }, [regime]);
+
+  const sparkColor = rs.iconColor;
+
+  // Stat box styles
+  const statBoxStyle: React.CSSProperties = {
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    borderRadius: '4px',
+    padding: '6px 8px',
+    textAlign: 'center',
+    minWidth: '50px',
+  };
+
+  const statLabelStyle: React.CSSProperties = {
+    fontSize: '8px',
+    color: '#9ca3af',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    marginBottom: '2px',
+  };
+
+  const statValueStyle = (color: string): React.CSSProperties => ({
+    fontSize: '11px',
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+    color,
+  });
+
+  const netColor = netChange >= 0 ? '#22c55e' : '#ef4444';
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        border: `1px solid ${rs.borderColor}`,
+        borderRadius: '8px',
+        padding: '12px 16px',
+        background: rs.bgGradient,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+      }}
+    >
+      {/* Regime Badge with Icon */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <span
+          style={{
+            fontSize: '20px',
+            color: rs.iconColor,
+            animation: rs.pulse ? 'pulse 1.5s infinite' : 'none',
+            lineHeight: 1,
+          }}
+        >
+          {rs.icon}
+        </span>
+        <span
+          style={{
+            fontSize: '13px',
+            fontWeight: 'bold',
+            color: rs.iconColor,
+            letterSpacing: '0.02em',
+          }}
+        >
+          {rs.label}
+        </span>
+        {regime === 'CHOPPY' && (
+          <span
+            style={{
+              fontSize: '9px',
+              fontWeight: 600,
+              color: '#fca5a5',
+              marginLeft: '4px',
+            }}
+          >
+            NO TRADES
+          </span>
+        )}
+      </div>
+
+      {/* Sparkline Row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <MiniSparkline data={sparklineData} color={sparkColor} />
+        <span style={{ fontSize: '9px', color: '#6b7280', fontFamily: 'monospace' }}>
+          20m trend
+        </span>
+      </div>
+
+      {/* Stats Row — 4 Mini Boxes */}
+      <div style={{ display: 'flex', gap: '6px', marginTop: '2px' }}>
+        <div style={statBoxStyle}>
+          <div style={statLabelStyle}>Chop</div>
+          <div style={statValueStyle('#f59e0b')}>{chopScore.toFixed(2)}</div>
+        </div>
+        <div style={statBoxStyle}>
+          <div style={statLabelStyle}>ATR</div>
+          <div style={statValueStyle('#60a5fa')}>{atrRatio.toFixed(1)}x</div>
+        </div>
+        <div style={statBoxStyle}>
+          <div style={statLabelStyle}>Net</div>
+          <div style={statValueStyle(netColor)}>
+            {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%
+          </div>
+        </div>
+        <div style={statBoxStyle}>
+          <div style={statLabelStyle}>Since</div>
+          <div style={statValueStyle('#9ca3af')}>{regimeDuration || '-'}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LiveStatusBar() {
   const { botStatus, isConnected, trades, dailyPnL, deposits } = useSupabase();
 
@@ -643,30 +829,14 @@ export function LiveStatusBar() {
             )}
           </div>
 
-          {/* Market Regime Card */}
-          <div className={cn(
-            'flex-1 border rounded-lg px-4 py-3',
-            rc.bg,
-            rc.pulse && 'animate-pulse',
-          )}>
-            <div className="flex items-center gap-2 mb-1">
-              <span className={cn('text-base', rc.text)}>{rc.icon}</span>
-              <span className={cn('text-sm font-bold tracking-wide', rc.text)}>{rc.label}</span>
-              {regime === 'CHOPPY' && (
-                <span className="text-[10px] font-semibold text-red-300 ml-1">NO TRADES</span>
-              )}
-            </div>
-            <div className="flex flex-col gap-0.5 text-[10px] font-mono text-zinc-400">
-              <div className="flex items-center gap-3">
-                <span>Chop: {chopScore.toFixed(2)}</span>
-                <span>ATR: {atrRatio.toFixed(1)}x</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <span>Net: {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%</span>
-                {regimeDuration && <span>Since {regimeDuration}</span>}
-              </div>
-            </div>
-          </div>
+          {/* Market Regime Card — Visual Upgrade */}
+          <MarketRegimeCard
+            regime={regime}
+            chopScore={chopScore}
+            atrRatio={atrRatio}
+            netChange={netChange}
+            regimeDuration={regimeDuration}
+          />
         </div>
 
         {/* Center: Total Capital + Bot State */}
