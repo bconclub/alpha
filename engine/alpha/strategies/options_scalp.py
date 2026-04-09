@@ -17,16 +17,20 @@
    - Calculate breakout_velocity = % price move in last 3 candles
    - Log BREAKOUT_DETECTED: dir=UP/DOWN velocity=X% confirmation=Xs
 
- STEP 3 — DYNAMIC CONFIRMATION WINDOW (GPFC #21):
+ STEP 3 — DYNAMIC CONFIRMATION WINDOW (GPFC #21 + #24):
    Based on breakout velocity:
    - velocity >= 0.3% in 3 candles → confirmation = 0s (enter immediately)
    - velocity 0.15-0.3% → confirmation = 20s
    - velocity < 0.15% → confirmation = 60s (weak, wait)
    
    During confirmation window, check every 10s:
-   - Premium must be >= breakout_premium_ask * 0.95 (not falling > 5%)
-   - If premium drops > 5% from breakout ask → BREAKOUT_FAKEOUT, abort, reset
-   - If window passes with premium stable/rising → BREAKOUT_CONFIRMED, enter
+   - If premium drops > 5% → BREAKOUT_FAKEOUT, abort immediately
+   - If premium rises > 15% → BREAKOUT_OVERPRICED, don't chase
+   
+   At end of window (GPFC #24):
+   - Premium must be >= start premium (within 2% tolerance)
+   - If premium fell > 2% during confirmation → BREAKOUT_FAKEOUT, abort
+   - Only enter if premium is rising or held stable → BREAKOUT_CONFIRMED
 
  STEP 4 — ENTRY:
    - Place limit at current ask, wait 5 min for fill
@@ -1434,7 +1438,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_bot_state = f"breakout:confirming:{direction}:{confirmation_secs}s"
 
     async def _check_breakout_confirmation(self) -> list[Signal]:
-        """Check dynamic confirmation window. Enter if premium holds; abort on fakeout (GPFC #21)."""
+        """Check dynamic confirmation window. Enter if premium rising; abort on fakeout (GPFC #24)."""
         if not self._breakout_pending or self._breakout_time is None:
             self._reset_breakout_state()
             return []
@@ -1461,17 +1465,17 @@ class OptionsScalpStrategy(BaseStrategy):
 
         self._premium_current_ask = current_ask
 
-        # FAKEOUT: premium dropped > 5% from breakout ask (GPFC #21)
+        # GPFC #24: During confirmation window, abort early if premium drops significantly
         drop_pct = (self._breakout_entry_ask - current_ask) / self._breakout_entry_ask * 100
         if drop_pct > self.BREAKOUT_FAKEOUT_DROP_PCT:
             self.logger.info(
-                "[%s] BREAKOUT_FAKEOUT: dir=%s premium dropped %.1f%% (ask=$%.4f < entry_ask=$%.4f * 0.95) — abort",
+                "[%s] BREAKOUT_FAKEOUT: dir=%s premium dropped %.1f%% during confirmation (ask=$%.4f < entry_ask=$%.4f) — abort",
                 self.pair, self._breakout_direction, drop_pct, current_ask, self._breakout_entry_ask,
             )
             await self._log_activity(
                 "options_skip",
                 f"{self.pair} — BREAKOUT_FAKEOUT: dir={self._breakout_direction} "
-                f"premium dropped {drop_pct:.1f}% — aborting",
+                f"premium dropped {drop_pct:.1f}% during confirmation — aborting",
                 {"direction": self._breakout_direction, "ask": current_ask,
                  "entry_ask": self._breakout_entry_ask, "drop_pct": round(drop_pct, 2),
                  "elapsed": round(elapsed, 1)},
@@ -1508,7 +1512,7 @@ class OptionsScalpStrategy(BaseStrategy):
             remaining = self._breakout_confirmation_secs - int(elapsed)
             if self._tick_count % 6 == 0:
                 self.logger.info(
-                    "[%s] BREAKOUT_CONFIRM_WAIT: dir=%s ask=$%.4f >= entry=$%.4f (%.0fs/%ds)",
+                    "[%s] BREAKOUT_CONFIRM_WAIT: dir=%s ask=$%.4f vs entry=$%.4f (%.0fs/%ds)",
                     self.pair, self._breakout_direction,
                     current_ask, self._breakout_entry_ask, elapsed, self._breakout_confirmation_secs,
                 )
@@ -1516,18 +1520,44 @@ class OptionsScalpStrategy(BaseStrategy):
             self._breakout_state = "DETECTED"
             return []
 
-        # Dynamic window passed with premium holding — CONFIRMED, enter now
+        # GPFC #24: Window complete — check if premium is rising or stable (not falling)
+        # Premium must be >= start premium (within 2% tolerance) to confirm
+        CHANGE_TOLERANCE_PCT = 2.0  # Allow up to 2% drop (considered "stable")
+        change_pct = (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
+
+        if change_pct < -CHANGE_TOLERANCE_PCT:
+            # Premium fell during confirmation — fakeout
+            self.logger.info(
+                "[%s] BREAKOUT_FAKEOUT: premium falling during confirmation $%.4f → $%.4f (%.1f%%) — abort",
+                self.pair, self._breakout_entry_ask, current_ask, change_pct,
+            )
+            await self._log_activity(
+                "options_skip",
+                f"{self.pair} — BREAKOUT_FAKEOUT: premium falling during confirmation "
+                f"${self._breakout_entry_ask:.4f} → ${current_ask:.4f} ({change_pct:.1f}%) — abort",
+                {"direction": self._breakout_direction, "ask": current_ask,
+                 "entry_ask": self._breakout_entry_ask, "change_pct": round(change_pct, 2)},
+            )
+            self._last_action = "BREAKOUT_FAKEOUT"
+            self._last_action_at = time.time()
+            self._breakout_state = "FAKEOUT"
+            self._reset_breakout_state()
+            return []
+
+        # Premium rising or stable — CONFIRMED, enter now
         self._direction_bias = self._breakout_option_type.upper()
         self._breakout_state = "CONFIRMED"
         self.logger.info(
-            "[%s] BREAKOUT_CONFIRMED: dir=%s premium=$%.4f — entering now",
-            self.pair, self._breakout_direction, current_ask,
+            "[%s] BREAKOUT_CONFIRMED: dir=%s premium $%.4f → $%.4f (%.1f%%) — entering now",
+            self.pair, self._breakout_direction, self._breakout_entry_ask, current_ask, change_pct,
         )
         await self._log_activity(
             "options_skip",
-            f"{self.pair} — BREAKOUT_CONFIRMED: dir={self._breakout_direction} premium=${current_ask:.4f}",
+            f"{self.pair} — BREAKOUT_CONFIRMED: dir={self._breakout_direction} "
+            f"premium ${self._breakout_entry_ask:.4f} → ${current_ask:.4f} ({change_pct:+.1f}%)",
             {"direction": self._breakout_direction, "ask": current_ask,
-             "entry_ask": self._breakout_entry_ask, "velocity_pct": round(self._breakout_velocity_pct, 3)},
+             "entry_ask": self._breakout_entry_ask, "change_pct": round(change_pct, 2),
+             "velocity_pct": round(self._breakout_velocity_pct, 3)},
         )
         return await self._execute_breakout_entry(current_ask)
 
