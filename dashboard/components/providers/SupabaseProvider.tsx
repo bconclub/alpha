@@ -404,6 +404,17 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       } catch (e) { /* silent */ }
     }, 15_000);
 
+    // Poll options_state every 10s for live panel refresh (signal strength, breakout status, premiums)
+    // Realtime subscription can silently disconnect; this ensures the panel stays fresh
+    const optionsStatePoll = setInterval(async () => {
+      const c = getSupabase();
+      if (!c) return;
+      try {
+        const res = await c.from('options_state').select('*');
+        if (res.data) setOptionsState(res.data as OptionsState[]);
+      } catch (e) { /* silent */ }
+    }, 10_000);
+
     // Poll every 60s as fallback (realtime may disconnect silently)
     const pollInterval = setInterval(async () => {
       try {
@@ -431,6 +442,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
     return () => {
       clearInterval(livePositionsPoll);
+      clearInterval(optionsStatePoll);
       clearInterval(pollInterval);
     };
   }, [fetchViews, buildInitialFeed]);
