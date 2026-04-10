@@ -308,6 +308,33 @@ export function LiveStatusBar() {
 
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
 
+  const todayStats = useMemo(() => {
+    const now = new Date();
+    const istNowString = now.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const istNow = new Date(istNowString);
+    const istMidnight = new Date(istNow);
+    istMidnight.setHours(0, 0, 0, 0);
+    const cutoffMs = istMidnight.getTime() - (5.5 * 60 * 60 * 1000);
+
+    let pnl = 0;
+    let wins = 0;
+    let losses = 0;
+    let fees = 0;
+
+    for (const t of trades) {
+      if (t.status !== 'closed') continue;
+      const tradeOpenedAtMs = new Date(t.timestamp).getTime();
+      if (tradeOpenedAtMs <= cutoffMs) continue;
+
+      pnl += t.pnl ?? 0;
+      if ((t.pnl ?? 0) > 0) wins++;
+      else if ((t.pnl ?? 0) < 0) losses++;
+      fees += (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
+    }
+
+    return { pnl, wins, losses, fees };
+  }, [trades]);
+
   const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
   const [exchRange, setExchRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
   const [cardView, setCardView] = useState<CardView>('pnl');
@@ -499,15 +526,20 @@ export function LiveStatusBar() {
 
           {deltaConnected && deltaBalance > 0 && (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
-              <div className="flex items-center gap-1.5 mb-1.5">
-                <span className="w-2 h-2 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
-                <span className="text-[11px] font-bold text-[#00d2ff]">DELTA</span>
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">TODAY</div>
+              <span className={cn(
+                'font-mono text-2xl font-bold',
+                todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+              )}>
+                {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
+              </span>
+              <div className="text-[10px] text-zinc-500 font-mono mt-1">
+                ${todayStats.fees.toFixed(2)} fees
               </div>
-              <span className="font-mono text-lg font-semibold text-white">{formatCurrency(deltaBalance)}</span>
-              {deltaBalanceInr != null && (
-                <span className="text-[10px] text-zinc-500 ml-2">~{deltaBalanceInr.toLocaleString()}</span>
-              )}
-              {exchStats.delta && (
+              <div className="text-[10px] text-zinc-400 font-mono mt-1.5">
+                {todayStats.wins}W · {todayStats.losses}L
+              </div>
+              {false && (
                 <>
                   <div className="text-[10px] text-zinc-500 font-mono mt-1">
                     {exchStats.delta.wins}W / {exchStats.delta.losses}L · {exchStats.delta.wr.toFixed(0)}% WR · {exchStats.delta.total} trades
@@ -702,22 +734,22 @@ export function LiveStatusBar() {
           {/* Delta Card */}
           {deltaConnected && deltaBalance > 0 && (
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className={cn(
-                  'w-2 h-2 rounded-full',
-                  deltaConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-                )}
-              />
-              <span className="text-sm font-semibold text-[#00d2ff]">DELTA</span>
-            </div>
+            <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">TODAY</div>
             <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-              <span className="font-mono text-lg text-white truncate">{formatCurrency(deltaBalance)}</span>
-              {deltaBalanceInr != null && (
-                <span className="text-[10px] text-zinc-500 shrink-0">~{deltaBalanceInr.toLocaleString()}</span>
-              )}
+              <span className={cn(
+                'font-mono text-2xl font-bold truncate',
+                todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+              )}>
+                {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
+              </span>
             </div>
-            {exchStats.delta && (
+            <div className="text-[10px] text-zinc-500 font-mono mt-1">
+              ${todayStats.fees.toFixed(2)} fees
+            </div>
+            <div className="text-[10px] text-zinc-400 font-mono mt-2">
+              {todayStats.wins}W · {todayStats.losses}L
+            </div>
+            {false && (
               <>
                 <div className="text-[10px] text-zinc-500 font-mono mt-1">
                   {exchStats.delta.wins}W / {exchStats.delta.losses}L · {exchStats.delta.wr.toFixed(0)}% WR · {exchStats.delta.total} trades
