@@ -1,6 +1,6 @@
 {
   "name": "alpha-dashboard",
-  "version": "0.16.9",
+  "version": "0.17.0",
   "private": true,
   "scripts": {
     "dev": "next dev",

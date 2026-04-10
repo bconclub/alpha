@@ -168,7 +168,7 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
 
   return (
     <div className={cn(
-      'rounded-2xl border border-white/8 bg-[linear-gradient(180deg,#171821_0%,#101117_100%)] p-4 border-l-4 shadow-[0_18px_44px_rgba(0,0,0,0.28)]',
+      'rounded-2xl bg-[linear-gradient(180deg,#171821_0%,#101117_100%)] p-4 border-l-4 shadow-[0_18px_44px_rgba(0,0,0,0.28)]',
       state.leftBorder
     )}>
       <div className="mb-4 flex items-start justify-between gap-3">
@@ -199,7 +199,7 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
       </div>
 
       <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
-        <div className="rounded-xl border border-white/8 bg-black/10 p-3">
+        <div className="rounded-xl bg-black/10 p-3">
           <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Market At</p>
           <p className="mt-2 text-lg font-semibold text-white">
             {asset.strikePrice ? `$${asset.strikePrice.toLocaleString()}` : 'No strike'}
@@ -207,7 +207,7 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
           <p className="mt-1 text-xs text-gray-400">ATM strike</p>
         </div>
 
-        <div className="rounded-xl border border-white/8 bg-black/10 p-3">
+        <div className="rounded-xl bg-black/10 p-3">
           <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Bias</p>
           <p className="mt-2 flex items-center gap-2 text-sm font-semibold text-white">
             <span>{getDirectionEmoji(asset.direction)}</span>
@@ -216,7 +216,7 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
           <p className="mt-1 text-xs text-gray-400">{watchLabel}</p>
         </div>
 
-        <div className="rounded-xl border border-white/8 bg-black/10 p-3">
+        <div className="rounded-xl bg-black/10 p-3">
           <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Breakout</p>
           <p className={cn('mt-2 text-sm font-semibold', breakoutDisplay.color)}>
             {breakoutDisplay.label}
@@ -228,7 +228,7 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
       </div>
 
       {/* 2. Signal strength bar */}
-      <div className="mb-4 rounded-xl border border-white/8 bg-white/[0.03] p-3">
+      <div className="mb-4 rounded-xl bg-white/[0.03] p-3">
         <div className="flex justify-between text-xs mb-2">
           <span className="text-gray-400 uppercase tracking-[0.18em]">Signal Strength</span>
           <span className="font-mono text-white">{asset.confidence.toFixed(0)}%</span>
@@ -241,8 +241,8 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-xl border border-white/8 bg-white/[0.03] p-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="rounded-xl bg-white/[0.03] p-3">
           <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Going After</p>
           {cheaperPremium != null ? (
             <div className="mt-2 flex items-center gap-2">
@@ -266,7 +266,7 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
           <p className="mt-1 text-xs text-gray-500">Cheaper premium side</p>
         </div>
 
-        <div className="rounded-xl border border-dashed border-white/10 bg-black/10 p-3">
+        <div className="rounded-xl bg-black/10 p-3">
           <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">What To Watch</p>
           <p className={cn('mt-2 text-sm font-semibold', breakoutDisplay.color)}>{breakoutDisplay.label}</p>
           <p className="mt-1 text-xs text-gray-400">{breakoutDisplay.extra ?? watchLabel}</p>
@@ -687,16 +687,6 @@ export default function DashboardPage() {
         {/* Right Column - BB Squeeze (Sticky on desktop) */}
         <div className="lg:col-span-2">
           <div className="lg:sticky lg:top-4 space-y-3">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-8 h-8 bg-green-500/20 rounded-lg flex items-center justify-center">
-                <span className="text-green-500 font-bold text-sm">α</span>
-              </div>
-              <div>
-                <h2 className="font-bold">BB SQUEEZE</h2>
-                <p className="text-[10px] text-gray-500">Buy Cheap Premium | Hold Breakout</p>
-              </div>
-            </div>
-            
             {squeezeAssets.map((asset) => (
               <SqueezeCard key={asset.asset} asset={asset} />
             ))}
