@@ -22,11 +22,11 @@
    - velocity >= 0.3% in 3 candles → confirmation = 0s (enter immediately)
    - velocity 0.15-0.3% → confirmation = 20s
    - velocity < 0.15% → confirmation = 60s (weak, wait)
-   
+
    During confirmation window, check every 10s:
    - If premium drops > 5% → BREAKOUT_FAKEOUT, abort immediately
    - If premium rises > 15% → BREAKOUT_OVERPRICED, don't chase
-   
+
    At end of window (GPFC #24):
    - Premium must be >= start premium (within 2% tolerance)
    - If premium fell > 2% during confirmation → BREAKOUT_FAKEOUT, abort
@@ -95,103 +95,113 @@ class OptionsScalpStrategy(BaseStrategy):
     check_interval_sec = 5  # 5-second ticks
 
     # ── Class-level shared state ──────────────────────────────────────
-    _global_in_position: bool = False  # ONE option at a time across ALL assets (BTC+ETH)
+    _global_in_position: bool = (
+        False  # ONE option at a time across ALL assets (BTC+ETH)
+    )
     _global_position_asset: str | None = None  # which asset holds the lock
 
     # ── Delta Exchange contract multiplier (options) ─────────────
     CONTRACT_MULTIPLIER: dict[str, float] = {"ETH": 0.01, "BTC": 0.001}
 
     # ── Option chain refresh ──────────────────────────────────────
-    CHAIN_REFRESH_INTERVAL = 30 * 60     # Refresh every 30 min
-    MIN_EXPIRY_HOURS = 1                 # Must be 1+ hour to expiry
-    EXPIRY_SWITCH_HOURS = 3.0            # Switch to next-day expiry when < 3h remain on current day
-    CLOSE_BEFORE_EXPIRY_HOURS = 0.5      # Close 30 min before expiry
+    CHAIN_REFRESH_INTERVAL = 30 * 60  # Refresh every 30 min
+    MIN_EXPIRY_HOURS = 1  # Must be 1+ hour to expiry
+    EXPIRY_SWITCH_HOURS = (
+        3.0  # Switch to next-day expiry when < 3h remain on current day
+    )
+    CLOSE_BEFORE_EXPIRY_HOURS = 0.5  # Close 30 min before expiry
 
     # ── Strike selection ──────────────────────────────────────────
-    BTC_STRIKE_ROUND = 200               # BTC: nearest $200
-    ETH_STRIKE_ROUND = 20                # ETH: nearest $20
-    MAX_OTM_STRIKES = 1                  # ATM or 1 OTM only — further OTM is dead money
+    BTC_STRIKE_ROUND = 200  # BTC: nearest $200
+    ETH_STRIKE_ROUND = 20  # ETH: nearest $20
+    MAX_OTM_STRIKES = 1  # ATM or 1 OTM only — further OTM is dead money
 
     # ── Premium limits ────────────────────────────────────────────
-    OPTIONS_LEVERAGE = 50                # Delta options are 50x leveraged
-    MIN_PREMIUM_USD = 5.00               # Skip strikes < $5 — too little delta, premium doesn't respond
+    OPTIONS_LEVERAGE = 50  # Delta options are 50x leveraged
+    MIN_PREMIUM_USD = (
+        5.00  # Skip strikes < $5 — too little delta, premium doesn't respond
+    )
 
     # ── BB Squeeze detection ──────────────────────────────────────
-    BB_PERIOD = 20                       # Bollinger Band period
-    BB_STD_MULT = 2.0                    # BB standard deviation multiplier
-    KC_PERIOD = 20                       # Keltner Channel period
-    KC_ATR_MULT = 1.5                    # KC ATR multiplier
-    SQUEEZE_BB_WIDTH_ETH = 1.0           # ETH: BB width must be < 1.0% for valid squeeze
-    SQUEEZE_BB_WIDTH_BTC = 0.7           # BTC: BB width must be < 0.7% (tighter price action)
-    SQUEEZE_FILL_WAIT_SEC = 300          # Wait up to 5 min for fill
-    SQUEEZE_FILL_POLL_SEC = 30           # Poll every 30s during fill wait
-    SQUEEZE_CHEAP_PERCENTILE = 0.25      # Buy bottom 25% of 30-min premium range
-    SQUEEZE_HISTORY_MIN = 30             # Track premium history for 30 min
+    BB_PERIOD = 20  # Bollinger Band period
+    BB_STD_MULT = 2.0  # BB standard deviation multiplier
+    KC_PERIOD = 20  # Keltner Channel period
+    KC_ATR_MULT = 1.5  # KC ATR multiplier
+    SQUEEZE_BB_WIDTH_ETH = 1.0  # ETH: BB width must be < 1.0% for valid squeeze
+    SQUEEZE_BB_WIDTH_BTC = 0.7  # BTC: BB width must be < 0.7% (tighter price action)
+    SQUEEZE_FILL_WAIT_SEC = 300  # Wait up to 5 min for fill
+    SQUEEZE_FILL_POLL_SEC = 30  # Poll every 30s during fill wait
+    SQUEEZE_CHEAP_PERCENTILE = 0.25  # Buy bottom 25% of 30-min premium range
+    SQUEEZE_HISTORY_MIN = 30  # Track premium history for 30 min
     # GPFC #23: Extended stale windows for squeeze entries (squeezes need time to resolve)
-    SQUEEZE_NO_STALE_MIN_ETH = 25        # No stale SL for first 25 min after squeeze fill (ETH)
-    SQUEEZE_NO_STALE_MIN_BTC = 35        # No stale SL for first 35 min after squeeze fill (BTC)
+    SQUEEZE_NO_STALE_MIN_ETH = (
+        25  # No stale SL for first 25 min after squeeze fill (ETH)
+    )
+    SQUEEZE_NO_STALE_MIN_BTC = (
+        35  # No stale SL for first 35 min after squeeze fill (BTC)
+    )
     # Dynamic confirmation window thresholds (GPFC #21) — UPDATED
     # velocity >= 0.3% → 20s, 0.15-0.3% → 40s, < 0.15% → 60s
-    BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3        # >= 0.3% → 20s confirmation
-    BREAKOUT_CONFIRM_MED_VELOCITY = 0.15        # 0.15-0.3% → 40s confirmation
-    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.0         # < 0.15% → 60s confirmation (weak move)
-    BREAKOUT_CONFIRM_SEC_HIGH = 20              # Fast for strong moves
-    BREAKOUT_CONFIRM_SEC_MED = 40               # Medium wait for medium moves
-    BREAKOUT_CONFIRM_SEC_MAX = 60               # Max wait for weak moves
-    BREAKOUT_FAKEOUT_DROP_PCT = 5.0             # Premium drop > 5% from breakout = fakeout
-    BREAKOUT_OVERPRICED_RISE_PCT = 15.0         # Premium rise > 15% = overpriced, abort
+    BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3  # >= 0.3% → 20s confirmation
+    BREAKOUT_CONFIRM_MED_VELOCITY = 0.15  # 0.15-0.3% → 40s confirmation
+    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.0  # < 0.15% → 60s confirmation (weak move)
+    BREAKOUT_CONFIRM_SEC_HIGH = 20  # Fast for strong moves
+    BREAKOUT_CONFIRM_SEC_MED = 40  # Medium wait for medium moves
+    BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
+    BREAKOUT_FAKEOUT_DROP_PCT = 5.0  # Premium drop > 5% from breakout = fakeout
+    BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
     # allocation_pct = 0.20 + (confidence * 0.10)  # 20% at conf=0.0, 30% at conf=1.0
-    CAPITAL_PER_TRADE_MIN_PCT = 0.20     # 20% minimum per trade (low confidence)
-    CAPITAL_PER_TRADE_MAX_PCT = 0.30     # 30% maximum per trade (high confidence)
-    OPT_SURVIVAL_BALANCE = 20.0          # below this, cap allocation at 30%
+    CAPITAL_PER_TRADE_MIN_PCT = 0.20  # 20% minimum per trade (low confidence)
+    CAPITAL_PER_TRADE_MAX_PCT = 0.30  # 30% maximum per trade (high confidence)
+    OPT_SURVIVAL_BALANCE = 20.0  # below this, cap allocation at 30%
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
     # ── Exit thresholds ────────────────
-    TP_PREMIUM_GAIN_PCT = 30.0           # Take profit at +30% premium gain
-    SL_PREMIUM_LOSS_PCT = 30.0           # Stop loss at -30% premium drop
+    TP_PREMIUM_GAIN_PCT = 30.0  # Take profit at +30% premium gain
+    SL_PREMIUM_LOSS_PCT = 30.0  # Stop loss at -30% premium drop
     # Tiered trailing: start wide, tighten as profit grows
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
-        (10.0, 8.0),   # +10% peak → 8% trail distance
-        (20.0, 6.0),   # +20% peak → 6% trail
-        (30.0, 5.0),   # +30% peak → 5% trail
-        (50.0, 4.0),   # +50% peak → 4% trail
+        (10.0, 8.0),  # +10% peak → 8% trail distance
+        (20.0, 6.0),  # +20% peak → 6% trail
+        (30.0, 5.0),  # +30% peak → 5% trail
+        (50.0, 4.0),  # +50% peak → 4% trail
     ]
-    PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain
-    PULLBACK_ACTIVATE_PCT = 8.0          # Pullback only fires after +8% peak
-    DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
-    
+    PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
+    PULLBACK_ACTIVATE_PCT = 8.0  # Pullback only fires after +8% peak
+    DECAY_THRESHOLD_PCT = 3.0  # Exit if was +10%+ and faded to +3%
+
     # ── Stale SL tightening — progressive exit for stuck trades ─────
-    STALE_MOVE_THRESHOLD = 5.0           # < 5% from entry = stale (not going anywhere)
+    STALE_MOVE_THRESHOLD = 5.0  # < 5% from entry = stale (not going anywhere)
     # ETH stale thresholds
-    STALE_SL_5M_ETH = -10.0             # 5 min: SL → -10%
-    STALE_SL_8M_ETH = -5.0              # 8 min: SL → -5%
-    STALE_EXIT_MIN_ETH = 12             # 12 min: force OPT_STALE (but starts at 15m for squeeze)
+    STALE_SL_5M_ETH = -10.0  # 5 min: SL → -10%
+    STALE_SL_8M_ETH = -5.0  # 8 min: SL → -5%
+    STALE_EXIT_MIN_ETH = 12  # 12 min: force OPT_STALE (but starts at 15m for squeeze)
     # BTC stale thresholds
-    STALE_SL_8M_BTC = -15.0             # 8 min: SL → -15%
-    STALE_SL_12M_BTC = -10.0            # 12 min: SL → -10%
-    STALE_EXIT_MIN_BTC = 18             # 18 min: force OPT_STALE (but starts at 20m for squeeze)
-    PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
+    STALE_SL_8M_BTC = -15.0  # 8 min: SL → -15%
+    STALE_SL_12M_BTC = -10.0  # 12 min: SL → -10%
+    STALE_EXIT_MIN_BTC = 18  # 18 min: force OPT_STALE (but starts at 20m for squeeze)
+    PHASE1_HANDS_OFF_SEC = 30  # Only SL fires in first 30s after fill
 
     # ── Expiry guard ────────
-    EXPIRY_GUARD_HOURS = 2.0             # if expiry < 2h AND pnl < +10% → exit
-    EXPIRY_GUARD_MIN_MIN = 30            # if expiry < 30 min → always exit regardless of P&L
+    EXPIRY_GUARD_HOURS = 2.0  # if expiry < 2h AND pnl < +10% → exit
+    EXPIRY_GUARD_MIN_MIN = 30  # if expiry < 30 min → always exit regardless of P&L
 
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
     OPT_RATCHET_FLOOR_TABLE = [
-        (3.0, -2.0),     # +3% peak → floor -2% (room to breathe)
-        (5.0, 0.0),      # +5% peak → breakeven lock
-        (8.0, 2.0),      # +8% → lock +2%
-        (15.0, 5.0),     # +15% → lock +5%
-        (25.0, 10.0),    # +25% → lock +10%
-        (40.0, 20.0),    # +40% → lock +20%
-        (60.0, 35.0),    # +60% → lock +35%
+        (3.0, -2.0),  # +3% peak → floor -2% (room to breathe)
+        (5.0, 0.0),  # +5% peak → breakeven lock
+        (8.0, 2.0),  # +8% → lock +2%
+        (15.0, 5.0),  # +15% → lock +5%
+        (25.0, 10.0),  # +25% → lock +10%
+        (40.0, 20.0),  # +40% → lock +20%
+        (60.0, 35.0),  # +60% → lock +35%
     ]
 
     # ── Position limits ───────────────────────────────────────────
-    MAX_OPTION_POSITIONS = 1             # 1 option at a time
+    MAX_OPTION_POSITIONS = 1  # 1 option at a time
 
     def __init__(
         self,
@@ -223,12 +233,12 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Position state
         self.in_position = False
-        self.option_side: str | None = None       # "call" or "put"
-        self.option_symbol: str | None = None      # ccxt unified symbol
+        self.option_side: str | None = None  # "call" or "put"
+        self.option_symbol: str | None = None  # ccxt unified symbol
         self.entry_premium: float = 0.0
         self.entry_time: float = 0.0
-        self._contracts: int = 1                   # dynamic — set by _calculate_option_contracts
-        self._candle_alloc_pct: float = 35.0       # dynamic — set by signal strength
+        self._contracts: int = 1  # dynamic — set by _calculate_option_contracts
+        self._candle_alloc_pct: float = 35.0  # dynamic — set by signal strength
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
         self.strike_price: float = 0.0
@@ -324,24 +334,28 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_target_strike: float | None = None
 
         # ── Dashboard signals panel state ─────────────────────────
-        self._squeeze_status: str = "WAITING"           # ACTIVE / WAITING
-        self._bb_width_pct: float = 0.0                 # Current BB width %
-        self._bb_position: float = 0.5                  # Where price sits in bands (0-1)
-        self._direction_bias: str = "NEUTRAL"           # CALL / PUT / NEUTRAL
-        self._premium_current_ask: float = 0.0          # Current ATM ask
-        self._premium_cheap_threshold: float = 0.0      # Cheap threshold price
-        self._last_action: str = "SCANNING"             # SQUEEZE_FILL / SQUEEZE_NO_FILL / SCANNING
-        self._squeeze_duration_candles: int = 0         # How long squeeze has been active
-        self._squeeze_active_since: float | None = None # When squeeze started
-        self._position_opened_at: str | None = None     # ISO timestamp when position was entered
+        self._squeeze_status: str = "WAITING"  # ACTIVE / WAITING
+        self._bb_width_pct: float = 0.0  # Current BB width %
+        self._bb_position: float = 0.5  # Where price sits in bands (0-1)
+        self._direction_bias: str = "NEUTRAL"  # CALL / PUT / NEUTRAL
+        self._premium_current_ask: float = 0.0  # Current ATM ask
+        self._premium_cheap_threshold: float = 0.0  # Cheap threshold price
+        self._last_action: str = "SCANNING"  # SQUEEZE_FILL / SQUEEZE_NO_FILL / SCANNING
+        self._squeeze_duration_candles: int = 0  # How long squeeze has been active
+        self._squeeze_active_since: float | None = None  # When squeeze started
+        self._position_opened_at: str | None = (
+            None  # ISO timestamp when position was entered
+        )
 
         # ── GPFC #21: Breakout state for dashboard ─────────────────
-        self._breakout_state: str = "NONE"              # NONE/DETECTED/CONFIRMED/FAKEOUT
+        self._breakout_state: str = "NONE"  # NONE/DETECTED/CONFIRMED/FAKEOUT
 
         # ── GPFC #22 Part 2: Momentum tracking for "let winners ride" ─────────────────
-        self._momentum_price_history: deque[tuple[float, float]] = deque(maxlen=20)  # (time, price)
-        self._MOMENTUM_CHECK_WINDOW_SEC = 60.0          # Look back 60s for momentum
-        self._MOMENTUM_THRESHOLD_PCT = 0.1              # Min 0.1% momentum to ride
+        self._momentum_price_history: deque[tuple[float, float]] = deque(
+            maxlen=20
+        )  # (time, price)
+        self._MOMENTUM_CHECK_WINDOW_SEC = 60.0  # Look back 60s for momentum
+        self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -350,14 +364,16 @@ class OptionsScalpStrategy(BaseStrategy):
         self._OHLCV_CACHE_SEC = 25  # Cache valid for 25 seconds
 
         # ── GPFC: Fast Exit Recovery for Orphaned Positions ────────
-        self._force_exit_pending: bool = False           # True when exit failed and retry needed
-        self._force_exit_started_at: float = 0.0         # When force exit sequence started
-        self._force_exit_retry_count: int = 0            # Number of retry attempts
-        self._force_exit_last_retry: float = 0.0         # Last retry timestamp
-        self._FORCE_EXIT_CRITICAL_SEC = 60               # Alert after 60s stuck
-        self._FORCE_EXIT_RETRY_INTERVAL = 10             # Retry every 10s after critical
-        self._force_exit_last_signal: Signal | None = None  # Cached exit signal for retry
-        self._last_exit_attempt_at: float = 0.0          # Track when we last tried to exit
+        self._force_exit_pending: bool = False  # True when exit failed and retry needed
+        self._force_exit_started_at: float = 0.0  # When force exit sequence started
+        self._force_exit_retry_count: int = 0  # Number of retry attempts
+        self._force_exit_last_retry: float = 0.0  # Last retry timestamp
+        self._FORCE_EXIT_CRITICAL_SEC = 60  # Alert after 60s stuck
+        self._FORCE_EXIT_RETRY_INTERVAL = 10  # Retry every 10s after critical
+        self._force_exit_last_signal: Signal | None = (
+            None  # Cached exit signal for retry
+        )
+        self._last_exit_attempt_at: float = 0.0  # Track when we last tried to exit
 
     # ==================================================================
     # ACTIVITY LOGGING
@@ -382,10 +398,15 @@ class OptionsScalpStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.debug("[%s] activity_log write failed: %s", self.pair, e)
 
-    async def _log_skip(self, reason: str, metadata: dict[str, Any] | None = None) -> None:
+    async def _log_skip(
+        self, reason: str, metadata: dict[str, Any] | None = None
+    ) -> None:
         """Log an options skip event (throttled to avoid spam)."""
         now = time.monotonic()
-        if reason == self._last_skip_reason and (now - self._last_skip_time) < self._SKIP_LOG_INTERVAL:
+        if (
+            reason == self._last_skip_reason
+            and (now - self._last_skip_time) < self._SKIP_LOG_INTERVAL
+        ):
             return
         self._last_skip_reason = reason
         self._last_skip_time = now
@@ -401,43 +422,63 @@ class OptionsScalpStrategy(BaseStrategy):
             try:
                 await self.options_exchange.load_markets()
                 opt_count = sum(
-                    1 for m in self.options_exchange.markets.values()
+                    1
+                    for m in self.options_exchange.markets.values()
                     if m.get("type") == "option"
                 )
                 self.logger.info(
                     "[%s] Options exchange loaded — %d option markets",
-                    self.pair, opt_count,
+                    self.pair,
+                    opt_count,
                 )
             except Exception as e:
-                self.logger.error("[%s] Failed to load options markets: %s", self.pair, e)
+                self.logger.error(
+                    "[%s] Failed to load options markets: %s", self.pair, e
+                )
 
         await self._refresh_option_chain()
 
         # Restore position state from DB if engine restarted with open option trade
         await self._restore_position_from_db()
-        
+
         # GPFC: Startup check for stuck positions
         if self.in_position:
             startup_signals = await self._startup_stuck_position_check()
             # Note: Can't return signals from on_start, but force exit is now pending if needed
 
-        _bb_w = self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC" else self.SQUEEZE_BB_WIDTH_ETH
-        _no_stale = self.SQUEEZE_NO_STALE_MIN_BTC if self._base_asset == "BTC" else self.SQUEEZE_NO_STALE_MIN_ETH
+        _bb_w = (
+            self.SQUEEZE_BB_WIDTH_BTC
+            if self._base_asset == "BTC"
+            else self.SQUEEZE_BB_WIDTH_ETH
+        )
+        _no_stale = (
+            self.SQUEEZE_NO_STALE_MIN_BTC
+            if self._base_asset == "BTC"
+            else self.SQUEEZE_NO_STALE_MIN_ETH
+        )
         self.logger.info(
             "[%s] OPTIONS SCALP ACTIVE — BB_SQUEEZE strategy (GPFC #23) | "
             "BB_width<%.1f%% KC_squeeze fill_wait=%ds "
             "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
             "NoStale=%dm StaleCheck=%dm Phase1=%ds Alloc=%s%s",
             self.pair,
-            _bb_w, self.SQUEEZE_FILL_WAIT_SEC,
-            int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
-            int(self.OPT_TRAIL_TIERS[0][0]), int(self.OPT_TRAIL_TIERS[0][1]),
-            int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
+            _bb_w,
+            self.SQUEEZE_FILL_WAIT_SEC,
+            int(self.TP_PREMIUM_GAIN_PCT),
+            int(self.SL_PREMIUM_LOSS_PCT),
+            int(self.OPT_TRAIL_TIERS[0][0]),
+            int(self.OPT_TRAIL_TIERS[0][1]),
+            int(self.PULLBACK_EXIT_PCT),
+            int(self.DECAY_THRESHOLD_PCT),
             _no_stale,
-            self.STALE_EXIT_MIN_BTC if self._base_asset == "BTC" else self.STALE_EXIT_MIN_ETH,
+            self.STALE_EXIT_MIN_BTC
+            if self._base_asset == "BTC"
+            else self.STALE_EXIT_MIN_ETH,
             self.PHASE1_HANDS_OFF_SEC,
             f"{int(self.CAPITAL_PER_TRADE_MIN_PCT * 100)}-{int(self.CAPITAL_PER_TRADE_MAX_PCT * 100)}% per trade",
-            f" | RESTORED: {self.option_side} {self.option_symbol}" if self.in_position else "",
+            f" | RESTORED: {self.option_side} {self.option_symbol}"
+            if self.in_position
+            else "",
         )
 
     async def _restore_position_from_db(self) -> None:
@@ -490,8 +531,11 @@ class OptionsScalpStrategy(BaseStrategy):
                 if len(parts) >= 2:
                     try:
                         expiry_str = parts[-3] if len(parts) >= 4 else parts[1]
-                        self.expiry_dt = datetime.strptime(expiry_str, "%y%m%d").replace(
-                            hour=12, tzinfo=timezone.utc,
+                        self.expiry_dt = datetime.strptime(
+                            expiry_str, "%y%m%d"
+                        ).replace(
+                            hour=12,
+                            tzinfo=timezone.utc,
                         )
                     except (ValueError, IndexError):
                         pass
@@ -500,14 +544,21 @@ class OptionsScalpStrategy(BaseStrategy):
 
                 self.logger.info(
                     "[%s] RESTORED from DB: %s x%d %s strike=$%.0f entry=$%.4f peak=$%.4f trail=%s",
-                    self.pair, self.option_side, self._contracts, self.option_symbol,
-                    self.strike_price, self.entry_premium, self.highest_premium,
+                    self.pair,
+                    self.option_side,
+                    self._contracts,
+                    self.option_symbol,
+                    self.strike_price,
+                    self.entry_premium,
+                    self.highest_premium,
                     self._trailing_active,
                 )
                 break
 
         except Exception as e:
-            self.logger.error("[%s] Failed to restore position from DB: %s", self.pair, e)
+            self.logger.error(
+                "[%s] Failed to restore position from DB: %s", self.pair, e
+            )
 
     # ==================================================================
     # FAST EXIT RECOVERY (GPFC — Orphaned Position Protection)
@@ -522,7 +573,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._force_exit_last_signal = signal
         self.logger.error(
             "[%s] EXIT_RETRY: %s — _force_exit_pending=True, will retry market exit every tick",
-            self.option_symbol, reason,
+            self.option_symbol,
+            reason,
         )
 
     async def _check_force_exit(self) -> list[Signal]:
@@ -534,23 +586,33 @@ class OptionsScalpStrategy(BaseStrategy):
         elapsed = now - self._force_exit_started_at
 
         # Critical alert after 60s
-        if elapsed > self._FORCE_EXIT_CRITICAL_SEC and self._force_exit_retry_count == 0:
+        if (
+            elapsed > self._FORCE_EXIT_CRITICAL_SEC
+            and self._force_exit_retry_count == 0
+        ):
             self._force_exit_retry_count += 1  # Prevent duplicate alerts
-            
+
             # Calculate current P&L for alert
             pnl_pct = 0.0
             pnl_usd = 0.0
             if self._last_known_premium > 0 and self.entry_premium > 0:
-                pnl_pct = (self._last_known_premium - self.entry_premium) / self.entry_premium * 100
+                pnl_pct = (
+                    (self._last_known_premium - self.entry_premium)
+                    / self.entry_premium
+                    * 100
+                )
                 pnl_usd = self._calc_options_pnl(
                     self.entry_premium, self._last_known_premium, self._contracts
                 )
-            
+
             self.logger.critical(
                 "[%s] EXIT_CRITICAL: Position stuck for %.0fs — P&L %.1f%% ($%.2f) — alerting",
-                self.option_symbol, elapsed, pnl_pct, pnl_usd,
+                self.option_symbol,
+                elapsed,
+                pnl_pct,
+                pnl_usd,
             )
-            
+
             # Send Telegram alert
             try:
                 alerts = getattr(self.executor, "alerts", None)
@@ -567,7 +629,9 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     await alerts.send_text(msg)
             except Exception as e:
-                self.logger.debug("[%s] Failed to send EXIT_CRITICAL alert: %s", self.option_symbol, e)
+                self.logger.debug(
+                    "[%s] Failed to send EXIT_CRITICAL alert: %s", self.option_symbol, e
+                )
 
         # Retry interval: immediately on first call, then every 10s after critical
         if elapsed <= self._FORCE_EXIT_CRITICAL_SEC:
@@ -575,7 +639,9 @@ class OptionsScalpStrategy(BaseStrategy):
             should_retry = True
         else:
             # After critical: retry every 10s
-            should_retry = (now - self._force_exit_last_retry) >= self._FORCE_EXIT_RETRY_INTERVAL
+            should_retry = (
+                now - self._force_exit_last_retry
+            ) >= self._FORCE_EXIT_RETRY_INTERVAL
 
         if not should_retry:
             return []
@@ -585,7 +651,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         self.logger.warning(
             "[%s] EXIT_RETRY #%d: Attempting market exit after %.1fs",
-            self.option_symbol, self._force_exit_retry_count, elapsed,
+            self.option_symbol,
+            self._force_exit_retry_count,
+            elapsed,
         )
 
         # Fetch current bid for exit price
@@ -593,11 +661,15 @@ class OptionsScalpStrategy(BaseStrategy):
         try:
             if self.options_exchange and self.option_symbol:
                 ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-                current_bid = ticker.get("bid") or ticker.get("last") or self._last_known_premium
+                current_bid = (
+                    ticker.get("bid") or ticker.get("last") or self._last_known_premium
+                )
                 if current_bid > 0:
                     self._last_known_premium = current_bid
         except Exception as e:
-            self.logger.debug("[%s] Failed to fetch bid for retry: %s", self.option_symbol, e)
+            self.logger.debug(
+                "[%s] Failed to fetch bid for retry: %s", self.option_symbol, e
+            )
 
         # Recalculate P&L
         pnl_pct = 0.0
@@ -605,24 +677,26 @@ class OptionsScalpStrategy(BaseStrategy):
             pnl_pct = (current_bid - self.entry_premium) / self.entry_premium * 100
 
         # Build exit signal
-        return [Signal(
-            side="sell",
-            price=current_bid,
-            amount=float(self._contracts),
-            order_type="market",
-            reason=f"EXIT_RETRY #{self._force_exit_retry_count}: force exit after {elapsed:.0f}s",
-            strategy=self.name,
-            pair=self.option_symbol or self.pair,
-            leverage=self.OPTIONS_LEVERAGE,
-            position_type="long",
-            reduce_only=True,
-            exchange_id="delta",
-            metadata={
-                "exit_type": "FORCE_EXIT_RETRY",
-                "force_exit_elapsed_sec": round(elapsed, 1),
-                "force_exit_retry": self._force_exit_retry_count,
-            },
-        )]
+        return [
+            Signal(
+                side="sell",
+                price=current_bid,
+                amount=float(self._contracts),
+                order_type="market",
+                reason=f"EXIT_RETRY #{self._force_exit_retry_count}: force exit after {elapsed:.0f}s",
+                strategy=self.name,
+                pair=self.option_symbol or self.pair,
+                leverage=self.OPTIONS_LEVERAGE,
+                position_type="long",
+                reduce_only=True,
+                exchange_id="delta",
+                metadata={
+                    "exit_type": "FORCE_EXIT_RETRY",
+                    "force_exit_elapsed_sec": round(elapsed, 1),
+                    "force_exit_retry": self._force_exit_retry_count,
+                },
+            )
+        ]
 
     async def _clear_force_exit_pending(self) -> None:
         """Clear force exit flag when position successfully closed."""
@@ -647,11 +721,11 @@ class OptionsScalpStrategy(BaseStrategy):
         try:
             positions = await self.options_exchange.fetch_positions()
             has_position = any(
-                pos.get("symbol") == self.option_symbol and 
-                float(pos.get("contracts", 0) or 0) != 0
+                pos.get("symbol") == self.option_symbol
+                and float(pos.get("contracts", 0) or 0) != 0
                 for pos in positions
             )
-            
+
             if not has_position:
                 self.logger.info(
                     "[%s] STARTUP_CHECK: Position not found on exchange — already closed",
@@ -663,24 +737,36 @@ class OptionsScalpStrategy(BaseStrategy):
             current_bid = self._last_known_premium
             try:
                 ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-                current_bid = ticker.get("bid") or ticker.get("last") or self.entry_premium
+                current_bid = (
+                    ticker.get("bid") or ticker.get("last") or self.entry_premium
+                )
             except Exception:
                 pass
 
             if self.entry_premium > 0 and current_bid > 0:
                 pnl_pct = (current_bid - self.entry_premium) / self.entry_premium * 100
-                
+
                 if pnl_pct < -5.0:
                     self.logger.critical(
                         "[%s] STARTUP_CRITICAL: Restored position stuck at %.1f%% — force exiting now",
-                        self.option_symbol, pnl_pct,
+                        self.option_symbol,
+                        pnl_pct,
                     )
                     self._set_force_exit_pending(
-                        self._force_exit_last_signal or Signal(
-                            side="sell", price=current_bid, amount=float(self._contracts),
-                            order_type="market", reason="Startup stuck check", strategy=self.name,
-                            pair=self.option_symbol, leverage=self.OPTIONS_LEVERAGE,
-                            position_type="long", reduce_only=True, exchange_id="delta",
+                        self._force_exit_last_signal
+                        or Signal(
+                            side="sell",
+                            price=current_bid,
+                            amount=float(self._contracts),
+                            order_type="market",
+                            reason="Startup stuck check",
+                            strategy=self.name,
+                            pair=self.option_symbol,
+                            leverage=self.OPTIONS_LEVERAGE,
+                            position_type="long",
+                            reduce_only=True,
+                            exchange_id="delta",
+                            metadata={"exit_type": "STARTUP_STUCK"},
                         ),
                         f"Startup check: P&L {pnl_pct:.1f}% < -5%",
                     )
@@ -688,11 +774,16 @@ class OptionsScalpStrategy(BaseStrategy):
                 else:
                     self.logger.info(
                         "[%s] STARTUP_CHECK: Position OK at %.1f%% — normal monitoring",
-                        self.option_symbol, pnl_pct,
+                        self.option_symbol,
+                        pnl_pct,
                     )
-                    
+
         except Exception as e:
-            self.logger.warning("[%s] STARTUP_CHECK: Failed to verify position: %s", self.option_symbol, e)
+            self.logger.warning(
+                "[%s] STARTUP_CHECK: Failed to verify position: %s",
+                self.option_symbol,
+                e,
+            )
 
         return []
 
@@ -706,30 +797,43 @@ class OptionsScalpStrategy(BaseStrategy):
         try:
             pnl_pct = 0.0
             if self.entry_premium > 0:
-                pnl_pct = (current_premium - self.entry_premium) / self.entry_premium * 100
+                pnl_pct = (
+                    (current_premium - self.entry_premium) / self.entry_premium * 100
+                )
 
             peak_pnl = 0.0
             if self.entry_premium > 0:
-                peak_pnl = (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+                peak_pnl = (
+                    (self.highest_premium - self.entry_premium)
+                    / self.entry_premium
+                    * 100
+                )
 
             state = "trailing" if self._trailing_active else "holding"
 
             open_trade = await self._db.get_open_trade(
-                pair=self.option_symbol, exchange="delta", strategy="options_scalp",
+                pair=self.option_symbol,
+                exchange="delta",
+                strategy="options_scalp",
             )
             if open_trade:
                 live_pnl = self._calc_options_pnl(
-                    self.entry_premium, current_premium, self._contracts,
+                    self.entry_premium,
+                    current_premium,
+                    self._contracts,
                 )
 
-                await self._db.update_trade(open_trade["id"], {
-                    "position_state": state,
-                    "current_price": round(current_premium, 8),
-                    "current_pnl": round(pnl_pct, 4),
-                    "peak_pnl": round(peak_pnl, 4),
-                    "pnl": round(live_pnl, 8),
-                    "pnl_pct": round(pnl_pct, 4),
-                })
+                await self._db.update_trade(
+                    open_trade["id"],
+                    {
+                        "position_state": state,
+                        "current_price": round(current_premium, 8),
+                        "current_pnl": round(pnl_pct, 4),
+                        "peak_pnl": round(peak_pnl, 4),
+                        "pnl": round(live_pnl, 8),
+                        "pnl_pct": round(pnl_pct, 4),
+                    },
+                )
         except Exception as e:
             self.logger.debug("[%s] position state DB update failed: %s", self.pair, e)
 
@@ -738,7 +842,10 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
 
     def _calc_options_pnl(
-        self, entry_premium: float, exit_premium: float, contracts: int,
+        self,
+        entry_premium: float,
+        exit_premium: float,
+        contracts: int,
     ) -> float:
         """Calculate gross P&L for an options trade using contract multiplier."""
         multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
@@ -751,7 +858,10 @@ class OptionsScalpStrategy(BaseStrategy):
     async def _refresh_option_chain(self) -> None:
         """Fetch available option contracts, filter for valid expiries."""
         now = time.monotonic()
-        if now - self._chain_last_refresh < self.CHAIN_REFRESH_INTERVAL and self._option_chain:
+        if (
+            now - self._chain_last_refresh < self.CHAIN_REFRESH_INTERVAL
+            and self._option_chain
+        ):
             return
 
         if not self.options_exchange:
@@ -781,12 +891,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 if expiry_dt < min_expiry:
                     continue
 
-                chain.append({
-                    "symbol": symbol,
-                    "strike": float(market.get("strike", 0)),
-                    "option_type": (market.get("optionType") or "").lower(),
-                    "expiry": expiry_dt,
-                })
+                chain.append(
+                    {
+                        "symbol": symbol,
+                        "strike": float(market.get("strike", 0)),
+                        "option_type": (market.get("optionType") or "").lower(),
+                        "expiry": expiry_dt,
+                    }
+                )
 
             chain.sort(key=lambda x: (x["expiry"], x["strike"]))
             self._option_chain = chain
@@ -797,32 +909,45 @@ class OptionsScalpStrategy(BaseStrategy):
                 hours_away = (self._selected_expiry - now_utc).total_seconds() / 3600
 
                 if hours_away < self.EXPIRY_SWITCH_HOURS:
-                    next_expiries = sorted(set(
-                        c["expiry"] for c in chain if c["expiry"] > self._selected_expiry
-                    ))
+                    next_expiries = sorted(
+                        set(
+                            c["expiry"]
+                            for c in chain
+                            if c["expiry"] > self._selected_expiry
+                        )
+                    )
                     if next_expiries:
                         old_exp = self._selected_expiry
                         self._selected_expiry = next_expiries[0]
-                        new_hours = (self._selected_expiry - now_utc).total_seconds() / 3600
+                        new_hours = (
+                            self._selected_expiry - now_utc
+                        ).total_seconds() / 3600
                         self.logger.info(
                             "[%s] EXPIRY_SWITCH: nearest %s only %.1fh away — "
                             "switching to %s (%.1fh away)",
                             self.pair,
-                            old_exp.strftime("%b %d %H:%M UTC"), hours_away,
-                            self._selected_expiry.strftime("%b %d %H:%M UTC"), new_hours,
+                            old_exp.strftime("%b %d %H:%M UTC"),
+                            hours_away,
+                            self._selected_expiry.strftime("%b %d %H:%M UTC"),
+                            new_hours,
                         )
                         hours_away = new_hours
 
-                self._available_strikes = sorted(set(
-                    c["strike"] for c in chain
-                    if c["expiry"] == self._selected_expiry
-                ))
+                self._available_strikes = sorted(
+                    set(
+                        c["strike"]
+                        for c in chain
+                        if c["expiry"] == self._selected_expiry
+                    )
+                )
                 self.logger.info(
                     "[%s] Option chain refreshed: %d contracts, "
                     "selected expiry=%s (%.1fh away), %d strikes",
-                    self.pair, len(chain),
+                    self.pair,
+                    len(chain),
                     self._selected_expiry.strftime("%b %d %H:%M UTC"),
-                    hours_away, len(self._available_strikes),
+                    hours_away,
+                    len(self._available_strikes),
                 )
             else:
                 self._selected_expiry = None
@@ -843,29 +968,38 @@ class OptionsScalpStrategy(BaseStrategy):
         return min(self._available_strikes, key=lambda s: abs(s - current_price))
 
     def _get_otm_candidates(
-        self, atm_strike: float, option_type: str, extra: int = 0,
+        self,
+        atm_strike: float,
+        option_type: str,
+        extra: int = 0,
     ) -> list[float]:
         """Get sorted OTM strikes away from ATM (up for calls, down for puts)."""
         if option_type == "call":
             candidates = sorted(s for s in self._available_strikes if s > atm_strike)
         else:
             candidates = sorted(
-                (s for s in self._available_strikes if s < atm_strike), reverse=True,
+                (s for s in self._available_strikes if s < atm_strike),
+                reverse=True,
             )
         if extra > 0:
             start = self.MAX_OTM_STRIKES
-            return candidates[start:start + extra]
-        return candidates[:self.MAX_OTM_STRIKES]
+            return candidates[start : start + extra]
+        return candidates[: self.MAX_OTM_STRIKES]
 
     def _build_option_symbol(
-        self, strike: float, option_type: str, expiry: datetime,
+        self,
+        strike: float,
+        option_type: str,
+        expiry: datetime,
     ) -> str | None:
         """Find the ccxt unified symbol for the given option parameters."""
         target_type = option_type.lower()
         for opt in self._option_chain:
-            if (opt["strike"] == strike
-                    and opt["option_type"] == target_type
-                    and opt["expiry"] == expiry):
+            if (
+                opt["strike"] == strike
+                and opt["option_type"] == target_type
+                and opt["expiry"] == expiry
+            ):
                 return opt["symbol"]
 
         # Fallback: construct manually
@@ -874,7 +1008,9 @@ class OptionsScalpStrategy(BaseStrategy):
         cp = "C" if target_type == "call" else "P"
         symbol = f"{self._base_asset}/USD:USD-{expiry_str}-{strike_str}-{cp}"
         self.logger.warning(
-            "[%s] Option not in chain, constructed: %s", self.pair, symbol,
+            "[%s] Option not in chain, constructed: %s",
+            self.pair,
+            symbol,
         )
         return symbol
 
@@ -931,14 +1067,18 @@ class OptionsScalpStrategy(BaseStrategy):
             expiry_ts = self._selected_expiry.isoformat()
 
             if self._available_strikes and spot_price > 0:
-                atm_strike = min(self._available_strikes, key=lambda s: abs(s - spot_price))
+                atm_strike = min(
+                    self._available_strikes, key=lambda s: abs(s - spot_price)
+                )
 
                 raw_call_ask: float = 0.0
                 raw_put_ask: float = 0.0
 
                 try:
                     call_sym = self._build_option_symbol(
-                        atm_strike, "call", self._selected_expiry,
+                        atm_strike,
+                        "call",
+                        self._selected_expiry,
                     )
                     if call_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(call_sym)
@@ -949,7 +1089,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
                 try:
                     put_sym = self._build_option_symbol(
-                        atm_strike, "put", self._selected_expiry,
+                        atm_strike,
+                        "put",
+                        self._selected_expiry,
                     )
                     if put_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(put_sym)
@@ -959,14 +1101,21 @@ class OptionsScalpStrategy(BaseStrategy):
                     pass
 
                 # Keep premium_current_ask live during scan phase (raw ask, not last price)
-                if not self.in_position and not self._breakout_pending and raw_call_ask > 0:
+                if (
+                    not self.in_position
+                    and not self._breakout_pending
+                    and raw_call_ask > 0
+                ):
                     self._premium_current_ask = raw_call_ask
 
                 if raw_call_ask > 0 or raw_put_ask > 0:
                     self.logger.info(
                         "[%s] SQUEEZE_SCAN: %s ATM_call_ask=$%.2f ATM_put_ask=$%.2f strike=%s",
-                        self.pair, self._base_asset,
-                        raw_call_ask, raw_put_ask, atm_strike,
+                        self.pair,
+                        self._base_asset,
+                        raw_call_ask,
+                        raw_put_ask,
+                        atm_strike,
                     )
 
         # ── Chain data: top 5 calls + puts near ATM ──
@@ -980,33 +1129,44 @@ class OptionsScalpStrategy(BaseStrategy):
             and self._selected_expiry
             and self.options_exchange
         ):
-            call_strikes = sorted(s for s in self._available_strikes if s >= atm_strike)[:5]
+            call_strikes = sorted(
+                s for s in self._available_strikes if s >= atm_strike
+            )[:5]
             for strike in call_strikes:
                 try:
-                    sym = self._build_option_symbol(strike, "call", self._selected_expiry)
+                    sym = self._build_option_symbol(
+                        strike, "call", self._selected_expiry
+                    )
                     if sym:
                         t = await self.options_exchange.fetch_ticker(sym)
-                        chain_calls.append({
-                            "strike": strike,
-                            "bid": t.get("bid") or 0,
-                            "ask": t.get("ask") or 0,
-                        })
+                        chain_calls.append(
+                            {
+                                "strike": strike,
+                                "bid": t.get("bid") or 0,
+                                "ask": t.get("ask") or 0,
+                            }
+                        )
                 except Exception:
                     chain_calls.append({"strike": strike, "bid": 0, "ask": 0})
 
             put_strikes = sorted(
-                (s for s in self._available_strikes if s <= atm_strike), reverse=True,
+                (s for s in self._available_strikes if s <= atm_strike),
+                reverse=True,
             )[:5]
             for strike in put_strikes:
                 try:
-                    sym = self._build_option_symbol(strike, "put", self._selected_expiry)
+                    sym = self._build_option_symbol(
+                        strike, "put", self._selected_expiry
+                    )
                     if sym:
                         t = await self.options_exchange.fetch_ticker(sym)
-                        chain_puts.append({
-                            "strike": strike,
-                            "bid": t.get("bid") or 0,
-                            "ask": t.get("ask") or 0,
-                        })
+                        chain_puts.append(
+                            {
+                                "strike": strike,
+                                "bid": t.get("bid") or 0,
+                                "ask": t.get("ask") or 0,
+                            }
+                        )
                 except Exception:
                     chain_puts.append({"strike": strike, "bid": 0, "ask": 0})
 
@@ -1038,7 +1198,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
             try:
                 if self.options_exchange:
-                    ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
+                    ticker = await self.options_exchange.fetch_ticker(
+                        self.option_symbol
+                    )
                     current_prem = ticker.get("last") or ticker.get("bid") or None
                     if current_prem and entry_prem and entry_prem > 0:
                         pnl_pct = (current_prem - entry_prem) / entry_prem * 100
@@ -1058,14 +1220,19 @@ class OptionsScalpStrategy(BaseStrategy):
         signals_panel = {
             "bb_width_pct": round(self._bb_width_pct, 3),
             "bb_width_threshold": (
-                self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                self.SQUEEZE_BB_WIDTH_BTC
+                if self._base_asset == "BTC"
                 else self.SQUEEZE_BB_WIDTH_ETH
             ),
             "squeeze_status": self._squeeze_status,
             "bb_position": round(self._bb_position, 2),
             "direction_bias": self._direction_bias,
-            "premium_current_ask": round(self._premium_current_ask, 4) if self._premium_current_ask > 0 else None,
-            "premium_cheap_threshold": round(self._premium_cheap_threshold, 4) if self._premium_cheap_threshold > 0 else None,
+            "premium_current_ask": round(self._premium_current_ask, 4)
+            if self._premium_current_ask > 0
+            else None,
+            "premium_cheap_threshold": round(self._premium_cheap_threshold, 4)
+            if self._premium_cheap_threshold > 0
+            else None,
             "last_action": self._last_action,
             "squeeze_duration_candles": self._squeeze_duration_candles,
         }
@@ -1100,43 +1267,73 @@ class OptionsScalpStrategy(BaseStrategy):
             # Top-level squeeze fields (read directly by dashboard)
             "bb_width_pct": round(self._bb_width_pct, 3),
             "bb_width_threshold": (
-                self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                self.SQUEEZE_BB_WIDTH_BTC
+                if self._base_asset == "BTC"
                 else self.SQUEEZE_BB_WIDTH_ETH
             ),
             "squeeze_active": self._squeeze_status == "ACTIVE",
             "bb_position": round(self._bb_position, 2),
             "direction_bias": self._direction_bias,
-            "premium_current_ask": round(self._premium_current_ask, 4) if self._premium_current_ask > 0 else None,
-            "premium_cheap_threshold": round(self._premium_cheap_threshold, 4) if self._premium_cheap_threshold > 0 else None,
+            "premium_current_ask": round(self._premium_current_ask, 4)
+            if self._premium_current_ask > 0
+            else None,
+            "premium_cheap_threshold": round(self._premium_cheap_threshold, 4)
+            if self._premium_cheap_threshold > 0
+            else None,
             "last_squeeze_action": self._last_action,
             "last_action_at": (
-                datetime.fromtimestamp(self._last_action_at, tz=timezone.utc).isoformat()
-                if self._last_action_at > 0 else None
+                datetime.fromtimestamp(
+                    self._last_action_at, tz=timezone.utc
+                ).isoformat()
+                if self._last_action_at > 0
+                else None
             ),
             # Breakout confirmation state (GPFC #21)
-            "breakout_state": self._breakout_state if self._breakout_state else (
-                "DETECTED" if self._breakout_pending else 
-                (self._last_action if self._last_action in ("BREAKOUT_CONFIRMED", "BREAKOUT_FAKEOUT", "BREAKOUT_NO_FILL") else "NONE")
+            "breakout_state": self._breakout_state
+            if self._breakout_state
+            else (
+                "DETECTED"
+                if self._breakout_pending
+                else (
+                    self._last_action
+                    if self._last_action
+                    in ("BREAKOUT_CONFIRMED", "BREAKOUT_FAKEOUT", "BREAKOUT_NO_FILL")
+                    else "NONE"
+                )
             ),
             "breakout_direction": self._breakout_direction,
-            "breakout_velocity_pct": round(self._breakout_velocity_pct * 100, 3) if self._breakout_velocity_pct > 0 else None,
+            "breakout_velocity_pct": round(self._breakout_velocity_pct * 100, 3)
+            if self._breakout_velocity_pct > 0
+            else None,
             "breakout_confirmation_secs_remaining": (
-                max(0, int(self._breakout_confirmation_secs - (time.monotonic() - self._breakout_time)))
-                if self._breakout_pending and self._breakout_time is not None else None
+                max(
+                    0,
+                    int(
+                        self._breakout_confirmation_secs
+                        - (time.monotonic() - self._breakout_time)
+                    ),
+                )
+                if self._breakout_pending and self._breakout_time is not None
+                else None
             ),
             "breakout_detected_at": (
                 datetime.fromtimestamp(self._breakout_time, tz=timezone.utc).isoformat()
-                if self._breakout_time else None
+                if self._breakout_time
+                else None
             ),
-            "breakout_premium_at_detection": round(self._breakout_entry_ask, 6) if self._breakout_entry_ask > 0 else None,
+            "breakout_premium_at_detection": round(self._breakout_entry_ask, 6)
+            if self._breakout_entry_ask > 0
+            else None,
             # 30-min premium range (actual low/high from history)
             "premium_lowest_ask": (
                 round(min(a for _, a in self._premium_history), 4)
-                if self._premium_history else None
+                if self._premium_history
+                else None
             ),
             "premium_highest_ask": (
                 round(max(a for _, a in self._premium_history), 4)
-                if self._premium_history else None
+                if self._premium_history
+                else None
             ),
         }
 
@@ -1144,7 +1341,9 @@ class OptionsScalpStrategy(BaseStrategy):
         try:
             await self._db.upsert_options_state(self.pair, state)
         except Exception as e:
-            self.logger.warning("[%s] options_state upsert failed (non-critical): %s", self.pair, e)
+            self.logger.warning(
+                "[%s] options_state upsert failed (non-critical): %s", self.pair, e
+            )
 
     # ==================================================================
     # MAIN CHECK LOOP
@@ -1162,7 +1361,10 @@ class OptionsScalpStrategy(BaseStrategy):
                 utilization = (total_capital - available) / total_capital * 100
                 self.logger.info(
                     "CAPITAL_UTIL: %s %.1f%% deployed, $%.2f free / $%.2f total",
-                    self.pair, utilization, available, total_capital
+                    self.pair,
+                    utilization,
+                    available,
+                    total_capital,
                 )
 
         # Periodic chain refresh
@@ -1177,13 +1379,13 @@ class OptionsScalpStrategy(BaseStrategy):
         # In position: manage exit
         if self.in_position:
             self._cached_bot_state = "in_position"
-            
+
             # GPFC: Fast Exit Recovery — check force exit first
             if self._force_exit_pending:
                 force_signals = await self._check_force_exit()
                 if force_signals:
                     return force_signals
-            
+
             return await self._check_option_exit()
 
         # Not in position: look for squeeze entry
@@ -1208,8 +1410,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return
 
-        if self._cached_bot_state.startswith("blocked:position_gone_cooldown") or \
-                self._cached_bot_state.startswith("blocked:no_fill_cooldown"):
+        if self._cached_bot_state.startswith(
+            "blocked:position_gone_cooldown"
+        ) or self._cached_bot_state.startswith("blocked:no_fill_cooldown"):
             self._cached_bot_state = "scanning"
 
     # ==================================================================
@@ -1219,7 +1422,10 @@ class OptionsScalpStrategy(BaseStrategy):
     async def _get_ohlcv_for_squeeze(self) -> list[list[float]] | None:
         """Fetch OHLCV data with caching to avoid refetching within same scan tick."""
         now = time.monotonic()
-        if self._cached_ohlcv and (now - self._cached_ohlcv_time) < self._OHLCV_CACHE_SEC:
+        if (
+            self._cached_ohlcv
+            and (now - self._cached_ohlcv_time) < self._OHLCV_CACHE_SEC
+        ):
             return self._cached_ohlcv
 
         if not self.futures_exchange:
@@ -1237,7 +1443,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.debug("[%s] fetch_ohlcv failed: %s", self.pair, e)
             return None
 
-    async def _detect_squeeze(self) -> tuple[bool, float, float, float, int, float, float, float, float] | None:
+    async def _detect_squeeze(
+        self,
+    ) -> tuple[bool, float, float, float, int, float, float, float, float] | None:
         """Detect BB Squeeze: BB width < threshold and BB contained within KC.
 
         Returns:
@@ -1260,7 +1468,7 @@ class OptionsScalpStrategy(BaseStrategy):
             return None
 
         # Calculate BB
-        bb_window = closes[-self.BB_PERIOD:]
+        bb_window = closes[-self.BB_PERIOD :]
         sma = mean(bb_window)
         std = (sum((x - sma) ** 2 for x in bb_window) / len(bb_window)) ** 0.5
         bb_upper = sma + self.BB_STD_MULT * std
@@ -1269,21 +1477,25 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Calculate BB position (0 = at lower band, 1 = at upper band, 0.5 = middle)
         current_price = closes[-1]
-        bb_position = (current_price - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
+        bb_position = (
+            (current_price - bb_lower) / (bb_upper - bb_lower)
+            if (bb_upper - bb_lower) > 0
+            else 0.5
+        )
         bb_position = max(0.0, min(1.0, bb_position))  # Clamp to [0, 1]
 
         # Calculate ATR for KC
         tr_list = []
         for i in range(1, len(candles)):
-            prev_close = candles[i-1][4]
+            prev_close = candles[i - 1][4]
             curr_high = candles[i][2]
             curr_low = candles[i][3]
             tr1 = curr_high - curr_low
             tr2 = abs(curr_high - prev_close)
             tr3 = abs(curr_low - prev_close)
             tr_list.append(max(tr1, tr2, tr3))
-        
-        atr_window = tr_list[-self.KC_PERIOD:]
+
+        atr_window = tr_list[-self.KC_PERIOD :]
         atr = mean(atr_window) if atr_window else 0
 
         # Calculate Keltner Channel
@@ -1298,7 +1510,17 @@ class OptionsScalpStrategy(BaseStrategy):
         recent_vol = mean(volumes[-5:])
         avg_vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 1.0
 
-        return is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, len(candles), bb_upper, bb_lower, kc_upper, kc_lower
+        return (
+            is_squeeze,
+            bb_width_pct,
+            bb_position,
+            avg_vol_ratio,
+            len(candles),
+            bb_upper,
+            bb_lower,
+            kc_upper,
+            kc_lower,
+        )
 
     def _compute_squeeze_confidence(
         self,
@@ -1309,7 +1531,7 @@ class OptionsScalpStrategy(BaseStrategy):
         vol_ratio: float,
     ) -> float:
         """Compute entry confidence based on squeeze tightness, premium cheapness, and volume.
-        
+
         Returns confidence score 0-1. Skip if < 0.6
         """
         # Tightness score
@@ -1354,34 +1576,34 @@ class OptionsScalpStrategy(BaseStrategy):
 
     async def _calculate_breakout_velocity(self) -> float:
         """Calculate % price move in last 3 candles for breakout velocity (GPFC #21).
-        
+
         Returns velocity as decimal (e.g., 0.003 = 0.3% move).
         """
         ohlcv = await self._get_ohlcv_for_squeeze()
         if not ohlcv or len(ohlcv) < 4:
             return 0.0
-        
+
         # Use last 4 candles to calculate move over last 3 periods
         # Velocity = |current close - close 3 candles ago| / close 3 candles ago
         recent_candles = ohlcv[-4:]
         old_close = recent_candles[0][4]  # Close 3 candles ago
         new_close = recent_candles[-1][4]  # Most recent close
-        
+
         if old_close <= 0:
             return 0.0
-        
+
         velocity = abs(new_close - old_close) / old_close
         return velocity
 
     def _get_confirmation_secs(self, velocity_pct: float) -> int:
         """Get dynamic confirmation window based on breakout velocity (GPFC #21) — UPDATED.
-        
+
         velocity >= 0.3% → 20s (was 0s)
         velocity 0.15-0.3% → 40s (was 20s)
         velocity < 0.15% → 60s (unchanged)
         """
         velocity_pct_actual = velocity_pct * 100  # Convert to percentage
-        
+
         if velocity_pct_actual >= self.BREAKOUT_CONFIRM_HIGH_VELOCITY:
             return self.BREAKOUT_CONFIRM_SEC_HIGH
         elif velocity_pct_actual >= self.BREAKOUT_CONFIRM_MED_VELOCITY:
@@ -1403,7 +1625,8 @@ class OptionsScalpStrategy(BaseStrategy):
             if self._tick_count % 6 == 0:
                 self.logger.info(
                     "[%s] OPTIONS GLOBAL_LOCK — %s has an open option",
-                    self.pair, OptionsScalpStrategy._global_position_asset or "another asset",
+                    self.pair,
+                    OptionsScalpStrategy._global_position_asset or "another asset",
                 )
             self._cached_bot_state = "blocked:other_asset_in_position"
             return []
@@ -1414,7 +1637,8 @@ class OptionsScalpStrategy(BaseStrategy):
             if self._tick_count % 6 == 0:
                 self.logger.info(
                     "[%s] OPTIONS COOLDOWN after POSITION_GONE — %.0fs remaining",
-                    self.pair, remaining,
+                    self.pair,
+                    remaining,
                 )
             self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return []
@@ -1430,9 +1654,20 @@ class OptionsScalpStrategy(BaseStrategy):
             self._direction_bias = "NEUTRAL"
             return []
 
-        is_squeeze, bb_width_pct, bb_position, avg_vol_ratio, _candles_used, bb_upper, bb_lower, kc_upper, kc_lower = squeeze_result
+        (
+            is_squeeze,
+            bb_width_pct,
+            bb_position,
+            avg_vol_ratio,
+            _candles_used,
+            bb_upper,
+            bb_lower,
+            kc_upper,
+            kc_lower,
+        ) = squeeze_result
         bb_width_threshold = (
-            self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+            self.SQUEEZE_BB_WIDTH_BTC
+            if self._base_asset == "BTC"
             else self.SQUEEZE_BB_WIDTH_ETH
         )
 
@@ -1444,15 +1679,24 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.info(
                 "[%s] SQUEEZE_SCAN: BB_width=%.3f%% squeeze=%s (thresh=%.1f%%) "
                 "atm_ask=$%.2f strike=%s",
-                self.pair, bb_width_pct, is_squeeze, bb_width_threshold,
-                self._premium_current_ask, self._cached_target_strike,
+                self.pair,
+                bb_width_pct,
+                is_squeeze,
+                bb_width_threshold,
+                self._premium_current_ask,
+                self._cached_target_strike,
             )
 
         if not is_squeeze:
             # STEP 2: Was squeeze active? Check for breakout direction before resetting state.
             if self._squeeze_active_since is not None:
                 await self._handle_squeeze_breakout(
-                    bb_upper, bb_lower, kc_upper, kc_lower, bb_width_pct, avg_vol_ratio,
+                    bb_upper,
+                    bb_lower,
+                    kc_upper,
+                    kc_lower,
+                    bb_width_pct,
+                    avg_vol_ratio,
                 )
 
             self._squeeze_status = "WAITING"
@@ -1479,7 +1723,8 @@ class OptionsScalpStrategy(BaseStrategy):
         if self._tick_count % 6 == 0:
             self.logger.info(
                 "[%s] SQUEEZE_DETECTED: BB_width=%.3f%% KC_contains_BB=true — waiting for breakout",
-                self.pair, bb_width_pct,
+                self.pair,
+                bb_width_pct,
             )
         self._cached_bot_state = "squeeze:waiting_for_breakout"
         return []
@@ -1526,7 +1771,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #21: Calculate breakout velocity from last 3 candles
         velocity_pct = await self._calculate_breakout_velocity()
         self._breakout_velocity_pct = velocity_pct
-        
+
         # GPFC #21: Set dynamic confirmation window based on velocity
         confirmation_secs = self._get_confirmation_secs(velocity_pct)
         self._breakout_confirmation_secs = confirmation_secs
@@ -1534,7 +1779,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if self._selected_expiry is None:
             return
-        hours_to_expiry = (self._selected_expiry - datetime.now(timezone.utc)).total_seconds() / 3600
+        hours_to_expiry = (
+            self._selected_expiry - datetime.now(timezone.utc)
+        ).total_seconds() / 3600
         if hours_to_expiry < self.MIN_EXPIRY_HOURS:
             return
 
@@ -1562,7 +1809,9 @@ class OptionsScalpStrategy(BaseStrategy):
                 ticker = await self.options_exchange.fetch_ticker(sym)
                 ask = float(ticker.get("ask") or ticker.get("last") or 0)
             except Exception as e:
-                self.logger.debug("[%s] Ticker fetch failed for %s: %s", self.pair, sym, e)
+                self.logger.debug(
+                    "[%s] Ticker fetch failed for %s: %s", self.pair, sym, e
+                )
                 continue
             if ask < self.MIN_PREMIUM_USD:
                 continue
@@ -1576,7 +1825,8 @@ class OptionsScalpStrategy(BaseStrategy):
         if selected_strike is None or selected_symbol is None:
             self.logger.info(
                 "[%s] SQUEEZE_BREAKOUT dir=%s: no affordable strike — skip",
-                self.pair, direction,
+                self.pair,
+                direction,
             )
             return
 
@@ -1593,12 +1843,17 @@ class OptionsScalpStrategy(BaseStrategy):
         self._premium_current_ask = current_ask
         cheap_threshold = (
             lowest_ask + (highest_ask - lowest_ask) * self.SQUEEZE_CHEAP_PERCENTILE
-            if highest_ask > lowest_ask else current_ask
+            if highest_ask > lowest_ask
+            else current_ask
         )
         self._premium_cheap_threshold = cheap_threshold
 
         entry_confidence = self._compute_squeeze_confidence(
-            bb_width_pct, current_ask, lowest_ask, highest_ask, avg_vol_ratio,
+            bb_width_pct,
+            current_ask,
+            lowest_ask,
+            highest_ask,
+            avg_vol_ratio,
         )
         if self._base_asset == "BTC":
             entry_confidence *= 0.7
@@ -1606,7 +1861,9 @@ class OptionsScalpStrategy(BaseStrategy):
         if entry_confidence < 0.6:
             self.logger.info(
                 "[%s] BREAKOUT_DETECTED dir=%s: confidence=%.2f < 0.6 — skip",
-                self.pair, direction, entry_confidence,
+                self.pair,
+                direction,
+                entry_confidence,
             )
             return
 
@@ -1614,7 +1871,8 @@ class OptionsScalpStrategy(BaseStrategy):
         if opt_contracts < 1:
             self.logger.info(
                 "[%s] BREAKOUT_DETECTED dir=%s: 0 contracts affordable — skip",
-                self.pair, direction,
+                self.pair,
+                direction,
             )
             return
 
@@ -1634,15 +1892,26 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #21: Log BREAKOUT_DETECTED with velocity and confirmation window
         self.logger.info(
             "[%s] BREAKOUT_DETECTED: dir=%s velocity=%.2f%% confirmation=%ds — %s $%.0f ask=$%.4f conf=%.2f",
-            self.pair, direction, velocity_pct * 100, confirmation_secs,
-            option_type.upper(), selected_strike, current_ask, entry_confidence,
+            self.pair,
+            direction,
+            velocity_pct * 100,
+            confirmation_secs,
+            option_type.upper(),
+            selected_strike,
+            current_ask,
+            entry_confidence,
         )
         await self._log_activity(
             "options_skip",
-            f"{self.pair} — BREAKOUT_DETECTED: dir={direction} velocity={velocity_pct*100:.2f}% confirmation={confirmation_secs}s",
-            {"direction": direction, "ask": current_ask, "strike": selected_strike,
-             "confidence": round(entry_confidence, 3), "velocity_pct": round(velocity_pct * 100, 2),
-             "confirmation_secs": confirmation_secs},
+            f"{self.pair} — BREAKOUT_DETECTED: dir={direction} velocity={velocity_pct * 100:.2f}% confirmation={confirmation_secs}s",
+            {
+                "direction": direction,
+                "ask": current_ask,
+                "strike": selected_strike,
+                "confidence": round(entry_confidence, 3),
+                "velocity_pct": round(velocity_pct * 100, 2),
+                "confirmation_secs": confirmation_secs,
+            },
         )
         self._cached_bot_state = f"breakout:confirming:{direction}:{confirmation_secs}s"
 
@@ -1662,32 +1931,46 @@ class OptionsScalpStrategy(BaseStrategy):
         except Exception as e:
             self.logger.debug("[%s] Confirmation tick fetch failed: %s", self.pair, e)
             remaining = max(0, self._breakout_confirmation_secs - int(elapsed))
-            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            self._cached_bot_state = (
+                f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            )
             self._breakout_state = "DETECTED"
             return []
 
         if current_ask <= 0:
             remaining = max(0, self._breakout_confirmation_secs - int(elapsed))
-            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            self._cached_bot_state = (
+                f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            )
             self._breakout_state = "DETECTED"
             return []
 
         self._premium_current_ask = current_ask
 
         # GPFC #24: During confirmation window, abort early if premium drops significantly
-        drop_pct = (self._breakout_entry_ask - current_ask) / self._breakout_entry_ask * 100
+        drop_pct = (
+            (self._breakout_entry_ask - current_ask) / self._breakout_entry_ask * 100
+        )
         if drop_pct > self.BREAKOUT_FAKEOUT_DROP_PCT:
             self.logger.info(
                 "[%s] BREAKOUT_FAKEOUT: dir=%s premium dropped %.1f%% during confirmation (ask=$%.4f < entry_ask=$%.4f) — abort",
-                self.pair, self._breakout_direction, drop_pct, current_ask, self._breakout_entry_ask,
+                self.pair,
+                self._breakout_direction,
+                drop_pct,
+                current_ask,
+                self._breakout_entry_ask,
             )
             await self._log_activity(
                 "options_skip",
                 f"{self.pair} — BREAKOUT_FAKEOUT: dir={self._breakout_direction} "
                 f"premium dropped {drop_pct:.1f}% during confirmation — aborting",
-                {"direction": self._breakout_direction, "ask": current_ask,
-                 "entry_ask": self._breakout_entry_ask, "drop_pct": round(drop_pct, 2),
-                 "elapsed": round(elapsed, 1)},
+                {
+                    "direction": self._breakout_direction,
+                    "ask": current_ask,
+                    "entry_ask": self._breakout_entry_ask,
+                    "drop_pct": round(drop_pct, 2),
+                    "elapsed": round(elapsed, 1),
+                },
             )
             self._last_action = "BREAKOUT_FAKEOUT"
             self._last_action_at = time.time()
@@ -1696,19 +1979,29 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         # OVERPRICED: premium rose > 15% from breakout ask — don't chase pumped premium
-        rise_pct = (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
+        rise_pct = (
+            (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
+        )
         if rise_pct > self.BREAKOUT_OVERPRICED_RISE_PCT:
             self.logger.info(
                 "[%s] BREAKOUT_OVERPRICED: dir=%s premium rose %.1f%% (ask=$%.4f > entry_ask=$%.4f * 1.15) — abort, don't chase",
-                self.pair, self._breakout_direction, rise_pct, current_ask, self._breakout_entry_ask,
+                self.pair,
+                self._breakout_direction,
+                rise_pct,
+                current_ask,
+                self._breakout_entry_ask,
             )
             await self._log_activity(
                 "options_skip",
                 f"{self.pair} — BREAKOUT_OVERPRICED: dir={self._breakout_direction} "
                 f"premium rose {rise_pct:.1f}% — aborting, don't chase",
-                {"direction": self._breakout_direction, "ask": current_ask,
-                 "entry_ask": self._breakout_entry_ask, "rise_pct": round(rise_pct, 2),
-                 "elapsed": round(elapsed, 1)},
+                {
+                    "direction": self._breakout_direction,
+                    "ask": current_ask,
+                    "entry_ask": self._breakout_entry_ask,
+                    "rise_pct": round(rise_pct, 2),
+                    "elapsed": round(elapsed, 1),
+                },
             )
             self._last_action = "BREAKOUT_OVERPRICED"
             self._last_action_at = time.time()
@@ -1722,30 +2015,45 @@ class OptionsScalpStrategy(BaseStrategy):
             if self._tick_count % 6 == 0:
                 self.logger.info(
                     "[%s] BREAKOUT_CONFIRM_WAIT: dir=%s ask=$%.4f vs entry=$%.4f (%.0fs/%ds)",
-                    self.pair, self._breakout_direction,
-                    current_ask, self._breakout_entry_ask, elapsed, self._breakout_confirmation_secs,
+                    self.pair,
+                    self._breakout_direction,
+                    current_ask,
+                    self._breakout_entry_ask,
+                    elapsed,
+                    self._breakout_confirmation_secs,
                 )
-            self._cached_bot_state = f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            self._cached_bot_state = (
+                f"breakout:confirming:{self._breakout_direction}:{remaining}s"
+            )
             self._breakout_state = "DETECTED"
             return []
 
         # GPFC #24: Window complete — check if premium is rising or stable (not falling)
         # Premium must be >= start premium (within 2% tolerance) to confirm
         CHANGE_TOLERANCE_PCT = 2.0  # Allow up to 2% drop (considered "stable")
-        change_pct = (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
+        change_pct = (
+            (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
+        )
 
         if change_pct < -CHANGE_TOLERANCE_PCT:
             # Premium fell during confirmation — fakeout
             self.logger.info(
                 "[%s] BREAKOUT_FAKEOUT: premium falling during confirmation $%.4f → $%.4f (%.1f%%) — abort",
-                self.pair, self._breakout_entry_ask, current_ask, change_pct,
+                self.pair,
+                self._breakout_entry_ask,
+                current_ask,
+                change_pct,
             )
             await self._log_activity(
                 "options_skip",
                 f"{self.pair} — BREAKOUT_FAKEOUT: premium falling during confirmation "
                 f"${self._breakout_entry_ask:.4f} → ${current_ask:.4f} ({change_pct:.1f}%) — abort",
-                {"direction": self._breakout_direction, "ask": current_ask,
-                 "entry_ask": self._breakout_entry_ask, "change_pct": round(change_pct, 2)},
+                {
+                    "direction": self._breakout_direction,
+                    "ask": current_ask,
+                    "entry_ask": self._breakout_entry_ask,
+                    "change_pct": round(change_pct, 2),
+                },
             )
             self._last_action = "BREAKOUT_FAKEOUT"
             self._last_action_at = time.time()
@@ -1758,15 +2066,23 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_state = "CONFIRMED"
         self.logger.info(
             "[%s] BREAKOUT_CONFIRMED: dir=%s premium $%.4f → $%.4f (%.1f%%) — entering now",
-            self.pair, self._breakout_direction, self._breakout_entry_ask, current_ask, change_pct,
+            self.pair,
+            self._breakout_direction,
+            self._breakout_entry_ask,
+            current_ask,
+            change_pct,
         )
         await self._log_activity(
             "options_skip",
             f"{self.pair} — BREAKOUT_CONFIRMED: dir={self._breakout_direction} "
             f"premium ${self._breakout_entry_ask:.4f} → ${current_ask:.4f} ({change_pct:+.1f}%)",
-            {"direction": self._breakout_direction, "ask": current_ask,
-             "entry_ask": self._breakout_entry_ask, "change_pct": round(change_pct, 2),
-             "velocity_pct": round(self._breakout_velocity_pct, 3)},
+            {
+                "direction": self._breakout_direction,
+                "ask": current_ask,
+                "entry_ask": self._breakout_entry_ask,
+                "change_pct": round(change_pct, 2),
+                "velocity_pct": round(self._breakout_velocity_pct, 3),
+            },
         )
         return await self._execute_breakout_entry(current_ask)
 
@@ -1798,11 +2114,14 @@ class OptionsScalpStrategy(BaseStrategy):
         bb_width_pct = self._breakout_bb_width
 
         # Recalculate contracts at confirmed ask price
-        opt_contracts = self._calculate_option_contracts(confirmed_ask, entry_confidence)
+        opt_contracts = self._calculate_option_contracts(
+            confirmed_ask, entry_confidence
+        )
         if opt_contracts < 1:
             self.logger.info(
                 "[%s] BREAKOUT_CONFIRMED: no affordable contracts at $%.4f — abort",
-                self.pair, confirmed_ask,
+                self.pair,
+                confirmed_ask,
             )
             self._reset_breakout_state()
             return []
@@ -1814,17 +2133,26 @@ class OptionsScalpStrategy(BaseStrategy):
         atm_strike = self._cached_target_strike or selected_strike
 
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (entry_confidence *
-                         (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT))
+        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (
+            entry_confidence
+            * (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT)
+        )
         collateral_usd = exchange_capital * allocation_pct
 
         self.logger.info(
             "[%s] BREAKOUT_ENTRY: %s $%.0f | BB_width=%.3f%% dir=%s | "
             "ask=$%.4f | conf=%.2f → %d contracts ($%.2f collateral, %.1f%% of $%.2f)",
-            self.pair, option_type.upper(), selected_strike,
-            bb_width_pct, self._breakout_direction,
-            limit_price, entry_confidence, opt_contracts,
-            collateral_usd, allocation_pct * 100, exchange_capital,
+            self.pair,
+            option_type.upper(),
+            selected_strike,
+            bb_width_pct,
+            self._breakout_direction,
+            limit_price,
+            entry_confidence,
+            opt_contracts,
+            collateral_usd,
+            allocation_pct * 100,
+            exchange_capital,
         )
 
         self._cached_bot_state = "breakout:placing_order"
@@ -1840,10 +2168,15 @@ class OptionsScalpStrategy(BaseStrategy):
             limit_order_id = limit_order.get("id")
             self.logger.info(
                 "[%s] BREAKOUT: limit order %s placed — %d contracts @ $%.4f",
-                self.pair, limit_order_id, opt_contracts, limit_price,
+                self.pair,
+                limit_order_id,
+                opt_contracts,
+                limit_price,
             )
         except Exception as e:
-            self.logger.info("[%s] BREAKOUT: order placement failed: %s — SKIP", self.pair, e)
+            self.logger.info(
+                "[%s] BREAKOUT: order placement failed: %s — SKIP", self.pair, e
+            )
             self._reset_breakout_state()
             return []
 
@@ -1856,23 +2189,35 @@ class OptionsScalpStrategy(BaseStrategy):
         for _poll in range(polls):
             await asyncio.sleep(self.SQUEEZE_FILL_POLL_SEC)
             try:
-                updated = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
+                updated = await self.options_exchange.fetch_order(
+                    limit_order_id, selected_symbol
+                )
                 status = updated.get("status", "")
                 _filled_qty = float(updated.get("filled", 0) or 0)
                 if status == "closed" or _filled_qty >= opt_contracts:
                     fill_price = float(
-                        updated.get("average", 0) or updated.get("price", 0) or limit_price
+                        updated.get("average", 0)
+                        or updated.get("price", 0)
+                        or limit_price
                     )
                     limit_filled = True
                     self.logger.info(
                         "[%s] BREAKOUT: FILLED @ $%.4f (%d contracts) — poll %d/%d",
-                        self.pair, fill_price, opt_contracts, _poll + 1, polls,
+                        self.pair,
+                        fill_price,
+                        opt_contracts,
+                        _poll + 1,
+                        polls,
                     )
                     break
                 elif _filled_qty > 0:
                     self.logger.debug(
                         "[%s] BREAKOUT: partial fill %.1f/%d — poll %d/%d",
-                        self.pair, _filled_qty, opt_contracts, _poll + 1, polls,
+                        self.pair,
+                        _filled_qty,
+                        opt_contracts,
+                        _poll + 1,
+                        polls,
                     )
             except Exception as e:
                 self.logger.debug("[%s] BREAKOUT: poll failed: %s", self.pair, e)
@@ -1880,7 +2225,9 @@ class OptionsScalpStrategy(BaseStrategy):
         if not limit_filled and _filled_qty > 0:
             # Partial fill — keep it, cancel residual
             try:
-                await self.options_exchange.cancel_order(limit_order_id, selected_symbol)
+                await self.options_exchange.cancel_order(
+                    limit_order_id, selected_symbol
+                )
             except Exception:
                 pass
             opt_contracts = max(1, int(_filled_qty))
@@ -1888,17 +2235,26 @@ class OptionsScalpStrategy(BaseStrategy):
             limit_filled = True
             self.logger.info(
                 "[%s] BREAKOUT: PARTIAL FILL — %d contracts @ ~$%.4f",
-                self.pair, opt_contracts, fill_price,
+                self.pair,
+                opt_contracts,
+                fill_price,
             )
 
         if not limit_filled:
             # No fill — cancel and move on
             try:
-                await self.options_exchange.cancel_order(limit_order_id, selected_symbol)
+                await self.options_exchange.cancel_order(
+                    limit_order_id, selected_symbol
+                )
             except Exception as _ce:
                 try:
-                    _fc = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
-                    if _fc.get("status") == "closed" or float(_fc.get("filled", 0) or 0) >= opt_contracts:
+                    _fc = await self.options_exchange.fetch_order(
+                        limit_order_id, selected_symbol
+                    )
+                    if (
+                        _fc.get("status") == "closed"
+                        or float(_fc.get("filled", 0) or 0) >= opt_contracts
+                    ):
                         fill_price = float(
                             _fc.get("average", 0) or _fc.get("price", 0) or limit_price
                         )
@@ -1907,7 +2263,9 @@ class OptionsScalpStrategy(BaseStrategy):
                     pass
                 if not limit_filled:
                     self.logger.info(
-                        "[%s] BREAKOUT: cancel failed: %s — SKIP", self.pair, _ce,
+                        "[%s] BREAKOUT: cancel failed: %s — SKIP",
+                        self.pair,
+                        _ce,
                     )
                     self._reset_breakout_state()
                     return []
@@ -1915,7 +2273,8 @@ class OptionsScalpStrategy(BaseStrategy):
         if not limit_filled:
             self.logger.info(
                 "[%s] BREAKOUT_NO_FILL: ask=$%.4f cancelled",
-                self.pair, limit_price,
+                self.pair,
+                limit_price,
             )
             await self._log_skip(
                 f"{self.pair} — BREAKOUT_NO_FILL: ask=${limit_price:.4f}",
@@ -1928,8 +2287,12 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Re-fetch for Delta's actual fill price
         try:
-            final = await self.options_exchange.fetch_order(limit_order_id, selected_symbol)
-            actual_avg = float(final.get("average") or final.get("price") or limit_price)
+            final = await self.options_exchange.fetch_order(
+                limit_order_id, selected_symbol
+            )
+            actual_avg = float(
+                final.get("average") or final.get("price") or limit_price
+            )
             if actual_avg > 0:
                 fill_price = actual_avg
         except Exception:
@@ -1942,7 +2305,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         self.logger.info(
             "[%s] BREAKOUT_FILL: dir=%s premium=$%.4f",
-            self.pair, self._breakout_direction, premium,
+            self.pair,
+            self._breakout_direction,
+            premium,
         )
 
         # SET POSITION STATE
@@ -1965,8 +2330,12 @@ class OptionsScalpStrategy(BaseStrategy):
 
         self.logger.info(
             "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed, no stale for %dm)",
-            self.pair, option_type.upper(), opt_contracts, fill_price,
-            self.SQUEEZE_NO_STALE_MIN_BTC if self._base_asset == "BTC"
+            self.pair,
+            option_type.upper(),
+            opt_contracts,
+            fill_price,
+            self.SQUEEZE_NO_STALE_MIN_BTC
+            if self._base_asset == "BTC"
             else self.SQUEEZE_NO_STALE_MIN_ETH,
         )
 
@@ -1975,20 +2344,29 @@ class OptionsScalpStrategy(BaseStrategy):
             f"ask=${premium:.4f} conf={entry_confidence:.2f}"
         )
 
-        expiry_str = self._selected_expiry.strftime('%b %d %H:%M')
+        expiry_str = self._selected_expiry.strftime("%b %d %H:%M")
         strike_label = "ATM" if selected_strike == atm_strike else "OTM"
 
         await self._log_activity(
             "options_entry",
             f"{self.pair} — OPTIONS: {option_type.upper()} {strike_label} ${selected_strike:.0f} | "
             f"premium=${premium:.4f} | expiry={expiry_str} | BREAKOUT dir={self._breakout_direction}",
-            {"option_type": option_type, "strike": selected_strike, "premium": premium,
-             "strike_label": strike_label,
-             "expiry": self._selected_expiry.isoformat() if self._selected_expiry else "",
-             "underlying_price": current_price, "symbol": selected_symbol,
-             "setup_type": "BB_SQUEEZE_BREAKOUT", "contracts": opt_contracts,
-             "bb_width_pct": round(bb_width_pct, 4), "confidence": round(entry_confidence, 3),
-             "breakout_direction": self._breakout_direction},
+            {
+                "option_type": option_type,
+                "strike": selected_strike,
+                "premium": premium,
+                "strike_label": strike_label,
+                "expiry": self._selected_expiry.isoformat()
+                if self._selected_expiry
+                else "",
+                "underlying_price": current_price,
+                "symbol": selected_symbol,
+                "setup_type": "BB_SQUEEZE_BREAKOUT",
+                "contracts": opt_contracts,
+                "bb_width_pct": round(bb_width_pct, 4),
+                "confidence": round(entry_confidence, 3),
+                "breakout_direction": self._breakout_direction,
+            },
         )
 
         self._reset_breakout_state()
@@ -2030,10 +2408,12 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Calculate sizing info for alert
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (confidence * 
-                         (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT))
+        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (
+            confidence
+            * (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT)
+        )
         collateral_usd = exchange_capital * allocation_pct
-        
+
         reason = (
             f"OPTIONS {option_type.upper()} | BB_SQUEEZE "
             f"({signals_str or 'squeeze_detected'}) | "
@@ -2042,46 +2422,54 @@ class OptionsScalpStrategy(BaseStrategy):
             f"Premium=${premium:.4f} x{contracts} | "
             f"Sizing: {contracts} contracts (${collateral_usd:.2f}, {allocation_pct:.1%} of capital)"
         )
-        self.logger.info("[%s] OPTIONS ENTRY — %s (setup=%s)", self.pair, reason, setup_type)
+        self.logger.info(
+            "[%s] OPTIONS ENTRY — %s (setup=%s)", self.pair, reason, setup_type
+        )
 
-        return [Signal(
-            side="buy",
-            price=premium,
-            amount=float(contracts),
-            order_type="market",
-            reason=reason,
-            strategy=self.name,
-            pair=selected_symbol,
-            leverage=self.OPTIONS_LEVERAGE,
-            position_type="long",
-            exchange_id="delta",
-            metadata={
-                "pending_side": option_type,
-                "pending_amount": float(contracts),
-                "option_type": option_type,
-                "strike": selected_strike,
-                "strike_label": strike_label,
-                "expiry": self._selected_expiry.isoformat() if self._selected_expiry else "",
-                "underlying_price": current_price,
-                "underlying_pair": self.pair,
-                "tp_price": premium * (1 + self.TP_PREMIUM_GAIN_PCT / 100),
-                "sl_price": premium * (1 - self.SL_PREMIUM_LOSS_PCT / 100),
-                "setup_type": setup_type,
-                "contracts": contracts,
-                "already_filled": already_filled,
-                "entry_context": self._entry_context,
-                "signals_fired": self._entry_context,
-                "spot_price": self._last_spot_price,
-            },
-        )]
+        return [
+            Signal(
+                side="buy",
+                price=premium,
+                amount=float(contracts),
+                order_type="market",
+                reason=reason,
+                strategy=self.name,
+                pair=selected_symbol,
+                leverage=self.OPTIONS_LEVERAGE,
+                position_type="long",
+                exchange_id="delta",
+                metadata={
+                    "pending_side": option_type,
+                    "pending_amount": float(contracts),
+                    "option_type": option_type,
+                    "strike": selected_strike,
+                    "strike_label": strike_label,
+                    "expiry": self._selected_expiry.isoformat()
+                    if self._selected_expiry
+                    else "",
+                    "underlying_price": current_price,
+                    "underlying_pair": self.pair,
+                    "tp_price": premium * (1 + self.TP_PREMIUM_GAIN_PCT / 100),
+                    "sl_price": premium * (1 - self.SL_PREMIUM_LOSS_PCT / 100),
+                    "setup_type": setup_type,
+                    "contracts": contracts,
+                    "already_filled": already_filled,
+                    "entry_context": self._entry_context,
+                    "signals_fired": self._entry_context,
+                    "spot_price": self._last_spot_price,
+                },
+            )
+        ]
 
     # ==================================================================
     # DYNAMIC OPTION SIZING
     # ==================================================================
 
-    def _calculate_option_contracts(self, premium: float, confidence: float = 0.7) -> int:
+    def _calculate_option_contracts(
+        self, premium: float, confidence: float = 0.7
+    ) -> int:
         """Dynamic sizing: allocate 20-30% of capital per trade based on confidence.
-        
+
         Higher confidence = higher allocation (closer to 30%)
         Lower confidence = lower allocation (closer to 20%)
         """
@@ -2093,65 +2481,84 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Scale allocation: 20% + (confidence * 10%) = 20-30% range
         # confidence 0.6 → 26%, confidence 1.0 → 30%
-        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (confidence * 
-                         (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT))
-        
+        allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (
+            confidence
+            * (self.CAPITAL_PER_TRADE_MAX_PCT - self.CAPITAL_PER_TRADE_MIN_PCT)
+        )
+
         # Cap at 30% max per trade
         allocation_pct = min(allocation_pct, self.CAPITAL_PER_TRADE_MAX_PCT)
-        
+
         # Survival mode: if balance is very low, cap allocation
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
             allocation_pct = min(allocation_pct, self.OPT_SURVIVAL_MAX_ALLOC / 100)
 
         # Calculate collateral to use (this is the premium we'll pay)
         collateral_usd = exchange_capital * allocation_pct
-        
+
         # Calculate collateral required per contract
         # collateral_per_contract = premium / leverage
         collateral_per_contract = premium / self.OPTIONS_LEVERAGE
         if collateral_per_contract <= 0:
             return 0
-        
+
         # Calculate contracts: collateral_usd / collateral_per_contract
         contracts = math.floor(collateral_usd / collateral_per_contract)
         contracts = max(contracts, 0)
-        
+
         # Check if we have enough capital for meaningful position (at least 1 contract)
         if contracts < 1:
             self.logger.warning(
                 "[%s] INSUFFICIENT_CAPITAL: bal=$%.2f, need $%.2f for 1 contract @ $%.4f",
-                self.pair, exchange_capital, collateral_per_contract, premium,
+                self.pair,
+                exchange_capital,
+                collateral_per_contract,
+                premium,
             )
             return 0
-        
+
         # Hard cap on contracts per asset
         hard_cap = 40 if self._base_asset == "ETH" else 999
         if contracts > hard_cap:
             self.logger.info(
                 "[%s] SIZE_CAP: %d → %d contracts (hard cap)",
-                self.pair, contracts, hard_cap,
+                self.pair,
+                contracts,
+                hard_cap,
             )
             contracts = hard_cap
-        
+
         # Safety: ensure max SL loss doesn't exceed 25% of balance
         multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-        max_sl_loss = contracts * premium * (self.SL_PREMIUM_LOSS_PCT / 100) * multiplier
+        max_sl_loss = (
+            contracts * premium * (self.SL_PREMIUM_LOSS_PCT / 100) * multiplier
+        )
         max_allowed_loss = exchange_capital * 0.25
         if max_sl_loss > max_allowed_loss and premium > 0:
             safe_contracts = math.floor(
-                max_allowed_loss / (premium * (self.SL_PREMIUM_LOSS_PCT / 100) * multiplier)
+                max_allowed_loss
+                / (premium * (self.SL_PREMIUM_LOSS_PCT / 100) * multiplier)
             )
             self.logger.info(
                 "[%s] SL_SAFETY: %d→%d contracts (SL loss $%.2f > 25%% of bal $%.2f)",
-                self.pair, contracts, safe_contracts, max_sl_loss, exchange_capital,
+                self.pair,
+                contracts,
+                safe_contracts,
+                max_sl_loss,
+                exchange_capital,
             )
             contracts = max(safe_contracts, 1)
-        
+
         self.logger.info(
             "[%s] OPT_SIZING: %d contracts @ $%.4f "
             "(collateral=$%.2f, alloc=%.1f%%, conf=%.2f, bal=$%.2f)",
-            self.pair, contracts, premium,
-            collateral_usd, allocation_pct * 100, confidence, exchange_capital,
+            self.pair,
+            contracts,
+            premium,
+            collateral_usd,
+            allocation_pct * 100,
+            confidence,
+            exchange_capital,
         )
         return contracts
 
@@ -2165,7 +2572,10 @@ class OptionsScalpStrategy(BaseStrategy):
             if pnl_pct >= threshold and floor > self._opt_ratchet_floor:
                 self.logger.info(
                     "[%s] RATCHET FLOOR ↑ pnl +%.1f%% ≥ %+.0f%% → floor locked at +%.1f%%",
-                    self.option_symbol, pnl_pct, threshold, floor,
+                    self.option_symbol,
+                    pnl_pct,
+                    threshold,
+                    floor,
                 )
                 self._opt_ratchet_floor = floor
 
@@ -2180,38 +2590,38 @@ class OptionsScalpStrategy(BaseStrategy):
 
     def _should_ride_momentum(self, current_pnl_pct: float) -> bool:
         """Check if we should skip exit and ride the momentum.
-        
+
         Returns True if:
         - Current P&L is positive (we're winning)
         - Underlying price momentum in position direction > 0.1% over last 60s
-        
+
         Hard override: Always exit if peak > +50% AND pullback > 60% of peak gain
         """
         if current_pnl_pct <= 0:
             return False  # Only ride momentum when profitable
-        
+
         if len(self._momentum_price_history) < 2:
             return False  # Not enough data
-        
+
         now = time.monotonic()
         cutoff = now - self._MOMENTUM_CHECK_WINDOW_SEC
-        
+
         # Find price from ~60s ago
         old_price = None
         for t, price in reversed(self._momentum_price_history):
             if t <= cutoff:
                 old_price = price
                 break
-        
+
         if old_price is None or old_price <= 0:
             return False
-        
+
         # Get current price
         current_price = self._momentum_price_history[-1][1]
-        
+
         # Calculate momentum %
         momentum_pct = (current_price - old_price) / old_price * 100
-        
+
         # Check if momentum is in our favor
         # For CALL: positive momentum is good
         # For PUT: negative momentum is good
@@ -2221,13 +2631,15 @@ class OptionsScalpStrategy(BaseStrategy):
             momentum_favorable = momentum_pct <= -self._MOMENTUM_THRESHOLD_PCT
         else:
             return False
-        
+
         if momentum_favorable:
             self.logger.debug(
                 "[%s] RIDE_MOMENTUM check: momentum=%+.2f%% threshold=%.2f%% — RIDING",
-                self.option_symbol, momentum_pct, self._MOMENTUM_THRESHOLD_PCT,
+                self.option_symbol,
+                momentum_pct,
+                self._MOMENTUM_THRESHOLD_PCT,
             )
-        
+
         return momentum_favorable
 
     # ==================================================================
@@ -2262,21 +2674,25 @@ class OptionsScalpStrategy(BaseStrategy):
                 if mins_to_expiry <= self._EXPIRY_CLOSE_MINUTES:
                     self.logger.warning(
                         "[%s] Ticker failed near expiry (%.1f min) — marking POSITION_GONE",
-                        self.option_symbol, mins_to_expiry,
+                        self.option_symbol,
+                        mins_to_expiry,
                     )
                     return await self._handle_position_gone("EXPIRED_TICKER_FAIL")
 
             if self._consecutive_ticker_failures >= self._MAX_TICKER_FAILURES:
                 self.logger.warning(
                     "[%s] %d consecutive ticker failures — marking POSITION_GONE",
-                    self.option_symbol, self._consecutive_ticker_failures,
+                    self.option_symbol,
+                    self._consecutive_ticker_failures,
                 )
                 return await self._handle_position_gone("TICKER_FAIL_REPEATED")
 
             self.logger.warning(
                 "[%s] Failed to fetch option ticker (%d/%d): %s",
-                self.option_symbol, self._consecutive_ticker_failures,
-                self._MAX_TICKER_FAILURES, e,
+                self.option_symbol,
+                self._consecutive_ticker_failures,
+                self._MAX_TICKER_FAILURES,
+                e,
             )
             return []
 
@@ -2302,7 +2718,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # Update ratchet floor
         self._update_opt_ratchet_floor(
             (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-            if self.entry_premium > 0 else 0
+            if self.entry_premium > 0
+            else 0
         )
 
         # Write position state to trades table every tick (~10s)
@@ -2310,12 +2727,16 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # P&L
         premium_change_pct = (
-            (current_premium - self.entry_premium) / self.entry_premium * 100
-        ) if self.entry_premium > 0 else 0
+            ((current_premium - self.entry_premium) / self.entry_premium * 100)
+            if self.entry_premium > 0
+            else 0
+        )
 
         peak_pnl_pct = (
-            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-        ) if self.entry_premium > 0 else 0
+            ((self.highest_premium - self.entry_premium) / self.entry_premium * 100)
+            if self.entry_premium > 0
+            else 0
+        )
 
         hold_seconds = time.monotonic() - self.entry_time
         in_phase1 = hold_seconds < self.PHASE1_HANDS_OFF_SEC
@@ -2327,28 +2748,50 @@ class OptionsScalpStrategy(BaseStrategy):
             squeeze_tag = " [SQUEEZE]" if self._is_squeeze_entry else ""
             self.logger.info(
                 "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | %ds%s%s%s",
-                self.option_symbol, self.option_side,
-                self.entry_premium, current_premium, premium_change_pct,
-                self.highest_premium, peak_pnl_pct,
-                int(hold_seconds), trail_tag, phase_tag, squeeze_tag,
+                self.option_symbol,
+                self.option_side,
+                self.entry_premium,
+                current_premium,
+                premium_change_pct,
+                self.highest_premium,
+                peak_pnl_pct,
+                int(hold_seconds),
+                trail_tag,
+                phase_tag,
+                squeeze_tag,
             )
 
         # ── 1. EXPIRY GUARD ───────────
         if self.expiry_dt:
-            time_to_expiry = (self.expiry_dt - datetime.now(timezone.utc)).total_seconds()
+            time_to_expiry = (
+                self.expiry_dt - datetime.now(timezone.utc)
+            ).total_seconds()
             mins_to_expiry = time_to_expiry / 60
             if mins_to_expiry <= self.EXPIRY_GUARD_MIN_MIN:
                 self.logger.info(
                     "[%s] EXPIRY_GUARD: %s expires in %.0fm < %dm → EXIT regardless of P&L",
-                    self.option_symbol, self.option_symbol, mins_to_expiry, self.EXPIRY_GUARD_MIN_MIN,
+                    self.option_symbol,
+                    self.option_symbol,
+                    mins_to_expiry,
+                    self.EXPIRY_GUARD_MIN_MIN,
                 )
-                return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_GUARD")
-            elif mins_to_expiry <= self.EXPIRY_GUARD_HOURS * 60 and premium_change_pct < 10.0:
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "EXPIRY_GUARD"
+                )
+            elif (
+                mins_to_expiry <= self.EXPIRY_GUARD_HOURS * 60
+                and premium_change_pct < 10.0
+            ):
                 self.logger.info(
                     "[%s] EXPIRY_GUARD: %s expires in %.0fm, pnl=%.1f%% < +10%% → EXIT",
-                    self.option_symbol, self.option_symbol, mins_to_expiry, premium_change_pct,
+                    self.option_symbol,
+                    self.option_symbol,
+                    mins_to_expiry,
+                    premium_change_pct,
                 )
-                return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_GUARD")
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "EXPIRY_GUARD"
+                )
 
         # ── Ratchet floor update ─────
         self._update_opt_ratchet_floor(peak_pnl_pct)
@@ -2357,34 +2800,52 @@ class OptionsScalpStrategy(BaseStrategy):
         if hold_seconds <= 60 and premium_change_pct <= -8.0:
             self.logger.info(
                 "[%s] OPT_ENTRY_DROP: entry=$%.4f current=$%.4f drop=%.1f%% after %.0fs",
-                self.option_symbol, self.entry_premium, current_premium,
-                premium_change_pct, hold_seconds,
+                self.option_symbol,
+                self.entry_premium,
+                current_premium,
+                premium_change_pct,
+                hold_seconds,
             )
-            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_ENTRY_DROP")
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_ENTRY_DROP"
+            )
 
         # ── 3. RATCHET EXIT ─────────
-        if self._opt_ratchet_floor != 0.0 and premium_change_pct < self._opt_ratchet_floor:
+        if (
+            self._opt_ratchet_floor != 0.0
+            and premium_change_pct < self._opt_ratchet_floor
+        ):
             # GPFC #22 Part 2: Check momentum before firing RATCHET exit — let winners ride
             if self._should_ride_momentum(premium_change_pct):
                 self.logger.info(
                     "[%s] RIDE_MOMENTUM: pnl=+%.1f%% ratchet_floor=%+.1f%% — skipping RATCHET, holding",
-                    self.option_symbol, premium_change_pct, self._opt_ratchet_floor,
+                    self.option_symbol,
+                    premium_change_pct,
+                    self._opt_ratchet_floor,
                 )
             else:
                 self.logger.info(
                     "[%s] OPT_RATCHET — pnl +%.1f%% fell below floor +%.1f%%",
-                    self.option_symbol, premium_change_pct, self._opt_ratchet_floor,
+                    self.option_symbol,
+                    premium_change_pct,
+                    self._opt_ratchet_floor,
                 )
-                return await self._do_option_exit(current_premium, premium_change_pct, "OPT_RATCHET")
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "OPT_RATCHET"
+                )
 
         # ── 4. STOP LOSS ────────────
         if premium_change_pct <= -self.SL_PREMIUM_LOSS_PCT:
             self.logger.info(
                 "[%s] OPTION SL — premium %+.1f%% ($%.4f → $%.4f)",
-                self.option_symbol, premium_change_pct,
-                self.entry_premium, current_premium,
+                self.option_symbol,
+                premium_change_pct,
+                self.entry_premium,
+                current_premium,
             )
-            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_SL")
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_SL"
+            )
 
         # ── Phase 1 hands-off ─────
         if in_phase1:
@@ -2395,28 +2856,42 @@ class OptionsScalpStrategy(BaseStrategy):
             trail_floor_pct = peak_pnl_pct * 0.65
             if premium_change_pct <= trail_floor_pct:
                 multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                spot = self._last_spot_price or (current_premium * (200 if self._base_asset == "BTC" else 100))
+                spot = self._last_spot_price or (
+                    current_premium * (200 if self._base_asset == "BTC" else 100)
+                )
                 estimated_fees = 2 * (self._contracts * multiplier * spot * 0.000118)
-                gross_pnl = self._calc_options_pnl(self.entry_premium, current_premium, self._contracts)
+                gross_pnl = self._calc_options_pnl(
+                    self.entry_premium, current_premium, self._contracts
+                )
 
                 if peak_pnl_pct < 15.0 and gross_pnl < estimated_fees * 1.5:
                     self.logger.info(
                         "[%s] OPT_PEAK_TRAIL skipped — gross=$%.4f < fees*1.5=$%.4f (peak +%.1f%%)",
-                        self.option_symbol, gross_pnl, estimated_fees * 1.5, peak_pnl_pct,
+                        self.option_symbol,
+                        gross_pnl,
+                        estimated_fees * 1.5,
+                        peak_pnl_pct,
                     )
                 else:
                     self.logger.info(
                         "[%s] OPT_PEAK_TRAIL — peak +%.1f%%, floor +%.1f%%, now +%.1f%%",
-                        self.option_symbol, peak_pnl_pct, trail_floor_pct, premium_change_pct,
+                        self.option_symbol,
+                        peak_pnl_pct,
+                        trail_floor_pct,
+                        premium_change_pct,
                     )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_PEAK_TRAIL")
+                    return await self._do_option_exit(
+                        current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
+                    )
 
         # ── 6. TAKE PROFIT ──────────
         if premium_change_pct >= self.TP_PREMIUM_GAIN_PCT:
             self.logger.info(
                 "[%s] OPTION TP — premium +%.1f%% ($%.4f → $%.4f)",
-                self.option_symbol, premium_change_pct,
-                self.entry_premium, current_premium,
+                self.option_symbol,
+                premium_change_pct,
+                self.entry_premium,
+                current_premium,
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "TP")
 
@@ -2429,23 +2904,35 @@ class OptionsScalpStrategy(BaseStrategy):
             self._trailing_active = True
             self.logger.info(
                 "[%s] OPTION TRAIL ON at +%.1f%% (distance=%.1f%%)",
-                self.option_symbol, premium_change_pct, trail_distance,
+                self.option_symbol,
+                premium_change_pct,
+                trail_distance,
             )
 
         # ── 8. TRAILING STOP ────────
         if self._trailing_active and trail_distance > 0:
             trail_floor = self.highest_premium * (1 - trail_distance / 100)
             if current_premium <= trail_floor:
-                final_pct = (current_premium - self.entry_premium) / self.entry_premium * 100
+                final_pct = (
+                    (current_premium - self.entry_premium) / self.entry_premium * 100
+                )
                 self.logger.info(
                     "[%s] OPTION TRAIL HIT — peak=$%.4f floor=$%.4f now=$%.4f (dist=%.1f%%)",
-                    self.option_symbol, self.highest_premium, trail_floor, current_premium, trail_distance,
+                    self.option_symbol,
+                    self.highest_premium,
+                    trail_floor,
+                    current_premium,
+                    trail_distance,
                 )
-                return await self._do_option_exit(current_premium, final_pct, "OPT_TRAIL")
+                return await self._do_option_exit(
+                    current_premium, final_pct, "OPT_TRAIL"
+                )
 
         # ── 9. PULLBACK ─────────────
         if peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT and premium_change_pct > 0:
-            pct_of_peak_lost = ((peak_pnl_pct - premium_change_pct) / peak_pnl_pct) * 100
+            pct_of_peak_lost = (
+                (peak_pnl_pct - premium_change_pct) / peak_pnl_pct
+            ) * 100
             if pct_of_peak_lost >= self.PULLBACK_EXIT_PCT:
                 # GPFC #22 Part 2: Check momentum before firing PULLBACK — let winners ride
                 # Hard override: always exit if peak > +50% AND pullback > 60% of peak gain
@@ -2453,51 +2940,69 @@ class OptionsScalpStrategy(BaseStrategy):
                 if not hard_override and self._should_ride_momentum(premium_change_pct):
                     self.logger.info(
                         "[%s] RIDE_MOMENTUM: pnl=+%.1f%% peak=+%.1f%% lost=%.0f%% — skipping PULLBACK, holding",
-                        self.option_symbol, premium_change_pct, peak_pnl_pct, pct_of_peak_lost,
+                        self.option_symbol,
+                        premium_change_pct,
+                        peak_pnl_pct,
+                        pct_of_peak_lost,
                     )
                 else:
                     if hard_override:
                         self.logger.info(
                             "[%s] OPTION PULLBACK (HARD OVERRIDE) — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
-                            self.option_symbol, peak_pnl_pct, premium_change_pct, pct_of_peak_lost,
+                            self.option_symbol,
+                            peak_pnl_pct,
+                            premium_change_pct,
+                            pct_of_peak_lost,
                         )
                     else:
                         self.logger.info(
                             "[%s] OPTION PULLBACK — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
-                            self.option_symbol, peak_pnl_pct, premium_change_pct, pct_of_peak_lost,
+                            self.option_symbol,
+                            peak_pnl_pct,
+                            premium_change_pct,
+                            pct_of_peak_lost,
                         )
-                    return await self._do_option_exit(current_premium, premium_change_pct, "PULLBACK")
+                    return await self._do_option_exit(
+                        current_premium, premium_change_pct, "PULLBACK"
+                    )
 
         # ── 10. DECAY ───────────────
         if peak_pnl_pct >= 10.0 and premium_change_pct <= self.DECAY_THRESHOLD_PCT:
             self.logger.info(
                 "[%s] OPTION DECAY — peak +%.1f%% faded to +%.1f%% (threshold +%.1f%%)",
-                self.option_symbol, peak_pnl_pct, premium_change_pct, self.DECAY_THRESHOLD_PCT,
+                self.option_symbol,
+                peak_pnl_pct,
+                premium_change_pct,
+                self.DECAY_THRESHOLD_PCT,
             )
-            return await self._do_option_exit(current_premium, premium_change_pct, "DECAY")
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "DECAY"
+            )
 
         # ── 11. PROGRESSIVE SL TIGHTENING (stale trade protection) ────
         # GPFC #23: Smarter stale exit for squeeze setups
         abs_move_pct = abs(premium_change_pct)
-        
+
         # Determine no-stale threshold based on asset (extended for squeeze entries)
         no_stale_threshold = (
-            self.SQUEEZE_NO_STALE_MIN_BTC * 60 if self._is_squeeze_entry and self._base_asset == "BTC"
-            else self.SQUEEZE_NO_STALE_MIN_ETH * 60 if self._is_squeeze_entry
+            self.SQUEEZE_NO_STALE_MIN_BTC * 60
+            if self._is_squeeze_entry and self._base_asset == "BTC"
+            else self.SQUEEZE_NO_STALE_MIN_ETH * 60
+            if self._is_squeeze_entry
             else 0  # non-squeeze entries (shouldn't happen now)
         )
-        
+
         is_stale = (
             abs_move_pct < self.STALE_MOVE_THRESHOLD
             and peak_pnl_pct < 10.0
             and premium_change_pct <= 0.0
             and hold_seconds > no_stale_threshold  # Only after no-stale period
         )
-        
+
         if is_stale:
             hold_min = hold_seconds / 60
             _is_btc = self._base_asset == "BTC"
-            
+
             # GPFC #23: Before firing OPT_STALE, check if squeeze is still active
             squeeze_still_active = False
             if self._is_squeeze_entry:
@@ -2505,7 +3010,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 if squeeze_result:
                     is_squeeze, bb_width_pct, *_ = squeeze_result
                     bb_width_threshold = (
-                        self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                        self.SQUEEZE_BB_WIDTH_BTC
+                        if self._base_asset == "BTC"
                         else self.SQUEEZE_BB_WIDTH_ETH
                     )
                     # Squeeze is "still active" if BB width is still tight (< threshold)
@@ -2514,9 +3020,12 @@ class OptionsScalpStrategy(BaseStrategy):
                         self.logger.info(
                             "[%s] STALE_HOLD: squeeze still forming (bb_width=%.2f%% < %.1f%%), "
                             "keeping position — %.0fm held",
-                            self.option_symbol, bb_width_pct, bb_width_threshold, hold_min,
+                            self.option_symbol,
+                            bb_width_pct,
+                            bb_width_threshold,
+                            hold_min,
                         )
-            
+
             if _is_btc:
                 if hold_min >= self.STALE_EXIT_MIN_BTC:
                     if squeeze_still_active:
@@ -2525,23 +3034,36 @@ class OptionsScalpStrategy(BaseStrategy):
                     else:
                         self.logger.info(
                             "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
-                            self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
+                            self.option_symbol,
+                            hold_min,
+                            premium_change_pct,
+                            peak_pnl_pct,
                         )
-                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                        return await self._do_option_exit(
+                            current_premium, premium_change_pct, "OPT_STALE"
+                        )
                 elif hold_min >= 12.0 and premium_change_pct < self.STALE_SL_12M_BTC:
                     if not squeeze_still_active:
                         self.logger.info(
                             "[%s] SL_TIGHTEN: 12m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol, self.STALE_SL_12M_BTC, premium_change_pct,
+                            self.option_symbol,
+                            self.STALE_SL_12M_BTC,
+                            premium_change_pct,
                         )
-                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                        return await self._do_option_exit(
+                            current_premium, premium_change_pct, "OPT_STALE"
+                        )
                 elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_BTC:
                     if not squeeze_still_active:
                         self.logger.info(
                             "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol, self.STALE_SL_8M_BTC, premium_change_pct,
+                            self.option_symbol,
+                            self.STALE_SL_8M_BTC,
+                            premium_change_pct,
                         )
-                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                        return await self._do_option_exit(
+                            current_premium, premium_change_pct, "OPT_STALE"
+                        )
             else:
                 if hold_min >= self.STALE_EXIT_MIN_ETH:
                     if squeeze_still_active:
@@ -2550,23 +3072,36 @@ class OptionsScalpStrategy(BaseStrategy):
                     else:
                         self.logger.info(
                             "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
-                            self.option_symbol, hold_min, premium_change_pct, peak_pnl_pct,
+                            self.option_symbol,
+                            hold_min,
+                            premium_change_pct,
+                            peak_pnl_pct,
                         )
-                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                        return await self._do_option_exit(
+                            current_premium, premium_change_pct, "OPT_STALE"
+                        )
                 elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_ETH:
                     if not squeeze_still_active:
                         self.logger.info(
                             "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol, self.STALE_SL_8M_ETH, premium_change_pct,
+                            self.option_symbol,
+                            self.STALE_SL_8M_ETH,
+                            premium_change_pct,
                         )
-                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                        return await self._do_option_exit(
+                            current_premium, premium_change_pct, "OPT_STALE"
+                        )
                 elif hold_min >= 5.0 and premium_change_pct < self.STALE_SL_5M_ETH:
                     if not squeeze_still_active:
                         self.logger.info(
                             "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol, self.STALE_SL_5M_ETH, premium_change_pct,
+                            self.option_symbol,
+                            self.STALE_SL_5M_ETH,
+                            premium_change_pct,
                         )
-                        return await self._do_option_exit(current_premium, premium_change_pct, "OPT_STALE")
+                        return await self._do_option_exit(
+                            current_premium, premium_change_pct, "OPT_STALE"
+                        )
 
         # ── 12. SIGNAL REVERSAL ─────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
@@ -2576,21 +3111,26 @@ class OptionsScalpStrategy(BaseStrategy):
                 new_strength = ss.get("strength", 0)
                 signal_age = time.monotonic() - ss.get("timestamp", 0)
 
-                if (signal_age < 30  # SIGNAL_STALENESS_SEC
-                        and new_strength >= 4  # MIN_SIGNAL_STRENGTH
-                        and new_side is not None):
+                if (
+                    signal_age < 30  # SIGNAL_STALENESS_SEC
+                    and new_strength >= 4  # MIN_SIGNAL_STRENGTH
+                    and new_side is not None
+                ):
                     is_reversal = (
-                        (self.option_side == "call" and new_side == "short")
-                        or (self.option_side == "put" and new_side == "long")
-                    )
+                        self.option_side == "call" and new_side == "short"
+                    ) or (self.option_side == "put" and new_side == "long")
                     if is_reversal:
                         self.logger.info(
                             "[%s] SIGNAL REVERSAL — %s → opposite %s at %+.1f%%",
-                            self.option_symbol, self.option_side,
-                            new_side, premium_change_pct,
+                            self.option_symbol,
+                            self.option_side,
+                            new_side,
+                            premium_change_pct,
                         )
                         return await self._do_option_exit(
-                            current_premium, premium_change_pct, "OPT_REVERSAL",
+                            current_premium,
+                            premium_change_pct,
+                            "OPT_REVERSAL",
                         )
 
         return []
@@ -2599,10 +3139,17 @@ class OptionsScalpStrategy(BaseStrategy):
     # OPTIONS DB WRITE
     # ==================================================================
 
-    async def _write_entry_to_db(self, fill_price: float, contracts: int,
-                                  order: dict, signal, option_symbol: str,
-                                  option_side: str, strike_price: float,
-                                  base_asset: str):
+    async def _write_entry_to_db(
+        self,
+        fill_price: float,
+        contracts: int,
+        order: dict,
+        signal,
+        option_symbol: str,
+        option_side: str,
+        strike_price: float,
+        base_asset: str,
+    ):
         """Insert a new options trade row into the DB."""
         try:
             mult = self.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
@@ -2626,7 +3173,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 "pnl_pct": 0,
                 "status": "open",
                 "setup_type": "BB_SQUEEZE",
-                "signals_fired": f"option_side={option_side} " + getattr(self, '_entry_context', ''),
+                "signals_fired": f"option_side={option_side} "
+                + getattr(self, "_entry_context", ""),
                 "opened_at": datetime.utcnow().isoformat() + "Z",
             }
 
@@ -2634,7 +3182,9 @@ class OptionsScalpStrategy(BaseStrategy):
             if result.data:
                 self._db_trade_id = result.data[0].get("id")
             else:
-                self.logger.error("[%s] OPTIONS DB ENTRY returned no data", option_symbol)
+                self.logger.error(
+                    "[%s] OPTIONS DB ENTRY returned no data", option_symbol
+                )
                 return
 
             signal_price = getattr(signal, "price", 0) or 0
@@ -2642,28 +3192,39 @@ class OptionsScalpStrategy(BaseStrategy):
 
             if actual_fill and actual_fill > 0:
                 collateral = actual_fill * contracts / self.OPTIONS_LEVERAGE
-                self.executor.db.client.table("trades").update({
-                    "entry_price": round(actual_fill, 8),
-                    "collateral": round(collateral, 4),
-                }).eq("id", self._db_trade_id).execute()
+                self.executor.db.client.table("trades").update(
+                    {
+                        "entry_price": round(actual_fill, 8),
+                        "collateral": round(collateral, 4),
+                    }
+                ).eq("id", self._db_trade_id).execute()
 
                 self.entry_premium = actual_fill
                 self.highest_premium = max(self.highest_premium, actual_fill)
 
                 self.logger.info(
                     "[%s] DB entry_price updated: signal=$%.4f fill=$%.4f id=%s x%d fee=$%.6f",
-                    option_symbol, signal_price, actual_fill,
-                    self._db_trade_id, contracts, entry_fee,
+                    option_symbol,
+                    signal_price,
+                    actual_fill,
+                    self._db_trade_id,
+                    contracts,
+                    entry_fee,
                 )
             else:
                 collateral = fill_price * contracts / self.OPTIONS_LEVERAGE
-                self.executor.db.client.table("trades").update({
-                    "entry_price": round(fill_price, 8),
-                    "collateral": round(collateral, 4),
-                }).eq("id", self._db_trade_id).execute()
+                self.executor.db.client.table("trades").update(
+                    {
+                        "entry_price": round(fill_price, 8),
+                        "collateral": round(collateral, 4),
+                    }
+                ).eq("id", self._db_trade_id).execute()
                 self.logger.warning(
                     "[%s] DB entry_price FALLBACK: signal=$%.4f on_fill=$%.4f (fetch_order failed) id=%s",
-                    option_symbol, signal_price, fill_price, self._db_trade_id,
+                    option_symbol,
+                    signal_price,
+                    fill_price,
+                    self._db_trade_id,
                 )
         except Exception:
             self.logger.exception("[%s] _write_entry_to_db FAILED", option_symbol)
@@ -2675,6 +3236,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if order_id and self.options_exchange:
             try:
                 import asyncio
+
                 await asyncio.sleep(1)
                 fetched = await self.options_exchange.fetch_order(order_id, symbol)
                 avg = fetched.get("average")
@@ -2685,7 +3247,9 @@ class OptionsScalpStrategy(BaseStrategy):
                     if p and float(p) > 0:
                         return float(p)
             except Exception as e:
-                self.logger.debug("[%s] fetch_order for fill price failed: %s", symbol, e)
+                self.logger.debug(
+                    "[%s] fetch_order for fill price failed: %s", symbol, e
+                )
 
         avg = order.get("average")
         if avg and float(avg) > 0:
@@ -2694,10 +3258,15 @@ class OptionsScalpStrategy(BaseStrategy):
         return 0
 
     async def _close_option_trade_in_db(
-        self, exit_premium: float, exit_type: str,
-        *, option_symbol: str | None = None,
-        entry_premium: float = 0.0, highest_premium: float = 0.0,
-        contracts: int = 0, order: dict | None = None,
+        self,
+        exit_premium: float,
+        exit_type: str,
+        *,
+        option_symbol: str | None = None,
+        entry_premium: float = 0.0,
+        highest_premium: float = 0.0,
+        contracts: int = 0,
+        order: dict | None = None,
     ) -> bool:
         """Close the option trade in DB with correct options P&L."""
         sym = option_symbol or self.option_symbol or self.pair
@@ -2713,7 +3282,9 @@ class OptionsScalpStrategy(BaseStrategy):
             if resolved and resolved > 0:
                 self.logger.info(
                     "[%s] DB exit_price updated: on_fill=$%.4f actual=$%.4f",
-                    sym, exit_premium, resolved,
+                    sym,
+                    exit_premium,
+                    resolved,
                 )
                 exit_premium = resolved
         ep = entry_premium or self.entry_premium
@@ -2727,76 +3298,107 @@ class OptionsScalpStrategy(BaseStrategy):
             from alpha.utils import iso_now
 
             if self._db_trade_id:
-                resp = self.executor.db.client.table("trades").select("*").eq(
-                    "id", self._db_trade_id
-                ).execute()
+                resp = (
+                    self.executor.db.client.table("trades")
+                    .select("*")
+                    .eq("id", self._db_trade_id)
+                    .execute()
+                )
                 open_trade = resp.data[0] if resp.data else None
             else:
                 open_trade = await self._db.get_open_trade(
-                    pair=sym, exchange="delta", strategy="options_scalp",
+                    pair=sym,
+                    exchange="delta",
+                    strategy="options_scalp",
                 )
             if not open_trade:
                 self.logger.warning(
                     "[%s] _close_option_trade_in_db: no open trade found (db_id=%s)",
-                    sym, self._db_trade_id,
+                    sym,
+                    self._db_trade_id,
                 )
                 return False
 
             db_entry = float(open_trade.get("entry_price", ep) or ep)
-            db_contracts = int(open_trade.get("contracts") or open_trade.get("amount") or ct)
+            db_contracts = int(
+                open_trade.get("contracts") or open_trade.get("amount") or ct
+            )
 
             multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-            spot = self._last_spot_price or (exit_premium * (200 if self._base_asset == "BTC" else 100))
+            spot = self._last_spot_price or (
+                exit_premium * (200 if self._base_asset == "BTC" else 100)
+            )
             calculated_fee = round(db_contracts * multiplier * spot * 0.000118, 8)
 
             stored_entry_fee = float(open_trade.get("entry_fee") or 0)
-            entry_fee = stored_entry_fee if 0 < stored_entry_fee <= 0.10 else calculated_fee
+            entry_fee = (
+                stored_entry_fee if 0 < stored_entry_fee <= 0.10 else calculated_fee
+            )
             exit_fee = calculated_fee
 
             self.logger.info(
                 "[%s] FEE CHECK: entry stored=$%.6f calc=$%.6f using=$%.6f | exit calc=$%.6f",
-                sym, stored_entry_fee, calculated_fee, entry_fee, exit_fee,
+                sym,
+                stored_entry_fee,
+                calculated_fee,
+                entry_fee,
+                exit_fee,
             )
 
             gross_pnl = self._calc_options_pnl(db_entry, exit_premium, db_contracts)
-            pnl_pct = (exit_premium - db_entry) / db_entry * 100 if db_entry > 0 else 0.0
+            pnl_pct = (
+                (exit_premium - db_entry) / db_entry * 100 if db_entry > 0 else 0.0
+            )
             net_pnl = gross_pnl - entry_fee - exit_fee
 
             peak_pnl_pct = (hp - ep) / ep * 100 if ep > 0 else 0
 
             from alpha.trade_executor import _extract_exit_reason
-            await self._db.update_trade(open_trade["id"], {
-                "status": "closed",
-                "exit_price": round(exit_premium, 8),
-                "closed_at": iso_now(),
-                "pnl": round(net_pnl, 8),
-                "net_pnl": round(net_pnl, 8),
-                "pnl_pct": round(pnl_pct, 4),
-                "gross_pnl": round(gross_pnl, 8),
-                "entry_fee": round(entry_fee, 8),
-                "exit_fee": round(exit_fee, 8),
-                "peak_pnl": round(peak_pnl_pct, 4),
-                "exit_reason": _extract_exit_reason(exit_type),
-                "position_state": None,
-            })
+
+            await self._db.update_trade(
+                open_trade["id"],
+                {
+                    "status": "closed",
+                    "exit_price": round(exit_premium, 8),
+                    "closed_at": iso_now(),
+                    "pnl": round(net_pnl, 8),
+                    "net_pnl": round(net_pnl, 8),
+                    "pnl_pct": round(pnl_pct, 4),
+                    "gross_pnl": round(gross_pnl, 8),
+                    "entry_fee": round(entry_fee, 8),
+                    "exit_fee": round(exit_fee, 8),
+                    "peak_pnl": round(peak_pnl_pct, 4),
+                    "exit_reason": _extract_exit_reason(exit_type),
+                    "position_state": None,
+                },
+            )
 
             self.logger.info(
                 "[%s] OPTIONS DB CLOSE: id=%s exit=$%.4f gross=$%.6f net=$%.6f (%.2f%%)",
-                sym, open_trade["id"], exit_premium,
-                gross_pnl, net_pnl, pnl_pct,
+                sym,
+                open_trade["id"],
+                exit_premium,
+                gross_pnl,
+                net_pnl,
+                pnl_pct,
             )
 
             try:
                 bot = getattr(self, "_alpha_bot", None)
                 if bot and hasattr(bot, "record_session_trade"):
-                    side_label = "CALL" if sym.endswith("-C") or sym.endswith("C") else "PUT"
-                    bot.record_session_trade({
-                        "pair": sym, "base": self._base_asset,
-                        "side_label": side_label,
-                        "net_pnl": net_pnl,
-                        "fees": entry_fee + exit_fee,
-                        "pnl": net_pnl,
-                    })
+                    side_label = (
+                        "CALL" if sym.endswith("-C") or sym.endswith("C") else "PUT"
+                    )
+                    bot.record_session_trade(
+                        {
+                            "pair": sym,
+                            "base": self._base_asset,
+                            "side_label": side_label,
+                            "net_pnl": net_pnl,
+                            "fees": entry_fee + exit_fee,
+                            "pnl": net_pnl,
+                        }
+                    )
             except Exception:
                 pass
 
@@ -2804,19 +3406,30 @@ class OptionsScalpStrategy(BaseStrategy):
                 alerts = getattr(self.executor, "alerts", None)
                 if alerts is not None:
                     pnl_emoji = "\u2705" if net_pnl >= 0 else "\u274c"
-                    opened_at = open_trade.get("opened_at") or open_trade.get("created_at")
+                    opened_at = open_trade.get("opened_at") or open_trade.get(
+                        "created_at"
+                    )
                     hold_time = "?"
                     if opened_at:
                         from datetime import datetime as _dt, timezone as _tz
+
                         try:
                             if isinstance(opened_at, str):
-                                opened_at = _dt.fromisoformat(opened_at.replace("Z", "+00:00"))
+                                opened_at = _dt.fromisoformat(
+                                    opened_at.replace("Z", "+00:00")
+                                )
                             delta = _dt.now(_tz.utc) - opened_at
                             mins = int(delta.total_seconds() // 60)
-                            hold_time = f"{mins}m" if mins < 60 else f"{mins // 60}h{mins % 60}m"
+                            hold_time = (
+                                f"{mins}m"
+                                if mins < 60
+                                else f"{mins // 60}h{mins % 60}m"
+                            )
                         except Exception:
                             pass
-                    side_label = "CALL" if sym.endswith("-C") or sym.endswith("C") else "PUT"
+                    side_label = (
+                        "CALL" if sym.endswith("-C") or sym.endswith("C") else "PUT"
+                    )
                     msg = (
                         f"{pnl_emoji} {self._base_asset} option closed\n"
                         f"{exit_type} | {side_label} ${ep:.0f}\n"
@@ -2832,7 +3445,8 @@ class OptionsScalpStrategy(BaseStrategy):
 
         except Exception:
             self.logger.exception(
-                "[%s] _close_option_trade_in_db failed", sym,
+                "[%s] _close_option_trade_in_db failed",
+                sym,
             )
             return False
 
@@ -2841,17 +3455,21 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
 
     async def _do_option_exit(
-        self, current_premium: float, pnl_pct: float, exit_type: str,
+        self,
+        current_premium: float,
+        pnl_pct: float,
+        exit_type: str,
     ) -> list[Signal]:
         """Build exit signal for option position."""
         # GPFC: Check if previous exit attempt failed (still in position after 10s)
-        if hasattr(self, '_last_exit_attempt_at') and self._last_exit_attempt_at > 0:
+        if hasattr(self, "_last_exit_attempt_at") and self._last_exit_attempt_at > 0:
             time_since_exit = time.monotonic() - self._last_exit_attempt_at
             if time_since_exit > 10 and self.in_position:
                 # Previous exit didn't complete — trigger force exit
                 self.logger.error(
                     "[%s] EXIT_FAILED: Still in position %.1fs after exit signal — triggering force exit",
-                    self.option_symbol, time_since_exit,
+                    self.option_symbol,
+                    time_since_exit,
                 )
                 signal = Signal(
                     side="sell",
@@ -2865,30 +3483,47 @@ class OptionsScalpStrategy(BaseStrategy):
                     position_type="long",
                     reduce_only=True,
                     exchange_id="delta",
-                    metadata={"exit_type": f"FORCE_{exit_type}", "previous_failed": True},
+                    metadata={
+                        "exit_type": f"FORCE_{exit_type}",
+                        "previous_failed": True,
+                    },
                 )
-                self._set_force_exit_pending(signal, f"Previous exit failed after {time_since_exit:.1f}s")
+                self._set_force_exit_pending(
+                    signal, f"Previous exit failed after {time_since_exit:.1f}s"
+                )
                 return [signal]
-        
+
         # Track this exit attempt
         self._last_exit_attempt_at = time.monotonic()
-        
+
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             live_bid = ticker.get("bid") or ticker.get("last") or 0
             if live_bid > 0:
                 self.logger.info(
                     "[%s] LIVE_BID: $%.4f (cached=$%.4f, diff=%+.2f%%)",
-                    self.option_symbol, live_bid, current_premium,
-                    (live_bid - current_premium) / current_premium * 100 if current_premium > 0 else 0,
+                    self.option_symbol,
+                    live_bid,
+                    current_premium,
+                    (live_bid - current_premium) / current_premium * 100
+                    if current_premium > 0
+                    else 0,
                 )
                 current_premium = live_bid
                 if self.entry_premium > 0:
-                    pnl_pct = (current_premium - self.entry_premium) / self.entry_premium * 100
+                    pnl_pct = (
+                        (current_premium - self.entry_premium)
+                        / self.entry_premium
+                        * 100
+                    )
         except Exception as e:
-            self.logger.debug("[%s] Live bid fetch failed, using cached: %s", self.option_symbol, e)
+            self.logger.debug(
+                "[%s] Live bid fetch failed, using cached: %s", self.option_symbol, e
+            )
 
-        pnl_usd = self._calc_options_pnl(self.entry_premium, current_premium, self._contracts)
+        pnl_usd = self._calc_options_pnl(
+            self.entry_premium, current_premium, self._contracts
+        )
         reason = (
             f"Option {exit_type} {self.option_side} | "
             f"${self.entry_premium:.4f} \u2192 ${current_premium:.4f} "
@@ -2901,10 +3536,16 @@ class OptionsScalpStrategy(BaseStrategy):
             "options_exit",
             f"{self.pair} — OPTIONS EXIT: {exit_type} {self.option_side} | "
             f"${self.entry_premium:.4f} -> ${current_premium:.4f} ({pnl_pct:+.1f}%) {pnl_tag}",
-            {"exit_type": exit_type, "option_side": self.option_side,
-             "entry_premium": self.entry_premium, "exit_premium": current_premium,
-             "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4),
-             "strike": self.strike_price, "symbol": self.option_symbol},
+            {
+                "exit_type": exit_type,
+                "option_side": self.option_side,
+                "entry_premium": self.entry_premium,
+                "exit_premium": current_premium,
+                "pnl_pct": round(pnl_pct, 2),
+                "pnl_usd": round(pnl_usd, 4),
+                "strike": self.strike_price,
+                "symbol": self.option_symbol,
+            },
         )
 
         self._opt_ratchet_floor = 0.0
@@ -2918,27 +3559,31 @@ class OptionsScalpStrategy(BaseStrategy):
         await self._clear_dashboard_position(exit_type, pnl_pct, pnl_usd)
 
         peak_pnl_pct = (
-            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-        ) if self.entry_premium > 0 else 0
+            ((self.highest_premium - self.entry_premium) / self.entry_premium * 100)
+            if self.entry_premium > 0
+            else 0
+        )
 
-        return [Signal(
-            side="sell",
-            price=current_premium,
-            amount=float(self._contracts),
-            order_type="market",
-            reason=reason,
-            strategy=self.name,
-            pair=self.option_symbol or self.pair,
-            leverage=self.OPTIONS_LEVERAGE,
-            position_type="long",
-            reduce_only=True,
-            exchange_id="delta",
-            metadata={
-                "peak_pnl": round(peak_pnl_pct, 4),
-                "exit_type": exit_type,
-                "db_already_closed": False,
-            },
-        )]
+        return [
+            Signal(
+                side="sell",
+                price=current_premium,
+                amount=float(self._contracts),
+                order_type="market",
+                reason=reason,
+                strategy=self.name,
+                pair=self.option_symbol or self.pair,
+                leverage=self.OPTIONS_LEVERAGE,
+                position_type="long",
+                reduce_only=True,
+                exchange_id="delta",
+                metadata={
+                    "peak_pnl": round(peak_pnl_pct, 4),
+                    "exit_type": exit_type,
+                    "db_already_closed": False,
+                },
+            )
+        ]
 
     async def _verify_option_position(self) -> list[Signal] | None:
         """Check exchange positions to detect if option is still open."""
@@ -2960,7 +3605,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 if mins_to_expiry <= self._EXPIRY_CLOSE_MINUTES:
                     self.logger.warning(
                         "[%s] POSITION VERIFY: not found, near expiry (%.1f min) — EXPIRY",
-                        self.option_symbol, mins_to_expiry,
+                        self.option_symbol,
+                        mins_to_expiry,
                     )
                     return await self._handle_position_gone("VERIFY_EXPIRY")
 
@@ -2974,13 +3620,16 @@ class OptionsScalpStrategy(BaseStrategy):
             self._position_verify_failures += 1
             self.logger.warning(
                 "[%s] Position verify fetch_positions failed (%d/%d): %s",
-                self.option_symbol, self._position_verify_failures,
-                self._MAX_VERIFY_FAILURES, e,
+                self.option_symbol,
+                self._position_verify_failures,
+                self._MAX_VERIFY_FAILURES,
+                e,
             )
             if self._position_verify_failures >= self._MAX_VERIFY_FAILURES:
                 self.logger.error(
                     "[%s] POSITION VERIFY: %d consecutive failures — forcing POSITION_GONE",
-                    self.option_symbol, self._position_verify_failures,
+                    self.option_symbol,
+                    self._position_verify_failures,
                 )
                 return await self._handle_position_gone("VERIFY_API_FAIL")
             return None
@@ -2989,7 +3638,9 @@ class OptionsScalpStrategy(BaseStrategy):
         """Handle a position that no longer exists on exchange."""
         is_expiry = False
         if self.expiry_dt:
-            time_past_expiry = (datetime.now(timezone.utc) - self.expiry_dt).total_seconds()
+            time_past_expiry = (
+                datetime.now(timezone.utc) - self.expiry_dt
+            ).total_seconds()
             is_expiry = time_past_expiry >= 0
 
         exit_reason = "EXPIRY" if is_expiry else "POSITION_GONE"
@@ -3004,77 +3655,121 @@ class OptionsScalpStrategy(BaseStrategy):
 
         self.logger.info(
             "[%s] %s (%s) — exit_premium=$%.4f (last_known=$%.4f entry=$%.4f)",
-            self.option_symbol, exit_reason, reason,
-            exit_premium, self._last_known_premium, self.entry_premium,
+            self.option_symbol,
+            exit_reason,
+            reason,
+            exit_premium,
+            self._last_known_premium,
+            self.entry_premium,
         )
 
         pnl_pct = 0.0
         pnl_usd = 0.0
         if self.entry_premium > 0:
             pnl_pct = (exit_premium - self.entry_premium) / self.entry_premium * 100
-            pnl_usd = self._calc_options_pnl(self.entry_premium, exit_premium, self._contracts)
+            pnl_usd = self._calc_options_pnl(
+                self.entry_premium, exit_premium, self._contracts
+            )
 
         if self._db:
             try:
                 from alpha.utils import iso_now
+
                 open_trade = await self._db.get_open_trade(
                     pair=self.option_symbol or self.pair,
                     exchange="delta",
                     strategy="options_scalp",
                 )
                 if open_trade:
-                    entry_price = float(open_trade.get("entry_price", self.entry_premium) or self.entry_premium)
-                    contracts = int(open_trade.get("contracts") or open_trade.get("amount") or self._contracts)
+                    entry_price = float(
+                        open_trade.get("entry_price", self.entry_premium)
+                        or self.entry_premium
+                    )
+                    contracts = int(
+                        open_trade.get("contracts")
+                        or open_trade.get("amount")
+                        or self._contracts
+                    )
                     multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                    spot = self._last_spot_price or (exit_premium * (200 if self._base_asset == "BTC" else 100))
+                    spot = self._last_spot_price or (
+                        exit_premium * (200 if self._base_asset == "BTC" else 100)
+                    )
                     calculated_fee = round(contracts * multiplier * spot * 0.000118, 8)
 
                     stored_entry_fee = float(open_trade.get("entry_fee") or 0)
-                    entry_fee = stored_entry_fee if 0 < stored_entry_fee <= 0.10 else calculated_fee
+                    entry_fee = (
+                        stored_entry_fee
+                        if 0 < stored_entry_fee <= 0.10
+                        else calculated_fee
+                    )
                     exit_fee = calculated_fee
 
-                    gross_pnl = self._calc_options_pnl(entry_price, exit_premium, contracts)
+                    gross_pnl = self._calc_options_pnl(
+                        entry_price, exit_premium, contracts
+                    )
                     net_pnl = gross_pnl - entry_fee - exit_fee
-                    db_pnl_pct = (exit_premium - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
+                    db_pnl_pct = (
+                        (exit_premium - entry_price) / entry_price * 100
+                        if entry_price > 0
+                        else 0.0
+                    )
 
                     peak_pnl_val = (
-                        (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-                    ) if self.entry_premium > 0 else 0
+                        (
+                            (self.highest_premium - self.entry_premium)
+                            / self.entry_premium
+                            * 100
+                        )
+                        if self.entry_premium > 0
+                        else 0
+                    )
 
-                    await self._db.update_trade(open_trade["id"], {
-                        "status": "closed",
-                        "exit_price": exit_premium,
-                        "closed_at": iso_now(),
-                        "pnl": round(net_pnl, 8),
-                        "net_pnl": round(net_pnl, 8),
-                        "pnl_pct": round(db_pnl_pct, 4),
-                        "gross_pnl": round(gross_pnl, 8),
-                        "entry_fee": round(entry_fee, 8),
-                        "exit_fee": round(exit_fee, 8),
-                        "peak_pnl": round(peak_pnl_val, 4),
-                        "reason": exit_reason_detail.lower(),
-                        "exit_reason": exit_reason,
-                        "position_state": None,
-                    })
+                    await self._db.update_trade(
+                        open_trade["id"],
+                        {
+                            "status": "closed",
+                            "exit_price": exit_premium,
+                            "closed_at": iso_now(),
+                            "pnl": round(net_pnl, 8),
+                            "net_pnl": round(net_pnl, 8),
+                            "pnl_pct": round(db_pnl_pct, 4),
+                            "gross_pnl": round(gross_pnl, 8),
+                            "entry_fee": round(entry_fee, 8),
+                            "exit_fee": round(exit_fee, 8),
+                            "peak_pnl": round(peak_pnl_val, 4),
+                            "reason": exit_reason_detail.lower(),
+                            "exit_reason": exit_reason,
+                            "position_state": None,
+                        },
+                    )
                     pnl_pct = db_pnl_pct
                     pnl_usd = net_pnl
                     self.logger.info(
                         "[%s] Trade %s closed as %s — exit=$%.4f P&L=$%.4f (%.2f%%)",
-                        self.option_symbol, open_trade["id"], exit_reason,
-                        exit_premium, net_pnl, db_pnl_pct,
+                        self.option_symbol,
+                        open_trade["id"],
+                        exit_reason,
+                        exit_premium,
+                        net_pnl,
+                        db_pnl_pct,
                     )
                 else:
                     self.logger.info(
-                        "[%s] No open trade found in DB — already closed", self.option_symbol,
+                        "[%s] No open trade found in DB — already closed",
+                        self.option_symbol,
                     )
             except Exception:
-                self.logger.exception("[%s] Failed to close trade as %s", self.option_symbol, exit_reason)
+                self.logger.exception(
+                    "[%s] Failed to close trade as %s", self.option_symbol, exit_reason
+                )
 
         try:
             alerts = getattr(self.executor, "alerts", None)
             if alerts is not None:
                 pair_short = self._base_asset
-                pnl_tag = f"+${pnl_usd:.4f}" if pnl_usd >= 0 else f"-${abs(pnl_usd):.4f}"
+                pnl_tag = (
+                    f"+${pnl_usd:.4f}" if pnl_usd >= 0 else f"-${abs(pnl_usd):.4f}"
+                )
                 if is_expiry:
                     msg = (
                         f"\u23f0 {pair_short} option expired\n"
@@ -3092,18 +3787,25 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                 await alerts.send_text(msg)
         except Exception:
-            self.logger.debug("[%s] Failed to send %s Telegram alert", self.option_symbol, exit_reason)
+            self.logger.debug(
+                "[%s] Failed to send %s Telegram alert", self.option_symbol, exit_reason
+            )
 
         await self._log_activity(
             f"options_{exit_reason.lower()}",
             f"{self.pair} — OPTIONS {exit_reason}: {reason} | "
             f"{self.option_side} strike=${self.strike_price:.0f} | "
             f"exit=${exit_premium:.4f} P&L={pnl_pct:+.1f}% ${pnl_usd:+.4f}",
-            {"reason": reason, "exit_reason": exit_reason,
-             "option_side": self.option_side,
-             "strike": self.strike_price, "symbol": self.option_symbol,
-             "exit_premium": exit_premium,
-             "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4)},
+            {
+                "reason": reason,
+                "exit_reason": exit_reason,
+                "option_side": self.option_side,
+                "strike": self.strike_price,
+                "symbol": self.option_symbol,
+                "exit_premium": exit_premium,
+                "pnl_pct": round(pnl_pct, 2),
+                "pnl_usd": round(pnl_usd, 4),
+            },
         )
 
         if pnl_pct >= 0:
@@ -3114,16 +3816,22 @@ class OptionsScalpStrategy(BaseStrategy):
 
         await self._clear_dashboard_position(exit_reason_detail, pnl_pct, pnl_usd)
 
-        self._position_gone_cooldown_until = time.monotonic() + self._POSITION_GONE_COOLDOWN_SEC
+        self._position_gone_cooldown_until = (
+            time.monotonic() + self._POSITION_GONE_COOLDOWN_SEC
+        )
         self.logger.info(
             "[%s] %s cooldown: no new options entries for %ds",
-            self.pair, exit_reason, self._POSITION_GONE_COOLDOWN_SEC,
+            self.pair,
+            exit_reason,
+            self._POSITION_GONE_COOLDOWN_SEC,
         )
 
         # Build exit signal with proper exit_type for position-gone scenarios
         peak_pnl_pct = (
-            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-        ) if self.entry_premium > 0 else 0
+            ((self.highest_premium - self.entry_premium) / self.entry_premium * 100)
+            if self.entry_premium > 0
+            else 0
+        )
 
         self.in_position = False
         OptionsScalpStrategy._global_in_position = False
@@ -3144,27 +3852,32 @@ class OptionsScalpStrategy(BaseStrategy):
         self._squeeze_breakout_time = None
 
         # Return Signal with exit_type so executor knows why we exited
-        return [Signal(
-            side="sell",
-            price=exit_premium,
-            amount=float(self._contracts) if self._contracts else 0.0,
-            order_type="market",
-            reason=f"Option {exit_reason_detail} — position closed externally",
-            strategy=self.name,
-            pair=self.option_symbol or self.pair,
-            leverage=self.OPTIONS_LEVERAGE,
-            position_type="long",
-            reduce_only=True,
-            exchange_id="delta",
-            metadata={
-                "peak_pnl": round(peak_pnl_pct, 4),
-                "exit_type": exit_reason_detail,
-                "db_already_closed": True,
-            },
-        )]
+        return [
+            Signal(
+                side="sell",
+                price=exit_premium,
+                amount=float(self._contracts) if self._contracts else 0.0,
+                order_type="market",
+                reason=f"Option {exit_reason_detail} — position closed externally",
+                strategy=self.name,
+                pair=self.option_symbol or self.pair,
+                leverage=self.OPTIONS_LEVERAGE,
+                position_type="long",
+                reduce_only=True,
+                exchange_id="delta",
+                metadata={
+                    "peak_pnl": round(peak_pnl_pct, 4),
+                    "exit_type": exit_reason_detail,
+                    "db_already_closed": True,
+                },
+            )
+        ]
 
     async def _clear_dashboard_position(
-        self, exit_type: str = "", pnl_pct: float = 0.0, pnl_usd: float = 0.0,
+        self,
+        exit_type: str = "",
+        pnl_pct: float = 0.0,
+        pnl_usd: float = 0.0,
     ) -> None:
         """Write a final options_state update that clears all position fields."""
         if not self._db:
@@ -3185,7 +3898,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         state = {
             "spot_price": spot_price or None,
-            "expiry": self._selected_expiry.isoformat() if self._selected_expiry else None,
+            "expiry": self._selected_expiry.isoformat()
+            if self._selected_expiry
+            else None,
             "expiry_label": None,
             "atm_strike": None,
             "call_premium": None,
@@ -3208,7 +3923,8 @@ class OptionsScalpStrategy(BaseStrategy):
             "signals_panel": {
                 "bb_width_pct": round(self._bb_width_pct, 3),
                 "bb_width_threshold": (
-                    self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                    self.SQUEEZE_BB_WIDTH_BTC
+                    if self._base_asset == "BTC"
                     else self.SQUEEZE_BB_WIDTH_ETH
                 ),
                 "squeeze_status": "WAITING",
@@ -3222,7 +3938,8 @@ class OptionsScalpStrategy(BaseStrategy):
             # Top-level squeeze fields (read directly by dashboard)
             "bb_width_pct": round(self._bb_width_pct, 3),
             "bb_width_threshold": (
-                self.SQUEEZE_BB_WIDTH_BTC if self._base_asset == "BTC"
+                self.SQUEEZE_BB_WIDTH_BTC
+                if self._base_asset == "BTC"
                 else self.SQUEEZE_BB_WIDTH_ETH
             ),
             "squeeze_active": False,
@@ -3247,10 +3964,14 @@ class OptionsScalpStrategy(BaseStrategy):
             await self._db.upsert_options_state(self.pair, state)
             self.logger.info(
                 "[%s] Dashboard options state cleared (exit=%s pnl=%+.1f%%)",
-                self.pair, exit_type, pnl_pct,
+                self.pair,
+                exit_type,
+                pnl_pct,
             )
         except Exception as e:
-            self.logger.warning("[%s] Failed to clear dashboard options state: %s", self.pair, e)
+            self.logger.warning(
+                "[%s] Failed to clear dashboard options state: %s", self.pair, e
+            )
 
     # ==================================================================
     # CALLBACKS
@@ -3263,7 +3984,9 @@ class OptionsScalpStrategy(BaseStrategy):
             fill_price = order.get("average") or order.get("price") or 0
             fill_price = float(fill_price) if fill_price else 0
             if not fill_price:
-                self.logger.error("[%s] NO FILL PRICE from exchange — skipping on_fill", signal.pair)
+                self.logger.error(
+                    "[%s] NO FILL PRICE from exchange — skipping on_fill", signal.pair
+                )
                 return
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True
@@ -3285,20 +4008,31 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.expiry_dt = datetime.fromisoformat(expiry_str)
             self.logger.info(
                 "[%s] OPTION FILLED — %s x%d strike=$%.0f premium=$%.4f exp=%s",
-                self.option_symbol, self.option_side, self._contracts,
-                self.strike_price, fill_price,
+                self.option_symbol,
+                self.option_side,
+                self._contracts,
+                self.strike_price,
+                fill_price,
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
             self._db_trade_id = None
+            self._last_exit_attempt_at = 0.0  # Reset exit tracking for new position
 
             try:
                 alerts = getattr(self.executor, "alerts", None)
                 if alerts is not None:
                     import asyncio
+
                     collateral = fill_price * self._contracts / self.OPTIONS_LEVERAGE
                     _mult = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                    _spot = self._last_spot_price or signal.metadata.get("spot_price", 0)
-                    _fee = round(self._contracts * _mult * _spot * 0.000118, 6) if _spot else 0
+                    _spot = self._last_spot_price or signal.metadata.get(
+                        "spot_price", 0
+                    )
+                    _fee = (
+                        round(self._contracts * _mult * _spot * 0.000118, 6)
+                        if _spot
+                        else 0
+                    )
                     msg = (
                         f"\U0001f4e5 {self._base_asset} option opened\n"
                         f"{self.option_side.upper()} ${self.strike_price:.0f} | "
@@ -3310,9 +4044,13 @@ class OptionsScalpStrategy(BaseStrategy):
                 pass
 
             import asyncio as _aio_entry
+
             _aio_entry.get_event_loop().create_task(
                 self._write_entry_to_db(
-                    fill_price, self._contracts, order, signal,
+                    fill_price,
+                    self._contracts,
+                    order,
+                    signal,
                     option_symbol=self.option_symbol,
                     option_side=self.option_side,
                     strike_price=self.strike_price,
@@ -3322,12 +4060,16 @@ class OptionsScalpStrategy(BaseStrategy):
         else:
             exit_fill = float(order.get("average") or order.get("price") or 0)
             if not exit_fill:
-                self.logger.error("[%s] NO EXIT FILL PRICE from exchange — skipping", signal.pair)
+                self.logger.error(
+                    "[%s] NO EXIT FILL PRICE from exchange — skipping", signal.pair
+                )
                 return
             exit_type = signal.metadata.get("exit_type", "UNKNOWN")
             self.logger.info(
                 "[%s] OPTION EXIT FILLED — %s closed @ $%.4f",
-                self.option_symbol or self.pair, self.option_side, exit_fill,
+                self.option_symbol or self.pair,
+                self.option_side,
+                exit_fill,
             )
 
             _sym = self.option_symbol or self.pair
@@ -3338,9 +4080,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
             if exit_fill > 0:
                 import asyncio
+
                 asyncio.get_event_loop().create_task(
                     self._close_option_trade_in_db(
-                        exit_fill, exit_type,
+                        exit_fill,
+                        exit_type,
                         option_symbol=_sym,
                         entry_premium=_entry_prem,
                         highest_premium=_highest_prem,
@@ -3365,13 +4109,15 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
             self._is_squeeze_entry = False
             self._squeeze_breakout_time = None
+            self._last_exit_attempt_at = 0.0  # Clear exit tracking when position closes
 
     def on_rejected(self, signal: Signal) -> None:
         """Handle rejected option orders."""
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
             self.logger.warning(
-                "[%s] Option entry REJECTED — not tracking", signal.pair,
+                "[%s] Option entry REJECTED — not tracking",
+                signal.pair,
             )
         elif signal.reduce_only and self.in_position:
             self.logger.warning(
@@ -3392,6 +4138,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
             self._is_squeeze_entry = False
             self._squeeze_breakout_time = None
+            self._last_exit_attempt_at = 0.0  # Reset exit tracking on rejection
 
     # ==================================================================
     # STATS
