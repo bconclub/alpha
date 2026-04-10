@@ -148,40 +148,89 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
   };
   
   const breakoutDisplay = getBreakoutDisplay();
+  const directionLabel = asset.direction === 'long'
+    ? 'CALL bias'
+    : asset.direction === 'short'
+      ? 'PUT bias'
+      : 'Neutral bias';
+  const watchLabel = asset.state === 'position_open'
+    ? 'Managing open breakout'
+    : asset.breakoutState === 'DETECTED'
+      ? 'Watch for breakout confirmation'
+      : asset.breakoutState === 'CONFIRMED'
+        ? 'Breakout already confirmed'
+        : asset.state === 'squeeze_active'
+          ? 'Watch for expansion from squeeze'
+          : 'Waiting for squeeze setup';
+  const scanLabel = lastScanSecs < 60
+    ? `${lastScanSecs}s ago`
+    : `${Math.floor(lastScanSecs / 60)}m ${lastScanSecs % 60}s ago`;
 
   return (
     <div className={cn(
-      'bg-[#141419] border border-white/5 rounded-xl p-4 border-l-4',
+      'rounded-2xl border border-white/8 bg-[linear-gradient(180deg,#171821_0%,#101117_100%)] p-4 border-l-4 shadow-[0_18px_44px_rgba(0,0,0,0.28)]',
       state.leftBorder
     )}>
-      {/* 1. Asset + price + status badge */}
-      <div className="flex items-center justify-between gap-2 mb-4">
+      <div className="mb-4 flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="text-lg font-bold text-white">{asset.asset}</span>
+          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-gray-400">
+            Strategy View
+          </span>
           <span className="text-sm text-gray-400 font-mono">
             {asset.price != null ? `$${formatNumber(asset.price)}` : '—'}
           </span>
         </div>
         
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-col items-end gap-2">
           <span className={cn(
             'w-2 h-2 rounded-full',
             state.dotColor,
             state.pulse && 'animate-pulse'
           )} />
           <span className={cn(
-            'px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded border',
+            'px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.2em] rounded-full border',
             state.badgeColor
           )}>
             {state.label}
           </span>
+          <span className="text-[11px] text-gray-500">Live scan {scanLabel}</span>
+        </div>
+      </div>
+
+      <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div className="rounded-xl border border-white/8 bg-black/10 p-3">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Market At</p>
+          <p className="mt-2 text-lg font-semibold text-white">
+            {asset.strikePrice ? `$${asset.strikePrice.toLocaleString()}` : 'No strike'}
+          </p>
+          <p className="mt-1 text-xs text-gray-400">ATM strike</p>
+        </div>
+
+        <div className="rounded-xl border border-white/8 bg-black/10 p-3">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Bias</p>
+          <p className="mt-2 flex items-center gap-2 text-sm font-semibold text-white">
+            <span>{getDirectionEmoji(asset.direction)}</span>
+            <span>{directionLabel}</span>
+          </p>
+          <p className="mt-1 text-xs text-gray-400">{watchLabel}</p>
+        </div>
+
+        <div className="rounded-xl border border-white/8 bg-black/10 p-3">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Breakout</p>
+          <p className={cn('mt-2 text-sm font-semibold', breakoutDisplay.color)}>
+            {breakoutDisplay.label}
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            {breakoutDisplay.extra ?? 'No breakout pressure right now'}
+          </p>
         </div>
       </div>
 
       {/* 2. Signal strength bar */}
-      <div className="mb-4">
-        <div className="flex justify-between text-xs mb-1">
-          <span className="text-gray-400">Signal</span>
+      <div className="mb-4 rounded-xl border border-white/8 bg-white/[0.03] p-3">
+        <div className="flex justify-between text-xs mb-2">
+          <span className="text-gray-400 uppercase tracking-[0.18em]">Signal Strength</span>
           <span className="font-mono text-white">{asset.confidence.toFixed(0)}%</span>
         </div>
         <div className="relative h-2 bg-gray-800 rounded-full overflow-hidden">
@@ -192,60 +241,36 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
         </div>
       </div>
 
-      {/* 3. Strike */}
-      {asset.strikePrice && (
-        <div className="mb-3 flex items-center gap-2">
-          <span className="text-xs text-gray-500 uppercase">Strike</span>
-          <span className="font-mono font-bold text-white">${asset.strikePrice.toLocaleString()}</span>
-        </div>
-      )}
-
-      {/* 4. Cheaper side - only show the cheaper one */}
-      {cheaperPremium != null && (
-        <div className={cn(
-          "mb-3 p-2 rounded-lg border",
-          isCallCheaper 
-            ? "bg-green-500/10 border-green-500/30" 
-            : "bg-red-500/10 border-red-500/30"
-        )}>
-          <div className="flex items-center gap-2">
-            {isCallCheaper ? (
-              <>
-                <ArrowUp className="w-4 h-4 text-green-500" />
-                <span className="text-sm font-bold text-green-500">CALL</span>
-                <span className="text-lg font-mono font-bold text-white">${cheaperPremium}</span>
-              </>
-            ) : (
-              <>
-                <ArrowDown className="w-4 h-4 text-red-500" />
-                <span className="text-sm font-bold text-red-500">PUT</span>
-                <span className="text-lg font-mono font-bold text-white">${cheaperPremium}</span>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* 5. Breakout status */}
-      <div className="mb-3 flex items-center justify-between px-3 py-2 bg-white/5 rounded-lg">
-        <span className="text-xs text-gray-500 uppercase">Breakout</span>
-        <div className="flex items-center gap-2">
-          <span className={cn("text-sm font-bold", breakoutDisplay.color)}>
-            {breakoutDisplay.label}
-          </span>
-          {breakoutDisplay.extra && (
-            <span className="text-xs font-mono text-gray-400">{breakoutDisplay.extra}</span>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-xl border border-white/8 bg-white/[0.03] p-3">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Going After</p>
+          {cheaperPremium != null ? (
+            <div className="mt-2 flex items-center gap-2">
+              {isCallCheaper ? (
+                <>
+                  <ArrowUp className="w-4 h-4 text-green-500" />
+                  <span className="text-sm font-bold text-green-400">CALL</span>
+                  <span className="text-lg font-mono font-bold text-white">${cheaperPremium}</span>
+                </>
+              ) : (
+                <>
+                  <ArrowDown className="w-4 h-4 text-red-500" />
+                  <span className="text-sm font-bold text-red-400">PUT</span>
+                  <span className="text-lg font-mono font-bold text-white">${cheaperPremium}</span>
+                </>
+              )}
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-gray-400">Premium not available</p>
           )}
+          <p className="mt-1 text-xs text-gray-500">Cheaper premium side</p>
         </div>
-      </div>
 
-      {/* 6. Last scan */}
-      <div className="flex justify-between items-center text-xs text-gray-600">
-        <span>Last scan: {lastScanSecs < 60 ? `${lastScanSecs}s` : `${Math.floor(lastScanSecs / 60)}m ${lastScanSecs % 60}s`} ago</span>
-        <span className="flex items-center gap-1">
-          <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-          Live
-        </span>
+        <div className="rounded-xl border border-dashed border-white/10 bg-black/10 p-3">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">What To Watch</p>
+          <p className={cn('mt-2 text-sm font-semibold', breakoutDisplay.color)}>{breakoutDisplay.label}</p>
+          <p className="mt-1 text-xs text-gray-400">{breakoutDisplay.extra ?? watchLabel}</p>
+        </div>
       </div>
     </div>
   );
