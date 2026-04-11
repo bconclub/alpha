@@ -134,12 +134,8 @@ export function Sidebar() {
           <aside className="absolute left-0 top-0 h-full w-64 bg-[#0a0a0f] border-r border-zinc-800 flex flex-col animate-slide-in">
             {/* Drawer header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/50">
-              <div className="flex items-center gap-2.5">
-                <span className={cn(
-                  'inline-block h-2 w-2 rounded-full',
-                  isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-                )} />
-                <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
+              <div className="text-[10px] uppercase tracking-[0.28em] text-zinc-500">
+                Menu
               </div>
               <button
                 onClick={() => setDrawerOpen(false)}

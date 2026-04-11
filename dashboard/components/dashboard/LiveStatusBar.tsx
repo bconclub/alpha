@@ -298,7 +298,6 @@ export function LiveStatusBar() {
   }, [regimeSince]);
 
   const deltaBalance = Number(botStatus?.delta_balance ?? 0);
-  const deltaBalanceInr = botStatus?.delta_balance_inr;
 
   const totalCapital = deltaBalance > 0 ? deltaBalance : (botStatus?.capital || 0);
   const inrRate = botStatus?.inr_usd_rate ?? 86.5;
@@ -320,24 +319,26 @@ export function LiveStatusBar() {
     let wins = 0;
     let losses = 0;
     let fees = 0;
+    let total = 0;
 
     for (const t of trades) {
       if (t.status !== 'closed') continue;
       const tradeOpenedAtMs = new Date(t.timestamp).getTime();
       if (tradeOpenedAtMs <= cutoffMs) continue;
 
+      total++;
       pnl += t.pnl ?? 0;
       if ((t.pnl ?? 0) > 0) wins++;
       else if ((t.pnl ?? 0) < 0) losses++;
       fees += (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
     }
 
-    return { pnl, wins, losses, fees };
+    return { pnl, wins, losses, fees, total };
   }, [trades]);
 
   const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
-  const [exchRange, setExchRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
   const [cardView, setCardView] = useState<CardView>('pnl');
+  const exchStats = { delta: {} as any };
 
   // Deposit stats filtered by same pnlRange
   const depositStats = useMemo(() => {
@@ -395,40 +396,6 @@ export function LiveStatusBar() {
     const winRate = total > 0 ? (wins / total) * 100 : 0;
     return { pnl, total, wins, losses: total - wins, winRate, fees, grossPnl };
   }, [trades, pnlRange]);
-
-  // Per-exchange stats filtered by exchRange (same logic as pnlStats)
-  const exchStats = useMemo(() => {
-    const now = Date.now();
-    const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    let cutoffMs: number;
-    if (exchRange === '24h') {
-      const istNow = new Date(now + istOffsetMs);
-      const todayIST = istNow.toISOString().slice(0, 10);
-      cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
-    } else {
-      const days = exchRange === '7d' ? 7 : exchRange === '14d' ? 14 : 30;
-      cutoffMs = now - days * 24 * 60 * 60 * 1000;
-    }
-    const byExch: Record<string, { pnl: number; total: number; wins: number; fees: number; grossPnl: number }> = {};
-    for (const t of trades) {
-      if (t.status !== 'closed') continue;
-      if (new Date(t.timestamp).getTime() < cutoffMs) continue;
-      const ex = t.exchange ?? 'unknown';
-      if (!byExch[ex]) byExch[ex] = { pnl: 0, total: 0, wins: 0, fees: 0, grossPnl: 0 };
-      byExch[ex].pnl += t.pnl ?? 0;
-      byExch[ex].total++;
-      if ((t.pnl ?? 0) > 0) byExch[ex].wins++;
-      const tradeFees = (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
-      byExch[ex].fees += tradeFees;
-      byExch[ex].grossPnl += t.gross_pnl != null ? t.gross_pnl : ((t.pnl ?? 0) + tradeFees);
-    }
-    const build = (ex: string) => {
-      const s = byExch[ex];
-      if (!s || s.total === 0) return null;
-      return { pnl: s.pnl, total: s.total, wins: s.wins, losses: s.total - s.wins, wr: (s.wins / s.total) * 100, fees: s.fees, grossPnl: s.grossPnl };
-    };
-    return { delta: build('delta') };
-  }, [trades, exchRange]);
 
   // Build sparkline data: cumulative PnL from dailyPnL for selected range
   const sparklineData = useMemo(() => {
@@ -507,23 +474,6 @@ export function LiveStatusBar() {
 
         {/* Row 2 — Delta exchange balance card */}
         <div className="space-y-2">
-          <div className="flex items-center gap-1">
-            {(['24h', '7d', '14d', '30d'] as const).map((range) => (
-              <button
-                key={range}
-                onClick={() => setExchRange(range)}
-                className={cn(
-                  'px-2 py-0.5 rounded text-[10px] font-bold transition-colors',
-                  exchRange === range
-                    ? 'bg-zinc-700 text-white'
-                    : 'text-zinc-500 hover:text-zinc-300',
-                )}
-              >
-                {range.toUpperCase()}
-              </button>
-            ))}
-          </div>
-
           {deltaConnected && deltaBalance > 0 && (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
               <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">TODAY</div>
@@ -537,7 +487,10 @@ export function LiveStatusBar() {
                 ${todayStats.fees.toFixed(2)} fees
               </div>
               <div className="text-[10px] text-zinc-400 font-mono mt-1.5">
-                {todayStats.wins}W · {todayStats.losses}L
+                {todayStats.wins}W/{todayStats.losses}L
+              </div>
+              <div className="text-[10px] text-zinc-400 font-mono mt-1">
+                {todayStats.total} trades
               </div>
               {false && (
                 <>
@@ -713,24 +666,6 @@ export function LiveStatusBar() {
       <div className="hidden md:flex md:flex-row md:items-center md:justify-between gap-4">
         {/* Exchange Cards */}
         <div className="flex gap-3 flex-1 min-w-0">
-          {/* Exchange time range toggle */}
-          <div className="flex flex-col gap-2 justify-center">
-            {(['24h', '7d', '14d', '30d'] as const).map((range) => (
-              <button
-                key={range}
-                onClick={() => setExchRange(range)}
-                className={cn(
-                  'px-2 py-0.5 rounded text-[10px] font-bold transition-colors',
-                  exchRange === range
-                    ? 'bg-zinc-700 text-white'
-                    : 'text-zinc-500 hover:text-zinc-300',
-                )}
-              >
-                {range.toUpperCase()}
-              </button>
-            ))}
-          </div>
-
           {/* Delta Card */}
           {deltaConnected && deltaBalance > 0 && (
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
@@ -747,7 +682,10 @@ export function LiveStatusBar() {
               ${todayStats.fees.toFixed(2)} fees
             </div>
             <div className="text-[10px] text-zinc-400 font-mono mt-2">
-              {todayStats.wins}W · {todayStats.losses}L
+              {todayStats.wins}W/{todayStats.losses}L
+            </div>
+            <div className="text-[10px] text-zinc-400 font-mono mt-1">
+              {todayStats.total} trades
             </div>
             {false && (
               <>
