@@ -553,18 +553,6 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white p-3 sm:p-4 md:p-6 pb-24 md:pb-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <span className={cn(
-            'w-2 h-2 rounded-full',
-            isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'
-          )} />
-          <span className="text-lg font-bold tracking-wider">ALPHA</span>
-          <span className="text-xs text-gray-600">v{process.env.ALPHA_VERSION ?? '0.12.8'}</span>
-        </div>
-      </div>
-
       {/* 3-Card Row: Delta Balance | Total Capital + Timeframe | Market Regime */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
         {/* Card 1: Delta Balance */}
