@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
+import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, cn } from '@/lib/utils';
 
 function formatUptime(seconds: number): string {
@@ -326,6 +327,41 @@ export function LiveStatusBar() {
     return { pnl, wins, losses, fees, total, winRate };
   }, [trades]);
 
+  // Direct Supabase fetch for today's trades — refreshes every 30s
+  interface LiveTodayStats {
+    pnl: number; fees: number; wins: number; losses: number; total: number; winRate: number;
+  }
+  const [liveToday, setLiveToday] = useState<LiveTodayStats | null>(null);
+
+  useEffect(() => {
+    const fetchToday = async () => {
+      const db = getSupabase();
+      if (!db) return;
+      const istOffset = 5.5 * 60 * 60 * 1000;
+      const nowIST = new Date(Date.now() + istOffset);
+      const todayIST = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+      const todayStartISO = new Date(todayIST + 'T00:00:00+05:30').toISOString();
+      const { data } = await db
+        .from('trades')
+        .select('pnl, entry_fee, exit_fee, status')
+        .gte('opened_at', todayStartISO)
+        .neq('status', 'open');
+      if (!data) return;
+      const pnl = data.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
+      const fees = data.reduce((s: number, t: any) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
+      const wins = data.filter((t: any) => (t.pnl ?? 0) > 0).length;
+      const losses = data.filter((t: any) => (t.pnl ?? 0) <= 0).length;
+      const total = data.length;
+      setLiveToday({ pnl, fees, wins, losses, total, winRate: total > 0 ? (wins / total) * 100 : 0 });
+    };
+    fetchToday();
+    const id = setInterval(fetchToday, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Use live fetch when available, fall back to context-derived stats
+  const today = liveToday ?? todayStats;
+
   const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
   const [cardView, setCardView] = useState<CardView>('pnl');
   const exchStats = { delta: {} as any };
@@ -467,21 +503,21 @@ export function LiveStatusBar() {
           <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Today</div>
           <span className={cn(
             'font-mono text-2xl font-bold',
-            todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+            today.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
           )}>
-            {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
+            {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
           </span>
           <div className="text-[10px] text-zinc-400 font-mono mt-1">
-            {todayStats.total > 0 ? `${todayStats.winRate.toFixed(0)}% WR` : '—'}
+            {today.total > 0 ? `${today.winRate.toFixed(0)}% WR` : '—'}
           </div>
           <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
-            ${todayStats.fees.toFixed(2)} fees
+            ${today.fees.toFixed(2)} fees
           </div>
           <div className="text-[10px] text-zinc-400 font-mono mt-1.5">
-            {todayStats.wins}W / {todayStats.losses}L
+            {today.wins}W / {today.losses}L
           </div>
           <div className="text-[10px] text-zinc-500 font-mono mt-1">
-            {todayStats.total} trades
+            {today.total} trades
           </div>
         </div>
 
@@ -646,21 +682,21 @@ export function LiveStatusBar() {
             <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Today</div>
             <span className={cn(
               'font-mono text-2xl font-bold',
-              todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+              today.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
             )}>
-              {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
+              {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
             </span>
             <div className="text-[10px] text-zinc-400 font-mono mt-1">
-              {todayStats.total > 0 ? `${todayStats.winRate.toFixed(0)}% WR` : '—'}
+              {today.total > 0 ? `${today.winRate.toFixed(0)}% WR` : '—'}
             </div>
             <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
-              ${todayStats.fees.toFixed(2)} fees
+              ${today.fees.toFixed(2)} fees
             </div>
             <div className="text-[10px] text-zinc-400 font-mono mt-2">
-              {todayStats.wins}W / {todayStats.losses}L
+              {today.wins}W / {today.losses}L
             </div>
             <div className="text-[10px] text-zinc-500 font-mono mt-1">
-              {todayStats.total} trades
+              {today.total} trades
             </div>
           </div>
 
