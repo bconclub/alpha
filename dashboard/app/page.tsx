@@ -421,7 +421,7 @@ export default function DashboardPage() {
   }, [trades]);
 
   // Direct Supabase fetch for today's trades — refreshes every 30s
-  const [liveToday, setLiveToday] = useState<{ pnl: number; fees: number; wins: number; losses: number; total: number; winRate: number } | null>(null);
+  const [liveToday, setLiveToday] = useState<{ pnl: number; fees: number; wins: number; losses: number; total: number; winRate: number; totalLoss: number } | null>(null);
   useEffect(() => {
     const fetchToday = async () => {
       const db = getSupabase();
@@ -439,15 +439,16 @@ export default function DashboardPage() {
       const pnl = data.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
       const fees = data.reduce((s: number, t: any) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
       const wins = data.filter((t: any) => (t.pnl ?? 0) > 0).length;
-      const losses = data.filter((t: any) => (t.pnl ?? 0) <= 0).length;
+      const losses = data.filter((t: any) => (t.pnl ?? 0) < 0).length;
+      const totalLoss = data.filter((t: any) => (t.pnl ?? 0) < 0).reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
       const total = data.length;
-      setLiveToday({ pnl, fees, wins, losses, total, winRate: total > 0 ? (wins / total) * 100 : 0 });
+      setLiveToday({ pnl, fees, wins, losses, total, winRate: total > 0 ? (wins / total) * 100 : 0, totalLoss });
     };
     fetchToday();
     const id = setInterval(fetchToday, 30_000);
     return () => clearInterval(id);
   }, []);
-  const today = liveToday ?? todayStats;
+  const today = liveToday ?? { ...todayStats, totalLoss: 0 };
 
   // Total trades count
   const totalTrades = trades.filter(t => t.status === 'closed').length;
@@ -634,20 +635,34 @@ export default function DashboardPage() {
         </div>
 
         {/* Card 2: Today's P&L */}
-        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4 flex flex-col justify-between">
           <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Today</div>
-          <div className={cn('text-2xl font-bold font-mono', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
+          <div className={cn('text-3xl font-bold font-mono mb-4', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
             {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
           </div>
-          <div className="text-xs text-gray-400 font-mono mt-1">
-            {today.total > 0 ? `${today.winRate.toFixed(0)}% WR` : '—'}
-          </div>
-          <div className="text-xs text-gray-500 font-mono mt-0.5">
-            ${today.fees.toFixed(2)} fees
-          </div>
-          <div className="flex items-center justify-between mt-2">
-            <span className="text-xs text-gray-400 font-mono">{today.wins}W / {today.losses}L</span>
-            <span className="text-xs text-gray-500 font-mono">{today.total} trades</span>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Win Rate</div>
+              <div className="text-sm font-mono text-gray-200">{today.total > 0 ? `${today.winRate.toFixed(0)}%` : '—'}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Fees</div>
+              <div className="text-sm font-mono text-gray-200">${today.fees.toFixed(2)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">W / L</div>
+              <div className="text-sm font-mono text-gray-200">{today.wins}W / {today.losses}L</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Total Loss</div>
+              <div className="text-sm font-mono text-red-400">
+                {today.totalLoss < 0 ? `-$${Math.abs(today.totalLoss).toFixed(2)}` : '—'}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Trades</div>
+              <div className="text-sm font-mono text-gray-200">{today.total}</div>
+            </div>
           </div>
         </div>
 
