@@ -3368,6 +3368,10 @@ class OptionsScalpStrategy(BaseStrategy):
         if not self.options_exchange or not self.option_symbol:
             return None
 
+        # Don't verify in first 60s after entry — Delta may not show position immediately
+        if self.entry_time and time.monotonic() - self.entry_time < 60:
+            return None
+
         try:
             positions = await self.options_exchange.fetch_positions()
             self._position_verify_failures = 0
