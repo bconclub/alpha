@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
+import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, formatNumber, cn } from '@/lib/utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
@@ -419,6 +420,35 @@ export default function DashboardPage() {
     return { pnl, total, wins, losses: total - wins, winRate, fees, grossPnl };
   }, [trades]);
 
+  // Direct Supabase fetch for today's trades — refreshes every 30s
+  const [liveToday, setLiveToday] = useState<{ pnl: number; fees: number; wins: number; losses: number; total: number; winRate: number } | null>(null);
+  useEffect(() => {
+    const fetchToday = async () => {
+      const db = getSupabase();
+      if (!db) return;
+      const istOffset = 5.5 * 60 * 60 * 1000;
+      const nowIST = new Date(Date.now() + istOffset);
+      const todayIST = nowIST.toISOString().slice(0, 10);
+      const todayStartISO = new Date(todayIST + 'T00:00:00+05:30').toISOString();
+      const { data } = await db
+        .from('trades')
+        .select('pnl, entry_fee, exit_fee, status')
+        .gte('opened_at', todayStartISO)
+        .neq('status', 'open');
+      if (!data) return;
+      const pnl = data.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
+      const fees = data.reduce((s: number, t: any) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
+      const wins = data.filter((t: any) => (t.pnl ?? 0) > 0).length;
+      const losses = data.filter((t: any) => (t.pnl ?? 0) <= 0).length;
+      const total = data.length;
+      setLiveToday({ pnl, fees, wins, losses, total, winRate: total > 0 ? (wins / total) * 100 : 0 });
+    };
+    fetchToday();
+    const id = setInterval(fetchToday, 30_000);
+    return () => clearInterval(id);
+  }, []);
+  const today = liveToday ?? todayStats;
+
   // Total trades count
   const totalTrades = trades.filter(t => t.status === 'closed').length;
   const liveStrategyCount = useMemo(() => {
@@ -553,8 +583,8 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white p-3 sm:p-4 md:p-6 pb-24 md:pb-6">
-      {/* 2-Card Row: Total Capital + Timeframe | Market Regime */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+      {/* 3-Card Row: Total Capital | Today P&L | Market Regime */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
         {/* Card 1: Total Capital + Timeframe Toggle */}
         <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
@@ -600,6 +630,24 @@ export default function DashboardPage() {
                 {timeframeStats.pnl >= 0 ? '+' : ''}{formatCurrency(timeframeStats.pnl)}
               </span>
             )}
+          </div>
+        </div>
+
+        {/* Card 2: Today's P&L */}
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+          <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Today</div>
+          <div className={cn('text-2xl font-bold font-mono', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
+            {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
+          </div>
+          <div className="text-xs text-gray-400 font-mono mt-1">
+            {today.total > 0 ? `${today.winRate.toFixed(0)}% WR` : '—'}
+          </div>
+          <div className="text-xs text-gray-500 font-mono mt-0.5">
+            ${today.fees.toFixed(2)} fees
+          </div>
+          <div className="flex items-center justify-between mt-2">
+            <span className="text-xs text-gray-400 font-mono">{today.wins}W / {today.losses}L</span>
+            <span className="text-xs text-gray-500 font-mono">{today.total} trades</span>
           </div>
         </div>
 
