@@ -309,31 +309,20 @@ export function LiveStatusBar() {
 
   const todayStats = useMemo(() => {
     const now = new Date();
-    const istNowString = now.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-    const istNow = new Date(istNowString);
-    const istMidnight = new Date(istNow);
-    istMidnight.setHours(0, 0, 0, 0);
-    const cutoffMs = istMidnight.getTime() - (5.5 * 60 * 60 * 1000);
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    let pnl = 0;
-    let wins = 0;
-    let losses = 0;
-    let fees = 0;
-    let total = 0;
+    const todayTrades = trades.filter(t => {
+      const opened = new Date(t.timestamp); // timestamp is normalized from opened_at
+      return opened >= todayStart && t.status !== 'open';
+    });
 
-    for (const t of trades) {
-      if (t.status !== 'closed') continue;
-      const tradeOpenedAtMs = new Date(t.timestamp).getTime();
-      if (tradeOpenedAtMs <= cutoffMs) continue;
-
-      total++;
-      pnl += t.pnl ?? 0;
-      if ((t.pnl ?? 0) > 0) wins++;
-      else if ((t.pnl ?? 0) < 0) losses++;
-      fees += (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
-    }
-
+    const pnl = todayTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+    const fees = todayTrades.reduce((s, t) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
+    const wins = todayTrades.filter(t => (t.pnl ?? 0) > 0).length;
+    const losses = todayTrades.filter(t => (t.pnl ?? 0) <= 0).length;
+    const total = todayTrades.length;
     const winRate = total > 0 ? (wins / total) * 100 : 0;
+
     return { pnl, wins, losses, fees, total, winRate };
   }, [trades]);
 
