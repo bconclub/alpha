@@ -553,25 +553,9 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white p-3 sm:p-4 md:p-6 pb-24 md:pb-6">
-      {/* 3-Card Row: Delta Balance | Total Capital + Timeframe | Market Regime */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-        {/* Card 1: Delta Balance */}
-        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
-          <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">Delta Balance</div>
-          <div className="text-2xl font-bold font-mono">{formatCurrency(deltaBalance)}</div>
-          <div className="text-xs text-gray-500 mt-1">
-            {todayStats.wins}W / {todayStats.losses}L • {todayStats.winRate.toFixed(0)}% WR • {todayStats.total} trades
-          </div>
-          <div className="text-xs mt-1">
-            <span className={todayStats.grossPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
-              {todayStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(todayStats.grossPnl)} P&L
-            </span>
-            <span className="text-gray-600"> • </span>
-            <span className="text-gray-500">${todayStats.fees.toFixed(2)} fees</span>
-          </div>
-        </div>
-
-        {/* Card 2: Total Capital + Timeframe Toggle */}
+      {/* 2-Card Row: Total Capital + Timeframe | Market Regime */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+        {/* Card 1: Total Capital + Timeframe Toggle */}
         <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-gray-500 uppercase tracking-wider">Total Capital</span>
