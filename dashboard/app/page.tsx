@@ -635,33 +635,27 @@ export default function DashboardPage() {
         </div>
 
         {/* Card 2: Today's P&L */}
-        <div className="bg-[#141419] border border-white/5 rounded-xl p-4 flex flex-col justify-between">
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
           <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Today</div>
-          <div className={cn('text-3xl font-bold font-mono mb-4', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
+          <div className={cn('text-2xl font-bold font-mono mb-3', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
             {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
           </div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
             <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Win Rate</div>
-              <div className="text-sm font-mono text-gray-200">{today.total > 0 ? `${today.winRate.toFixed(0)}%` : '—'}</div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider">Win Rate</div>
+              <div className="text-xs font-mono text-gray-200 mt-0.5">{today.total > 0 ? `${today.winRate.toFixed(0)}%` : '—'}</div>
             </div>
             <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Fees</div>
-              <div className="text-sm font-mono text-gray-200">${today.fees.toFixed(2)}</div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider">Fees</div>
+              <div className="text-xs font-mono text-gray-200 mt-0.5">${today.fees.toFixed(2)}</div>
             </div>
             <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">W / L</div>
-              <div className="text-sm font-mono text-gray-200">{today.wins}W / {today.losses}L</div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider">W / L</div>
+              <div className="text-xs font-mono text-gray-200 mt-0.5">{today.wins}W / {today.losses}L</div>
             </div>
             <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Total Loss</div>
-              <div className="text-sm font-mono text-red-400">
-                {today.totalLoss < 0 ? `-$${Math.abs(today.totalLoss).toFixed(2)}` : '—'}
-              </div>
-            </div>
-            <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Trades</div>
-              <div className="text-sm font-mono text-gray-200">{today.total}</div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider">Trades</div>
+              <div className="text-xs font-mono text-gray-200 mt-0.5">{today.total}</div>
             </div>
           </div>
         </div>
