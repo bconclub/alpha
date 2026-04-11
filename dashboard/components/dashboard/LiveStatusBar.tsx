@@ -476,7 +476,6 @@ export function LiveStatusBar() {
         <div className="space-y-2">
           {deltaConnected && deltaBalance > 0 && (
             <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
-              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">TODAY</div>
               <span className={cn(
                 'font-mono text-2xl font-bold',
                 todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
@@ -492,20 +491,6 @@ export function LiveStatusBar() {
               <div className="text-[10px] text-zinc-400 font-mono mt-1">
                 {todayStats.total} trades
               </div>
-              {false && (
-                <>
-                  <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                    {exchStats.delta.wins}W / {exchStats.delta.losses}L · {exchStats.delta.wr.toFixed(0)}% WR · {exchStats.delta.total} trades
-                  </div>
-                  <div className="text-[10px] font-mono">
-                    <span className={exchStats.delta.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                      {exchStats.delta.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.delta.grossPnl)} P&L
-                    </span>
-                    <span className="text-zinc-600"> · </span>
-                    <span className="text-zinc-500">${exchStats.delta.fees.toFixed(2)} fees</span>
-                  </div>
-                </>
-              )}
             </div>
           )}
         </div>
@@ -669,15 +654,12 @@ export function LiveStatusBar() {
           {/* Delta Card */}
           {deltaConnected && deltaBalance > 0 && (
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">TODAY</div>
-            <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-              <span className={cn(
-                'font-mono text-2xl font-bold truncate',
-                todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-              )}>
-                {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
-              </span>
-            </div>
+            <span className={cn(
+              'font-mono text-2xl font-bold',
+              todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+            )}>
+              {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
+            </span>
             <div className="text-[10px] text-zinc-500 font-mono mt-1">
               ${todayStats.fees.toFixed(2)} fees
             </div>
@@ -687,20 +669,6 @@ export function LiveStatusBar() {
             <div className="text-[10px] text-zinc-400 font-mono mt-1">
               {todayStats.total} trades
             </div>
-            {false && (
-              <>
-                <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                  {exchStats.delta.wins}W / {exchStats.delta.losses}L · {exchStats.delta.wr.toFixed(0)}% WR · {exchStats.delta.total} trades
-                </div>
-                <div className="text-[10px] font-mono">
-                  <span className={exchStats.delta.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                    {exchStats.delta.grossPnl >= 0 ? '+' : ''}{formatCurrency(exchStats.delta.grossPnl)} P&L
-                  </span>
-                  <span className="text-zinc-600"> · </span>
-                  <span className="text-zinc-500">${exchStats.delta.fees.toFixed(2)} fees</span>
-                </div>
-              </>
-            )}
           </div>
           )}
 
