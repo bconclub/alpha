@@ -333,7 +333,8 @@ export function LiveStatusBar() {
       fees += (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
     }
 
-    return { pnl, wins, losses, fees, total };
+    const winRate = total > 0 ? (wins / total) * 100 : 0;
+    return { pnl, wins, losses, fees, total, winRate };
   }, [trades]);
 
   const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
@@ -472,27 +473,27 @@ export function LiveStatusBar() {
           </div>
         </div>
 
-        {/* Row 2 — Delta exchange balance card */}
-        <div className="space-y-2">
-          {deltaConnected && deltaBalance > 0 && (
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
-              <span className={cn(
-                'font-mono text-2xl font-bold',
-                todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-              )}>
-                {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
-              </span>
-              <div className="text-[10px] text-zinc-500 font-mono mt-1">
-                ${todayStats.fees.toFixed(2)} fees
-              </div>
-              <div className="text-[10px] text-zinc-400 font-mono mt-1.5">
-                {todayStats.wins}W/{todayStats.losses}L
-              </div>
-              <div className="text-[10px] text-zinc-400 font-mono mt-1">
-                {todayStats.total} trades
-              </div>
-            </div>
-          )}
+        {/* Row 2 — Today's performance */}
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Today</div>
+          <span className={cn(
+            'font-mono text-2xl font-bold',
+            todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+          )}>
+            {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
+          </span>
+          <div className="text-[10px] text-zinc-400 font-mono mt-1">
+            {todayStats.total > 0 ? `${todayStats.winRate.toFixed(0)}% WR` : '—'}
+          </div>
+          <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
+            ${todayStats.fees.toFixed(2)} fees
+          </div>
+          <div className="text-[10px] text-zinc-400 font-mono mt-1.5">
+            {todayStats.wins}W / {todayStats.losses}L
+          </div>
+          <div className="text-[10px] text-zinc-500 font-mono mt-1">
+            {todayStats.total} trades
+          </div>
         </div>
 
         {/* Row 2 — PnL / Deposits toggled card */}
@@ -651,26 +652,28 @@ export function LiveStatusBar() {
       <div className="hidden md:flex md:flex-row md:items-center md:justify-between gap-4">
         {/* Exchange Cards */}
         <div className="flex gap-3 flex-1 min-w-0">
-          {/* Delta Card */}
-          {deltaConnected && deltaBalance > 0 && (
+          {/* Today's performance card */}
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
+            <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Today</div>
             <span className={cn(
               'font-mono text-2xl font-bold',
               todayStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
             )}>
               {todayStats.pnl >= 0 ? '+' : ''}{formatCurrency(todayStats.pnl)}
             </span>
-            <div className="text-[10px] text-zinc-500 font-mono mt-1">
+            <div className="text-[10px] text-zinc-400 font-mono mt-1">
+              {todayStats.total > 0 ? `${todayStats.winRate.toFixed(0)}% WR` : '—'}
+            </div>
+            <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
               ${todayStats.fees.toFixed(2)} fees
             </div>
             <div className="text-[10px] text-zinc-400 font-mono mt-2">
-              {todayStats.wins}W/{todayStats.losses}L
+              {todayStats.wins}W / {todayStats.losses}L
             </div>
-            <div className="text-[10px] text-zinc-400 font-mono mt-1">
+            <div className="text-[10px] text-zinc-500 font-mono mt-1">
               {todayStats.total} trades
             </div>
           </div>
-          )}
 
           {/* P&L / Deposits toggled card */}
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
