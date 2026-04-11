@@ -363,17 +363,6 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_ohlcv_time: float = 0.0
         self._OHLCV_CACHE_SEC = 25  # Cache valid for 25 seconds
 
-        # ── GPFC: Fast Exit Recovery for Orphaned Positions ────────
-        self._force_exit_pending: bool = False  # True when exit failed and retry needed
-        self._force_exit_started_at: float = 0.0  # When force exit sequence started
-        self._force_exit_retry_count: int = 0  # Number of retry attempts
-        self._force_exit_last_retry: float = 0.0  # Last retry timestamp
-        self._FORCE_EXIT_CRITICAL_SEC = 60  # Alert after 60s stuck
-        self._FORCE_EXIT_RETRY_INTERVAL = 10  # Retry every 10s after critical
-        self._force_exit_last_signal: Signal | None = (
-            None  # Cached exit signal for retry
-        )
-        self._last_exit_attempt_at: float = 0.0  # Track when we last tried to exit
 
     # ==================================================================
     # ACTIVITY LOGGING
@@ -560,158 +549,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 "[%s] Failed to restore position from DB: %s", self.pair, e
             )
 
-    # ==================================================================
-    # FAST EXIT RECOVERY (GPFC — Orphaned Position Protection)
-    # ==================================================================
-
-    def _set_force_exit_pending(self, signal: Signal, reason: str) -> None:
-        """Mark position for forced exit retry when normal exit fails."""
-        self._force_exit_pending = True
-        self._force_exit_started_at = time.monotonic()
-        self._force_exit_retry_count = 0
-        self._force_exit_last_retry = 0.0
-        self._force_exit_last_signal = signal
-        self.logger.error(
-            "[%s] EXIT_RETRY: %s — _force_exit_pending=True, will retry market exit every tick",
-            self.option_symbol,
-            reason,
-        )
-
-    async def _check_force_exit(self) -> list[Signal]:
-        """Check if force exit is pending and retry if needed. Called every tick."""
-        if not self._force_exit_pending or not self.in_position:
-            return []
-
-        now = time.monotonic()
-        elapsed = now - self._force_exit_started_at
-
-        # Critical alert after 60s
-        if (
-            elapsed > self._FORCE_EXIT_CRITICAL_SEC
-            and self._force_exit_retry_count == 0
-        ):
-            self._force_exit_retry_count += 1  # Prevent duplicate alerts
-
-            # Calculate current P&L for alert
-            pnl_pct = 0.0
-            pnl_usd = 0.0
-            if self._last_known_premium > 0 and self.entry_premium > 0:
-                pnl_pct = (
-                    (self._last_known_premium - self.entry_premium)
-                    / self.entry_premium
-                    * 100
-                )
-                pnl_usd = self._calc_options_pnl(
-                    self.entry_premium, self._last_known_premium, self._contracts
-                )
-
-            self.logger.critical(
-                "[%s] EXIT_CRITICAL: Position stuck for %.0fs — P&L %.1f%% ($%.2f) — alerting",
-                self.option_symbol,
-                elapsed,
-                pnl_pct,
-                pnl_usd,
-            )
-
-            # Send Telegram alert
-            try:
-                alerts = getattr(self.executor, "alerts", None)
-                if alerts is not None:
-                    side_emoji = "📞" if self.option_side == "call" else "🛡️"
-                    pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
-                    msg = (
-                        f"<b>EXIT_CRITICAL: Stuck Position</b>\n"
-                        f"{side_emoji} {self._base_asset} {self.option_side.upper()} "
-                        f"Strike ${self.strike_price:,.0f}\n"
-                        f"{pnl_emoji} P&L: {pnl_pct:+.1f}% (${pnl_usd:+.2f})\n"
-                        f"⏱️ Stuck for {elapsed:.0f}s\n"
-                        f"Exit failed — retrying every 10s"
-                    )
-                    await alerts.send_text(msg)
-            except Exception as e:
-                self.logger.debug(
-                    "[%s] Failed to send EXIT_CRITICAL alert: %s", self.option_symbol, e
-                )
-
-        # Retry interval: immediately on first call, then every 10s after critical
-        if elapsed <= self._FORCE_EXIT_CRITICAL_SEC:
-            # Before critical: retry immediately (every tick, no delay)
-            should_retry = True
-        else:
-            # After critical: retry every 10s
-            should_retry = (
-                now - self._force_exit_last_retry
-            ) >= self._FORCE_EXIT_RETRY_INTERVAL
-
-        if not should_retry:
-            return []
-
-        self._force_exit_last_retry = now
-        self._force_exit_retry_count += 1
-
-        self.logger.warning(
-            "[%s] EXIT_RETRY #%d: Attempting market exit after %.1fs",
-            self.option_symbol,
-            self._force_exit_retry_count,
-            elapsed,
-        )
-
-        # Fetch current bid for exit price
-        current_bid = self._last_known_premium
-        try:
-            if self.options_exchange and self.option_symbol:
-                ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-                current_bid = (
-                    ticker.get("bid") or ticker.get("last") or self._last_known_premium
-                )
-                if current_bid > 0:
-                    self._last_known_premium = current_bid
-        except Exception as e:
-            self.logger.debug(
-                "[%s] Failed to fetch bid for retry: %s", self.option_symbol, e
-            )
-
-        # Recalculate P&L
-        pnl_pct = 0.0
-        if self.entry_premium > 0 and current_bid > 0:
-            pnl_pct = (current_bid - self.entry_premium) / self.entry_premium * 100
-
-        # Build exit signal
-        return [
-            Signal(
-                side="sell",
-                price=current_bid,
-                amount=float(self._contracts),
-                order_type="market",
-                reason=f"EXIT_RETRY #{self._force_exit_retry_count}: force exit after {elapsed:.0f}s",
-                strategy=self.name,
-                pair=self.option_symbol or self.pair,
-                leverage=self.OPTIONS_LEVERAGE,
-                position_type="long",
-                reduce_only=True,
-                exchange_id="delta",
-                metadata={
-                    "exit_type": "FORCE_EXIT_RETRY",
-                    "force_exit_elapsed_sec": round(elapsed, 1),
-                    "force_exit_retry": self._force_exit_retry_count,
-                },
-            )
-        ]
-
-    async def _clear_force_exit_pending(self) -> None:
-        """Clear force exit flag when position successfully closed."""
-        if self._force_exit_pending:
-            self.logger.info(
-                "[%s] EXIT_RETRY: Position closed — clearing _force_exit_pending",
-                self.option_symbol,
-            )
-        self._force_exit_pending = False
-        self._force_exit_started_at = 0.0
-        self._force_exit_retry_count = 0
-        self._force_exit_last_retry = 0.0
-        self._force_exit_last_signal = None
-        self._last_exit_attempt_at = 0.0
-
     async def _startup_stuck_position_check(self) -> list[Signal]:
         """On startup, check if restored position is stuck with large loss."""
         if not self.in_position or not self.option_symbol:
@@ -748,29 +585,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
                 if pnl_pct < -5.0:
                     self.logger.critical(
-                        "[%s] STARTUP_CRITICAL: Restored position stuck at %.1f%% — force exiting now",
+                        "[%s] STARTUP_CRITICAL: Restored position stuck at %.1f%% — normal exit logic will handle",
                         self.option_symbol,
                         pnl_pct,
                     )
-                    self._set_force_exit_pending(
-                        self._force_exit_last_signal
-                        or Signal(
-                            side="sell",
-                            price=current_bid,
-                            amount=float(self._contracts),
-                            order_type="market",
-                            reason="Startup stuck check",
-                            strategy=self.name,
-                            pair=self.option_symbol,
-                            leverage=self.OPTIONS_LEVERAGE,
-                            position_type="long",
-                            reduce_only=True,
-                            exchange_id="delta",
-                            metadata={"exit_type": "STARTUP_STUCK"},
-                        ),
-                        f"Startup check: P&L {pnl_pct:.1f}% < -5%",
-                    )
-                    return await self._check_force_exit()
+                    return []
                 else:
                     self.logger.info(
                         "[%s] STARTUP_CHECK: Position OK at %.1f%% — normal monitoring",
@@ -1379,12 +1198,6 @@ class OptionsScalpStrategy(BaseStrategy):
         # In position: manage exit
         if self.in_position:
             self._cached_bot_state = "in_position"
-
-            # GPFC: Fast Exit Recovery — check force exit first
-            if self._force_exit_pending:
-                force_signals = await self._check_force_exit()
-                if force_signals:
-                    return force_signals
 
             return await self._check_option_exit()
 
@@ -3461,41 +3274,6 @@ class OptionsScalpStrategy(BaseStrategy):
         exit_type: str,
     ) -> list[Signal]:
         """Build exit signal for option position."""
-        # GPFC: Check if previous exit attempt failed (still in position after 10s)
-        if hasattr(self, "_last_exit_attempt_at") and self._last_exit_attempt_at > 0:
-            time_since_exit = time.monotonic() - self._last_exit_attempt_at
-            if time_since_exit > 10 and self.in_position:
-                # Previous exit didn't complete — trigger force exit
-                self.logger.error(
-                    "[%s] EXIT_FAILED: Still in position %.1fs after exit signal — triggering force exit",
-                    self.option_symbol,
-                    time_since_exit,
-                )
-                signal = Signal(
-                    side="sell",
-                    price=current_premium,
-                    amount=float(self._contracts),
-                    order_type="market",
-                    reason=f"EXIT_RETRY: Previous {exit_type} exit failed",
-                    strategy=self.name,
-                    pair=self.option_symbol or self.pair,
-                    leverage=self.OPTIONS_LEVERAGE,
-                    position_type="long",
-                    reduce_only=True,
-                    exchange_id="delta",
-                    metadata={
-                        "exit_type": f"FORCE_{exit_type}",
-                        "previous_failed": True,
-                    },
-                )
-                self._set_force_exit_pending(
-                    signal, f"Previous exit failed after {time_since_exit:.1f}s"
-                )
-                return [signal]
-
-        # Track this exit attempt
-        self._last_exit_attempt_at = time.monotonic()
-
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             live_bid = ticker.get("bid") or ticker.get("last") or 0
@@ -4016,7 +3794,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
             self._db_trade_id = None
-            self._last_exit_attempt_at = 0.0  # Reset exit tracking for new position
 
             try:
                 alerts = getattr(self.executor, "alerts", None)
@@ -4109,7 +3886,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
             self._is_squeeze_entry = False
             self._squeeze_breakout_time = None
-            self._last_exit_attempt_at = 0.0  # Clear exit tracking when position closes
 
     def on_rejected(self, signal: Signal) -> None:
         """Handle rejected option orders."""
@@ -4138,7 +3914,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
             self._is_squeeze_entry = False
             self._squeeze_breakout_time = None
-            self._last_exit_attempt_at = 0.0  # Reset exit tracking on rejection
 
     # ==================================================================
     # STATS
