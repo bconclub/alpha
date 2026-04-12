@@ -2389,7 +2389,8 @@ class AlphaBot:
                 if scalp is not None and scalp.in_position:
                     continue  # scalp strategy owns this position
                 # Check options strategies too
-                opts = self._options_strategies.get(pos.pair)
+                base_pair = pos.pair.split("-")[0] if "-" in pos.pair else pos.pair
+                opts = self._options_strategies.get(base_pair)
                 if opts is not None and opts.in_position:
                     continue  # options strategy owns this position
                 ghost_pairs.append(pos.pair)

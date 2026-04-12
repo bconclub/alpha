@@ -496,6 +496,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     trade.get("opened_at") or datetime.now(timezone.utc).isoformat()
                 )
                 self.highest_premium = max(
+                    self.highest_premium,
                     self.entry_premium,
                     trade.get("current_price") or self.entry_premium,
                 )
