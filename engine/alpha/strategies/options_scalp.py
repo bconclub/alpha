@@ -530,7 +530,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     except (ValueError, IndexError):
                         pass
 
-                self._contracts = max(1, int(trade.get("amount", 1) or 1))
+                self._contracts = max(1, int(trade.get("contracts") or trade.get("amount") or 1))
 
                 self.logger.info(
                     "[%s] RESTORED from DB: %s x%d %s strike=$%.0f entry=$%.4f peak=$%.4f trail=%s",
