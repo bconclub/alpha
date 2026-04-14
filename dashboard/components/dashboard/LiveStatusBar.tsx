@@ -270,7 +270,7 @@ function MarketRegimeCard({
 }
 
 export function LiveStatusBar() {
-  const { botStatus, isConnected, trades, dailyPnL, deposits } = useSupabase();
+  const { botStatus, isConnected, trades, dailyPnL, deposits, recentTrades } = useSupabase();
 
   const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0);
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
@@ -500,25 +500,52 @@ export function LiveStatusBar() {
 
         {/* Row 2 — Today's performance */}
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl px-3.5 py-3">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Today</div>
-          <span className={cn(
-            'font-mono text-2xl font-bold',
-            today.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-          )}>
-            {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
-          </span>
-          <div className="text-[10px] text-zinc-400 font-mono mt-1">
-            {today.total > 0 ? `${today.winRate.toFixed(0)}% WR` : '—'}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            <div className="md:col-span-7 flex flex-col justify-center">
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Today</div>
+              <div className={cn(
+                'font-mono text-4xl md:text-5xl font-bold',
+                today.pnl >= 0 ? 'text-green-500' : today.pnl < 0 ? 'text-red-500' : 'text-white'
+              )}>
+                {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
+              </div>
+            </div>
+            <div className="md:col-span-5 grid grid-cols-2 gap-3">
+              <div className="bg-zinc-900/60 rounded-lg p-2">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500">Win Rate</div>
+                <div className="text-lg font-semibold text-zinc-200">{today.total > 0 ? `${today.winRate.toFixed(0)}%` : '—'}</div>
+              </div>
+              <div className="bg-zinc-900/60 rounded-lg p-2">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500">Fees</div>
+                <div className="text-lg font-semibold text-zinc-200">${today.fees.toFixed(2)}</div>
+              </div>
+              <div className="bg-zinc-900/60 rounded-lg p-2">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500">W/L</div>
+                <div className="text-lg font-semibold text-zinc-200">{today.wins}W / {today.losses}L</div>
+              </div>
+              <div className="bg-zinc-900/60 rounded-lg p-2">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500">Trades</div>
+                <div className="text-lg font-semibold text-zinc-200">{today.total}</div>
+              </div>
+            </div>
           </div>
-          <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
-            ${today.fees.toFixed(2)} fees
-          </div>
-          <div className="text-[10px] text-zinc-400 font-mono mt-1.5">
-            {today.wins}W / {today.losses}L
-          </div>
-          <div className="text-[10px] text-zinc-500 font-mono mt-1">
-            {today.total} trades
-          </div>
+          {recentTrades.length > 0 && (
+            <div className="mt-4 pt-3 border-t border-zinc-800">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Last 10 Trades</div>
+              <div className="flex gap-1 flex-wrap">
+                {[...recentTrades].reverse().map((trade, i) => (
+                  <div
+                    key={trade.id ?? i}
+                    className={cn(
+                      'w-6 h-6 rounded opacity-80 hover:opacity-100 cursor-pointer transition-opacity',
+                      trade.pnl > 0 ? 'bg-green-500' : trade.pnl < 0 ? 'bg-red-500' : 'bg-gray-500'
+                    )}
+                    title={`${trade.pair}: ${trade.pnl >= 0 ? '+' : ''}${formatCurrency(trade.pnl)}`}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Row 2 — PnL / Deposits toggled card */}
@@ -679,25 +706,52 @@ export function LiveStatusBar() {
         <div className="flex gap-3 flex-1 min-w-0">
           {/* Today's performance card */}
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5">Today</div>
-            <span className={cn(
-              'font-mono text-2xl font-bold',
-              today.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-            )}>
-              {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
-            </span>
-            <div className="text-[10px] text-zinc-400 font-mono mt-1">
-              {today.total > 0 ? `${today.winRate.toFixed(0)}% WR` : '—'}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+              <div className="md:col-span-7 flex flex-col justify-center">
+                <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Today</div>
+                <div className={cn(
+                  'font-mono text-4xl md:text-5xl font-bold',
+                  today.pnl >= 0 ? 'text-green-500' : today.pnl < 0 ? 'text-red-500' : 'text-white'
+                )}>
+                  {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
+                </div>
+              </div>
+              <div className="md:col-span-5 grid grid-cols-2 gap-3">
+                <div className="bg-zinc-900/60 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500">Win Rate</div>
+                  <div className="text-lg font-semibold text-zinc-200">{today.total > 0 ? `${today.winRate.toFixed(0)}%` : '—'}</div>
+                </div>
+                <div className="bg-zinc-900/60 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500">Fees</div>
+                  <div className="text-lg font-semibold text-zinc-200">${today.fees.toFixed(2)}</div>
+                </div>
+                <div className="bg-zinc-900/60 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500">W/L</div>
+                  <div className="text-lg font-semibold text-zinc-200">{today.wins}W / {today.losses}L</div>
+                </div>
+                <div className="bg-zinc-900/60 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500">Trades</div>
+                  <div className="text-lg font-semibold text-zinc-200">{today.total}</div>
+                </div>
+              </div>
             </div>
-            <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
-              ${today.fees.toFixed(2)} fees
-            </div>
-            <div className="text-[10px] text-zinc-400 font-mono mt-2">
-              {today.wins}W / {today.losses}L
-            </div>
-            <div className="text-[10px] text-zinc-500 font-mono mt-1">
-              {today.total} trades
-            </div>
+            {recentTrades.length > 0 && (
+              <div className="mt-4 pt-3 border-t border-zinc-800">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Last 10 Trades</div>
+                <div className="flex gap-1 flex-wrap">
+                  {[...recentTrades].reverse().map((trade, i) => (
+                    <div
+                      key={trade.id ?? i}
+                      className={cn(
+                        'w-6 h-6 rounded opacity-80 hover:opacity-100 cursor-pointer transition-opacity',
+                        trade.pnl > 0 ? 'bg-green-500' : trade.pnl < 0 ? 'bg-red-500' : 'bg-gray-500'
+                      )}
+                      title={`${trade.pair}: ${trade.pnl >= 0 ? '+' : ''}${formatCurrency(trade.pnl)}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* P&L / Deposits toggled card */}
