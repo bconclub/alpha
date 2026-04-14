@@ -19,7 +19,7 @@ function PnLChart({ trades, range }: { trades: any[]; range: TimeRange }) {
     
     let cutoffMs: number;
     let bucketSize: number;
-    
+
     if (range === '24h') {
       const istNow = new Date(now + istOffsetMs);
       const todayIST = istNow.toISOString().slice(0, 10);
@@ -33,13 +33,17 @@ function PnLChart({ trades, range }: { trades: any[]; range: TimeRange }) {
 
     // Group trades into buckets
     const buckets = new Map<number, number>();
-    
+
     for (const t of trades) {
       if (t.status !== 'closed') continue;
       const tradeTime = new Date(t.timestamp).getTime();
       if (tradeTime < cutoffMs) continue;
-      
-      const bucketTime = Math.floor(tradeTime / bucketSize) * bucketSize;
+
+      // Align day buckets to IST midnight instead of UTC midnight
+      const bucketTime =
+        bucketSize === 24 * 60 * 60 * 1000
+          ? Math.floor((tradeTime + istOffsetMs) / bucketSize) * bucketSize - istOffsetMs
+          : Math.floor(tradeTime / bucketSize) * bucketSize;
       const existing = buckets.get(bucketTime) || 0;
       buckets.set(bucketTime, existing + (t.pnl || 0));
     }
@@ -119,8 +123,10 @@ function StatCard({ label, value, subtext, color }: { label: string; value: stri
 export default function PnLPage() {
   const { trades, filteredTrades } = useSupabase();
   const [range, setRange] = useState<TimeRange>('7d');
-  const [year, setYear] = useState(new Date().getFullYear());
-  const [month, setMonth] = useState(new Date().getMonth());
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const istDateStr = new Date(Date.now() + istOffsetMs).toISOString().slice(0, 10);
+  const [year, setYear] = useState(Number(istDateStr.slice(0, 4)));
+  const [month, setMonth] = useState(Number(istDateStr.slice(5, 7)) - 1);
 
   // Calculate stats for selected range
   const stats = useMemo(() => {
