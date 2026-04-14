@@ -191,13 +191,13 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
     OPT_RATCHET_FLOOR_TABLE = [
-        (3.0, -2.0),  # +3% peak → floor -2% (room to breathe)
-        (5.0, 0.0),  # +5% peak → breakeven lock
-        (8.0, 2.0),  # +8% → lock +2%
-        (15.0, 5.0),  # +15% → lock +5%
-        (25.0, 10.0),  # +25% → lock +10%
-        (40.0, 20.0),  # +40% → lock +20%
-        (60.0, 35.0),  # +60% → lock +35%
+        (3.0, -10.0),  # +3% peak → floor at -10%  ← BREATHING ROOM
+        (5.0, -5.0),   # +5% peak → floor at -5%   ← BREATHING ROOM
+        (8.0, 0.0),    # +8% peak → breakeven      ← WAS +2%, now 0%
+        (15.0, 5.0),   # +15% peak → +5%
+        (25.0, 10.0),  # +25% peak → +10%
+        (40.0, 20.0),  # +40% peak → +20%
+        (60.0, 35.0),  # +60% peak → +35%
     ]
 
     # ── Position limits ───────────────────────────────────────────
