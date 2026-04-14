@@ -270,7 +270,7 @@ function MarketRegimeCard({
 }
 
 export function LiveStatusBar() {
-  const { botStatus, isConnected, trades, dailyPnL, deposits, recentTrades } = useSupabase();
+  const { botStatus, isConnected, trades, dailyPnL, deposits } = useSupabase();
 
   const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0);
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
@@ -325,6 +325,13 @@ export function LiveStatusBar() {
     const winRate = total > 0 ? (wins / total) * 100 : 0;
 
     return { pnl, wins, losses, fees, total, winRate };
+  }, [trades]);
+
+  const recentTrades = useMemo(() => {
+    return trades
+      .filter(t => t.status === 'closed')
+      .sort((a, b) => new Date(b.closed_at || b.timestamp).getTime() - new Date(a.closed_at || a.timestamp).getTime())
+      .slice(0, 10);
   }, [trades]);
 
   // Direct Supabase fetch for today's trades — refreshes every 30s
