@@ -290,7 +290,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._MAX_VERIFY_FAILURES = 10
 
         # Ratchet profit floor
-        self._opt_ratchet_floor: float = 0.0
+        self._opt_ratchet_floor: float = -999.0  # Sentinel value indicating "not set"
 
         # ── Squeeze state ──────────────────────────────────────────
         # Rolling premium history for cheap-threshold computation: (monotonic_time, ask)
@@ -500,6 +500,15 @@ class OptionsScalpStrategy(BaseStrategy):
                     self.entry_premium,
                     trade.get("current_price") or self.entry_premium,
                 )
+
+                # Restore ratchet floor based on recovered highest_premium
+                if self.entry_premium > 0:
+                    restored_peak_pct = (
+                        (self.highest_premium - self.entry_premium)
+                        / self.entry_premium
+                        * 100
+                    )
+                    self._update_opt_ratchet_floor(restored_peak_pct)
 
                 if trade_pair.endswith("-C"):
                     self.option_side = "call"
@@ -2626,7 +2635,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── 3. RATCHET EXIT ─────────
         if (
-            self._opt_ratchet_floor != 0.0
+            self._opt_ratchet_floor > -900.0  # Floor was actually set (not sentinel)
             and premium_change_pct < self._opt_ratchet_floor
         ):
             # GPFC #22 Part 2: Check momentum before firing RATCHET exit — let winners ride
@@ -3327,7 +3336,7 @@ class OptionsScalpStrategy(BaseStrategy):
             },
         )
 
-        self._opt_ratchet_floor = 0.0
+        self._opt_ratchet_floor = -999.0
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
@@ -3783,7 +3792,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_known_premium = fill_price
             self._trailing_active = False
             self._consecutive_ticker_failures = 0
-            self._opt_ratchet_floor = 0.0
+            self._opt_ratchet_floor = -999.0
             self.strike_price = signal.metadata.get("strike", 0)
             self._contracts = int(signal.metadata.get("contracts", 1) or 1)
             expiry_str = signal.metadata.get("expiry")
