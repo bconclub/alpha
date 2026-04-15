@@ -175,6 +175,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Stale SL tightening — progressive exit for stuck trades ─────
     STALE_MOVE_THRESHOLD = 5.0  # < 5% from entry = stale (not going anywhere)
+    STALE_MIN_WEAK_SIGNALS = 2  # require multiple weakness signals before stale exit
+    STALE_PREMIUM_RANGE_MIN_PCT = 2.0  # if premium range over window is below this, trade is truly dead
+    STALE_PREMIUM_WINDOW_SEC = 90.0  # short-term premium behavior window
     # ETH stale thresholds
     STALE_SL_5M_ETH = -10.0  # 5 min: SL → -10%
     STALE_SL_8M_ETH = -5.0  # 8 min: SL → -5%
@@ -357,6 +360,7 @@ class OptionsScalpStrategy(BaseStrategy):
         )  # (time, price)
         self._MOMENTUM_CHECK_WINDOW_SEC = 60.0  # Look back 60s for momentum
         self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
+        self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -2475,6 +2479,53 @@ class OptionsScalpStrategy(BaseStrategy):
 
         return momentum_favorable
 
+    def _underlying_momentum_pct(self) -> float:
+        """Underlying momentum % over the configured momentum window."""
+        if len(self._momentum_price_history) < 2:
+            return 0.0
+        now = time.monotonic()
+        cutoff = now - self._MOMENTUM_CHECK_WINDOW_SEC
+        old_price = None
+        for t, price in reversed(self._momentum_price_history):
+            if t <= cutoff:
+                old_price = price
+                break
+        if old_price is None or old_price <= 0:
+            return 0.0
+        current_price = self._momentum_price_history[-1][1]
+        return (current_price - old_price) / old_price * 100
+
+    def _premium_regime(self) -> tuple[float, float]:
+        """Return (premium_momentum_pct, premium_range_pct) for recent position ticks."""
+        if len(self._position_premium_history) < 2:
+            return (0.0, 0.0)
+        now = time.monotonic()
+        cutoff = now - self.STALE_PREMIUM_WINDOW_SEC
+        window = [(t, p) for t, p in self._position_premium_history if t >= cutoff]
+        if len(window) < 2:
+            window = list(self._position_premium_history)
+        first_price = window[0][1]
+        last_price = window[-1][1]
+        if first_price <= 0:
+            return (0.0, 0.0)
+        prices = [p for _, p in window]
+        premium_momentum_pct = (last_price - first_price) / first_price * 100
+        premium_range_pct = ((max(prices) - min(prices)) / first_price * 100) if prices else 0.0
+        return (premium_momentum_pct, premium_range_pct)
+
+    def _has_expansion_signals(self, current_pnl_pct: float) -> bool:
+        """True when momentum/volatility suggests we should keep riding."""
+        underlying_mom = self._underlying_momentum_pct()
+        premium_mom, premium_range = self._premium_regime()
+        underlying_favorable = (
+            underlying_mom >= self._MOMENTUM_THRESHOLD_PCT
+            if self.option_side == "call"
+            else underlying_mom <= -self._MOMENTUM_THRESHOLD_PCT
+        )
+        premium_expanding = premium_mom >= 0.8 or premium_range >= self.STALE_PREMIUM_RANGE_MIN_PCT
+        recoverable_drawdown = current_pnl_pct > -15.0
+        return recoverable_drawdown and (underlying_favorable or premium_expanding)
+
     # ==================================================================
     # EXIT LOGIC
     # ==================================================================
@@ -2547,6 +2598,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Track peak premium
         self.highest_premium = max(self.highest_premium, current_premium)
+        self._position_premium_history.append((time.monotonic(), current_premium))
 
         # Update ratchet floor
         self._update_opt_ratchet_floor(
@@ -2649,9 +2701,9 @@ class OptionsScalpStrategy(BaseStrategy):
             and premium_change_pct < self._opt_ratchet_floor
         ):
             # GPFC #22 Part 2: Check momentum before firing RATCHET exit — let winners ride
-            if self._should_ride_momentum(premium_change_pct):
+            if self._should_ride_momentum(premium_change_pct) or self._has_expansion_signals(premium_change_pct):
                 self.logger.info(
-                    "[%s] RIDE_MOMENTUM: pnl=+%.1f%% ratchet_floor=%+.1f%% — skipping RATCHET, holding",
+                    "[%s] RIDE_MOMENTUM: pnl=%+.1f%% ratchet_floor=%+.1f%% — expansion detected, holding",
                     self.option_symbol,
                     premium_change_pct,
                     self._opt_ratchet_floor,
@@ -2835,6 +2887,16 @@ class OptionsScalpStrategy(BaseStrategy):
         if is_stale:
             hold_min = hold_seconds / 60
             _is_btc = self._base_asset == "BTC"
+            underlying_mom = self._underlying_momentum_pct()
+            premium_mom, premium_range = self._premium_regime()
+            weak_underlying = (
+                underlying_mom < self._MOMENTUM_THRESHOLD_PCT
+                if self.option_side == "call"
+                else underlying_mom > -self._MOMENTUM_THRESHOLD_PCT
+            )
+            weak_premium_mom = premium_mom <= 0.2
+            low_premium_vol = premium_range < self.STALE_PREMIUM_RANGE_MIN_PCT
+            weak_signals = int(weak_underlying) + int(weak_premium_mom) + int(low_premium_vol)
 
             # GPFC #23: Before firing OPT_STALE, check if squeeze is still active
             squeeze_still_active = False
@@ -2874,6 +2936,15 @@ class OptionsScalpStrategy(BaseStrategy):
                     if squeeze_still_active:
                         # Squeeze still active → don't exit
                         pass
+                    elif weak_signals < self.STALE_MIN_WEAK_SIGNALS:
+                        self.logger.info(
+                            "[%s] STALE_HOLD: weak_signals=%d/3 (mom=%+.2f%% prem_mom=%+.2f%% prem_rng=%.2f%%) — hold",
+                            self.option_symbol,
+                            weak_signals,
+                            underlying_mom,
+                            premium_mom,
+                            premium_range,
+                        )
                     else:
                         self.logger.info(
                             "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
@@ -2912,6 +2983,15 @@ class OptionsScalpStrategy(BaseStrategy):
                     if squeeze_still_active:
                         # Squeeze still active → don't exit
                         pass
+                    elif weak_signals < self.STALE_MIN_WEAK_SIGNALS:
+                        self.logger.info(
+                            "[%s] STALE_HOLD: weak_signals=%d/3 (mom=%+.2f%% prem_mom=%+.2f%% prem_rng=%.2f%%) — hold",
+                            self.option_symbol,
+                            weak_signals,
+                            underlying_mom,
+                            premium_mom,
+                            premium_range,
+                        )
                     else:
                         self.logger.info(
                             "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
