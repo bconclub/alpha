@@ -2774,22 +2774,24 @@ class AlphaBot:
                 opts.option_side = option_side
                 opts.entry_premium = pos["entry_price"]
                 opts.entry_time = time.monotonic()
-                # Calculate floor from current mark price instead of hardcoding 0.0
+                # Use mark_price if higher than entry, but we can't recover historical peak here
+                # At least ensure we start with max of entry vs current mark
                 opts.highest_premium = max(
                     pos["entry_price"], pos.get("mark_price") or pos["entry_price"]
                 )
+                # Then recalculate floor immediately based on what we have
+                if opts.entry_premium > 0:
+                    current_peak_pct = (
+                        (opts.highest_premium - opts.entry_premium)
+                        / opts.entry_premium
+                        * 100
+                    )
+                    opts._update_opt_ratchet_floor(current_peak_pct)
                 opts._last_known_premium = pos["mark_price"] or pos["entry_price"]
                 opts._contracts = int(pos["contracts"])
                 opts.strike_price = strike_price
                 opts.expiry_dt = expiry_dt
                 opts._trailing_active = False
-                if opts.entry_premium > 0:
-                    mark_pct = (
-                        (opts.highest_premium - opts.entry_premium)
-                        / opts.entry_premium
-                        * 100
-                    )
-                    opts._update_opt_ratchet_floor(mark_pct)
                 opts._consecutive_ticker_failures = 0
                 opts._position_verify_failures = 0
                 logger.info(

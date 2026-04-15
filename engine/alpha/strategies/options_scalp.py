@@ -135,7 +135,7 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_HISTORY_MIN = 30  # Track premium history for 30 min
     # GPFC #23: Extended stale windows for squeeze entries (squeezes need time to resolve)
     SQUEEZE_NO_STALE_MIN_ETH = (
-        25  # No stale SL for first 25 min after squeeze fill (ETH)
+        15  # No stale SL for first 15 min after squeeze fill (ETH)
     )
     SQUEEZE_NO_STALE_MIN_BTC = (
         35  # No stale SL for first 35 min after squeeze fill (BTC)
@@ -191,6 +191,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
     OPT_RATCHET_FLOOR_TABLE = [
+        (0.0, -10.0),  # 0% or no peak → floor at -10% (safety net)
         (3.0, -10.0),  # +3% peak → floor at -10%  ← BREATHING ROOM
         (5.0, -5.0),   # +5% peak → floor at -5%   ← BREATHING ROOM
         (8.0, 0.0),    # +8% peak → breakeven      ← WAS +2%, now 0%
@@ -495,11 +496,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._position_opened_at = (
                     trade.get("opened_at") or datetime.now(timezone.utc).isoformat()
                 )
-                self.highest_premium = max(
-                    self.highest_premium,
-                    self.entry_premium,
-                    trade.get("current_price") or self.entry_premium,
-                )
+                # Restore peak from DB if available, else use current_price
+                stored_peak_pnl = trade.get("peak_pnl", 0) or 0
+                if stored_peak_pnl > 0 and self.entry_premium > 0:
+                    # Calculate highest_premium from stored peak_pnl percentage
+                    peak_premium = self.entry_premium * (1 + stored_peak_pnl / 100)
+                    self.highest_premium = max(
+                        self.highest_premium, peak_premium, self.entry_premium
+                    )
+                else:
+                    self.highest_premium = max(
+                        self.highest_premium,
+                        self.entry_premium,
+                        trade.get("current_price") or self.entry_premium,
+                    )
 
                 # Restore ratchet floor based on recovered highest_premium
                 if self.entry_premium > 0:
@@ -2848,6 +2858,16 @@ class OptionsScalpStrategy(BaseStrategy):
                             bb_width_threshold,
                             hold_min,
                         )
+
+            # After 30 minutes, never let squeeze still_active block exits
+            if hold_min >= 30:
+                if squeeze_still_active:
+                    self.logger.info(
+                        "[%s] SQUEEZE_TIMEOUT: forcing squeeze_still_active=False after %.0fm",
+                        self.option_symbol,
+                        hold_min,
+                    )
+                squeeze_still_active = False
 
             if _is_btc:
                 if hold_min >= self.STALE_EXIT_MIN_BTC:
