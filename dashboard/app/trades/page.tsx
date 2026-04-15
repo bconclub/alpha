@@ -9,6 +9,7 @@ export default function TradesPage() {
   const { filteredTrades } = useSupabase();
   const [reconciling, setReconciling] = useState(false);
   const [reconcileResult, setReconcileResult] = useState<string | null>(null);
+  const [dryRun, setDryRun] = useState(true);
 
   const handleReconcile = async () => {
     const sb = getSupabase();
@@ -18,12 +19,12 @@ export default function TradesPage() {
     setReconcileResult(null);
 
     try {
-      // Insert command for the bot to pick up
+      // Insert smart_reconcile command for the bot to pick up
       const { data, error } = await sb
         .from('bot_commands')
         .insert({
-          command: 'reconcile',
-          params: { hours: 24 },
+          command: 'smart_reconcile',
+          params: { dry_run: dryRun },
         })
         .select('id')
         .single();
@@ -46,7 +47,7 @@ export default function TradesPage() {
           .single();
 
         if (cmd?.executed) {
-          setReconcileResult(cmd.result || 'Reconciliation complete');
+          setReconcileResult(cmd.result || 'Smart reconciliation complete');
           done = true;
           break;
         }
@@ -70,28 +71,40 @@ export default function TradesPage() {
           Trade History
         </h1>
 
-        {/* Reconcile icon button */}
-        <button
-          onClick={handleReconcile}
-          disabled={reconciling}
-          title="Reconcile with Delta Exchange"
-          className={`ml-auto p-2 rounded-lg transition-colors ${
-            reconciling
-              ? 'text-zinc-500 cursor-not-allowed'
-              : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
-          }`}
-        >
-          {reconciling ? (
-            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
-          ) : (
-            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3" />
-            </svg>
-          )}
-        </button>
+        <div className="ml-auto flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={dryRun}
+              onChange={(e) => setDryRun(e.target.checked)}
+              className="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-indigo-500 focus:ring-indigo-500"
+            />
+            Dry run
+          </label>
+
+          {/* Reconcile icon button */}
+          <button
+            onClick={handleReconcile}
+            disabled={reconciling}
+            title="Smart reconcile with Delta Exchange"
+            className={`p-2 rounded-lg transition-colors ${
+              reconciling
+                ? 'text-zinc-500 cursor-not-allowed'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+            }`}
+          >
+            {reconciling ? (
+              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            ) : (
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3" />
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
 
       {reconcileResult && (

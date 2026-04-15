@@ -1363,6 +1363,27 @@ class AlphaBot:
                     f"{result['inserted']} inserted, diff=${result['diff']:.4f}"
                 )
 
+            elif command == "smart_reconcile":
+                from alpha.smart_reconcile import SmartDeltaReconciler
+                from datetime import datetime, timezone
+                reconciler = SmartDeltaReconciler(self.delta_options, self.db.client, logger)
+                dry_run = bool(params.get("dry_run", True))
+                date_from_str = params.get("date_from")
+                date_to_str = params.get("date_to")
+                if date_from_str and date_to_str:
+                    date_from = datetime.fromisoformat(date_from_str.replace("Z", "+00:00"))
+                    date_to = datetime.fromisoformat(date_to_str.replace("Z", "+00:00"))
+                else:
+                    # Default to last 24h
+                    now = datetime.now(timezone.utc)
+                    date_from = now - timedelta(hours=24)
+                    date_to = now
+                result = await reconciler.run(date_from=date_from, date_to=date_to, dry_run=dry_run)
+                result_msg = (
+                    f"Smart reconcile (dry_run={dry_run}): processed={result['processed']} "
+                    f"updated={result['updated']} skipped={result['skipped']} errors={result['errors']}"
+                )
+
             else:
                 result_msg = f"Unknown command: {command}"
 

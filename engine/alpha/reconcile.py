@@ -234,6 +234,11 @@ class DeltaReconciler:
                 elif side == "sell":
                     sell_queue.append(fill)
 
+            self.log.debug(
+                "Building round trips for %s: %d buys, %d sells",
+                symbol, len(buy_queue), len(sell_queue),
+            )
+
             # FIFO match: each buy pairs with next sell
             while buy_queue and sell_queue:
                 buy = buy_queue.popleft()
@@ -303,6 +308,12 @@ class DeltaReconciler:
                     "RECONCILE: %s has %d unmatched sell fills (missing buys?)",
                     symbol, len(sell_queue),
                 )
+            if buy_queue and len(buy_queue) > len(sell_queue):
+                self.log.warning(
+                    "RECONCILE: %s has %d unmatched buys vs %d sells — "
+                    "possible crossed trades (orphaned buys)",
+                    symbol, len(buy_queue), len(sell_queue),
+                )
 
         return round_trips
 
@@ -360,6 +371,15 @@ class DeltaReconciler:
             if not d_queue:
                 continue
 
+            # Count mismatch guard: skip updates if counts don't align
+            if len(d_queue) != len(db_queue):
+                self.log.warning(
+                    "Mismatched trade count for %s: %d Delta round trips vs %d DB trades. "
+                    "Skipping updates to prevent cross-trade corruption.",
+                    pair, len(d_queue), len(db_queue),
+                )
+                continue
+
             for db_trade in db_queue:
                 if not d_queue:
                     break
@@ -374,6 +394,26 @@ class DeltaReconciler:
                         break
 
                 matched += 1
+
+                # Time-alignment guard before updating
+                db_opened = db_trade.get("opened_at", "")
+                delta_buy = delta_rt.get("buy_time", "")
+                if db_opened and delta_buy:
+                    try:
+                        from datetime import datetime
+                        db_dt = datetime.fromisoformat(str(db_opened).replace("Z", "+00:00"))
+                        delta_dt = datetime.fromisoformat(str(delta_buy).replace("Z", "+00:00"))
+                        time_diff = abs((db_dt - delta_dt).total_seconds())
+                        if time_diff > 300:
+                            self.log.warning(
+                                "Skipping update for trade %s — time mismatch: "
+                                "DB opened_at=%s, Delta buy_time=%s (diff=%ss)",
+                                db_trade["id"], db_trade["opened_at"],
+                                delta_rt["buy_time"], int(time_diff),
+                            )
+                            continue
+                    except Exception:
+                        pass
 
                 # Check if values differ meaningfully
                 db_entry = float(db_trade.get("entry_price") or 0)
@@ -417,6 +457,12 @@ class DeltaReconciler:
                         else:
                             # Negative or open: can't recover true peak, reset to 0
                             update_data["peak_pnl"] = 0
+
+                    self.log.info(
+                        "Updating trade %s: opened_at=%s, delta_buy=%s, delta_sell=%s, fields=%s",
+                        trade_id, db_trade.get("opened_at"), delta_rt.get("buy_time"),
+                        delta_rt.get("sell_time"), list(update_data.keys()),
+                    )
 
                     try:
                         self.db.table("trades").update(update_data).eq("id", trade_id).execute()
