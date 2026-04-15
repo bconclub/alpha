@@ -457,8 +457,16 @@ export default function DashboardPage() {
     const todayIST = istNow.toISOString().slice(0, 10);
     const cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
     return trades
-      .filter((t) => t.status === 'closed' && new Date(t.timestamp).getTime() >= cutoffMs)
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .filter((t) => {
+        if (t.status !== 'closed') return false;
+        const tradeTime = new Date(t.closed_at || t.timestamp).getTime();
+        return tradeTime >= cutoffMs;
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.closed_at || b.timestamp).getTime() -
+          new Date(a.closed_at || a.timestamp).getTime()
+      )
       .slice(0, 10);
   }, [trades]);
 
