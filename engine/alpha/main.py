@@ -1381,7 +1381,9 @@ class AlphaBot:
                 result = await reconciler.run(date_from=date_from, date_to=date_to, dry_run=dry_run)
                 result_msg = (
                     f"Smart reconcile (dry_run={dry_run}): processed={result['processed']} "
-                    f"updated={result['updated']} skipped={result['skipped']} errors={result['errors']}"
+                    f"updated={result['updated']} skipped={result['skipped']} "
+                    f"dupes={result.get('duplicates_marked', 0)} ghosts={result.get('ghosts_inserted', 0)} "
+                    f"errors={result['errors']}"
                 )
 
             else:

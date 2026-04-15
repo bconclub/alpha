@@ -301,11 +301,20 @@ class SmartDeltaReconciler:
     async def _reconcile(
         self, delta_rts: list[dict], db_trades: list[dict], dry_run: bool,
     ) -> dict[str, Any]:
-        """Smart match and update."""
+        """Smart match and update.
+
+        Behavior:
+        - Match Delta round-trips to DB trades by pair + time + entry tolerance.
+        - Update matched DB rows when values differ.
+        - Mark unmatched DB rows as duplicate/unmatched (cleanup path).
+        - Insert unmatched Delta round-trips as ghost-reconciled rows.
+        """
         processed = 0
         updated = 0
         skipped = 0
         errors = 0
+        duplicates_marked = 0
+        ghosts_inserted = 0
         details: list[dict] = []
 
         # Group by pair
@@ -317,28 +326,26 @@ class SmartDeltaReconciler:
         for rt in delta_rts:
             rt_by_pair[rt["pair"]].append(rt)
 
-        for pair, pair_rts in rt_by_pair.items():
+        all_pairs = sorted(set(rt_by_pair.keys()) | set(db_by_pair.keys()))
+        for pair in all_pairs:
+            pair_rts = rt_by_pair.get(pair, [])
             db_list = db_by_pair.get(pair, [])
+            used_db_ids: set[int] = set()
+            matched_rt_idx: set[int] = set()
 
-            # Count mismatch guard
             if len(pair_rts) != len(db_list):
                 self.log.warning(
-                    "Mismatched trade count for %s: %d Delta round trips vs %d DB trades. "
-                    "Skipping updates to prevent cross-trade corruption.",
+                    "Count mismatch for %s: Delta=%d DB=%d. "
+                    "Proceeding with safe matching + cleanup/ghost handling.",
                     pair, len(pair_rts), len(db_list),
                 )
-                skipped += len(pair_rts)
-                details.append({
-                    "pair": pair,
-                    "action": "skipped_count_mismatch",
-                    "delta_count": len(pair_rts),
-                    "db_count": len(db_list),
-                })
-                continue
 
-            for delta_rt in pair_rts:
+            for idx, delta_rt in enumerate(pair_rts):
                 processed += 1
-                match = self._find_best_match(delta_rt, db_list)
+                match = self._find_best_match(
+                    delta_rt,
+                    [t for t in db_list if t.get("id") not in used_db_ids],
+                )
 
                 if not match:
                     self.log.warning(
@@ -349,6 +356,7 @@ class SmartDeltaReconciler:
                     details.append({
                         "pair": pair,
                         "action": "skipped_no_match",
+                        "delta_index": idx,
                         "delta_buy_time": delta_rt["buy_time"],
                         "delta_entry": delta_rt["entry"],
                     })
@@ -356,6 +364,8 @@ class SmartDeltaReconciler:
 
                 db_trade, time_diff_sec = match
                 trade_id = db_trade["id"]
+                used_db_ids.add(trade_id)
+                matched_rt_idx.add(idx)
 
                 # Time mismatch guard
                 if time_diff_sec > 300:
@@ -441,11 +451,53 @@ class SmartDeltaReconciler:
                         "action": "update_failed",
                     })
 
+            # DB rows that never matched any Delta round-trip are duplicates/invalid.
+            unmatched_db = [t for t in db_list if t.get("id") not in used_db_ids]
+            for db_trade in unmatched_db:
+                trade_id = int(db_trade.get("id", 0) or 0)
+                if trade_id <= 0:
+                    continue
+
+                details.append({
+                    "trade_id": trade_id,
+                    "pair": pair,
+                    "action": "duplicate_unmatched_db",
+                })
+                if dry_run:
+                    continue
+
+                try:
+                    self._mark_duplicate_trade(db_trade)
+                    duplicates_marked += 1
+                except Exception:
+                    self.log.exception("SMART RECONCILE: failed to mark duplicate trade %s", trade_id)
+                    errors += 1
+
+            # Delta round-trips that never matched any DB row are missing ghosts.
+            unmatched_delta = [rt for i, rt in enumerate(pair_rts) if i not in matched_rt_idx]
+            for rt in unmatched_delta:
+                details.append({
+                    "pair": pair,
+                    "action": "ghost_missing_in_db",
+                    "delta_buy_time": rt.get("buy_time"),
+                    "delta_entry": rt.get("entry"),
+                })
+                if dry_run:
+                    continue
+                try:
+                    self._insert_ghost_trade(rt)
+                    ghosts_inserted += 1
+                except Exception:
+                    self.log.exception("SMART RECONCILE: failed to insert ghost for %s", pair)
+                    errors += 1
+
         return {
             "processed": processed,
             "updated": updated,
             "skipped": skipped,
             "errors": errors,
+            "duplicates_marked": duplicates_marked,
+            "ghosts_inserted": ghosts_inserted,
             "dry_run": dry_run,
             "details": details,
         }
@@ -568,6 +620,66 @@ class SmartDeltaReconciler:
             "updated": 0,
             "skipped": 0,
             "errors": 0,
+            "duplicates_marked": 0,
+            "ghosts_inserted": 0,
             "dry_run": True,
             "details": [],
         }
+
+    def _mark_duplicate_trade(self, db_trade: dict) -> None:
+        """Mark an unmatched DB row as duplicate/unmatched instead of deleting it."""
+        trade_id = int(db_trade["id"])
+        metadata = db_trade.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        metadata["duplicate_cleanup"] = {
+            "reason": "unmatched_in_delta_reconcile",
+            "marked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        self.db.table("trades").update({
+            "status": "cancelled",
+            "exit_reason": "DUPLICATE_UNMATCHED",
+            "reason": "smart_reconcile_cleanup",
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": metadata,
+        }).eq("id", trade_id).execute()
+
+    def _insert_ghost_trade(self, rt: dict) -> None:
+        """Insert a closed trade row for a Delta round-trip missing in DB."""
+        buy_time = rt.get("buy_time") or datetime.now(timezone.utc).isoformat()
+        sell_time = rt.get("sell_time") or datetime.now(timezone.utc).isoformat()
+        pct = float(rt.get("pct", 0) or 0)
+        peak_pnl = round(pct, 4) if pct > 0 else 0
+
+        row = {
+            "pair": rt["pair"],
+            "exchange": "delta",
+            "strategy": "options_scalp",
+            "side": "buy",
+            "entry_price": float(rt["entry"]),
+            "exit_price": float(rt["exit"]),
+            "contracts": float(rt["qty"]),
+            "leverage": 50,
+            "gross_pnl": float(rt["gross"]),
+            "net_pnl": float(rt["net"]),
+            "pnl": float(rt["net"]),
+            "pnl_pct": pct,
+            "peak_pnl": peak_pnl,
+            "entry_fee": float(rt["efee"]),
+            "exit_fee": float(rt["xfee"]),
+            "status": "closed",
+            "exit_reason": "GHOST_RECONCILED",
+            "reason": "smart_reconcile_insert_missing",
+            "setup_type": "MOMENTUM_BURST",
+            "opened_at": buy_time,
+            "closed_at": sell_time,
+            "metadata": {
+                "reconciled_at": datetime.now(timezone.utc).isoformat(),
+                "ghost_inserted": True,
+            },
+        }
+        self.db.table("trades").insert(row).execute()
