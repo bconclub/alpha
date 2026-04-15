@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useEffect, useState, useCallback } from 'react';
+import { useMemo, useEffect, useState } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { OptionsState } from '@/lib/types';
@@ -46,11 +46,34 @@ function useSecondsAgo(isoTimestamp: string | null | undefined): number | null {
   return secs;
 }
 
+function useCountdownProgress(
+  isoTimestamp: string | null | undefined,
+  windowSecs: number = 10,
+): { secondsLeft: number | null; progress: number } {
+  const secondsAgo = useSecondsAgo(isoTimestamp);
+  if (secondsAgo == null) return { secondsLeft: null, progress: 0 };
+  const clampedElapsed = Math.min(secondsAgo, windowSecs);
+  return {
+    secondsLeft: Math.max(0, windowSecs - clampedElapsed),
+    progress: Math.max(0, 1 - clampedElapsed / windowSecs),
+  };
+}
+
+function getSignalConfidence(state: OptionsState): number {
+  const raw =
+    state.signal_strength != null
+      ? state.signal_strength
+      : state.bb_width_pct != null && state.bb_width_threshold != null && state.bb_width_threshold > 0
+        ? Math.min(state.bb_width_pct / state.bb_width_threshold, 1)
+        : 0;
+  return Math.max(0, Math.min(1, raw));
+}
+
 // ---------------------------------------------------------------------------
-// Squeeze Bar with animated fill and percentage
+// Signal battery gauge
 // ---------------------------------------------------------------------------
 
-function SqueezeBar({ 
+function SqueezeBar({
   bb_width_pct, 
   bb_width_threshold, 
   squeeze_active,
@@ -81,6 +104,11 @@ function SqueezeBar({
   
   // Determine color based on confidence
   const barColor = confidence >= 0.7 ? '#22c55e' : confidence >= 0.4 ? '#eab308' : '#ef4444';
+  const segmentFill = Array.from({ length: 5 }).map((_, i) => {
+    const boundary = (i + 1) / 5;
+    return confidence >= boundary;
+  });
+  const lowSignal = confidence < 0.2;
 
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
@@ -102,17 +130,23 @@ function SqueezeBar({
         </span>
       </div>
       <div className="flex items-center gap-2">
-        <div className="flex-1 h-2 rounded-full bg-zinc-800 overflow-hidden">
-          {/* Signal bar fill - inline styles for reliable colors */}
-          <div
-            style={{
-              width: `${targetPct}%`,
-              height: '100%',
-              transition: 'width 0.5s ease',
-              backgroundColor: barColor,
-              borderRadius: '4px'
-            }}
-          />
+        <div className="flex-1 flex items-center gap-1">
+          {segmentFill.map((on, idx) => (
+            <div
+              key={idx}
+              className="h-2 flex-1 rounded-sm transition-opacity duration-300"
+              style={{
+                opacity: on ? 1 : 0.2,
+                background:
+                  idx <= 1
+                    ? '#ef4444'
+                    : idx === 2
+                      ? '#eab308'
+                      : '#22c55e',
+                boxShadow: on ? `0 0 8px ${barColor}` : 'none',
+              }}
+            />
+          ))}
         </div>
         <span className={cn(
           'text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300',
@@ -121,6 +155,11 @@ function SqueezeBar({
           {displayPct}%
         </span>
       </div>
+      {lowSignal && (
+        <div className="mt-1 text-[8px] font-mono text-orange-300 uppercase tracking-wide">
+          Low Signal - waiting...
+        </div>
+      )}
     </div>
   );
 }
@@ -242,8 +281,8 @@ function ChainTable({
 
 const breakoutStyle: Record<string, React.CSSProperties> = {
   NONE: { backgroundColor: '#374151', color: '#9ca3af', border: '1px solid #4b5563', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase' },
-  DETECTED_UP: { backgroundColor: '#14532d', color: '#4ade80', border: '1px solid #22c55e', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase', animation: 'pulse 1.5s infinite' },
-  DETECTED_DOWN: { backgroundColor: '#450a0a', color: '#f87171', border: '1px solid #ef4444', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase', animation: 'pulse 1.5s infinite' },
+  DETECTED_UP: { backgroundColor: '#14532d', color: '#4ade80', border: '1px solid #22c55e', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase', animation: 'breakout-pop 1s ease-in-out infinite' },
+  DETECTED_DOWN: { backgroundColor: '#450a0a', color: '#f87171', border: '1px solid #ef4444', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase', animation: 'breakout-pop 1s ease-in-out infinite' },
   CONFIRMED: { backgroundColor: '#14532d', color: '#22c55e', border: '1px solid #22c55e', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase' },
   FAKEOUT: { backgroundColor: '#431407', color: '#fb923c', border: '1px solid #f97316', borderRadius: '4px', padding: '2px 8px', fontSize: '9px', fontFamily: 'monospace', fontWeight: 'bold', textTransform: 'uppercase' },
 };
@@ -295,11 +334,15 @@ function BreakoutBadge({
 function PremiumBox({ 
   type, 
   premium, 
-  breakout_state 
+  breakout_state,
+  balance,
+  spotPrice,
 }: { 
   type: 'call' | 'put'; 
   premium: number | null; 
   breakout_state: string;
+  balance: number | null;
+  spotPrice: number | null;
 }) {
   const isCall = type === 'call';
   const colorClass = isCall ? 'text-[#00c853]' : 'text-[#ff1744]';
@@ -307,6 +350,19 @@ function PremiumBox({
   
   const isGlowing = ['DETECTED_UP', 'DETECTED_DOWN', 'CONFIRMED', 'BREAKOUT_CONFIRMED'].includes(breakout_state);
   const glowColor = breakout_state === 'DETECTED_DOWN' ? '#ef4444' : '#22c55e';
+  const collateralPerContract = premium != null && premium > 0 ? premium / OPTIONS_LEVERAGE : 0;
+  const estimatedContracts =
+    balance != null && collateralPerContract > 0 ? Math.max(1, Math.floor((balance * 0.4) / collateralPerContract)) : 0;
+  const contractMultiplier = spotPrice && spotPrice > 50000 ? 0.001 : 0.01;
+  const feeRate = 0.000118;
+  const estimatedFee =
+    premium != null && premium > 0 && spotPrice != null && estimatedContracts > 0
+      ? estimatedContracts * contractMultiplier * spotPrice * feeRate
+      : 0;
+  const estimatedPremiumValue =
+    premium != null && premium > 0 && estimatedContracts > 0 ? premium * estimatedContracts : 0;
+  const feeRatioPct = estimatedPremiumValue > 0 ? (estimatedFee / estimatedPremiumValue) * 100 : 0;
+  const lowRR = feeRatioPct > 15;
   
   return (
     <div 
@@ -326,42 +382,50 @@ function PremiumBox({
       <div className={cn('text-[14px] font-mono font-semibold text-zinc-200', colorClass)}>
         {fmtPrem(premium)}
       </div>
+      <div className="mt-0.5 text-[8px] font-mono text-zinc-500">
+        Est fee: ${estimatedFee.toFixed(2)}
+      </div>
+      {lowRR && (
+        <div className="text-[8px] font-mono text-orange-400 font-semibold mt-0.5">
+          ⚠ LOW R/R
+        </div>
+      )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Live Counter Component
+// Countdown ring for refresh freshness
 // ---------------------------------------------------------------------------
 
-function LiveCounter({ seconds }: { seconds: number | null }) {
-  const [liveSecs, setLiveSecs] = useState(seconds ?? 0);
-  
-  useEffect(() => {
-    setLiveSecs(seconds ?? 0);
-  }, [seconds]);
-  
-  useEffect(() => {
-    if (seconds == null) return;
-    const id = setInterval(() => {
-      setLiveSecs(s => s + 1);
-    }, 1000);
-    return () => clearInterval(id);
-  }, [seconds]);
-  
-  if (seconds == null) return null;
-  
-  const mins = Math.floor(liveSecs / 60);
-  const secs = liveSecs % 60;
-  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-  
-  // Color coding: <30s green, 30-60s yellow, >60s red
-  const colorClass = liveSecs < 30 ? 'text-[#00c853]' : liveSecs < 60 ? 'text-[#ffd600]' : 'text-[#ff1744]';
-  
+function CountdownRing({ secondsLeft, progress }: { secondsLeft: number | null; progress: number }) {
+  if (secondsLeft == null) return null;
+  const radius = 10;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference * (1 - progress);
+
   return (
-    <div className="mb-3 text-[8px] font-mono text-right">
-      <span className="text-zinc-600">Last scan: </span>
-      <span className={cn('transition-colors duration-300', colorClass)}>{timeStr} ago</span>
+    <div className="mb-3 flex items-center justify-end gap-1.5">
+      <span className="text-[8px] font-mono text-zinc-500">Refresh</span>
+      <div className="relative h-6 w-6">
+        <svg className="h-6 w-6 -rotate-90" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r={radius} stroke="rgba(63,63,70,0.7)" strokeWidth="3" fill="transparent" />
+          <circle
+            cx="12"
+            cy="12"
+            r={radius}
+            stroke="#22c55e"
+            strokeWidth="3"
+            fill="transparent"
+            strokeDasharray={circumference}
+            strokeDashoffset={offset}
+            className="transition-all duration-500"
+          />
+        </svg>
+        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-mono text-zinc-300">
+          {secondsLeft}
+        </span>
+      </div>
     </div>
   );
 }
@@ -370,24 +434,17 @@ function LiveCounter({ seconds }: { seconds: number | null }) {
 // Chain Card (one per asset)
 // ---------------------------------------------------------------------------
 
-function ChainCard({ asset, state }: { asset: string; state: OptionsState | null }) {
-  const scanSecsAgo = useSecondsAgo(state?.updated_at);
+function ChainCard({
+  asset,
+  state,
+  strategyScore,
+}: {
+  asset: string;
+  state: OptionsState | null;
+  strategyScore: number | null;
+}) {
+  const { secondsLeft, progress } = useCountdownProgress(state?.updated_at, 10);
   const hoursRemaining = fmtHoursRemaining(state?.expiry);
-
-  // Debug logging - check what fields are available
-  useEffect(() => {
-    if (state) {
-      console.log('[ChainCard fields]', Object.keys(state || {}));
-      console.log('[SignalBar] confidence value:', (state as any)?.confidence, (state as any)?.signal_strength, (state as any)?.bb_confidence);
-      console.log(`[ChainCard ${asset}]`, {
-        bb_width_pct: state.bb_width_pct,
-        bb_width_threshold: state.bb_width_threshold,
-        signal_strength: (state as any).signal_strength,
-        squeeze_active: state.squeeze_active,
-        breakout_state: state.breakout_state,
-      });
-    }
-  }, [state, asset]);
 
   if (!state) {
     return (
@@ -402,20 +459,57 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
   const balance        = state.balance ?? null;
   const targetStrike   = state.target_strike ?? null;
   const affordableLimit = balance != null ? balance * 0.40 : Infinity;
+  const confidence = getSignalConfidence(state);
+  const lowSignal = confidence < 0.2;
+  const isReady = confidence > 0.15;
 
-  // Breakout detection for glow effect
   const breakoutState = state.breakout_state ?? 'NONE';
-  const isBreakoutActive = ['DETECTED', 'CONFIRMED', 'BREAKOUT_CONFIRMED'].includes(breakoutState);
+  const breakoutDirection =
+    state.breakout_direction ??
+    (breakoutState === 'UP' ? 'UP' : breakoutState === 'DOWN' ? 'DOWN' : null);
+  const cardTint =
+    breakoutDirection === 'UP'
+      ? 'rgba(0,200,83,0.04)'
+      : breakoutDirection === 'DOWN'
+        ? 'rgba(239,68,68,0.04)'
+        : 'rgba(24,24,27,0.4)';
 
   return (
-    <div className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3">
+    <div
+      className={cn(
+        'relative border rounded-lg p-3 transition-all duration-300',
+        isReady ? 'border-[#22c55e]/70 shadow-[0_0_0_1px_rgba(34,197,94,0.45)]' : 'border-zinc-800/50',
+      )}
+      style={{
+        backgroundColor: cardTint,
+        opacity: lowSignal ? 0.5 : 1,
+      }}
+    >
+      {lowSignal && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+          <span className="px-2 py-1 rounded bg-zinc-900/80 text-[10px] font-mono text-orange-300 uppercase tracking-wide">
+            LOW SIGNAL - waiting...
+          </span>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-white">{asset}</span>
           <span className="text-[10px] font-mono text-zinc-500">{fmtSpot(state.spot_price)}</span>
+          <span className="text-[9px] font-mono text-zinc-400">
+            Strategy Score: {strategyScore != null ? `${strategyScore.toFixed(0)}%` : '--'}
+          </span>
         </div>
-        <div className="text-right">
+        <div className="text-right flex items-center gap-2">
+          <span className={cn(
+            'px-1.5 py-0.5 rounded text-[8px] font-mono font-bold border uppercase',
+            isReady
+              ? 'bg-[#22c55e]/15 text-[#22c55e] border-[#22c55e]/30'
+              : 'bg-zinc-800 text-zinc-500 border-zinc-700',
+          )}>
+            {isReady ? 'READY' : 'MONITORING'}
+          </span>
           {hoursRemaining && (
             <span className="text-[9px] font-mono text-zinc-400">
               Exp: {hoursRemaining}
@@ -447,11 +541,15 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
           type="call" 
           premium={state.call_premium} 
           breakout_state={breakoutState}
+          balance={balance}
+          spotPrice={state.spot_price}
         />
         <PremiumBox 
           type="put" 
           premium={state.put_premium} 
           breakout_state={breakoutState}
+          balance={balance}
+          spotPrice={state.spot_price}
         />
       </div>
 
@@ -487,8 +585,8 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
         </div>
       )}
 
-      {/* 7. Last scan timestamp - live ticking counter */}
-      <LiveCounter seconds={scanSecsAgo} />
+      {/* 7. Last scan indicator */}
+      <CountdownRing secondsLeft={secondsLeft} progress={progress} />
 
       {/* CALLS chain */}
       <ChainTable
@@ -524,7 +622,7 @@ function ChainCard({ asset, state }: { asset: string; state: OptionsState | null
 // ---------------------------------------------------------------------------
 
 export function OptionsChainPanel() {
-  const { optionsState, setOptionsState } = useSupabase();
+  const { optionsState, setOptionsState, trades } = useSupabase();
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   
   // Auto-refresh: poll options_state every 10s
@@ -566,6 +664,25 @@ export function OptionsChainPanel() {
       return { asset, state };
     });
   }, [optionsState]);
+
+  const todayWinRate = useMemo(() => {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const todaysOptionsTrades = trades.filter((t) => {
+      const closedAt = t.closed_at ? new Date(t.closed_at).getTime() : null;
+      const ts = t.timestamp ? new Date(t.timestamp).getTime() : null;
+      const tradeTime = closedAt ?? ts;
+      return (
+        tradeTime != null &&
+        tradeTime >= startOfDay &&
+        t.status === 'closed' &&
+        t.strategy.toLowerCase().includes('option')
+      );
+    });
+    if (todaysOptionsTrades.length === 0) return null;
+    const winners = todaysOptionsTrades.filter((t) => (t.pnl_pct ?? 0) > 0).length;
+    return (winners / todaysOptionsTrades.length) * 100;
+  }, [trades]);
   
   // Show stale data warning if no update in 30s
   const isStale = !lastUpdate || (Date.now() - lastUpdate.getTime()) > 30000;
@@ -591,9 +708,15 @@ export function OptionsChainPanel() {
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {pairData.map(pd => (
-          <ChainCard key={pd.asset} asset={pd.asset} state={pd.state} />
+          <ChainCard key={pd.asset} asset={pd.asset} state={pd.state} strategyScore={todayWinRate} />
         ))}
       </div>
+      <style jsx global>{`
+        @keyframes breakout-pop {
+          0%, 100% { transform: scale(1); box-shadow: 0 0 0 rgba(34, 197, 94, 0); }
+          50% { transform: scale(1.08); box-shadow: 0 0 14px rgba(34, 197, 94, 0.35); }
+        }
+      `}</style>
     </div>
   );
 }

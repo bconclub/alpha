@@ -93,12 +93,14 @@ function MarketRegimeCard({
   atrRatio,
   netChange,
   regimeDuration,
+  sparklineData,
 }: {
   regime: string;
   chopScore: number;
   atrRatio: number;
   netChange: number;
   regimeDuration: string;
+  sparklineData: number[];
 }) {
   // Regime configuration with inline styles
   const regimeStyles: Record<string, {
@@ -145,21 +147,16 @@ function MarketRegimeCard({
 
   const rs = regimeStyles[regime] ?? regimeStyles.SIDEWAYS;
 
-  // Generate directional sparkline data based on regime
-  const sparklineData = useMemo(() => {
-    const points: number[] = [];
-    const trend = regime === 'TRENDING_UP' ? 1 : regime === 'TRENDING_DOWN' ? -1 : 0;
-    let val = 50;
-    for (let i = 0; i < 20; i++) {
-      const noise = (Math.random() - 0.5) * 10;
-      const trendMove = trend * 2;
-      val = Math.max(20, Math.min(80, val + trendMove + noise));
-      points.push(val);
-    }
-    return points;
-  }, [regime]);
-
   const sparkColor = rs.iconColor;
+  const regimeMessage: Record<string, string> = {
+    SIDEWAYS: 'Compression building - options entry zone',
+    TRENDING_UP: 'Momentum active - ride calls',
+    TRENDING_DOWN: 'Momentum active - ride puts',
+    CHOPPY: 'High noise - skip all entries',
+  };
+  const atrContext = atrRatio < 0.8 ? 'Low vol' : atrRatio <= 1.5 ? 'Normal' : 'High vol';
+  const chopBarColor = chopScore > 0.6 ? '#ef4444' : chopScore >= 0.3 ? '#eab308' : '#22c55e';
+  const chopBarWidthPct = Math.max(0, Math.min(1, chopScore)) * 100;
 
   // Stat box styles
   const statBoxStyle: React.CSSProperties = {
@@ -235,6 +232,17 @@ function MarketRegimeCard({
           </span>
         )}
       </div>
+      <div
+        style={{
+          fontSize: '11px',
+          fontStyle: 'italic',
+          color: rs.iconColor,
+          opacity: 0.6,
+          marginTop: '-2px',
+        }}
+      >
+        {regimeMessage[regime] ?? regimeMessage.SIDEWAYS}
+      </div>
 
       {/* Sparkline Row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -248,11 +256,31 @@ function MarketRegimeCard({
       <div style={{ display: 'flex', gap: '6px', marginTop: '2px' }}>
         <div style={statBoxStyle}>
           <div style={statLabelStyle}>Chop</div>
-          <div style={statValueStyle('#f59e0b')}>{chopScore.toFixed(2)}</div>
+          <div
+            style={{
+              width: '52px',
+              height: '6px',
+              borderRadius: '999px',
+              backgroundColor: 'rgba(63,63,70,0.8)',
+              overflow: 'hidden',
+              margin: '2px auto 0',
+            }}
+          >
+            <div
+              style={{
+                width: `${chopBarWidthPct}%`,
+                height: '100%',
+                backgroundColor: chopBarColor,
+                transition: 'width 250ms ease',
+              }}
+            />
+          </div>
+          <div style={{ ...statValueStyle(chopBarColor), marginTop: '2px' }}>{chopScore.toFixed(2)}</div>
         </div>
         <div style={statBoxStyle}>
           <div style={statLabelStyle}>ATR</div>
           <div style={statValueStyle('#60a5fa')}>{atrRatio.toFixed(1)}x</div>
+          <div style={{ fontSize: '8px', color: '#93c5fd', opacity: 0.85 }}>{atrContext}</div>
         </div>
         <div style={statBoxStyle}>
           <div style={statLabelStyle}>Net</div>
@@ -281,14 +309,6 @@ export function LiveStatusBar() {
   const atrRatio = botStatus?.atr_ratio ?? 1;
   const netChange = botStatus?.net_change_30m ?? 0;
   const regimeSince = botStatus?.regime_since;
-
-  const regimeConfig: Record<string, { label: string; icon: string; bg: string; text: string; pulse?: boolean }> = {
-    TRENDING_UP:   { label: 'TRENDING UP',   icon: '↗', bg: 'bg-emerald-500/15 border-emerald-500/30', text: 'text-emerald-400' },
-    TRENDING_DOWN: { label: 'TRENDING DOWN', icon: '↘', bg: 'bg-red-500/15 border-red-500/30',     text: 'text-red-400' },
-    SIDEWAYS:      { label: 'SIDEWAYS',      icon: '↔', bg: 'bg-amber-500/15 border-amber-500/30',  text: 'text-amber-400' },
-    CHOPPY:        { label: 'CHOPPY',        icon: '⚡', bg: 'bg-red-500/20 border-red-500/40',      text: 'text-red-400', pulse: true },
-  };
-  const rc = regimeConfig[regime] ?? regimeConfig.SIDEWAYS;
 
   const regimeDuration = useMemo(() => {
     if (!regimeSince) return '';
@@ -656,25 +676,14 @@ export function LiveStatusBar() {
         </div>
 
         {/* Row 3 — Market Regime */}
-        <div className={cn(
-          'flex flex-col gap-1.5 rounded-lg border px-3 py-2',
-          rc.bg,
-          rc.pulse && 'animate-pulse',
-        )}>
-          <div className="flex items-center gap-2">
-            <span className={cn('text-base', rc.text)}>{rc.icon}</span>
-            <span className={cn('text-xs font-bold tracking-wide', rc.text)}>{rc.label}</span>
-            {regime === 'CHOPPY' && (
-              <span className="text-[10px] font-semibold text-red-300 ml-1">NO TRADES</span>
-            )}
-          </div>
-          <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
-            <span>Chop: {chopScore.toFixed(2)}</span>
-            <span>ATR: {atrRatio.toFixed(1)}x</span>
-            <span>Net: {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%</span>
-            {regimeDuration && <span>Since {regimeDuration}</span>}
-          </div>
-        </div>
+        <MarketRegimeCard
+          regime={regime}
+          chopScore={chopScore}
+          atrRatio={atrRatio}
+          netChange={netChange}
+          regimeDuration={regimeDuration}
+          sparklineData={sparklineData}
+        />
 
         {/* Row 4 — Bot state + uptime + open positions + clock */}
         <div className="flex items-center justify-between px-1">
@@ -863,6 +872,7 @@ export function LiveStatusBar() {
             atrRatio={atrRatio}
             netChange={netChange}
             regimeDuration={regimeDuration}
+            sparklineData={sparklineData}
           />
         </div>
 
