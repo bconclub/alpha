@@ -1365,7 +1365,7 @@ class AlphaBot:
 
             elif command == "smart_reconcile":
                 from alpha.smart_reconcile import SmartDeltaReconciler
-                from datetime import datetime, timezone
+                from datetime import datetime, timezone, timedelta
                 reconciler = SmartDeltaReconciler(self.delta_options, self.db.client, logger)
                 dry_run = bool(params.get("dry_run", True))
                 date_from_str = params.get("date_from")
