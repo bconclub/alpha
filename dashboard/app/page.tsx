@@ -5,8 +5,8 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, formatNumber, cn } from '@/lib/utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
-import { LivePositions } from '@/components/dashboard/LivePositions';
-import { ArrowUp, ArrowDown, Scan } from 'lucide-react';
+import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
+import { ArrowUp, ArrowDown } from 'lucide-react';
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -450,6 +450,36 @@ export default function DashboardPage() {
   }, []);
   const today = liveToday ?? { ...todayStats, totalLoss: 0 };
 
+  const todayRecentTrades = useMemo(() => {
+    const now = Date.now();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(now + istOffsetMs);
+    const todayIST = istNow.toISOString().slice(0, 10);
+    const cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
+    return trades
+      .filter((t) => t.status === 'closed' && new Date(t.timestamp).getTime() >= cutoffMs)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 10);
+  }, [trades]);
+
+  const todayTradeSlots = useMemo(() => {
+    const slots: Array<{ key: string; pnl: number | null; title: string }> = todayRecentTrades.map(
+      (trade, i) => ({
+        key: String(trade.id ?? i),
+        pnl: trade.pnl ?? 0,
+        title: `${trade.pair}: ${trade.pnl >= 0 ? '+' : ''}${formatCurrency(trade.pnl ?? 0)}`,
+      })
+    );
+    while (slots.length < 10) {
+      slots.push({
+        key: `empty-${slots.length}`,
+        pnl: null,
+        title: 'No trade',
+      });
+    }
+    return slots;
+  }, [todayRecentTrades]);
+
   // Total trades count
   const totalTrades = trades.filter(t => t.status === 'closed').length;
   const liveStrategyCount = useMemo(() => {
@@ -539,7 +569,7 @@ export default function DashboardPage() {
     return trades
       .filter(t => t.status === 'closed')
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-      .slice(0, 5);
+      .slice(0, 10);
   }, [trades]);
 
   const formatUptime = (seconds: number): string => {
@@ -549,14 +579,10 @@ export default function DashboardPage() {
     return `${m}m`;
   };
 
-  // Timeframe selection for Total Capital card
   const [capitalTimeframe, setCapitalTimeframe] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
-  
-  // Calculate P&L for selected timeframe
   const timeframeStats = useMemo(() => {
     const now = Date.now();
     const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    
     let cutoffMs: number;
     if (capitalTimeframe === '24h') {
       const istNow = new Date(now + istOffsetMs);
@@ -566,10 +592,8 @@ export default function DashboardPage() {
       const days = capitalTimeframe === '7d' ? 7 : capitalTimeframe === '14d' ? 14 : 30;
       cutoffMs = now - days * 24 * 60 * 60 * 1000;
     }
-
     let pnl = 0;
     let total = 0;
-    
     for (const t of trades) {
       if (t.status !== 'closed') continue;
       const tradeTime = new Date(t.timestamp).getTime();
@@ -578,16 +602,14 @@ export default function DashboardPage() {
         total++;
       }
     }
-    
     return { pnl, total };
   }, [trades, capitalTimeframe]);
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white p-3 sm:p-4 md:p-6 pb-24 md:pb-6">
-      {/* 3-Card Row: Total Capital | Today P&L | Market Regime */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-        {/* Card 1: Total Capital + Timeframe Toggle */}
-        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+      {/* Top summary row: Total Capital | Today | Sideways */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4 items-stretch">
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4 min-h-[156px]">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-gray-500 uppercase tracking-wider">Total Capital</span>
             <div className="flex gap-1">
@@ -596,7 +618,7 @@ export default function DashboardPage() {
                   key={tf}
                   onClick={() => setCapitalTimeframe(tf)}
                   className={cn(
-                    'px-2 py-0.5 text-[10px] font-medium rounded transition-colors',
+                    'px-1.5 py-0.5 text-[10px] font-medium rounded transition-colors',
                     capitalTimeframe === tf
                       ? 'bg-white/10 text-white'
                       : 'border border-white/10 text-gray-500 hover:text-gray-300'
@@ -607,66 +629,68 @@ export default function DashboardPage() {
               ))}
             </div>
           </div>
-          <div className="text-2xl font-bold font-mono">
-            {formatCurrency(totalCapital)}
-          </div>
-          {capitalInr > 0 && (
-            <div className="text-xs text-gray-500">₹{capitalInr.toLocaleString('en-IN')}</div>
-          )}
-          <div className="flex items-center justify-between mt-2">
+          <div className="text-4xl font-bold font-mono leading-none">{formatCurrency(totalCapital)}</div>
+          {capitalInr > 0 && <div className="text-xs text-gray-500 mt-1">₹{capitalInr.toLocaleString('en-IN')}</div>}
+          <div className="mt-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className={cn('w-2 h-2 rounded-full', botState === 'running' ? 'bg-green-500' : 'bg-yellow-500')} />
               <span className={cn('text-xs', botState === 'running' ? 'text-green-500' : 'text-yellow-500')}>
                 {botState === 'running' ? 'Running' : 'Paused'}
               </span>
-              {uptimeSeconds > 0 && (
-                <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>
-              )}
+              {uptimeSeconds > 0 && <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>}
             </div>
             {timeframeStats.total > 0 && (
-              <span className={cn(
-                'text-xs font-mono font-bold',
-                timeframeStats.pnl >= 0 ? 'text-green-400' : 'text-red-400'
-              )}>
+              <span className={cn('text-xs font-mono font-bold', timeframeStats.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
                 {timeframeStats.pnl >= 0 ? '+' : ''}{formatCurrency(timeframeStats.pnl)}
               </span>
             )}
           </div>
         </div>
 
-        {/* Card 2: Today's P&L */}
-        <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
+        <div className="bg-[#141419] border border-white/5 rounded-xl p-4 min-h-[156px]">
           <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Today</div>
-          <div className={cn('text-2xl font-bold font-mono mb-3', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
-            {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
-          </div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+          <div className="grid grid-cols-2 gap-4 items-start">
             <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider">Win Rate</div>
-              <div className="text-xs font-mono text-gray-200 mt-0.5">{today.total > 0 ? `${today.winRate.toFixed(0)}%` : '—'}</div>
+              <div className={cn('text-4xl font-bold font-mono leading-none mb-3', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
+                {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
+              </div>
+              <div>
+                <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Last 10 Today</div>
+                <div className="flex gap-1 flex-wrap">
+                  {todayTradeSlots.map((slot) => (
+                    <div
+                      key={slot.key}
+                      className={cn(
+                        'w-3.5 h-3.5 rounded-sm',
+                        slot.pnl == null
+                          ? 'bg-gray-700/60'
+                          : slot.pnl > 0
+                            ? 'bg-green-500'
+                            : slot.pnl < 0
+                              ? 'bg-red-500'
+                              : 'bg-gray-500'
+                      )}
+                      title={slot.title}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
-            <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider">Fees</div>
-              <div className="text-xs font-mono text-gray-200 mt-0.5">${today.fees.toFixed(2)}</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider">W / L</div>
-              <div className="text-xs font-mono text-gray-200 mt-0.5">{today.wins}W / {today.losses}L</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider">Trades</div>
-              <div className="text-xs font-mono text-gray-200 mt-0.5">{today.total}</div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+              <div><span className="text-gray-500 block">Win Rate</span><span className="font-mono text-gray-200">{today.total > 0 ? `${today.winRate.toFixed(0)}%` : '—'}</span></div>
+              <div><span className="text-gray-500 block">Fees</span><span className="font-mono text-gray-200">${today.fees.toFixed(2)}</span></div>
+              <div><span className="text-gray-500 block">W / L</span><span className="font-mono text-gray-200">{today.wins}W / {today.losses}L</span></div>
+              <div><span className="text-gray-500 block">Trades</span><span className="font-mono text-gray-200">{today.total}</span></div>
             </div>
           </div>
         </div>
 
-        {/* Card 3: Market Regime */}
-        <div className={cn('rounded-xl p-4 border', rc.bg, 'border-white/5')}>
+        <div className={cn('rounded-xl p-4 border border-white/5 min-h-[156px]', rc.bg)}>
           <div className="flex items-center gap-2 mb-2">
             <span className={cn('text-lg', rc.color)}>{rc.icon}</span>
             <span className={cn('text-sm font-bold', rc.color)}>{rc.label}</span>
           </div>
-          <div className="grid grid-cols-4 gap-2 text-xs">
+          <div className="grid grid-cols-4 gap-2 text-xs mt-4">
             <div>
               <span className="text-gray-500 block">Chop</span>
               <span className="font-mono text-gray-300">{chopScore.toFixed(2)}</span>
@@ -689,16 +713,10 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Live Positions */}
-      <LivePositions />
-
-      {/* Main Content Grid */}
+      {/* Main body: left info cards + right strategy/signal view */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 mt-4">
-        {/* Left Column - Market Overview & Recent Trades */}
         <div className="lg:col-span-3 space-y-4">
           <MarketOverview />
-          
-          {/* Recent Trades */}
           <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
             <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Recent Trades</h3>
             {recentTrades.length === 0 ? (
@@ -712,14 +730,8 @@ export default function DashboardPage() {
             )}
           </div>
         </div>
-
-        {/* Right Column - BB Squeeze (Sticky on desktop) */}
         <div className="lg:col-span-2">
-          <div className="lg:sticky lg:top-4 space-y-3">
-            {squeezeAssets.map((asset) => (
-              <SqueezeCard key={asset.asset} asset={asset} />
-            ))}
-          </div>
+          <OptionsChainPanel />
         </div>
       </div>
     </div>
