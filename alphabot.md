@@ -257,6 +257,180 @@ npm run dev      # Development
 npm run build    # Production build
 ```
 
+## Changelog
+
+### [0.19.2] - 2026-04-15 - Smart Reconcile & Critical Bug Fixes
+
+#### 🚀 New Features
+
+**1. Smart Reconciler (`engine/alpha/smart_reconcile.py`)**
+- Time-aware trade matching (not FIFO)
+- Matches by: pair + opened_at (±2min) + entry_price (±1%)
+- Dry-run mode: preview changes without writing
+- Backup system: stores old values in `metadata->reconcile_backup`
+- Respects `manual_fix_applied` flag to prevent overwrite
+- Count mismatch guard: skips if Delta round trips ≠ DB trades
+- Time mismatch guard: skips if entry times differ >5min
+
+**2. One-Time Fix Script (`engine/scripts/fix_apr15_trades.py`)**
+- Targets corrupted trades #2844/#2845 (ETH 2320C 15Apr26)
+- Usage: `python3 scripts/fix_apr15_trades.py --apply`
+- Defaults to dry-run for safety
+- Uses SmartDeltaReconciler with real Delta API data
+- Marks fixed trades with `metadata.manual_fix_applied = true`
+
+**3. Reconcile API Endpoint (`dashboard/app/api/reconcile/route.ts`)**
+- `POST /api/reconcile`
+- Body: `{ date_from?, date_to?, dry_run? }`
+- Inserts command into `bot_commands` queue
+- Returns `{ command_id, status, message }`
+
+**4. Database Migration**
+- Added `metadata` JSONB column to trades table
+- Stores: `reconcile_backup`, `manual_fix_applied`, ratchet data, etc.
+
+#### 🔧 Modified Components
+
+**`engine/alpha/reconcile.py`**
+- Count mismatch guard: skips symbol if `len(delta_rts) ≠ len(db_trades)`
+- Time-alignment guard: rejects updates if `|opened_at - buy_time| > 300s`
+- Detailed pre-update logging: trade_id, timestamps, fields changed
+- Crossed-trade detection: warns on unmatched buys/sells
+
+**`engine/alpha/strategies/options_scalp.py`**
+- Ratchet sentinel fix: `-999.0` initialization (was `0.0`)
+- Exit gate fix: `> -900.0` check (was `!= 0.0`)
+- 0% peak floor: added `(0.0, -10.0)` tier to table
+- Peak restoration: uses DB `peak_pnl` on restart
+- Squeeze window: reduced to 10min (was 25min)
+
+**`engine/alpha/main.py`**
+- Added `smart_reconcile` command handler
+- Accepts: `date_from`, `date_to`, `dry_run` parameters
+- Processes via `bot_commands` queue
+
+**`dashboard/app/trades/page.tsx`**
+- Added Dry run checkbox to reconcile button
+- Changed command from `'reconcile'` to `'smart_reconcile'`
+- Shows command status feedback
+
+#### 🐛 Critical Bugs Fixed
+
+| Bug | Impact | Fix |
+|-----|--------|-----|
+| Ratchet 0% floor not exiting | -30% SL on +5% peaks | Sentinel value + gate logic |
+| Peak lost on restart | No ratchet protection | Restore from `peak_pnl` column |
+| 0% peak no floor | -30% disasters | Added `(0.0, -10.0)` tier |
+| Cross-trade corruption | Trade A data → Trade B | Time + count guards |
+| Stale exits blocked | No intermediate protection | 25min → 10min squeeze window |
+
+#### 📊 Data Integrity
+
+**Before (Corrupted):**
+- Trade #2844: 25 contracts @ $5.50→$7.00 (winner data, actually loser)
+- Trade #2845: 25 contracts @ $5.50→$7.00 (duplicated)
+
+**After (Fixed):**
+- Trade #2844: 14 contracts @ $9.50→$6.60, -30.53% (OPT_SL)
+- Trade #2845: 25 contracts @ $5.50→$7.00, +27.27% (TP)
+
+#### 🛠️ How to Use
+
+**Fix specific trades:**
+```bash
+cd /root/alpha/engine
+python3 scripts/fix_apr15_trades.py --apply
+```
+
+**Run ongoing reconciliation:**
+1. Dashboard → Trades page
+2. Check "Dry run" (preview first)
+3. Click 🔄 Reconcile button
+4. Review results, uncheck dry run, repeat
+
+**Via API:**
+```bash
+curl -X POST http://localhost:3000/api/reconcile \
+  -H "Content-Type: application/json" \
+  -d '{"date_from": "2026-04-15", "dry_run": true}'
+```
+
+#### 📁 Files Changed
+- **Created**: `smart_reconcile.py`, `fix_apr15_trades.py`, `route.ts`, migration SQL
+- **Modified**: `reconcile.py`, `options_scalp.py`, `main.py`, `page.tsx`
+- **Commit**: `47e76f7`
+
+#### ⚠️ Known Issues
+- Dashboard Today card UI not reflecting changes (deployment/cache)
+- Timezone IST vs local mismatch in Today stats
+- Some 0% peak trades still occurring (`highest_premium` tracking under investigation)
+
+### [0.19.1] - 2026-04-15 - Critical Bug Fixes: Ratchet, Reconcile & Peak Detection
+
+#### Fixed
+- **Ratchet Floor Sentinel Bug (CRITICAL)**
+  - Changed `_opt_ratchet_floor` initialization from `0.0` to `-999.0`
+  - Changed exit gate from `!= 0.0` to `> -900.0`
+  - Fixed 0% breakeven floors not triggering exits
+  - Impact: Trades peaking +5-8% now properly exit at breakeven instead of running to -30% SL
+
+- **Peak Restoration on Restart**
+  - Fixed `_restore_position_from_db()` to use `peak_pnl` column from DB
+  - Recalculates `highest_premium = entry * (1 + peak_pnl/100)` on restart
+  - Previously used `current_price` which lost true peaks
+  - Impact: Ratchet floors survive engine restarts
+
+- **0% Peak Floor Protection**
+  - Added `(0.0, -10.0)` tier to `OPT_RATCHET_FLOOR_TABLE`
+  - Provides -10% safety net for trades that never peak or lose peak data
+  - Impact: Prevents -30% disasters when peak tracking fails
+
+- **Reconcile.py Cross-Trade Corruption (CRITICAL)**
+  - Added count mismatch guard: skips updates when Delta round trips != DB trades
+  - Added 5-minute time-alignment guard: rejects updates if entry times differ >5min
+  - Added detailed logging before every UPDATE
+  - Added crossed-trade detection for unmatched buys/sells
+  - Impact: Prevents Trade A from being overwritten with Trade B's exit data
+
+- **Squeeze No-Stale Window**
+  - Reduced `SQUEEZE_NO_STALE_MIN_ETH` from 25min to 10min
+  - Impact: Allows stale exits to catch -20% drops before -30% SL
+
+- **Dashboard Today Card (Partial)**
+  - Added `recentTrades` computation from trades context
+  - Added Last 10 Trades visual bar (green/red blocks)
+  - Reorganized layout (big P&L left, stats grid right)
+  - Note: Deployment issues pending
+
+#### Technical Details
+- Ratchet table now: `(0.0, -10.0), (3.0, -2.0), (5.0, 0.0), (8.0, 2.0)...`
+- All `_opt_ratchet_floor` reset points use `-999.0` consistently
+- Reconcile guards use ISO timestamp parsing with 5-minute tolerance
+- Ghost inserts remain functional while updates are protected
+
+#### Before/After Examples
+| Scenario | Before | After |
+|----------|--------|-------|
+| +7% peak → 0% floor | No exit (bug), hit -30% SL | Exit at breakeven |
+| 0% peak → no floor | -30% SL | -10% floor exit |
+| Restart with +10% peak | Peak lost, floor at 0% | Peak restored, floor at +2% |
+| Two trades same symbol | Data cross-contamination | Protected by guards |
+
+#### Files Modified
+- `engine/alpha/strategies/options_scalp.py`
+- `engine/alpha/main.py`
+- `engine/alpha/reconcile.py`
+- `engine/alpha/smart_reconcile.py`
+- `engine/scripts/fix_apr15_trades.py`
+- `dashboard/app/api/reconcile/route.ts`
+- `dashboard/app/trades/page.tsx`
+- `supabase/migrations/20250415_add_metadata_to_trades.sql`
+
+#### Known Issues
+- Dashboard Today card UI changes not showing (cache/deployment issue)
+- Timezone mismatch between Today card and PnL Calendar (IST vs local)
+- Some trades showing 0% peak (highest_premium tracking needs investigation)
+
 ## Commit History
 Major milestones:
 - v5.2: Focused Signal — pure 2-of-4, max 2 positions, cooldowns

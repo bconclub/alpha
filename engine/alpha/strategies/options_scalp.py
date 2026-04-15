@@ -358,8 +358,12 @@ class OptionsScalpStrategy(BaseStrategy):
         self._momentum_price_history: deque[tuple[float, float]] = deque(
             maxlen=20
         )  # (time, price)
+        self._premium_energy_history: deque[tuple[float, float]] = deque(
+            maxlen=20
+        )  # (time, option premium)
         self._MOMENTUM_CHECK_WINDOW_SEC = 60.0  # Look back 60s for momentum
         self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
+        self._ENERGY_DEAD_THRESHOLD_PCT = 0.05
         self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
 
         # ── Caching for squeeze detection ─────────────────────────
@@ -2495,6 +2499,36 @@ class OptionsScalpStrategy(BaseStrategy):
         current_price = self._momentum_price_history[-1][1]
         return (current_price - old_price) / old_price * 100
 
+    def _compute_energy(self, current_premium: float) -> float:
+        """Combined energy = abs(underlying momentum) + abs(premium velocity) over 60s."""
+        now = time.monotonic()
+        cutoff = now - self._MOMENTUM_CHECK_WINDOW_SEC
+
+        underlying_mom = 0.0
+        if len(self._momentum_price_history) >= 2:
+            old_underlying = None
+            for t, price in reversed(self._momentum_price_history):
+                if t <= cutoff:
+                    old_underlying = price
+                    break
+            if old_underlying and old_underlying > 0:
+                latest_underlying = self._momentum_price_history[-1][1]
+                underlying_mom = (
+                    (latest_underlying - old_underlying) / old_underlying * 100
+                )
+
+        premium_velocity = 0.0
+        if len(self._premium_energy_history) >= 2:
+            old_premium = None
+            for t, premium in reversed(self._premium_energy_history):
+                if t <= cutoff:
+                    old_premium = premium
+                    break
+            if old_premium and old_premium > 0:
+                premium_velocity = (current_premium - old_premium) / old_premium * 100
+
+        return abs(underlying_mom) + abs(premium_velocity)
+
     def _premium_regime(self) -> tuple[float, float]:
         """Return (premium_momentum_pct, premium_range_pct) for recent position ticks."""
         if len(self._position_premium_history) < 2:
@@ -2598,14 +2632,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Track peak premium
         self.highest_premium = max(self.highest_premium, current_premium)
-        self._position_premium_history.append((time.monotonic(), current_premium))
-
-        # Update ratchet floor
-        self._update_opt_ratchet_floor(
-            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-            if self.entry_premium > 0
-            else 0
-        )
+        now = time.monotonic()
+        self._position_premium_history.append((now, current_premium))
+        self._premium_energy_history.append((now, current_premium))
 
         # Write position state to trades table every tick (~10s)
         await self._update_position_state_in_db(current_premium)
@@ -2622,17 +2651,12 @@ class OptionsScalpStrategy(BaseStrategy):
             if self.entry_premium > 0
             else 0
         )
-
-        hold_seconds = time.monotonic() - self.entry_time
-        in_phase1 = hold_seconds < self.PHASE1_HANDS_OFF_SEC
+        energy_score = self._compute_energy(current_premium)
 
         # Heartbeat (every ~60s)
         if self._tick_count % 6 == 0:
-            trail_tag = " [TRAILING]" if self._trailing_active else ""
-            phase_tag = " [PHASE1]" if in_phase1 else ""
-            squeeze_tag = " [SQUEEZE]" if self._is_squeeze_entry else ""
             self.logger.info(
-                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | %ds%s%s%s",
+                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | energy=%.3f%%",
                 self.option_symbol,
                 self.option_side,
                 self.entry_premium,
@@ -2640,421 +2664,52 @@ class OptionsScalpStrategy(BaseStrategy):
                 premium_change_pct,
                 self.highest_premium,
                 peak_pnl_pct,
-                int(hold_seconds),
-                trail_tag,
-                phase_tag,
-                squeeze_tag,
+                energy_score,
             )
 
-        # ── 1. EXPIRY GUARD ───────────
-        if self.expiry_dt:
-            time_to_expiry = (
-                self.expiry_dt - datetime.now(timezone.utc)
-            ).total_seconds()
-            mins_to_expiry = time_to_expiry / 60
-            if mins_to_expiry <= self.EXPIRY_GUARD_MIN_MIN:
-                self.logger.info(
-                    "[%s] EXPIRY_GUARD: %s expires in %.0fm < %dm → EXIT regardless of P&L",
-                    self.option_symbol,
-                    self.option_symbol,
-                    mins_to_expiry,
-                    self.EXPIRY_GUARD_MIN_MIN,
-                )
-                return await self._do_option_exit(
-                    current_premium, premium_change_pct, "EXPIRY_GUARD"
-                )
-            elif (
-                mins_to_expiry <= self.EXPIRY_GUARD_HOURS * 60
-                and premium_change_pct < 10.0
-            ):
-                self.logger.info(
-                    "[%s] EXPIRY_GUARD: %s expires in %.0fm, pnl=%.1f%% < +10%% → EXIT",
-                    self.option_symbol,
-                    self.option_symbol,
-                    mins_to_expiry,
-                    premium_change_pct,
-                )
-                return await self._do_option_exit(
-                    current_premium, premium_change_pct, "EXPIRY_GUARD"
-                )
-
-        # ── Ratchet floor update ─────
-        self._update_opt_ratchet_floor(peak_pnl_pct)
-
-        # ── 2. ENTRY DROP ──
-        if hold_seconds <= 60 and premium_change_pct <= -8.0:
+        # ── 1. Hard fallback stop loss ──
+        if premium_change_pct <= -30.0:
             self.logger.info(
-                "[%s] OPT_ENTRY_DROP: entry=$%.4f current=$%.4f drop=%.1f%% after %.0fs",
+                "[%s] OPT_HARD_SL — premium %+.1f%% ($%.4f → $%.4f)",
                 self.option_symbol,
+                premium_change_pct,
                 self.entry_premium,
                 current_premium,
-                premium_change_pct,
-                hold_seconds,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_ENTRY_DROP"
+                current_premium, premium_change_pct, "OPT_HARD_SL"
             )
 
-        # ── 3. RATCHET EXIT ─────────
+        # ── 2. Energy-based dead loser exit ──
+        if energy_score < self._ENERGY_DEAD_THRESHOLD_PCT and premium_change_pct < 0:
+            self.logger.info(
+                "[%s] OPT_ENERGY_DEAD_LOSER — energy=%.3f%% < %.3f%% and pnl=%+.1f%%",
+                self.option_symbol,
+                energy_score,
+                self._ENERGY_DEAD_THRESHOLD_PCT,
+                premium_change_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_ENERGY_DEAD_LOSER"
+            )
+
+        # ── 3. Energy-based winner fading exit ──
         if (
-            self._opt_ratchet_floor > -900.0  # Floor was actually set (not sentinel)
-            and premium_change_pct < self._opt_ratchet_floor
+            energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
+            and premium_change_pct > 0
+            and peak_pnl_pct > 20.0
         ):
-            # GPFC #22 Part 2: Check momentum before firing RATCHET exit — let winners ride
-            if self._should_ride_momentum(premium_change_pct) or self._has_expansion_signals(premium_change_pct):
-                self.logger.info(
-                    "[%s] RIDE_MOMENTUM: pnl=%+.1f%% ratchet_floor=%+.1f%% — expansion detected, holding",
-                    self.option_symbol,
-                    premium_change_pct,
-                    self._opt_ratchet_floor,
-                )
-            else:
-                self.logger.info(
-                    "[%s] OPT_RATCHET — pnl +%.1f%% fell below floor +%.1f%%",
-                    self.option_symbol,
-                    premium_change_pct,
-                    self._opt_ratchet_floor,
-                )
-                return await self._do_option_exit(
-                    current_premium, premium_change_pct, "OPT_RATCHET"
-                )
-
-        # ── 4. STOP LOSS ────────────
-        if premium_change_pct <= -self.SL_PREMIUM_LOSS_PCT:
             self.logger.info(
-                "[%s] OPTION SL — premium %+.1f%% ($%.4f → $%.4f)",
+                "[%s] OPT_ENERGY_WINNER_FADING — energy=%.3f%% < %.3f%% with pnl=%+.1f%% peak=%+.1f%%",
                 self.option_symbol,
+                energy_score,
+                self._ENERGY_DEAD_THRESHOLD_PCT,
                 premium_change_pct,
-                self.entry_premium,
-                current_premium,
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_SL"
-            )
-
-        # ── Phase 1 hands-off ─────
-        if in_phase1:
-            return []
-
-        # ── 5. PEAK TRAIL ───────────
-        if peak_pnl_pct >= 8.0:
-            trail_floor_pct = peak_pnl_pct * 0.65
-            if premium_change_pct <= trail_floor_pct:
-                multiplier = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
-                spot = self._last_spot_price or (
-                    current_premium * (200 if self._base_asset == "BTC" else 100)
-                )
-                estimated_fees = 2 * (self._contracts * multiplier * spot * 0.000118)
-                gross_pnl = self._calc_options_pnl(
-                    self.entry_premium, current_premium, self._contracts
-                )
-
-                if peak_pnl_pct < 15.0 and gross_pnl < estimated_fees * 1.5:
-                    self.logger.info(
-                        "[%s] OPT_PEAK_TRAIL skipped — gross=$%.4f < fees*1.5=$%.4f (peak +%.1f%%)",
-                        self.option_symbol,
-                        gross_pnl,
-                        estimated_fees * 1.5,
-                        peak_pnl_pct,
-                    )
-                else:
-                    self.logger.info(
-                        "[%s] OPT_PEAK_TRAIL — peak +%.1f%%, floor +%.1f%%, now +%.1f%%",
-                        self.option_symbol,
-                        peak_pnl_pct,
-                        trail_floor_pct,
-                        premium_change_pct,
-                    )
-                    return await self._do_option_exit(
-                        current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
-                    )
-
-        # ── 6. TAKE PROFIT ──────────
-        if premium_change_pct >= self.TP_PREMIUM_GAIN_PCT:
-            self.logger.info(
-                "[%s] OPTION TP — premium +%.1f%% ($%.4f → $%.4f)",
-                self.option_symbol,
-                premium_change_pct,
-                self.entry_premium,
-                current_premium,
-            )
-            return await self._do_option_exit(current_premium, premium_change_pct, "TP")
-
-        # ── 7. TIERED TRAILING ──────
-        trail_distance = 0.0
-        for tier_pct, tier_dist in self.OPT_TRAIL_TIERS:
-            if peak_pnl_pct >= tier_pct:
-                trail_distance = tier_dist
-        if trail_distance > 0 and not self._trailing_active:
-            self._trailing_active = True
-            self.logger.info(
-                "[%s] OPTION TRAIL ON at +%.1f%% (distance=%.1f%%)",
-                self.option_symbol,
-                premium_change_pct,
-                trail_distance,
-            )
-
-        # ── 8. TRAILING STOP ────────
-        if self._trailing_active and trail_distance > 0:
-            trail_floor = self.highest_premium * (1 - trail_distance / 100)
-            if current_premium <= trail_floor:
-                final_pct = (
-                    (current_premium - self.entry_premium) / self.entry_premium * 100
-                )
-                self.logger.info(
-                    "[%s] OPTION TRAIL HIT — peak=$%.4f floor=$%.4f now=$%.4f (dist=%.1f%%)",
-                    self.option_symbol,
-                    self.highest_premium,
-                    trail_floor,
-                    current_premium,
-                    trail_distance,
-                )
-                return await self._do_option_exit(
-                    current_premium, final_pct, "OPT_TRAIL"
-                )
-
-        # ── 9. PULLBACK ─────────────
-        if peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT and premium_change_pct > 0:
-            pct_of_peak_lost = (
-                (peak_pnl_pct - premium_change_pct) / peak_pnl_pct
-            ) * 100
-            if pct_of_peak_lost >= self.PULLBACK_EXIT_PCT:
-                # GPFC #22 Part 2: Check momentum before firing PULLBACK — let winners ride
-                # Hard override: always exit if peak > +50% AND pullback > 60% of peak gain
-                hard_override = peak_pnl_pct > 50.0 and pct_of_peak_lost > 60.0
-                if not hard_override and self._should_ride_momentum(premium_change_pct):
-                    self.logger.info(
-                        "[%s] RIDE_MOMENTUM: pnl=+%.1f%% peak=+%.1f%% lost=%.0f%% — skipping PULLBACK, holding",
-                        self.option_symbol,
-                        premium_change_pct,
-                        peak_pnl_pct,
-                        pct_of_peak_lost,
-                    )
-                else:
-                    if hard_override:
-                        self.logger.info(
-                            "[%s] OPTION PULLBACK (HARD OVERRIDE) — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
-                            self.option_symbol,
-                            peak_pnl_pct,
-                            premium_change_pct,
-                            pct_of_peak_lost,
-                        )
-                    else:
-                        self.logger.info(
-                            "[%s] OPTION PULLBACK — peak +%.1f%% now +%.1f%% (lost %.0f%% of gain)",
-                            self.option_symbol,
-                            peak_pnl_pct,
-                            premium_change_pct,
-                            pct_of_peak_lost,
-                        )
-                    return await self._do_option_exit(
-                        current_premium, premium_change_pct, "PULLBACK"
-                    )
-
-        # ── 10. DECAY ───────────────
-        if peak_pnl_pct >= 10.0 and premium_change_pct <= self.DECAY_THRESHOLD_PCT:
-            self.logger.info(
-                "[%s] OPTION DECAY — peak +%.1f%% faded to +%.1f%% (threshold +%.1f%%)",
-                self.option_symbol,
                 peak_pnl_pct,
-                premium_change_pct,
-                self.DECAY_THRESHOLD_PCT,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "DECAY"
+                current_premium, premium_change_pct, "OPT_ENERGY_WINNER_FADING"
             )
-
-        # ── 11. PROGRESSIVE SL TIGHTENING (stale trade protection) ────
-        # GPFC #23: Smarter stale exit for squeeze setups
-        abs_move_pct = abs(premium_change_pct)
-
-        # Determine no-stale threshold based on asset (extended for squeeze entries)
-        no_stale_threshold = (
-            self.SQUEEZE_NO_STALE_MIN_BTC * 60
-            if self._is_squeeze_entry and self._base_asset == "BTC"
-            else self.SQUEEZE_NO_STALE_MIN_ETH * 60
-            if self._is_squeeze_entry
-            else 0  # non-squeeze entries (shouldn't happen now)
-        )
-
-        is_stale = (
-            abs_move_pct < self.STALE_MOVE_THRESHOLD
-            and peak_pnl_pct < 10.0
-            and premium_change_pct <= 0.0
-            and hold_seconds > no_stale_threshold  # Only after no-stale period
-        )
-
-        if is_stale:
-            hold_min = hold_seconds / 60
-            _is_btc = self._base_asset == "BTC"
-            underlying_mom = self._underlying_momentum_pct()
-            premium_mom, premium_range = self._premium_regime()
-            weak_underlying = (
-                underlying_mom < self._MOMENTUM_THRESHOLD_PCT
-                if self.option_side == "call"
-                else underlying_mom > -self._MOMENTUM_THRESHOLD_PCT
-            )
-            weak_premium_mom = premium_mom <= 0.2
-            low_premium_vol = premium_range < self.STALE_PREMIUM_RANGE_MIN_PCT
-            weak_signals = int(weak_underlying) + int(weak_premium_mom) + int(low_premium_vol)
-
-            # GPFC #23: Before firing OPT_STALE, check if squeeze is still active
-            squeeze_still_active = False
-            if self._is_squeeze_entry:
-                squeeze_result = await self._detect_squeeze()
-                if squeeze_result:
-                    is_squeeze, bb_width_pct, *_ = squeeze_result
-                    bb_width_threshold = (
-                        self.SQUEEZE_BB_WIDTH_BTC
-                        if self._base_asset == "BTC"
-                        else self.SQUEEZE_BB_WIDTH_ETH
-                    )
-                    # Squeeze is "still active" if BB width is still tight (< threshold)
-                    squeeze_still_active = bb_width_pct < bb_width_threshold
-                    if squeeze_still_active:
-                        self.logger.info(
-                            "[%s] STALE_HOLD: squeeze still forming (bb_width=%.2f%% < %.1f%%), "
-                            "keeping position — %.0fm held",
-                            self.option_symbol,
-                            bb_width_pct,
-                            bb_width_threshold,
-                            hold_min,
-                        )
-
-            # After 30 minutes, never let squeeze still_active block exits
-            if hold_min >= 30:
-                if squeeze_still_active:
-                    self.logger.info(
-                        "[%s] SQUEEZE_TIMEOUT: forcing squeeze_still_active=False after %.0fm",
-                        self.option_symbol,
-                        hold_min,
-                    )
-                squeeze_still_active = False
-
-            if _is_btc:
-                if hold_min >= self.STALE_EXIT_MIN_BTC:
-                    if squeeze_still_active:
-                        # Squeeze still active → don't exit
-                        pass
-                    elif weak_signals < self.STALE_MIN_WEAK_SIGNALS:
-                        self.logger.info(
-                            "[%s] STALE_HOLD: weak_signals=%d/3 (mom=%+.2f%% prem_mom=%+.2f%% prem_rng=%.2f%%) — hold",
-                            self.option_symbol,
-                            weak_signals,
-                            underlying_mom,
-                            premium_mom,
-                            premium_range,
-                        )
-                    else:
-                        self.logger.info(
-                            "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
-                            self.option_symbol,
-                            hold_min,
-                            premium_change_pct,
-                            peak_pnl_pct,
-                        )
-                        return await self._do_option_exit(
-                            current_premium, premium_change_pct, "OPT_STALE"
-                        )
-                elif hold_min >= 12.0 and premium_change_pct < self.STALE_SL_12M_BTC:
-                    if not squeeze_still_active:
-                        self.logger.info(
-                            "[%s] SL_TIGHTEN: 12m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol,
-                            self.STALE_SL_12M_BTC,
-                            premium_change_pct,
-                        )
-                        return await self._do_option_exit(
-                            current_premium, premium_change_pct, "OPT_STALE"
-                        )
-                elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_BTC:
-                    if not squeeze_still_active:
-                        self.logger.info(
-                            "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol,
-                            self.STALE_SL_8M_BTC,
-                            premium_change_pct,
-                        )
-                        return await self._do_option_exit(
-                            current_premium, premium_change_pct, "OPT_STALE"
-                        )
-            else:
-                if hold_min >= self.STALE_EXIT_MIN_ETH:
-                    if squeeze_still_active:
-                        # Squeeze still active → don't exit
-                        pass
-                    elif weak_signals < self.STALE_MIN_WEAK_SIGNALS:
-                        self.logger.info(
-                            "[%s] STALE_HOLD: weak_signals=%d/3 (mom=%+.2f%% prem_mom=%+.2f%% prem_rng=%.2f%%) — hold",
-                            self.option_symbol,
-                            weak_signals,
-                            underlying_mom,
-                            premium_mom,
-                            premium_range,
-                        )
-                    else:
-                        self.logger.info(
-                            "[%s] OPT_STALE: %.0fm no movement (move=%.1f%%, peak=%.1f%%) → EXIT",
-                            self.option_symbol,
-                            hold_min,
-                            premium_change_pct,
-                            peak_pnl_pct,
-                        )
-                        return await self._do_option_exit(
-                            current_premium, premium_change_pct, "OPT_STALE"
-                        )
-                elif hold_min >= 8.0 and premium_change_pct < self.STALE_SL_8M_ETH:
-                    if not squeeze_still_active:
-                        self.logger.info(
-                            "[%s] SL_TIGHTEN: 8m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol,
-                            self.STALE_SL_8M_ETH,
-                            premium_change_pct,
-                        )
-                        return await self._do_option_exit(
-                            current_premium, premium_change_pct, "OPT_STALE"
-                        )
-                elif hold_min >= 5.0 and premium_change_pct < self.STALE_SL_5M_ETH:
-                    if not squeeze_still_active:
-                        self.logger.info(
-                            "[%s] SL_TIGHTEN: 5m stale, SL → %.0f%% (now %.1f%%)",
-                            self.option_symbol,
-                            self.STALE_SL_5M_ETH,
-                            premium_change_pct,
-                        )
-                        return await self._do_option_exit(
-                            current_premium, premium_change_pct, "OPT_STALE"
-                        )
-
-        # ── 12. SIGNAL REVERSAL ─────
-        if self._scalp and hasattr(self._scalp, "last_signal_state"):
-            ss = self._scalp.last_signal_state
-            if ss:
-                new_side = ss.get("side")
-                new_strength = ss.get("strength", 0)
-                signal_age = time.monotonic() - ss.get("timestamp", 0)
-
-                if (
-                    signal_age < 30  # SIGNAL_STALENESS_SEC
-                    and new_strength >= 4  # MIN_SIGNAL_STRENGTH
-                    and new_side is not None
-                ):
-                    is_reversal = (
-                        self.option_side == "call" and new_side == "short"
-                    ) or (self.option_side == "put" and new_side == "long")
-                    if is_reversal:
-                        self.logger.info(
-                            "[%s] SIGNAL REVERSAL — %s → opposite %s at %+.1f%%",
-                            self.option_symbol,
-                            self.option_side,
-                            new_side,
-                            premium_change_pct,
-                        )
-                        return await self._do_option_exit(
-                            current_premium,
-                            premium_change_pct,
-                            "OPT_REVERSAL",
-                        )
 
         return []
 
