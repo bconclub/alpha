@@ -192,6 +192,16 @@ function getSetupLabel(setup?: string): string {
   return labels[setup] ?? setup;
 }
 
+function inferSetupType(trade: Trade): string | undefined {
+  if (trade.setup_type && trade.setup_type.trim()) return trade.setup_type;
+  const haystack = `${trade.reason ?? ''} ${trade.order_id ?? ''}`.toUpperCase();
+  if (haystack.includes('MOMENTUM_BURST')) return 'MOMENTUM_BURST';
+  if (haystack.includes('MOMENTUM_BURST_ENTRY')) return 'MOMENTUM_BURST';
+  if (haystack.includes('BB_SQUEEZE_BREAKOUT')) return 'BB_SQUEEZE';
+  if (haystack.includes('BB_SQUEEZE')) return 'BB_SQUEEZE';
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1044,13 +1054,13 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
                         {getStrategyLabel(trade.strategy)}
                       </Badge>
-                      {trade.setup_type && (
+                      {inferSetupType(trade) && (
                         <span className={cn(
                           'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold',
-                          SETUP_COLORS[trade.setup_type]?.bg ?? 'bg-zinc-500/10',
-                          SETUP_COLORS[trade.setup_type]?.text ?? 'text-zinc-400',
+                          SETUP_COLORS[inferSetupType(trade) as string]?.bg ?? 'bg-zinc-500/10',
+                          SETUP_COLORS[inferSetupType(trade) as string]?.text ?? 'text-zinc-400',
                         )}>
-                          {getSetupLabel(trade.setup_type)}
+                          {getSetupLabel(inferSetupType(trade))}
                         </span>
                       )}
                       {trade.leverage > 1 && (
@@ -1378,13 +1388,13 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* Setup Type */}
                         <td className="whitespace-nowrap px-4 py-3">
-                          {trade.setup_type ? (
+                          {inferSetupType(trade) ? (
                             <span className={cn(
                               'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold',
-                              SETUP_COLORS[trade.setup_type]?.bg ?? 'bg-zinc-500/10',
-                              SETUP_COLORS[trade.setup_type]?.text ?? 'text-zinc-400',
+                              SETUP_COLORS[inferSetupType(trade) as string]?.bg ?? 'bg-zinc-500/10',
+                              SETUP_COLORS[inferSetupType(trade) as string]?.text ?? 'text-zinc-400',
                             )}>
-                              {getSetupLabel(trade.setup_type)}
+                              {getSetupLabel(inferSetupType(trade))}
                             </span>
                           ) : (
                             <span className="text-zinc-600 text-xs">—</span>

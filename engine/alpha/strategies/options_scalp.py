@@ -2889,6 +2889,10 @@ class OptionsScalpStrategy(BaseStrategy):
             mult = self.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
             spot = self._last_spot_price or 0
             entry_fee = round(contracts * mult * spot * 0.000118, 8) if spot else 0
+            setup_type = getattr(signal, "metadata", {}).get("setup_type") or "BB_SQUEEZE"
+            signals_fired = getattr(signal, "metadata", {}).get("signals_fired") or (
+                f"option_side={option_side} " + getattr(self, "_entry_context", "")
+            )
 
             row = {
                 "pair": option_symbol,
@@ -2906,9 +2910,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 "pnl": 0,
                 "pnl_pct": 0,
                 "status": "open",
-                "setup_type": "BB_SQUEEZE",
-                "signals_fired": f"option_side={option_side} "
-                + getattr(self, "_entry_context", ""),
+                "setup_type": setup_type,
+                "signals_fired": signals_fired,
                 "opened_at": datetime.utcnow().isoformat() + "Z",
             }
 

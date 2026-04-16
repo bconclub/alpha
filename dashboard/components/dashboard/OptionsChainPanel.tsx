@@ -119,6 +119,7 @@ function DualSignalBar({
     momentum_60s_pct != null ? clamp01(Math.abs(momentum_60s_pct) / 0.15) : 0;
   const squeezePct = Math.round(squeezeConfidence * 100);
   const momentumPct = Math.round(momentumConfidence * 100);
+  const hasMomentumData = momentum_60s_pct != null && Number.isFinite(momentum_60s_pct);
   const momentumLabel = `MOMENTUM ${(momentum_60s_pct ?? 0) >= 0 ? '↑' : '↓'}`;
   
   useEffect(() => {
@@ -198,8 +199,11 @@ function DualSignalBar({
             className="text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300"
             style={{ color: lowMomentum ? '#71717a' : '#2196f3' }}
           >
-            {displayMomentumPct}%
+            {hasMomentumData ? `${displayMomentumPct}%` : '--'}
           </span>
+        </div>
+        <div className="mb-1 text-[8px] font-mono text-right" style={{ color: hasMomentumData ? '#93c5fd' : '#71717a' }}>
+          {hasMomentumData ? `${momentum_60s_pct! >= 0 ? '+' : ''}${momentum_60s_pct!.toFixed(2)}%` : 'NO DATA'}
         </div>
         <div className="flex items-center gap-2">
           <div className="flex-1 flex items-center gap-1">
@@ -478,7 +482,13 @@ function ChainCard({
       <DualSignalBar
         bb_width_pct={state.bb_width_pct}
         bb_width_threshold={state.bb_width_threshold}
-        momentum_60s_pct={state.momentum_60s_pct ?? state.signals_panel?.momentum_60s_pct}
+        momentum_60s_pct={
+          state.momentum_60s_pct
+          ?? state.signals_panel?.momentum_60s_pct
+          ?? (state as any).momentum_60s
+          ?? (state.signals_panel as any)?.momentum_60s
+          ?? null
+        }
         squeeze_active={state.squeeze_active}
         signal_strength={(state as any).signal_strength}
       />
