@@ -466,6 +466,9 @@ function ChainCard({
   const confidence = getSignalConfidence(state);
   const lowSignal = confidence < 0.2;
   const isReady = confidence > 0.15;
+  // Low-signal amber border is for idle monitoring only; an active position
+  // is already called out by the purple bar — avoid stacking amber on that card.
+  const useLowSignalBorder = lowSignal && !inPosition;
 
   const breakoutState = state.breakout_state ?? 'NONE';
   const breakoutDirection =
@@ -484,7 +487,7 @@ function ChainCard({
         'relative border rounded-lg p-3 transition-all duration-300',
         isReady
           ? 'border-[#22c55e]/70 shadow-[0_0_0_1px_rgba(34,197,94,0.45)]'
-          : lowSignal
+          : useLowSignalBorder
             ? 'border-amber-500/40'
             : 'border-zinc-800/50',
       )}

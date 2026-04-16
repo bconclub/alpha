@@ -766,25 +766,29 @@ export default function TradeTable({ trades }: TradeTableProps) {
         const entryPrice = trade.price;
         const contracts = trade.contracts ?? trade.amount ?? 0;
         const multiplier = OPTION_CONTRACT_MULTIPLIER[asset] ?? 0.01;
-        
-        // Priority 1: Use engine-calculated pnl_usd from options_state if available
+
+        // Priority 1: deterministic per-trade calculation using current premium.
+        // This avoids mismatches when options_state.pnl_usd reflects a different
+        // contract size or a stale position snapshot.
+        const currentPremium = optState?.current_premium ?? null;
+        if (currentPremium != null && currentPremium > 0 && contracts > 0) {
+          const direction = trade.position_type === 'short' ? -1 : 1;
+          const grossPnl = direction * (currentPremium - entryPrice) * contracts * multiplier;
+          const pnlPct = entryPrice > 0 ? direction * ((currentPremium - entryPrice) / entryPrice) * 100 : 0;
+          return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
+        }
+
+        // Priority 2: Use engine-provided pnl as fallback if premium is unavailable.
         if (optState?.pnl_usd != null) {
           return { pnl: optState.pnl_usd, pnlPct: optState.pnl_pct ?? 0, grossPnl: optState.pnl_usd, isUnrealized: true };
         }
-        
-        // Priority 2: Calculate from current_premium in options_state
-        const currentPremium = optState?.current_premium ?? null;
-        if (currentPremium != null && currentPremium > 0 && contracts > 0) {
-          const grossPnl = (currentPremium - entryPrice) * contracts * multiplier;
-          const pnlPct = entryPrice > 0 ? ((currentPremium - entryPrice) / entryPrice) * 100 : 0;
-          return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
-        }
-        
+
         // Priority 3: Try live prices API as fallback
         const currentPrice = livePrices.prices[trade.pair] ?? trade.current_price ?? null;
         if (currentPrice != null && currentPrice > 0 && contracts > 0) {
-          const grossPnl = (currentPrice - entryPrice) * contracts * multiplier;
-          const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+          const direction = trade.position_type === 'short' ? -1 : 1;
+          const grossPnl = direction * (currentPrice - entryPrice) * contracts * multiplier;
+          const pnlPct = entryPrice > 0 ? direction * ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
           return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
         }
 
@@ -1548,7 +1552,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Exit Reason */}
                         <td className="whitespace-nowrap px-4 py-3">
                           {trade.status === 'open' ? (
-                            <span className="text-zinc-600">&mdash;</span>
+                            <span className="text-xs font-semibold text-emerald-400">
+                              {(trade.position_state || 'LIVE').toUpperCase()}
+                            </span>
                           ) : (() => {
                             const reason = getExitReason(trade);
                             const displayReason = reason ? getExitReasonDisplay(reason) : null;

@@ -5,6 +5,7 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, formatNumber, cn } from '@/lib/utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
+import { LivePositions } from '@/components/dashboard/LivePositions';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
 import { ArrowUp, ArrowDown } from 'lucide-react';
 
@@ -718,6 +719,11 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Live active positions */}
+      <div className="mb-4">
+        <LivePositions />
       </div>
 
       {/* Main body: left info cards + right strategy/signal view */}
