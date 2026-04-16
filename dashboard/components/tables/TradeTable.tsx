@@ -226,20 +226,18 @@ function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): num
 
 /** Get color for exit reason — expanded palette */
 function getExitReasonColor(reason: string): string {
-  const upper = reason.toUpperCase();
-  // Green: profit exits
-  if (['TRAIL', 'OPT_TRAIL', 'TP', 'HARD_TP', 'TP_EXCHANGE', 'PROFIT_LOCK', 'OPT_RATCHET'].includes(upper)) return 'text-emerald-400';
-  // Blue: manual
-  if (upper === 'MANUAL') return 'text-blue-400';
-  // Red: stop loss
-  if (['SL', 'SL_EXCHANGE', 'OPT_SL'].includes(upper)) return 'text-red-400';
-  // Yellow: conditional exits
-  if (['REVERSAL', 'OPT_REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY', 'MOMENTUM_FADE', 'OPT_MOMENTUM_FADE', 'DEAD_MOMENTUM', 'OPT_DEAD_MOMENTUM', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN'].includes(upper)) return 'text-yellow-400';
-  // Orange: external/phantom
-  if (upper === 'PHANTOM' || upper === 'POSITION_GONE' || upper === 'CLOSED_BY_EXCHANGE') return 'text-orange-400';
-  // Gray: neutral exits
-  if (['FLAT', 'TIMEOUT', 'OPT_TIMEOUT', 'BREAKEVEN', 'SAFETY', 'DUST', 'ORPHAN', 'EXPIRY'].includes(upper)) return 'text-zinc-500';
-  return 'text-zinc-500';
+  const normalized = reason.toUpperCase().replace(/^OPT_/, '');
+  if (['ENERGY_WINNER_FADING', 'TRAIL', 'PEAK_TRAIL'].includes(normalized)) return '#00c853';
+  if (['RATCHET', 'TP'].includes(normalized)) return '#ffd600';
+  if (['ENERGY_DEAD_LOSER', 'ENTRY_DROP', 'STALE'].includes(normalized)) return '#ff9100';
+  if (normalized === 'SL') return '#ff1744';
+  if (normalized === 'EXPIRY_GUARD') return '#7c4dff';
+  if (['UNKNOWN', 'DUPLICATE_UNMATCHED'].includes(normalized)) return '#4b5563';
+  return '#9ca3af';
+}
+
+function getExitReasonDisplay(reason: string): string {
+  return reason.replace(/^OPT_/, '');
 }
 
 /** Parse exit reason from trade reason field (fallback for older trades without exit_reason column) */
@@ -1119,9 +1117,10 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       })()}
                       {trade.status !== 'open' && (() => {
                         const reason = getExitReason(trade);
+                        const displayReason = reason ? getExitReasonDisplay(reason) : null;
                         return reason ? (
-                          <span className={cn('font-semibold', getExitReasonColor(reason))}>
-                            {reason}
+                          <span className="font-semibold" style={{ color: getExitReasonColor(displayReason || reason) }}>
+                            {displayReason}
                           </span>
                         ) : null;
                       })()}
@@ -1552,9 +1551,10 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             <span className="text-zinc-600">&mdash;</span>
                           ) : (() => {
                             const reason = getExitReason(trade);
+                            const displayReason = reason ? getExitReasonDisplay(reason) : null;
                             return reason ? (
-                              <span className={cn('text-xs font-semibold', getExitReasonColor(reason))}>
-                                {reason}
+                              <span className="text-xs font-semibold" style={{ color: getExitReasonColor(displayReason || reason) }}>
+                                {displayReason}
                               </span>
                             ) : (
                               <span className="text-zinc-600">&mdash;</span>

@@ -2652,6 +2652,9 @@ class OptionsScalpStrategy(BaseStrategy):
             else 0
         )
         energy_score = self._compute_energy(current_premium)
+        hold_seconds = (
+            time.monotonic() - self.entry_time if self.entry_time else 0.0
+        )
 
         # Heartbeat (every ~60s)
         if self._tick_count % 6 == 0:
@@ -2681,10 +2684,15 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         # ── 2. Energy-based dead loser exit ──
-        if energy_score < self._ENERGY_DEAD_THRESHOLD_PCT and premium_change_pct < 0:
+        if (
+            hold_seconds >= 180.0
+            and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
+            and premium_change_pct < 0
+        ):
             self.logger.info(
-                "[%s] OPT_ENERGY_DEAD_LOSER — energy=%.3f%% < %.3f%% and pnl=%+.1f%%",
+                "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% and pnl=%+.1f%%",
                 self.option_symbol,
+                int(hold_seconds),
                 energy_score,
                 self._ENERGY_DEAD_THRESHOLD_PCT,
                 premium_change_pct,

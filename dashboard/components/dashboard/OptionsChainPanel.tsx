@@ -367,13 +367,17 @@ function PremiumBox({
   return (
     <div 
       className={cn(
-        'bg-zinc-800/40 rounded p-2',
-        isGlowing && 'animate-pulse'
+        'rounded p-2 transition-colors duration-200',
       )}
       style={{
-        border: '1px solid rgba(63,63,70,0.6)',
-        boxShadow: isGlowing ? `0 0 12px ${glowColor}` : 'none',
-        transition: 'box-shadow 0.3s ease'
+        border: isGlowing
+          ? `2px solid ${glowColor}99`
+          : '1px solid rgba(63,63,70,0.6)',
+        backgroundColor: isGlowing
+          ? (breakout_state === 'DETECTED_DOWN'
+              ? 'rgba(239,68,68,0.08)'
+              : 'rgba(34,197,94,0.08)')
+          : 'rgba(39,39,42,0.4)',
       }}
     >
       <div className={cn('text-[7px] uppercase mb-0.5', dimColorClass)}>
