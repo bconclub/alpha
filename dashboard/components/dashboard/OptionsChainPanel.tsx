@@ -156,7 +156,6 @@ function SqueezeBar({
                     : idx === 2
                       ? '#eab308'
                       : '#22c55e',
-                boxShadow: on ? `0 0 8px ${barColor}` : 'none',
               }}
             />
           ))}

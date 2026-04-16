@@ -18,13 +18,6 @@ function ensureStyles() {
   const style = document.createElement('style');
   style.id = STYLE_ID;
   style.textContent = `
-    @keyframes squeezePulse {
-      0%, 100% { box-shadow: 0 0 20px rgba(0,255,136,0.2); }
-      50% { box-shadow: 0 0 40px rgba(0,255,136,0.4); }
-    }
-    .squeeze-pulse-active {
-      animation: squeezePulse 2s ease-in-out infinite;
-    }
     @keyframes fillRingProgress {
       from { stroke-dashoffset: 283; }
       to { stroke-dashoffset: var(--progress-offset, 0); }
@@ -249,8 +242,6 @@ function SqueezeVisualizer({
   // Determine squeeze state
   const isForming = !isActive && bbWidth != null && bbWidthMax != null && bbWidth < bbWidthMax * 1.5;
   
-  const glowClass = isActive ? 'squeeze-pulse-active' : '';
-  
   const barColor = isActive 
     ? 'from-[#00ff88] to-[#00c853]'
     : isForming 
@@ -271,10 +262,7 @@ function SqueezeVisualizer({
 
   return (
     <div 
-      className={cn(
-        'rounded-xl p-4 mb-4 border transition-all duration-300',
-        glowClass
-      )}
+      className="rounded-xl p-4 mb-4 border transition-all duration-300"
       style={{ 
         background: COLORS.card,
         borderColor: isActive ? 'rgba(0,255,136,0.3)' : COLORS.border,

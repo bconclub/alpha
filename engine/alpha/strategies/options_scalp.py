@@ -1614,6 +1614,8 @@ class OptionsScalpStrategy(BaseStrategy):
         velocity_pct = await self._calculate_breakout_velocity()
         self._breakout_velocity_pct = velocity_pct
 
+        if velocity_pct < 0.10: self.logger.info("[%s] LOW_VELOCITY_SKIP: velocity=%.2f%% < 0.10%% — skipping", self.pair, velocity_pct * 100); return
+
         # GPFC #21: Set dynamic confirmation window based on velocity
         confirmation_secs = self._get_confirmation_secs(velocity_pct)
         self._breakout_confirmation_secs = confirmation_secs
