@@ -110,6 +110,7 @@ class OptionsScalpStrategy(BaseStrategy):
         3.0  # Switch to next-day expiry when < 3h remain on current day
     )
     CLOSE_BEFORE_EXPIRY_HOURS = 0.5  # Close 30 min before expiry
+    EXPIRY_MODE_HOURS = 8.0  # Switch to expiry-mode exit when < 8h to expiry
 
     # ── Strike selection ──────────────────────────────────────────
     BTC_STRIKE_ROUND = 200  # BTC: nearest $200
@@ -2655,11 +2656,18 @@ class OptionsScalpStrategy(BaseStrategy):
         hold_seconds = (
             time.monotonic() - self.entry_time if self.entry_time else 0.0
         )
+        hours_to_expiry = (
+            (self.expiry_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+            if self.expiry_dt
+            else 99.0
+        )
+        in_expiry_mode = hours_to_expiry < self.EXPIRY_MODE_HOURS
+        expiry_tag = f" [EXPIRY {hours_to_expiry:.1f}h]" if in_expiry_mode else ""
 
         # Heartbeat (every ~60s)
         if self._tick_count % 6 == 0:
             self.logger.info(
-                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | energy=%.3f%%",
+                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | energy=%.3f%%%s",
                 self.option_symbol,
                 self.option_side,
                 self.entry_premium,
@@ -2668,6 +2676,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.highest_premium,
                 peak_pnl_pct,
                 energy_score,
+                expiry_tag,
             )
 
         # ── 1. Hard fallback stop loss ──
@@ -2683,25 +2692,37 @@ class OptionsScalpStrategy(BaseStrategy):
                 current_premium, premium_change_pct, "OPT_HARD_SL"
             )
 
-        # ── 2. Energy-based dead loser exit ──
-        if (
-            hold_seconds >= 180.0
-            and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
-            and premium_change_pct < 0
-        ):
+        # ── 2. Expiry-mode dead loser exit (price-based) ──
+        if in_expiry_mode and premium_change_pct < -20.0 and hold_seconds > 120:
             self.logger.info(
-                "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% and pnl=%+.1f%%",
+                "[%s] EXPIRY_DEAD — hold=%ds pnl=%+.1f%% with %.1fh to expiry",
                 self.option_symbol,
                 int(hold_seconds),
-                energy_score,
-                self._ENERGY_DEAD_THRESHOLD_PCT,
                 premium_change_pct,
+                hours_to_expiry,
             )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_ENERGY_DEAD_LOSER"
-            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_DEAD")
 
-        # ── 3. Energy-based winner fading exit ──
+        # ── 3. Energy-based dead loser exit (disabled in expiry mode) ──
+        if not in_expiry_mode:
+            if (
+                hold_seconds >= 180.0
+                and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
+                and premium_change_pct < 0
+            ):
+                self.logger.info(
+                    "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% and pnl=%+.1f%%",
+                    self.option_symbol,
+                    int(hold_seconds),
+                    energy_score,
+                    self._ENERGY_DEAD_THRESHOLD_PCT,
+                    premium_change_pct,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "OPT_ENERGY_DEAD_LOSER"
+                )
+
+        # ── 4. Energy-based winner fading exit ──
         if (
             energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
             and premium_change_pct > 0
