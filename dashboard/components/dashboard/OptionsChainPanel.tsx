@@ -486,18 +486,8 @@ function ChainCard({
       )}
       style={{
         backgroundColor: cardTint,
-        boxShadow: lowSignal
-          ? '0 0 18px rgba(245, 158, 11, 0.16), inset 0 0 24px rgba(245, 158, 11, 0.05)'
-          : undefined,
       }}
     >
-      {lowSignal && (
-        <div className="absolute top-2 left-2 z-10 pointer-events-none">
-          <span className="px-2 py-0.5 rounded bg-amber-950/70 border border-amber-500/30 text-[9px] font-mono text-amber-300 uppercase tracking-wide">
-            LOW SIGNAL - waiting...
-          </span>
-        </div>
-      )}
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
