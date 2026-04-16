@@ -105,6 +105,17 @@ function getLastScanSeconds(lastUpdate: string | null): number {
   return Math.floor((Date.now() - new Date(lastUpdate).getTime()) / 1000);
 }
 
+function formatExitReasonLabel(exitReason: string | null | undefined): string {
+  if (!exitReason) return '';
+  return exitReason
+    .trim()
+    .replace(/^OPT[\s_]+/, '')
+    .replace(/^EXPIRY_/, 'EXPIRY ')
+    .replace(/^POSITION_GONE_/, 'POSITION GONE ')
+    .replace(/_/g, ' ')
+    .trim();
+}
+
 // ── Components ──────────────────────────────────────────────────────────
 
 function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
@@ -311,6 +322,7 @@ function RecentTradeCard({ trade }: { trade: { pair: string; position_type: stri
   };
   
   const optionDisplay = getOptionSide();
+  const exitReasonLabel = formatExitReasonLabel(trade.exit_reason);
   
   return (
     <div className="bg-[#141419] border border-white/5 rounded-lg p-3 min-w-[200px]">
@@ -337,7 +349,7 @@ function RecentTradeCard({ trade }: { trade: { pair: string; position_type: stri
       <div className="flex items-center justify-between mt-2">
         {trade.exit_reason && (
           <span className="text-[10px] bg-gray-800 px-1.5 py-0.5 rounded text-gray-400">
-            {trade.exit_reason}
+            {exitReasonLabel}
           </span>
         )}
         <span className="text-[10px] text-gray-600">{timeText}</span>

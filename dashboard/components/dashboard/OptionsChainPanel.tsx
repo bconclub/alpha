@@ -59,14 +59,31 @@ function useCountdownProgress(
   };
 }
 
+/** 0–1 squeeze / signal fill: prefer BB width vs threshold when present (matches on-card numbers). */
+function confidenceFromBbAndSignal(
+  bb_width_pct: number | null | undefined,
+  bb_width_threshold: number | null | undefined,
+  signal_strength: number | null | undefined,
+): number {
+  if (
+    bb_width_pct != null
+    && bb_width_threshold != null
+    && bb_width_threshold > 0
+  ) {
+    return Math.max(0, Math.min(1, bb_width_pct / bb_width_threshold));
+  }
+  if (signal_strength != null) {
+    return Math.max(0, Math.min(1, signal_strength));
+  }
+  return 0;
+}
+
 function getSignalConfidence(state: OptionsState): number {
-  const raw =
-    state.signal_strength != null
-      ? state.signal_strength
-      : state.bb_width_pct != null && state.bb_width_threshold != null && state.bb_width_threshold > 0
-        ? Math.min(state.bb_width_pct / state.bb_width_threshold, 1)
-        : 0;
-  return Math.max(0, Math.min(1, raw));
+  return confidenceFromBbAndSignal(
+    state.bb_width_pct,
+    state.bb_width_threshold,
+    state.signal_strength,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -85,16 +102,12 @@ function SqueezeBar({
   signal_strength?: number | null;
 }) {
   const [displayPct, setDisplayPct] = useState(0);
-  
-  // Use signal_strength if available (0-1), otherwise calculate from bb_width
-  const rawConfidence = signal_strength != null 
-    ? signal_strength 
-    : bb_width_pct != null && bb_width_threshold != null 
-      ? Math.min(bb_width_pct / bb_width_threshold, 1) 
-      : 0;
-  
-  // Clamp to 0-1 range
-  const confidence = Math.max(0, Math.min(1, rawConfidence));
+
+  const confidence = confidenceFromBbAndSignal(
+    bb_width_pct,
+    bb_width_threshold,
+    signal_strength,
+  );
   const targetPct = Math.round(confidence * 100);
   
   // Animate the percentage number - must be called before any early return
