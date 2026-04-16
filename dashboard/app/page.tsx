@@ -589,29 +589,28 @@ export default function DashboardPage() {
 
   const [capitalTimeframe, setCapitalTimeframe] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
   const timeframeStats = useMemo(() => {
-    const now = Date.now();
-    const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    let cutoffMs: number;
     if (capitalTimeframe === '24h') {
-      const istNow = new Date(now + istOffsetMs);
-      const todayIST = istNow.toISOString().slice(0, 10);
-      cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
-    } else {
-      const days = capitalTimeframe === '7d' ? 7 : capitalTimeframe === '14d' ? 14 : 30;
-      cutoffMs = now - days * 24 * 60 * 60 * 1000;
+      // Keep 24h card aligned with the Today card source of truth.
+      return { pnl: today.pnl, total: today.total };
     }
+
+    const now = Date.now();
+    let cutoffMs: number;
+    const days = capitalTimeframe === '7d' ? 7 : capitalTimeframe === '14d' ? 14 : 30;
+    cutoffMs = now - days * 24 * 60 * 60 * 1000;
+
     let pnl = 0;
     let total = 0;
     for (const t of trades) {
       if (t.status !== 'closed') continue;
-      const tradeTime = new Date(t.timestamp).getTime();
+      const tradeTime = new Date(t.closed_at || t.timestamp).getTime();
       if (tradeTime >= cutoffMs) {
         pnl += t.pnl ?? 0;
         total++;
       }
     }
     return { pnl, total };
-  }, [trades, capitalTimeframe]);
+  }, [trades, capitalTimeframe, today.pnl, today.total]);
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white p-3 sm:p-4 md:p-6 pb-24 md:pb-6">
@@ -657,19 +656,19 @@ export default function DashboardPage() {
 
         <div className="bg-[#141419] border border-white/5 rounded-xl p-4 min-h-[156px]">
           <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Today</div>
-          <div className="grid grid-cols-2 gap-4 items-start">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
             <div>
               <div className={cn('text-4xl font-bold font-mono leading-none mb-3', today.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
                 {today.pnl >= 0 ? '+' : ''}{formatCurrency(today.pnl)}
               </div>
               <div>
                 <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Last 10 Today</div>
-                <div className="flex gap-1 flex-wrap">
+                <div className="flex gap-1 flex-nowrap overflow-x-auto scrollbar-hide">
                   {todayTradeSlots.map((slot) => (
                     <div
                       key={slot.key}
                       className={cn(
-                        'w-3.5 h-3.5 rounded-sm',
+                        'w-3.5 h-3.5 rounded-sm shrink-0',
                         slot.pnl == null
                           ? 'bg-gray-700/60'
                           : slot.pnl > 0

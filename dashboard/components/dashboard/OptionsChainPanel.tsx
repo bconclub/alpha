@@ -478,16 +478,22 @@ function ChainCard({
     <div
       className={cn(
         'relative border rounded-lg p-3 transition-all duration-300',
-        isReady ? 'border-[#22c55e]/70 shadow-[0_0_0_1px_rgba(34,197,94,0.45)]' : 'border-zinc-800/50',
+        isReady
+          ? 'border-[#22c55e]/70 shadow-[0_0_0_1px_rgba(34,197,94,0.45)]'
+          : lowSignal
+            ? 'border-amber-500/40'
+            : 'border-zinc-800/50',
       )}
       style={{
         backgroundColor: cardTint,
-        opacity: lowSignal ? 0.5 : 1,
+        boxShadow: lowSignal
+          ? '0 0 18px rgba(245, 158, 11, 0.16), inset 0 0 24px rgba(245, 158, 11, 0.05)'
+          : undefined,
       }}
     >
       {lowSignal && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-          <span className="px-2 py-1 rounded bg-zinc-900/80 text-[10px] font-mono text-orange-300 uppercase tracking-wide">
+        <div className="absolute top-2 left-2 z-10 pointer-events-none">
+          <span className="px-2 py-0.5 rounded bg-amber-950/70 border border-amber-500/30 text-[9px] font-mono text-amber-300 uppercase tracking-wide">
             LOW SIGNAL - waiting...
           </span>
         </div>

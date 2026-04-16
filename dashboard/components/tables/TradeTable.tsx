@@ -247,7 +247,8 @@ function parseExitReason(reason?: string | null): string | null {
   if (!reason) return null;
   const upper = reason.toUpperCase().trim();
   // Check from most specific to least (HARD_TP before TP)
-  const keywords = ['OPT_MOMENTUM_FADE', 'OPT_DEAD_MOMENTUM', 'OPT_TIMEOUT',
+  const keywords = ['OPT_MOMENTUM_FADE', 'OPT_DEAD_MOMENTUM', 'OPT_ENERGY_DEAD_LOSER',
+    'OPT_ENERGY_WINNER_FADING', 'OPT_HARD_SL', 'OPT_TIMEOUT',
     'OPT_SL', 'OPT_TRAIL', 'OPT_RATCHET', 'OPT_REVERSAL',
     'HARD_TP', 'PROFIT_LOCK', 'DEAD_MOMENTUM', 'MOMENTUM_FADE',
     'DECAY_EMERGENCY', 'MANUAL_CLOSE', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN',

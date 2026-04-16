@@ -259,6 +259,47 @@ npm run build    # Production build
 
 ## Changelog
 
+### [0.19.9] - 2026-04-15 - Dashboard Layout Refinement & Options Panel UX
+
+#### 🎨 Dashboard Layout Updates
+- Restored the classic main dashboard structure in `dashboard/app/page.tsx`:
+  - Top row with three cards: **Total Capital**, **Today**, and **Market Regime**
+  - Left column: **Market Overview** + **Recent Trades**
+  - Right column: **OptionsChainPanel** strategy/signal view
+- Removed temporary sections requested during iteration:
+  - Removed custom **Alpha Signal** card block
+  - Removed **System Logs** bottom block
+- Normalized top-card sizing so all three summary cards have consistent width and height.
+
+#### 📈 Today Card Improvements
+- Added **Last 10 Today** trade strip directly in the Today card.
+- Ensured strip always renders 10 slots:
+  - Filled slots for real trades
+  - Neutral placeholders for missing trades
+- Updated Today-card layout:
+  - Left side: daily PnL + last-10 strip
+  - Right side: Win Rate, Fees, W/L, Trades
+- Fixed mobile responsiveness so the 10-slot strip remains visible and usable on narrow screens.
+
+#### ✅ Data Accuracy Fixes
+- Fixed Today strip trade selection to use close time first:
+  - Filters and sorts by `closed_at || timestamp` instead of only `timestamp`
+  - Correctly includes trades opened earlier but closed today
+- Aligned 24h Capital-card PnL with Today-card source to avoid mismatch between cards.
+
+#### ✨ Options Chain UX Tuning
+- Low-signal state in `dashboard/components/dashboard/OptionsChainPanel.tsx` no longer heavily greys out cards.
+- Replaced dimming with a subtle amber glow + badge so cards remain readable while still signaling low confidence.
+
+#### 🧪 Debug Session Notes
+- Added temporary runtime instrumentation in dashboard files to confirm active render path.
+- Fully removed instrumentation after verification and cleanup.
+
+#### 🔖 Related Commits
+- `2c97477` — dashboard visuals and regime card upgrades
+- `ef33903` — restored classic layout + enhanced options panel
+- `fd1ac00` — fixed Today strip to use `closed_at`
+
 ### [0.19.2] - 2026-04-15 - Smart Reconcile & Critical Bug Fixes
 
 #### 🚀 New Features

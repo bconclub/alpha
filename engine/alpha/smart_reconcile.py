@@ -572,8 +572,9 @@ class SmartDeltaReconciler:
                 except Exception:
                     out[key] = new_val
 
-        # Derive exit_reason from pnl sign if missing
-        if "exit_reason" not in out and not db_trade.get("exit_reason"):
+        # Derive/repair exit_reason from pnl sign when missing or still UNKNOWN
+        existing_exit_reason = str(db_trade.get("exit_reason") or "").strip().upper()
+        if "exit_reason" not in out and (not existing_exit_reason or existing_exit_reason == "UNKNOWN"):
             if delta_rt["pct"] >= 20:
                 out["exit_reason"] = "TP"
             elif delta_rt["pct"] <= -20:
