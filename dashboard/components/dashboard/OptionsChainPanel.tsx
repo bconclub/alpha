@@ -86,42 +86,56 @@ function getSignalConfidence(state: OptionsState): number {
   );
 }
 
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
 // ---------------------------------------------------------------------------
-// Signal battery gauge
+// Dual signal gauge
 // ---------------------------------------------------------------------------
 
-function SqueezeBar({
+function DualSignalBar({
   bb_width_pct, 
   bb_width_threshold, 
+  momentum_60s_pct,
   squeeze_active,
   signal_strength 
 }: {
   bb_width_pct: number | null | undefined;
   bb_width_threshold: number | null | undefined;
+  momentum_60s_pct: number | null | undefined;
   squeeze_active: boolean | null | undefined;
   signal_strength?: number | null;
 }) {
-  const [displayPct, setDisplayPct] = useState(0);
+  const [displaySqueezePct, setDisplaySqueezePct] = useState(0);
+  const [displayMomentumPct, setDisplayMomentumPct] = useState(0);
 
-  const confidence = confidenceFromBbAndSignal(
+  const squeezeConfidence = confidenceFromBbAndSignal(
     bb_width_pct,
     bb_width_threshold,
     signal_strength,
   );
-  const targetPct = Math.round(confidence * 100);
+  const momentumConfidence =
+    momentum_60s_pct != null ? clamp01(Math.abs(momentum_60s_pct) / 0.15) : 0;
+  const squeezePct = Math.round(squeezeConfidence * 100);
+  const momentumPct = Math.round(momentumConfidence * 100);
+  const momentumLabel = `MOMENTUM ${(momentum_60s_pct ?? 0) >= 0 ? '↑' : '↓'}`;
   
-  // Animate the percentage number - must be called before any early return
   useEffect(() => {
-    setDisplayPct(targetPct);
-  }, [targetPct]);
+    setDisplaySqueezePct(squeezePct);
+    setDisplayMomentumPct(momentumPct);
+  }, [squeezePct, momentumPct]);
   
-  // Determine color based on confidence
-  const barColor = confidence >= 0.7 ? '#22c55e' : confidence >= 0.4 ? '#eab308' : '#ef4444';
-  const segmentFill = Array.from({ length: 5 }).map((_, i) => {
+  const squeezeFill = Array.from({ length: 5 }).map((_, i) => {
     const boundary = (i + 1) / 5;
-    return confidence >= boundary;
+    return squeezeConfidence >= boundary;
   });
-  const lowSignal = confidence < 0.2;
+  const momentumFill = Array.from({ length: 5 }).map((_, i) => {
+    const boundary = (i + 1) / 5;
+    return momentumConfidence >= boundary;
+  });
+  const lowSignal = squeezeConfidence < 0.2;
+  const lowMomentum = momentumConfidence < 0.2;
 
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
@@ -142,31 +156,71 @@ function SqueezeBar({
           {bb_width_pct?.toFixed(2) ?? '--'}% / {bb_width_threshold ?? '--'}% thresh
         </span>
       </div>
-      <div className="flex items-center gap-2">
-        <div className="flex-1 flex items-center gap-1">
-          {segmentFill.map((on, idx) => (
-            <div
-              key={idx}
-              className="h-2 flex-1 rounded-sm transition-opacity duration-300"
-              style={{
-                opacity: on ? 1 : 0.2,
-                background:
-                  idx <= 1
-                    ? '#ef4444'
-                    : idx === 2
-                      ? '#eab308'
-                      : '#22c55e',
-              }}
-            />
-          ))}
+      <div className="mb-2">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[8px] font-semibold text-zinc-400 uppercase tracking-wide">SQUEEZE</span>
+          <span className={cn(
+            'text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300',
+            squeezeConfidence >= 0.7 ? 'text-[#22c55e]' : squeezeConfidence >= 0.4 ? 'text-[#eab308]' : 'text-[#ef4444]'
+          )}>
+            {displaySqueezePct}%
+          </span>
         </div>
-        <span className={cn(
-          'text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300',
-          confidence >= 0.7 ? 'text-[#22c55e]' : confidence >= 0.4 ? 'text-[#eab308]' : 'text-[#ef4444]'
-        )}>
-          {displayPct}%
-        </span>
+        <div className="flex items-center gap-2">
+          <div className="flex-1 flex items-center gap-1">
+            {squeezeFill.map((on, idx) => (
+              <div
+                key={idx}
+                className="h-2 flex-1 rounded-sm transition-opacity duration-300"
+                style={{
+                  opacity: on ? 1 : 0.2,
+                  background:
+                    idx <= 1
+                      ? '#ef4444'
+                      : idx === 2
+                        ? '#eab308'
+                        : '#22c55e',
+                }}
+              />
+            ))}
+          </div>
+        </div>
       </div>
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <span
+            className="text-[8px] font-semibold uppercase tracking-wide"
+            style={{ color: lowMomentum ? '#71717a' : '#2196f3' }}
+          >
+            {momentumLabel}
+          </span>
+          <span
+            className="text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300"
+            style={{ color: lowMomentum ? '#71717a' : '#2196f3' }}
+          >
+            {displayMomentumPct}%
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex-1 flex items-center gap-1">
+            {momentumFill.map((on, idx) => (
+              <div
+                key={idx}
+                className="h-2 flex-1 rounded-sm transition-opacity duration-300"
+                style={{
+                  opacity: lowMomentum ? (on ? 0.45 : 0.15) : on ? 1 : 0.2,
+                  background: '#2196f3',
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+      {lowMomentum && (
+        <div className="mt-1 text-[8px] font-mono text-zinc-500 uppercase tracking-wide">
+          Momentum below trigger
+        </div>
+      )}
       {lowSignal && (
         <div className="mt-1 text-[8px] font-mono text-orange-300 uppercase tracking-wide">
           Low Signal - waiting...
@@ -533,10 +587,11 @@ function ChainCard({
         </div>
       </div>
 
-      {/* 1. Signal Strength bar */}
-      <SqueezeBar
+      {/* 1. Dual signal bar */}
+      <DualSignalBar
         bb_width_pct={state.bb_width_pct}
         bb_width_threshold={state.bb_width_threshold}
+        momentum_60s_pct={state.momentum_60s_pct ?? state.signals_panel?.momentum_60s_pct}
         squeeze_active={state.squeeze_active}
         signal_strength={(state as any).signal_strength}
       />

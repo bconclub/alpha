@@ -325,6 +325,7 @@ export type ActivityFilter = 'all' | 'trades' | 'options';
 export interface SignalsPanel {
   bb_width_pct: number;
   bb_width_threshold: number;
+  momentum_60s_pct?: number | null;
   squeeze_status: 'ACTIVE' | 'WAITING';
   bb_position: number;  // 0-1, where price sits in bands
   direction_bias: 'CALL' | 'PUT' | 'NEUTRAL';
@@ -380,6 +381,7 @@ export interface OptionsState {
   // Top-level BB Squeeze fields (wired directly for dashboard panel)
   bb_width_pct?: number | null;
   bb_width_threshold?: number | null;
+  momentum_60s_pct?: number | null;
   squeeze_active?: boolean | null;
   bb_position?: number | null;
   direction_bias?: 'CALL' | 'PUT' | 'NEUTRAL' | null;

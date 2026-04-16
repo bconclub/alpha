@@ -151,6 +151,7 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
     BREAKOUT_FAKEOUT_DROP_PCT = 5.0  # Premium drop > 5% from breakout = fakeout
     BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
+    MOMENTUM_BURST_THRESHOLD_PCT = 0.15  # 60s momentum threshold for burst entries
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
@@ -332,6 +333,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_confirmation_secs: int = 60
         # Last spot price when breakout was detected (for velocity calc)
         self._breakout_spot_price: float = 0.0
+        # Entry setup tag for pending execution path
+        self._pending_entry_setup: str = "BB_SQUEEZE_BREAKOUT"
 
         # Dashboard chain panel cached state
         self._cached_candle_momentum: dict | None = None
@@ -366,6 +369,10 @@ class OptionsScalpStrategy(BaseStrategy):
         self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
         self._ENERGY_DEAD_THRESHOLD_PCT = 0.05
         self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
+        self._atm_call_ask: float = 0.0
+        self._atm_put_ask: float = 0.0
+        self._prev_call_ask: float = 0.0
+        self._prev_put_ask: float = 0.0
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -898,6 +905,10 @@ class OptionsScalpStrategy(BaseStrategy):
             except Exception:
                 pass
 
+        if spot_price > 0:
+            self._last_spot_price = float(spot_price)
+            self._update_momentum_history(float(spot_price))
+
         # ── Expiry info ──
         expiry_label: str | None = None
         expiry_ts: str | None = None
@@ -957,6 +968,12 @@ class OptionsScalpStrategy(BaseStrategy):
                     self._premium_current_ask = raw_call_ask
 
                 if raw_call_ask > 0 or raw_put_ask > 0:
+                    if raw_call_ask > 0:
+                        self._prev_call_ask = self._atm_call_ask
+                        self._atm_call_ask = raw_call_ask
+                    if raw_put_ask > 0:
+                        self._prev_put_ask = self._atm_put_ask
+                        self._atm_put_ask = raw_put_ask
                     self.logger.info(
                         "[%s] SQUEEZE_SCAN: %s ATM_call_ask=$%.2f ATM_put_ask=$%.2f strike=%s",
                         self.pair,
@@ -1072,6 +1089,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 if self._base_asset == "BTC"
                 else self.SQUEEZE_BB_WIDTH_ETH
             ),
+            "momentum_60s_pct": round(self._underlying_momentum_pct(), 3),
             "squeeze_status": self._squeeze_status,
             "bb_position": round(self._bb_position, 2),
             "direction_bias": self._direction_bias,
@@ -1119,6 +1137,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 if self._base_asset == "BTC"
                 else self.SQUEEZE_BB_WIDTH_ETH
             ),
+            "momentum_60s_pct": round(self._underlying_momentum_pct(), 3),
             "squeeze_active": self._squeeze_status == "ACTIVE",
             "bb_position": round(self._bb_position, 2),
             "direction_bias": self._direction_bias,
@@ -1540,6 +1559,12 @@ class OptionsScalpStrategy(BaseStrategy):
                     bb_width_pct,
                     avg_vol_ratio,
                 )
+                if self._breakout_pending:
+                    return []
+
+            momentum_signals = await self._check_momentum_burst_entry()
+            if momentum_signals:
+                return momentum_signals
 
             self._squeeze_status = "WAITING"
             self._squeeze_active_since = None
@@ -1570,6 +1595,87 @@ class OptionsScalpStrategy(BaseStrategy):
             )
         self._cached_bot_state = "squeeze:waiting_for_breakout"
         return []
+
+    async def _check_momentum_burst_entry(self) -> list[Signal]:
+        """Immediate entry when 60s momentum and ATM premium trend align (outside squeeze)."""
+        momentum_60s = self._underlying_momentum_pct()
+        if abs(momentum_60s) < self.MOMENTUM_BURST_THRESHOLD_PCT:
+            return []
+
+        if not self._selected_expiry or not self.options_exchange:
+            return []
+
+        now_utc = datetime.now(timezone.utc)
+        hours_to_expiry = (self._selected_expiry - now_utc).total_seconds() / 3600
+        if hours_to_expiry < self.MIN_EXPIRY_HOURS:
+            return []
+
+        spot = self._last_spot_price
+        if spot <= 0 and self.futures_exchange:
+            try:
+                ticker = await self.futures_exchange.fetch_ticker(self.pair)
+                spot = float(ticker.get("last") or ticker.get("bid") or 0)
+            except Exception:
+                spot = 0.0
+        if spot <= 0:
+            return []
+        self._last_spot_price = spot
+
+        atm_strike = self._get_atm_strike(spot)
+        if atm_strike is None:
+            return []
+        self._cached_target_strike = atm_strike
+
+        if (
+            momentum_60s > 0
+            and self._prev_call_ask > 0
+            and self._atm_call_ask > self._prev_call_ask
+        ):
+            option_type = "call"
+            direction = "UP"
+            entry_ask = self._atm_call_ask
+            prev_ask = self._prev_call_ask
+        elif (
+            momentum_60s < 0
+            and self._prev_put_ask > 0
+            and self._atm_put_ask > self._prev_put_ask
+        ):
+            option_type = "put"
+            direction = "DOWN"
+            entry_ask = self._atm_put_ask
+            prev_ask = self._prev_put_ask
+        else:
+            return []
+
+        selected_symbol = self._build_option_symbol(atm_strike, option_type, self._selected_expiry)
+        if not selected_symbol:
+            return []
+        if entry_ask < self.MIN_PREMIUM_USD:
+            return []
+
+        opt_contracts = self._calculate_option_contracts(entry_ask, confidence=0.7)
+        if opt_contracts < 1:
+            return []
+
+        self.logger.info(
+            "[%s] MOMENTUM_BURST: dir=%s mom=%+.2f%% premium=$%.2f→$%.2f — entering %s",
+            self.pair,
+            direction,
+            momentum_60s,
+            prev_ask,
+            entry_ask,
+            option_type.upper(),
+        )
+
+        self._breakout_direction = direction
+        self._breakout_option_type = option_type
+        self._breakout_symbol = selected_symbol
+        self._breakout_strike = atm_strike
+        self._breakout_contracts = opt_contracts
+        self._breakout_confidence = 0.7
+        self._breakout_bb_width = self._bb_width_pct
+        self._pending_entry_setup = "MOMENTUM_BURST_ENTRY"
+        return await self._execute_breakout_entry(entry_ask)
 
     async def _handle_squeeze_breakout(
         self,
@@ -1731,6 +1837,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_contracts = opt_contracts
         self._breakout_confidence = entry_confidence
         self._breakout_bb_width = bb_width_pct
+        self._pending_entry_setup = "BB_SQUEEZE_BREAKOUT"
         self._breakout_state = "DETECTED"
 
         # GPFC #21: Log BREAKOUT_DETECTED with velocity and confirmation window
@@ -1945,6 +2052,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_velocity_pct = 0.0
         self._breakout_confirmation_secs = 60
         self._breakout_spot_price = 0.0
+        self._pending_entry_setup = "BB_SQUEEZE_BREAKOUT"
         self._direction_bias = "NEUTRAL"
         # Note: _breakout_state is preserved until next detection for dashboard visibility
 
@@ -1956,6 +2064,7 @@ class OptionsScalpStrategy(BaseStrategy):
         opt_contracts = self._breakout_contracts
         entry_confidence = self._breakout_confidence
         bb_width_pct = self._breakout_bb_width
+        setup_type = self._pending_entry_setup or "BB_SQUEEZE_BREAKOUT"
 
         # Recalculate contracts at confirmed ask price
         opt_contracts = self._calculate_option_contracts(
@@ -2144,7 +2253,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         premium = fill_price
         self._limit_entry_filled = True
-        self._last_action = "SQUEEZE_FILL"
+        self._last_action = (
+            "SQUEEZE_FILL" if setup_type == "BB_SQUEEZE_BREAKOUT" else "MOMENTUM_BURST_FILL"
+        )
         self._last_action_at = time.time()
 
         self.logger.info(
@@ -2167,26 +2278,40 @@ class OptionsScalpStrategy(BaseStrategy):
         self.highest_premium = fill_price
         self._last_known_premium = fill_price
         self.strike_price = selected_strike
-        self._is_squeeze_entry = True
-        self._squeeze_breakout_time = time.monotonic()
+        self._is_squeeze_entry = setup_type == "BB_SQUEEZE_BREAKOUT"
+        self._squeeze_breakout_time = (
+            time.monotonic() if self._is_squeeze_entry else None
+        )
         if self._selected_expiry:
             self.expiry_dt = self._selected_expiry
 
-        self.logger.info(
-            "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed, no stale for %dm)",
-            self.pair,
-            option_type.upper(),
-            opt_contracts,
-            fill_price,
-            self.SQUEEZE_NO_STALE_MIN_BTC
-            if self._base_asset == "BTC"
-            else self.SQUEEZE_NO_STALE_MIN_ETH,
-        )
-
-        self._entry_context = (
-            f"BB_SQUEEZE_BREAKOUT dir={self._breakout_direction} BB_width={bb_width_pct:.3f}% "
-            f"ask=${premium:.4f} conf={entry_confidence:.2f}"
-        )
+        if setup_type == "BB_SQUEEZE_BREAKOUT":
+            self.logger.info(
+                "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed, no stale for %dm)",
+                self.pair,
+                option_type.upper(),
+                opt_contracts,
+                fill_price,
+                self.SQUEEZE_NO_STALE_MIN_BTC
+                if self._base_asset == "BTC"
+                else self.SQUEEZE_NO_STALE_MIN_ETH,
+            )
+            self._entry_context = (
+                f"BB_SQUEEZE_BREAKOUT dir={self._breakout_direction} BB_width={bb_width_pct:.3f}% "
+                f"ask=${premium:.4f} conf={entry_confidence:.2f}"
+            )
+        else:
+            self.logger.info(
+                "[%s] POSITION LOCKED — %s x%d @ $%.4f (momentum burst entry)",
+                self.pair,
+                option_type.upper(),
+                opt_contracts,
+                fill_price,
+            )
+            self._entry_context = (
+                f"MOMENTUM_BURST_ENTRY dir={self._breakout_direction} mom={self._underlying_momentum_pct():+.2f}% "
+                f"ask=${premium:.4f} conf={entry_confidence:.2f}"
+            )
 
         expiry_str = self._selected_expiry.strftime("%b %d %H:%M")
         strike_label = "ATM" if selected_strike == atm_strike else "OTM"
@@ -2194,7 +2319,7 @@ class OptionsScalpStrategy(BaseStrategy):
         await self._log_activity(
             "options_entry",
             f"{self.pair} — OPTIONS: {option_type.upper()} {strike_label} ${selected_strike:.0f} | "
-            f"premium=${premium:.4f} | expiry={expiry_str} | BREAKOUT dir={self._breakout_direction}",
+            f"premium=${premium:.4f} | expiry={expiry_str} | {setup_type} dir={self._breakout_direction}",
             {
                 "option_type": option_type,
                 "strike": selected_strike,
@@ -2205,7 +2330,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 else "",
                 "underlying_price": current_price,
                 "symbol": selected_symbol,
-                "setup_type": "BB_SQUEEZE_BREAKOUT",
+                "setup_type": setup_type,
                 "contracts": opt_contracts,
                 "bb_width_pct": round(bb_width_pct, 4),
                 "confidence": round(entry_confidence, 3),
@@ -2221,9 +2346,9 @@ class OptionsScalpStrategy(BaseStrategy):
             selected_strike=selected_strike,
             premium=premium,
             strength=0,
-            signals_str=f"BB_SQUEEZE_BREAKOUT dir={self._breakout_direction} width={bb_width_pct:.3f}%",
+            signals_str=f"{setup_type} dir={self._breakout_direction} width={bb_width_pct:.3f}%",
             current_price=current_price,
-            setup_type="BB_SQUEEZE_BREAKOUT",
+            setup_type=setup_type,
             expiry_str=expiry_str,
             strike_label=strike_label,
             contracts=opt_contracts,
