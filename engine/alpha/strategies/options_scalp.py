@@ -373,6 +373,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._atm_put_ask: float = 0.0
         self._prev_call_ask: float = 0.0
         self._prev_put_ask: float = 0.0
+        self._prev2_call_ask: float = 0.0
+        self._prev2_put_ask: float = 0.0
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -969,9 +971,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
                 if raw_call_ask > 0 or raw_put_ask > 0:
                     if raw_call_ask > 0:
+                        self._prev2_call_ask = self._prev_call_ask
                         self._prev_call_ask = self._atm_call_ask
                         self._atm_call_ask = raw_call_ask
                     if raw_put_ask > 0:
+                        self._prev2_put_ask = self._prev_put_ask
                         self._prev_put_ask = self._atm_put_ask
                         self._atm_put_ask = raw_put_ask
                     self.logger.info(
@@ -1628,8 +1632,9 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if (
             momentum_60s > 0
+            and self._prev2_call_ask > 0
             and self._prev_call_ask > 0
-            and self._atm_call_ask > self._prev_call_ask
+            and self._atm_call_ask > self._prev_call_ask > self._prev2_call_ask
         ):
             option_type = "call"
             direction = "UP"
@@ -1637,8 +1642,9 @@ class OptionsScalpStrategy(BaseStrategy):
             prev_ask = self._prev_call_ask
         elif (
             momentum_60s < 0
+            and self._prev2_put_ask > 0
             and self._prev_put_ask > 0
-            and self._atm_put_ask > self._prev_put_ask
+            and self._atm_put_ask > self._prev_put_ask > self._prev2_put_ask
         ):
             option_type = "put"
             direction = "DOWN"
@@ -1658,10 +1664,11 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         self.logger.info(
-            "[%s] MOMENTUM_BURST: dir=%s mom=%+.2f%% premium=$%.2f→$%.2f — entering %s",
+            "[%s] MOMENTUM_BURST: dir=%s mom=%+.2f%% premium=$%.2f→$%.2f→$%.2f — entering %s",
             self.pair,
             direction,
             momentum_60s,
+            (self._prev2_call_ask if option_type == "call" else self._prev2_put_ask),
             prev_ask,
             entry_ask,
             option_type.upper(),

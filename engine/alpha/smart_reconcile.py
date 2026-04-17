@@ -451,17 +451,46 @@ class SmartDeltaReconciler:
                         "action": "update_failed",
                     })
 
-            # DB rows that never matched any Delta round-trip are duplicates/invalid.
+            # DB rows that never matched any Delta round-trip: only mark DUPLICATE
+            # when an exact twin exists (same entry, contracts, opened_at within 60s),
+            # and this pair has more than one trade in that time window.
             unmatched_db = [t for t in db_list if t.get("id") not in used_db_ids]
             for db_trade in unmatched_db:
                 trade_id = int(db_trade.get("id", 0) or 0)
                 if trade_id <= 0:
                     continue
 
+                if not self._should_mark_duplicate_unmatched(db_trade, db_list):
+                    details.append({
+                        "trade_id": trade_id,
+                        "pair": pair,
+                        "action": "skipped_duplicate_rules",
+                    })
+                    continue
+
+                ep = self._normalize_trade_price(
+                    db_trade.get("entry_price", db_trade.get("price", 0)),
+                )
+                ct = self._normalize_trade_contracts(
+                    db_trade.get("contracts", db_trade.get("amount", 0)),
+                )
+                opened = db_trade.get("opened_at")
+                self.log.info(
+                    "SMART RECONCILE%s: %s DUPLICATE_UNMATCHED trade_id=%s pair=%s "
+                    "entry_price=%s contracts=%s opened_at=%s",
+                    " [dry_run]" if dry_run else "",
+                    "would mark" if dry_run else "marking",
+                    trade_id,
+                    pair,
+                    ep,
+                    ct,
+                    opened,
+                )
+
                 details.append({
                     "trade_id": trade_id,
                     "pair": pair,
-                    "action": "duplicate_unmatched_db",
+                    "action": "duplicate_unmatched_db_dry_run" if dry_run else "duplicate_unmatched_db",
                 })
                 if dry_run:
                     continue
@@ -501,6 +530,93 @@ class SmartDeltaReconciler:
             "dry_run": dry_run,
             "details": details,
         }
+
+    @staticmethod
+    def _normalize_trade_price(val: Any) -> float:
+        return round(float(val or 0), 8)
+
+    @staticmethod
+    def _normalize_trade_contracts(val: Any) -> float:
+        return round(float(val or 0), 8)
+
+    @staticmethod
+    def _parse_opened_at(val: Any) -> datetime | None:
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            dt = val
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        s = str(val).replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def _count_pair_trades_in_time_window(
+        self, db_list: list[dict], center: datetime, window_sec: float = 60.0,
+    ) -> int:
+        """How many trades for this pair have opened_at within ±window_sec of center."""
+        n = 0
+        for t in db_list:
+            ot = self._parse_opened_at(t.get("opened_at"))
+            if ot is None:
+                continue
+            if abs((ot - center).total_seconds()) <= window_sec:
+                n += 1
+        return n
+
+    def _has_exact_duplicate_peer(
+        self,
+        db_trade: dict,
+        db_list: list[dict],
+        window_sec: float = 60.0,
+    ) -> bool:
+        """Another row with same pair list, exact entry + contracts, opened_at within window."""
+        tid = db_trade.get("id")
+        ep = self._normalize_trade_price(
+            db_trade.get("entry_price", db_trade.get("price", 0)),
+        )
+        ct = self._normalize_trade_contracts(
+            db_trade.get("contracts", db_trade.get("amount", 0)),
+        )
+        ot = self._parse_opened_at(db_trade.get("opened_at"))
+        if ot is None or ep <= 0 or ct <= 0:
+            return False
+        for other in db_list:
+            if other.get("id") == tid:
+                continue
+            o_ep = self._normalize_trade_price(
+                other.get("entry_price", other.get("price", 0)),
+            )
+            o_ct = self._normalize_trade_contracts(
+                other.get("contracts", other.get("amount", 0)),
+            )
+            o_ot = self._parse_opened_at(other.get("opened_at"))
+            if o_ot is None:
+                continue
+            if o_ep != ep or o_ct != ct:
+                continue
+            if abs((o_ot - ot).total_seconds()) <= window_sec:
+                return True
+        return False
+
+    def _should_mark_duplicate_unmatched(
+        self, db_trade: dict, db_list: list[dict],
+    ) -> bool:
+        """Strict duplicate fingerprint: never tag lone pair rows or non-twins."""
+        if len(db_list) <= 1:
+            return False
+        ot = self._parse_opened_at(db_trade.get("opened_at"))
+        if ot is None:
+            return False
+        if self._count_pair_trades_in_time_window(db_list, ot) < 2:
+            return False
+        return self._has_exact_duplicate_peer(db_trade, db_list)
 
     def _find_best_match(
         self, delta_rt: dict, db_list: list[dict]
