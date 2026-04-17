@@ -2413,7 +2413,19 @@ class AlphaBot:
                     continue  # scalp strategy owns this position
                 # Check options strategies too
                 base_pair = pos.pair.split("-")[0] if "-" in pos.pair else pos.pair
-                opts = self._options_strategies.get(base_pair)
+                opts = self._options_strategies.get(pos.pair)
+                if opts is None:
+                    opts = self._options_strategies.get(base_pair)
+                if opts is None:
+                    opts = next(
+                        (
+                            strategy
+                            for pair_key, strategy in self._options_strategies.items()
+                            if pair_key.startswith(f"{base_pair}/")
+                            or strategy._base_asset == base_pair
+                        ),
+                        None,
+                    )
                 if opts is not None and opts.in_position:
                     continue  # options strategy owns this position
                 ghost_pairs.append(pos.pair)
@@ -2809,7 +2821,9 @@ class AlphaBot:
                         / opts.entry_premium
                         * 100
                     )
-                    opts._update_opt_ratchet_floor(current_peak_pct)
+                    opts._opt_ratchet_floor = opts._compute_dynamic_floor(
+                        current_peak_pct, 0.0
+                    )
                 opts._last_known_premium = pos["mark_price"] or pos["entry_price"]
                 opts._contracts = int(pos["contracts"])
                 opts.strike_price = strike_price

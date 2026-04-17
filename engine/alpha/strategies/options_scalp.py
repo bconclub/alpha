@@ -2556,7 +2556,7 @@ class OptionsScalpStrategy(BaseStrategy):
         elif energy_score >= 0.1:
             momentum_multiplier = 0.5
         else:
-            momentum_multiplier = 0.0
+            momentum_multiplier = 0.3
 
         trail_distance = (
             peak_pnl_pct * self.DYNAMIC_RATCHET_BASE_FRAC * momentum_multiplier
@@ -2854,7 +2854,9 @@ class OptionsScalpStrategy(BaseStrategy):
             return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_DEAD")
 
         # ── 2b. Dynamic momentum-based ratchet floor ──
-        if peak_pnl_pct > 0 and premium_change_pct <= dynamic_floor:
+        if peak_pnl_pct < 5.0:
+            pass  # skip ratchet — use SL only for tiny peaks
+        elif premium_change_pct <= dynamic_floor:
             self.logger.info(
                 "[%s] OPT_RATCHET_DYNAMIC — pnl=%+.1f%% <= floor=%+.1f%% "
                 "(peak=%+.1f%% energy=%.3f%%)",
