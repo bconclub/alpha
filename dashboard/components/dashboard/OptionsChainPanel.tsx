@@ -420,6 +420,7 @@ function ChainCard({
 
   const inPosition     = !!state.position_side;
   const balance        = state.balance ?? null;
+  const strikeWatching = state.atm_strike ?? state.target_strike ?? null;
   const confidence = getSignalConfidence(state);
   const lowSignal = confidence < 0.2;
   const isReady = confidence > 0.15;
@@ -543,11 +544,11 @@ function ChainCard({
       </div>
 
       {/* 6. Strike display - bold monospace, larger font */}
-      {state.atm_strike != null && state.atm_strike > 0 && (
+      {strikeWatching != null && strikeWatching > 0 && (
         <div className="mb-2 px-2 py-1.5 bg-zinc-800/30 rounded">
           <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Strike Watching</span>
           <span className="ml-2 text-[14px] font-mono font-bold text-amber-400">
-            STRIKE ${state.atm_strike.toLocaleString()}
+            STRIKE ${strikeWatching.toLocaleString()}
           </span>
         </div>
       )}

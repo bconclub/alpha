@@ -452,7 +452,7 @@ class SmartDeltaReconciler:
                     })
 
             # DB rows that never matched any Delta round-trip: only mark DUPLICATE
-            # when an exact twin exists (same entry, contracts, opened_at within 60s),
+            # when an exact twin exists (same entry, contracts, opened_at within 120s),
             # and this pair has more than one trade in that time window.
             unmatched_db = [t for t in db_list if t.get("id") not in used_db_ids]
             for db_trade in unmatched_db:
@@ -462,7 +462,7 @@ class SmartDeltaReconciler:
 
                 if not self._should_mark_duplicate_unmatched(db_trade, db_list):
                     self.log.info(
-                        "SKIP_DUPLICATE_TAG: trade #%s is unique in window, not tagging",
+                        "SKIP_DUPLICATE_TAG: trade #%s is unique",
                         trade_id,
                     )
                     details.append({
@@ -562,7 +562,7 @@ class SmartDeltaReconciler:
             return None
 
     def _count_pair_trades_in_time_window(
-        self, db_list: list[dict], center: datetime, window_sec: float = 60.0,
+        self, db_list: list[dict], center: datetime, window_sec: float = 120.0,
     ) -> int:
         """How many trades for this pair have opened_at within ±window_sec of center."""
         n = 0
@@ -578,7 +578,7 @@ class SmartDeltaReconciler:
         self,
         db_trade: dict,
         db_list: list[dict],
-        window_sec: float = 60.0,
+        window_sec: float = 120.0,
     ) -> bool:
         """Another row with same pair list, exact entry + contracts, opened_at within window."""
         tid = db_trade.get("id")

@@ -194,17 +194,11 @@ class OptionsScalpStrategy(BaseStrategy):
     EXPIRY_GUARD_HOURS = 2.0  # if expiry < 2h AND pnl < +10% → exit
     EXPIRY_GUARD_MIN_MIN = 30  # if expiry < 30 min → always exit regardless of P&L
 
-    # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
-    OPT_RATCHET_FLOOR_TABLE = [
-        (0.0, -10.0),  # 0% or no peak → floor at -10% (safety net)
-        (3.0, -10.0),  # +3% peak → floor at -10%  ← BREATHING ROOM
-        (5.0, -5.0),   # +5% peak → floor at -5%   ← BREATHING ROOM
-        (8.0, 0.0),    # +8% peak → breakeven      ← WAS +2%, now 0%
-        (15.0, 5.0),   # +15% peak → +5%
-        (25.0, 10.0),  # +25% peak → +10%
-        (40.0, 20.0),  # +40% peak → +20%
-        (60.0, 35.0),  # +60% peak → +35%
-    ]
+    # ── Dynamic ratchet floor ──────────────────────────────────────────
+    # trail_distance = (15% of peak_pnl) * momentum_multiplier
+    # momentum_multiplier based on energy score:
+    #   >5.0% -> 2.0x, 1.0-5.0% -> 1.0x, 0.1-1.0% -> 0.5x, <0.1% -> 0.0x
+    DYNAMIC_RATCHET_BASE_FRAC = 0.15
 
     # ── Position limits ───────────────────────────────────────────
     MAX_OPTION_POSITIONS = 1  # 1 option at a time
@@ -295,8 +289,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._position_verify_failures: int = 0
         self._MAX_VERIFY_FAILURES = 10
 
-        # Ratchet profit floor
-        self._opt_ratchet_floor: float = -999.0  # Sentinel value indicating "not set"
+        # Dynamic ratchet floor (computed from peak + energy)
+        self._opt_ratchet_floor: float = 0.0
 
         # ── Squeeze state ──────────────────────────────────────────
         # Rolling premium history for cheap-threshold computation: (monotonic_time, ask)
@@ -530,14 +524,16 @@ class OptionsScalpStrategy(BaseStrategy):
                         trade.get("current_price") or self.entry_premium,
                     )
 
-                # Restore ratchet floor based on recovered highest_premium
+                # Restore dynamic floor based on recovered highest premium.
                 if self.entry_premium > 0:
                     restored_peak_pct = (
                         (self.highest_premium - self.entry_premium)
                         / self.entry_premium
                         * 100
                     )
-                    self._update_opt_ratchet_floor(restored_peak_pct)
+                    self._opt_ratchet_floor = self._compute_dynamic_floor(
+                        restored_peak_pct, 1.0
+                    )
 
                 if trade_pair.endswith("-C"):
                     self.option_side = "call"
@@ -2541,21 +2537,31 @@ class OptionsScalpStrategy(BaseStrategy):
         return contracts
 
     # ==================================================================
-    # RATCHET FLOOR
+    # DYNAMIC RATCHET FLOOR
     # ==================================================================
 
-    def _update_opt_ratchet_floor(self, pnl_pct: float) -> None:
-        """Ratchet profit floor — one-way lock based on premium peak."""
-        for threshold, floor in self.OPT_RATCHET_FLOOR_TABLE:
-            if pnl_pct >= threshold and floor > self._opt_ratchet_floor:
-                self.logger.info(
-                    "[%s] RATCHET FLOOR ↑ pnl +%.1f%% ≥ %+.0f%% → floor locked at +%.1f%%",
-                    self.option_symbol,
-                    pnl_pct,
-                    threshold,
-                    floor,
-                )
-                self._opt_ratchet_floor = floor
+    def _compute_dynamic_floor(self, peak_pnl_pct: float, energy_score: float) -> float:
+        """Compute dynamic floor from peak PnL and current momentum energy.
+
+        trail_distance = (15% of peak_pnl) * momentum_multiplier
+        floor = peak_pnl - trail_distance
+        """
+        if peak_pnl_pct <= 0:
+            return -10.0
+
+        if energy_score > 5.0:
+            momentum_multiplier = 2.0
+        elif energy_score >= 1.0:
+            momentum_multiplier = 1.0
+        elif energy_score >= 0.1:
+            momentum_multiplier = 0.5
+        else:
+            momentum_multiplier = 0.0
+
+        trail_distance = (
+            peak_pnl_pct * self.DYNAMIC_RATCHET_BASE_FRAC * momentum_multiplier
+        )
+        return peak_pnl_pct - trail_distance
 
     # ==================================================================
     # GPFC #22 Part 2: Let Winners Ride — Momentum Check
@@ -2789,6 +2795,8 @@ class OptionsScalpStrategy(BaseStrategy):
             else 0
         )
         energy_score = self._compute_energy(current_premium)
+        dynamic_floor = self._compute_dynamic_floor(peak_pnl_pct, energy_score)
+        self._opt_ratchet_floor = dynamic_floor
         if energy_score < self._ENERGY_DEAD_THRESHOLD_PCT:
             self._low_energy_ticks += 1
         else:
@@ -2807,7 +2815,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # Heartbeat (every ~60s)
         if self._tick_count % 6 == 0:
             self.logger.info(
-                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | energy=%.3f%%%s",
+                "[%s] %s | $%.4f → $%.4f (%+.1f%%) | peak=$%.4f (+%.1f%%) | "
+                "energy=%.3f%% floor=%+.1f%%%s",
                 self.option_symbol,
                 self.option_side,
                 self.entry_premium,
@@ -2816,6 +2825,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.highest_premium,
                 peak_pnl_pct,
                 energy_score,
+                dynamic_floor,
                 expiry_tag,
             )
 
@@ -2842,6 +2852,21 @@ class OptionsScalpStrategy(BaseStrategy):
                 hours_to_expiry,
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_DEAD")
+
+        # ── 2b. Dynamic momentum-based ratchet floor ──
+        if peak_pnl_pct > 0 and premium_change_pct <= dynamic_floor:
+            self.logger.info(
+                "[%s] OPT_RATCHET_DYNAMIC — pnl=%+.1f%% <= floor=%+.1f%% "
+                "(peak=%+.1f%% energy=%.3f%%)",
+                self.option_symbol,
+                premium_change_pct,
+                dynamic_floor,
+                peak_pnl_pct,
+                energy_score,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_RATCHET_DYNAMIC"
+            )
 
         # ── 3. Energy-based dead loser exit (disabled in expiry mode) ──
         if not in_expiry_mode:
@@ -3269,7 +3294,7 @@ class OptionsScalpStrategy(BaseStrategy):
             },
         )
 
-        self._opt_ratchet_floor = -999.0
+        self._opt_ratchet_floor = 0.0
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
@@ -3726,7 +3751,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_known_premium = fill_price
             self._trailing_active = False
             self._consecutive_ticker_failures = 0
-            self._opt_ratchet_floor = -999.0
+            self._opt_ratchet_floor = 0.0
             self.strike_price = signal.metadata.get("strike", 0)
             self._contracts = int(signal.metadata.get("contracts", 1) or 1)
             expiry_str = signal.metadata.get("expiry")
