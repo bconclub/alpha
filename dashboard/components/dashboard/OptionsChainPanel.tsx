@@ -117,10 +117,12 @@ function DualSignalBar({
   );
   const momentumConfidence =
     momentum_60s_pct != null ? clamp01(Math.abs(momentum_60s_pct) / 0.15) : 0;
-  const squeezePct = Math.round(squeezeConfidence * 100);
+  const squeezePctRaw = Math.round(squeezeConfidence * 100);
+  const squeezePct = squeeze_active ? squeezePctRaw : Math.min(99, squeezePctRaw);
   const momentumPct = Math.round(momentumConfidence * 100);
   const hasMomentumData = momentum_60s_pct != null && Number.isFinite(momentum_60s_pct);
   const momentumLabel = `MOMENTUM ${(momentum_60s_pct ?? 0) >= 0 ? '↑' : '↓'}`;
+  const squeezeIsActive = squeeze_active === true;
   
   useEffect(() => {
     setDisplaySqueezePct(squeezePct);
@@ -162,7 +164,11 @@ function DualSignalBar({
           <span className="text-[8px] font-semibold text-zinc-400 uppercase tracking-wide">SQUEEZE</span>
           <span className={cn(
             'text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300',
-            squeezeConfidence >= 0.7 ? 'text-[#22c55e]' : squeezeConfidence >= 0.4 ? 'text-[#eab308]' : 'text-[#ef4444]'
+            squeezeIsActive
+              ? 'text-[#22c55e]'
+              : squeezeConfidence >= 0.4
+                ? 'text-[#eab308]'
+                : 'text-[#ef4444]'
           )}>
             {displaySqueezePct}%
           </span>
@@ -176,11 +182,13 @@ function DualSignalBar({
                 style={{
                   opacity: on ? 1 : 0.2,
                   background:
-                    idx <= 1
-                      ? '#ef4444'
-                      : idx === 2
-                        ? '#eab308'
-                        : '#22c55e',
+                    squeezeIsActive
+                      ? '#22c55e'
+                      : idx <= 1
+                        ? '#ef4444'
+                        : idx === 2
+                          ? '#eab308'
+                          : '#f59e0b',
                 }}
               />
             ))}
@@ -227,7 +235,7 @@ function DualSignalBar({
       )}
       {lowSignal && (
         <div className="mt-1 text-[8px] font-mono text-orange-300 uppercase tracking-wide">
-          Low Signal - waiting...
+          Waiting for market compression...
         </div>
       )}
     </div>
