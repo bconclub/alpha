@@ -160,6 +160,7 @@ const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
   VWAP_RECLAIM:   { bg: 'bg-blue-500/10',   text: 'text-blue-400' },
   RSI_OVERRIDE:   { bg: 'bg-purple-500/10',  text: 'text-purple-400' },
   MOMENTUM_BURST: { bg: 'bg-orange-500/10',  text: 'text-orange-400' },
+  MOMENTUM_BURST_ENTRY: { bg: 'bg-orange-500/10', text: 'text-orange-400' },
   MEAN_REVERT:    { bg: 'bg-cyan-500/10',    text: 'text-cyan-400' },
   TREND_CONT:     { bg: 'bg-emerald-500/10', text: 'text-emerald-400' },
   BB_SQUEEZE:     { bg: 'bg-red-500/10',     text: 'text-red-400' },
@@ -178,7 +179,8 @@ function getSetupLabel(setup?: string): string {
     ANTIC: 'ANTIC',
     VWAP_RECLAIM: 'VWAP',
     RSI_OVERRIDE: 'RSI OVR',
-    MOMENTUM_BURST: 'MOM',
+    MOMENTUM_BURST: 'MOM BURST',
+    MOMENTUM_BURST_ENTRY: 'MOM BURST',
     MEAN_REVERT: 'REVERT',
     TREND_CONT: 'TREND',
     BB_SQUEEZE: 'SQUEEZE',
@@ -193,10 +195,14 @@ function getSetupLabel(setup?: string): string {
 }
 
 function inferSetupType(trade: Trade): string | undefined {
-  if (trade.setup_type && trade.setup_type.trim()) return trade.setup_type;
+  if (trade.setup_type && trade.setup_type.trim()) {
+    const raw = trade.setup_type.trim();
+    if (raw === 'MOMENTUM_BURST_ENTRY') return 'MOMENTUM_BURST_ENTRY';
+    return raw;
+  }
   const haystack = `${trade.reason ?? ''} ${trade.order_id ?? ''}`.toUpperCase();
+  if (haystack.includes('MOMENTUM_BURST_ENTRY')) return 'MOMENTUM_BURST_ENTRY';
   if (haystack.includes('MOMENTUM_BURST')) return 'MOMENTUM_BURST';
-  if (haystack.includes('MOMENTUM_BURST_ENTRY')) return 'MOMENTUM_BURST';
   if (haystack.includes('BB_SQUEEZE_BREAKOUT')) return 'BB_SQUEEZE';
   if (haystack.includes('BB_SQUEEZE')) return 'BB_SQUEEZE';
   return undefined;
