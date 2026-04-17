@@ -9,6 +9,27 @@ Format: `MAJOR.MINOR.PATCH`
 
 ---
 
+## v2.0.1 — 2026-04-17 — Momentum Burst + Reconcile Safety Hardening
+
+### Options Scalp
+- Added `MOMENTUM_BURST_ENTRY` premium confirmation hardening:
+  - Tracks ATM premium over 3 ticks (`current`, `prev`, `prev2`) for both call and put legs.
+  - Requires two-step premium rise before entry:
+    - CALL path: `current_call_ask > prev_call_ask > prev2_call_ask`
+    - PUT path: `current_put_ask > prev_put_ask > prev2_put_ask`
+- Added sustained low-energy confirmation to reduce noisy exits:
+  - New `_low_energy_ticks` counter.
+  - `ENERGY_WINNER_FADING` now requires low energy for at least 3 consecutive ticks.
+  - `ENERGY_DEAD_LOSER` now requires low energy for at least 3 consecutive ticks and minimum hold of 180s.
+
+### Smart Reconcile
+- Tightened `DUPLICATE_UNMATCHED` tagging guard:
+  - Only tags when an exact twin exists in the same pair window (same entry price + same contracts + opened_at within 60s).
+  - Never tags a lone trade that is unique in the pair/time window.
+- Added explicit duplicate-skip logging:
+  - `SKIP_DUPLICATE_TAG: trade #X is unique in window, not tagging`
+- Dry-run path logs what would be tagged before any DB mutation.
+
 ## v2.0.0 — 2026-02-15 — Delta Scalping Agent
 
 **FULL REFOCUS: Delta-only, aggressive momentum scalping.**

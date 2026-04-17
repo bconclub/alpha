@@ -461,6 +461,10 @@ class SmartDeltaReconciler:
                     continue
 
                 if not self._should_mark_duplicate_unmatched(db_trade, db_list):
+                    self.log.info(
+                        "SKIP_DUPLICATE_TAG: trade #%s is unique in window, not tagging",
+                        trade_id,
+                    )
                     details.append({
                         "trade_id": trade_id,
                         "pair": pair,

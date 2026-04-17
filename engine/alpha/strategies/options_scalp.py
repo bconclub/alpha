@@ -368,6 +368,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._MOMENTUM_CHECK_WINDOW_SEC = 60.0  # Look back 60s for momentum
         self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
         self._ENERGY_DEAD_THRESHOLD_PCT = 0.05
+        self._low_energy_ticks: int = 0
         self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
         self._atm_call_ask: float = 0.0
         self._atm_put_ask: float = 0.0
@@ -2276,6 +2277,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
+        self._low_energy_ticks = 0
         self.entry_premium = fill_price
         self._contracts = opt_contracts
         self.option_symbol = selected_symbol
@@ -2787,6 +2789,10 @@ class OptionsScalpStrategy(BaseStrategy):
             else 0
         )
         energy_score = self._compute_energy(current_premium)
+        if energy_score < self._ENERGY_DEAD_THRESHOLD_PCT:
+            self._low_energy_ticks += 1
+        else:
+            self._low_energy_ticks = 0
         hold_seconds = (
             time.monotonic() - self.entry_time if self.entry_time else 0.0
         )
@@ -2842,14 +2848,17 @@ class OptionsScalpStrategy(BaseStrategy):
             if (
                 hold_seconds >= 180.0
                 and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
+                and self._low_energy_ticks >= 3
                 and premium_change_pct < 0
             ):
                 self.logger.info(
-                    "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% and pnl=%+.1f%%",
+                    "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% "
+                    "(low_energy_ticks=%d) and pnl=%+.1f%%",
                     self.option_symbol,
                     int(hold_seconds),
                     energy_score,
                     self._ENERGY_DEAD_THRESHOLD_PCT,
+                    self._low_energy_ticks,
                     premium_change_pct,
                 )
                 return await self._do_option_exit(
@@ -2859,14 +2868,17 @@ class OptionsScalpStrategy(BaseStrategy):
         # ── 4. Energy-based winner fading exit ──
         if (
             energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
+            and self._low_energy_ticks >= 3
             and premium_change_pct > 0
             and peak_pnl_pct > 20.0
         ):
             self.logger.info(
-                "[%s] OPT_ENERGY_WINNER_FADING — energy=%.3f%% < %.3f%% with pnl=%+.1f%% peak=%+.1f%%",
+                "[%s] OPT_ENERGY_WINNER_FADING — energy=%.3f%% < %.3f%% "
+                "(low_energy_ticks=%d) with pnl=%+.1f%% peak=%+.1f%%",
                 self.option_symbol,
                 energy_score,
                 self._ENERGY_DEAD_THRESHOLD_PCT,
+                self._low_energy_ticks,
                 premium_change_pct,
                 peak_pnl_pct,
             )
@@ -3704,6 +3716,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True
             OptionsScalpStrategy._global_position_asset = self._base_asset
+            self._low_energy_ticks = 0
             self.option_side = pending_side
             self.option_symbol = signal.pair
             self.entry_premium = fill_price
@@ -3808,6 +3821,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.in_position = False
             OptionsScalpStrategy._global_in_position = False
             OptionsScalpStrategy._global_position_asset = None
+            self._low_energy_ticks = 0
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0
@@ -3838,6 +3852,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.in_position = False
             OptionsScalpStrategy._global_in_position = False
             OptionsScalpStrategy._global_position_asset = None
+            self._low_energy_ticks = 0
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0
