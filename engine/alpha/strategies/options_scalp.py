@@ -198,7 +198,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # trail_distance = (15% of peak_pnl) * momentum_multiplier
     # momentum_multiplier based on energy score:
     #   >5.0% -> 2.0x, 1.0-5.0% -> 1.0x, 0.1-1.0% -> 0.5x, <0.1% -> 0.0x
-    DYNAMIC_RATCHET_BASE_FRAC = 0.15
+    DYNAMIC_RATCHET_BASE_FRAC = 0.30
 
     # ── Position limits ───────────────────────────────────────────
     MAX_OPTION_POSITIONS = 1  # 1 option at a time
