@@ -304,12 +304,14 @@ function PremiumBox({
   breakout_state,
   balance,
   spotPrice,
+  isEntryTarget = false,
 }: { 
   type: 'call' | 'put'; 
   premium: number | null; 
   breakout_state: string;
   balance: number | null;
   spotPrice: number | null;
+  isEntryTarget?: boolean;
 }) {
   const isCall = type === 'call';
   const colorClass = isCall ? 'text-[#00c853]' : 'text-[#ff1744]';
@@ -337,16 +339,33 @@ function PremiumBox({
         'rounded p-2 transition-colors duration-200',
       )}
       style={{
-        border: isGlowing
-          ? `2px solid ${glowColor}99`
+        border: isEntryTarget
+          ? (isCall ? '2px solid rgba(34,197,94,0.95)' : '2px solid rgba(239,68,68,0.95)')
+          : isGlowing
+            ? `2px solid ${glowColor}99`
           : '1px solid rgba(63,63,70,0.6)',
-        backgroundColor: isGlowing
-          ? (breakout_state === 'DETECTED_DOWN'
-              ? 'rgba(239,68,68,0.08)'
-              : 'rgba(34,197,94,0.08)')
+        backgroundColor: isEntryTarget
+          ? (isCall ? 'rgba(34,197,94,0.14)' : 'rgba(239,68,68,0.14)')
+          : isGlowing
+            ? (breakout_state === 'DETECTED_DOWN'
+                ? 'rgba(239,68,68,0.08)'
+                : 'rgba(34,197,94,0.08)')
           : 'rgba(39,39,42,0.4)',
+        boxShadow: isEntryTarget
+          ? (isCall
+              ? '0 0 0 1px rgba(34,197,94,0.45), 0 0 14px rgba(34,197,94,0.25)'
+              : '0 0 0 1px rgba(239,68,68,0.45), 0 0 14px rgba(239,68,68,0.25)')
+          : undefined,
       }}
     >
+      {isEntryTarget && (
+        <div className={cn(
+          'mb-1 text-[8px] font-mono font-semibold uppercase tracking-wide',
+          isCall ? 'text-[#86efac]' : 'text-[#fca5a5]'
+        )}>
+          Entry Target
+        </div>
+      )}
       <div className={cn('text-[7px] uppercase mb-0.5', dimColorClass)}>
         {isCall ? 'Call' : 'Put'}
       </div>
@@ -440,6 +459,22 @@ function ChainCard({
   const breakoutDirection =
     state.breakout_direction ??
     (breakoutState === 'UP' ? 'UP' : breakoutState === 'DOWN' ? 'DOWN' : null);
+  const normalizedPositionSide = state.position_side?.toLowerCase();
+  const normalizedSignalSide = state.signal_side?.toLowerCase();
+  const entrySide: 'call' | 'put' | null =
+    normalizedPositionSide === 'call' || normalizedPositionSide === 'put'
+      ? (normalizedPositionSide as 'call' | 'put')
+      : breakoutDirection === 'UP'
+        ? 'call'
+        : breakoutDirection === 'DOWN'
+          ? 'put'
+          : normalizedSignalSide === 'call' || normalizedSignalSide === 'put'
+            ? (normalizedSignalSide as 'call' | 'put')
+            : state.direction_bias === 'CALL'
+              ? 'call'
+              : state.direction_bias === 'PUT'
+                ? 'put'
+                : null;
   const cardTint =
     breakoutDirection === 'UP'
       ? 'rgba(0,200,83,0.04)'
@@ -512,6 +547,17 @@ function ChainCard({
       )}
 
       {/* 3. CALL and PUT premium boxes with glow on breakout */}
+      {entrySide && (
+        <div className="mb-2 px-2 py-1 bg-zinc-800/30 rounded flex items-center justify-between">
+          <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Entry Side</span>
+          <span className={cn(
+            'text-[10px] font-mono font-bold uppercase',
+            entrySide === 'call' ? 'text-[#22c55e]' : 'text-[#ef4444]'
+          )}>
+            {entrySide.toUpperCase()}
+          </span>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2 mb-2">
         <PremiumBox 
           type="call" 
@@ -519,6 +565,7 @@ function ChainCard({
           breakout_state={breakoutState}
           balance={balance}
           spotPrice={state.spot_price}
+          isEntryTarget={entrySide === 'call'}
         />
         <PremiumBox 
           type="put" 
@@ -526,6 +573,7 @@ function ChainCard({
           breakout_state={breakoutState}
           balance={balance}
           spotPrice={state.spot_price}
+          isEntryTarget={entrySide === 'put'}
         />
       </div>
 
