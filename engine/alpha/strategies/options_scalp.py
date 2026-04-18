@@ -2072,7 +2072,7 @@ class OptionsScalpStrategy(BaseStrategy):
         opt_contracts = self._breakout_contracts
         entry_confidence = self._breakout_confidence
         bb_width_pct = self._breakout_bb_width
-        setup_type = self._pending_entry_setup or "BB_SQUEEZE_BREAKOUT"
+        setup_type = "BB_SQUEEZE_BREAKOUT" if self._is_squeeze_entry else (self._pending_entry_setup or "BB_SQUEEZE_BREAKOUT")
 
         # Recalculate contracts at confirmed ask price
         opt_contracts = self._calculate_option_contracts(
