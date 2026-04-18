@@ -317,6 +317,7 @@ class AlphaBot:
         self._scheduler.add_job(self._run_reconciliation, "interval", minutes=60)
         self._scheduler.add_job(self._watchdog_ping, "interval", seconds=60)
         self._scheduler.start()
+        asyncio.create_task(self._options_position_loop())
 
         # Signal systemd that we are ready and alive
         self._sd_notifier.notify("READY=1")
@@ -496,6 +497,19 @@ class AlphaBot:
         logger.info("Shutdown complete")
 
     # -- Core cycle ------------------------------------------------------------
+
+    async def _options_position_loop(self) -> None:
+        """Fast path for option exit checks — runs every 10s, independent of analysis interval."""
+        while not self._running:
+            await asyncio.sleep(0.25)
+        while self._running:
+            try:
+                for opts in self._options_strategies.values():
+                    if opts.in_position:
+                        await opts._check_option_exit()
+            except Exception:
+                logger.exception("Options position loop iteration failed")
+            await asyncio.sleep(10)
 
     async def _analysis_cycle(self) -> None:
         """Analyze all pairs (both exchanges) concurrently, switch strategies by signal strength."""
