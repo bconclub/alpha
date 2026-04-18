@@ -283,7 +283,6 @@ class OptionsScalpStrategy(BaseStrategy):
         # Position verification
         self._position_verify_tick: int = 0
         self._position_verify_failures: int = 0
-        self._verify_miss_count: int = 0
         self._MAX_VERIFY_FAILURES = 10
 
         # Dynamic ratchet floor (computed from peak + energy)
@@ -501,7 +500,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 # Found our open option trade — restore state
                 self._position_premium_history.clear()
                 self._last_30s_premium = None
-                self._verify_miss_count = 0
                 self.in_position = True
                 OptionsScalpStrategy._global_in_position = True
                 OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -2278,7 +2276,6 @@ class OptionsScalpStrategy(BaseStrategy):
         # SET POSITION STATE
         self._position_premium_history.clear()
         self._last_30s_premium = None
-        self._verify_miss_count = 0
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -3387,7 +3384,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 symbol = pos.get("symbol", "")
                 contracts = float(pos.get("contracts", 0) or 0)
                 if symbol == self.option_symbol and contracts != 0:
-                    self._verify_miss_count = 0
                     return None
 
             now_utc = datetime.now(timezone.utc)
@@ -3395,26 +3391,18 @@ class OptionsScalpStrategy(BaseStrategy):
                 mins_to_expiry = (self.expiry_dt - now_utc).total_seconds() / 60
                 if mins_to_expiry <= self._EXPIRY_CLOSE_MINUTES:
                     self.logger.warning(
-                        "[%s] POSITION VERIFY: not found, near expiry (%.1f min) — EXPIRY",
+                        "[%s] POSITION VERIFY: not found, near expiry (%.1f min) — "
+                        "log only (verify does not close)",
                         self.option_symbol,
                         mins_to_expiry,
                     )
-                    return await self._handle_position_gone("VERIFY_EXPIRY")
+                    return []
 
-            self._verify_miss_count += 1
-            if self._verify_miss_count < 3:
-                self.logger.warning(
-                    "[%s] POSITION VERIFY: not found on exchange — miss %d/3, retrying",
-                    self.option_symbol,
-                    self._verify_miss_count,
-                )
-                return []
             self.logger.warning(
-                "[%s] POSITION VERIFY: not found on exchange — miss %d/3, POSITION_GONE",
+                "[%s] POSITION VERIFY: not found on exchange — log only (verify does not close)",
                 self.option_symbol,
-                self._verify_miss_count,
             )
-            return await self._handle_position_gone("VERIFY_GONE")
+            return []
 
         except Exception as e:
             self._position_verify_failures += 1
@@ -3427,11 +3415,11 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             if self._position_verify_failures >= self._MAX_VERIFY_FAILURES:
                 self.logger.error(
-                    "[%s] POSITION VERIFY: %d consecutive failures — forcing POSITION_GONE",
+                    "[%s] POSITION VERIFY: %d consecutive failures — log only (verify does not close)",
                     self.option_symbol,
                     self._position_verify_failures,
                 )
-                return await self._handle_position_gone("VERIFY_API_FAIL")
+                return []
             return None
 
     async def _handle_position_gone(self, reason: str) -> list[Signal]:
@@ -3619,7 +3607,6 @@ class OptionsScalpStrategy(BaseStrategy):
         self._position_gone_cooldown_until = (
             time.monotonic() + self._POSITION_GONE_COOLDOWN_SEC
         )
-        self._verify_miss_count = 0
         self.logger.info(
             "[%s] %s cooldown: no new options entries for %ds",
             self.pair,
@@ -3648,7 +3635,6 @@ class OptionsScalpStrategy(BaseStrategy):
         self.expiry_dt = None
         self._consecutive_ticker_failures = 0
         self._position_verify_failures = 0
-        self._verify_miss_count = 0
         self._last_state_write = 0.0
         self._is_squeeze_entry = False
         self._squeeze_breakout_time = None
@@ -3792,7 +3778,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 return
             self._position_premium_history.clear()
             self._last_30s_premium = None
-            self._verify_miss_count = 0
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True
             OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -3917,7 +3902,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self._squeeze_breakout_time = None
             self._position_premium_history.clear()
             self._last_30s_premium = None
-            self._verify_miss_count = 0
 
     def on_rejected(self, signal: Signal) -> None:
         """Handle rejected option orders."""
@@ -3947,7 +3931,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
             self._is_squeeze_entry = False
             self._squeeze_breakout_time = None
-            self._verify_miss_count = 0
 
     # ==================================================================
     # STATS
