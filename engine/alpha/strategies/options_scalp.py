@@ -194,11 +194,7 @@ class OptionsScalpStrategy(BaseStrategy):
     EXPIRY_GUARD_HOURS = 2.0  # if expiry < 2h AND pnl < +10% → exit
     EXPIRY_GUARD_MIN_MIN = 30  # if expiry < 30 min → always exit regardless of P&L
 
-    # ── Dynamic ratchet floor ──────────────────────────────────────────
-    # trail_distance = (15% of peak_pnl) * momentum_multiplier
-    # momentum_multiplier based on energy score:
-    #   >5.0% -> 2.0x, 1.0-5.0% -> 1.0x, 0.1-1.0% -> 0.5x, <0.1% -> 0.0x
-    DYNAMIC_RATCHET_BASE_FRAC = 0.30
+    # ── Dynamic ratchet floor (GPFC #26 — tiered by peak_pnl_pct in _compute_dynamic_floor)
 
     # ── Position limits ───────────────────────────────────────────
     MAX_OPTION_POSITIONS = 1  # 1 option at a time
@@ -364,6 +360,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._ENERGY_DEAD_THRESHOLD_PCT = 0.05
         self._low_energy_ticks: int = 0
         self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
+        # GPFC #26: premium ~30s ago for ratchet velocity (fast reversal vs slow drift)
+        self._last_30s_premium: float | None = None
         self._atm_call_ask: float = 0.0
         self._atm_put_ask: float = 0.0
         self._prev_call_ask: float = 0.0
@@ -500,6 +498,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     continue
 
                 # Found our open option trade — restore state
+                self._position_premium_history.clear()
+                self._last_30s_premium = None
                 self.in_position = True
                 OptionsScalpStrategy._global_in_position = True
                 OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -2274,6 +2274,8 @@ class OptionsScalpStrategy(BaseStrategy):
         )
 
         # SET POSITION STATE
+        self._position_premium_history.clear()
+        self._last_30s_premium = None
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -2544,28 +2546,39 @@ class OptionsScalpStrategy(BaseStrategy):
     # DYNAMIC RATCHET FLOOR
     # ==================================================================
 
-    def _compute_dynamic_floor(self, peak_pnl_pct: float, energy_score: float) -> float:
-        """Compute dynamic floor from peak PnL and current momentum energy.
+    def _compute_dynamic_floor(self, peak_pnl_pct: float, _energy_score: float = 0.0) -> float:
+        """Tiered profit floor from peak PnL % (GPFC #26 — breathe at low peaks, tighten high).
 
-        trail_distance = (15% of peak_pnl) * momentum_multiplier
-        floor = peak_pnl - trail_distance
+        ``_energy_score`` is kept for call-site compatibility; tiers are peak-only.
         """
         if peak_pnl_pct <= 0:
             return -10.0
+        if peak_pnl_pct < 10.0:
+            return -8.0
+        if peak_pnl_pct < 20.0:
+            return 0.0
+        if peak_pnl_pct < 35.0:
+            return peak_pnl_pct * 0.40
+        if peak_pnl_pct < 50.0:
+            return peak_pnl_pct * 0.55
+        return peak_pnl_pct * 0.65
 
-        if energy_score > 5.0:
-            momentum_multiplier = 2.0
-        elif energy_score >= 1.0:
-            momentum_multiplier = 1.0
-        elif energy_score >= 0.1:
-            momentum_multiplier = 0.5
-        else:
-            momentum_multiplier = 0.3
+    def _premium_price_at_least_seconds_ago(self, now: float, seconds: float) -> float | None:
+        """Latest stored premium at or before ``now - seconds`` (monotonic clock)."""
+        cutoff = now - seconds
+        for t, p in reversed(self._position_premium_history):
+            if t <= cutoff and p > 0:
+                return float(p)
+        return None
 
-        trail_distance = (
-            peak_pnl_pct * self.DYNAMIC_RATCHET_BASE_FRAC * momentum_multiplier
-        )
-        return peak_pnl_pct - trail_distance
+    def _premium_pct_change_vs_seconds_ago(
+        self, current_premium: float, now: float, seconds: float
+    ) -> float | None:
+        """Return %% change vs premium ``seconds`` ago, or None if unknown."""
+        prev = self._premium_price_at_least_seconds_ago(now, seconds)
+        if prev is None or prev <= 0:
+            return None
+        return (current_premium - prev) / prev * 100.0
 
     # ==================================================================
     # GPFC #22 Part 2: Let Winners Ride — Momentum Check
@@ -2781,6 +2794,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.highest_premium = max(self.highest_premium, current_premium)
         now = time.monotonic()
         self._position_premium_history.append((now, current_premium))
+        self._last_30s_premium = self._premium_price_at_least_seconds_ago(now, 30.0)
         self._premium_energy_history.append((now, current_premium))
 
         # Write position state to trades table every tick (~10s)
@@ -2858,21 +2872,38 @@ class OptionsScalpStrategy(BaseStrategy):
             return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_DEAD")
 
         # ── 2b. Dynamic momentum-based ratchet floor ──
-        if peak_pnl_pct < 5.0:
-            pass  # skip ratchet — use SL only for tiny peaks
-        elif premium_change_pct <= dynamic_floor and not self._should_ride_momentum(premium_change_pct):
-            self.logger.info(
-                "[%s] OPT_RATCHET_DYNAMIC — pnl=%+.1f%% <= floor=%+.1f%% "
-                "(peak=%+.1f%% energy=%.3f%%)",
-                self.option_symbol,
-                premium_change_pct,
-                dynamic_floor,
-                peak_pnl_pct,
-                energy_score,
+        if peak_pnl_pct < 10.0:
+            pass  # skip ratchet — let small peaks breathe, use SL only
+        elif premium_change_pct <= dynamic_floor and not self._should_ride_momentum(
+            premium_change_pct
+        ):
+            drop_30s = self._premium_pct_change_vs_seconds_ago(
+                current_premium, now, 30.0
             )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_RATCHET_DYNAMIC"
-            )
+            # Only ratchet on a fast premium reversal (≥3% drop in 30s), not slow drift
+            if drop_30s is None or drop_30s > -3.0:
+                self.logger.debug(
+                    "[%s] OPT_RATCHET_SKIP slow drift — pnl=%+.1f%% floor=%+.1f%% "
+                    "drop_30s=%s (need <=-3.0%%)",
+                    self.option_symbol,
+                    premium_change_pct,
+                    dynamic_floor,
+                    f"{drop_30s:+.2f}%" if drop_30s is not None else "n/a",
+                )
+            else:
+                self.logger.info(
+                    "[%s] OPT_RATCHET_DYNAMIC — pnl=%+.1f%% <= floor=%+.1f%% "
+                    "(peak=%+.1f%% energy=%.3f%% drop_30s=%+.2f%%)",
+                    self.option_symbol,
+                    premium_change_pct,
+                    dynamic_floor,
+                    peak_pnl_pct,
+                    energy_score,
+                    drop_30s,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "OPT_RATCHET_DYNAMIC"
+                )
 
         # ── 3. Energy-based dead loser exit (disabled in expiry mode) ──
         if not in_expiry_mode:
@@ -3744,6 +3775,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] NO FILL PRICE from exchange — skipping on_fill", signal.pair
                 )
                 return
+            self._position_premium_history.clear()
+            self._last_30s_premium = None
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True
             OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -3866,6 +3899,8 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
             self._is_squeeze_entry = False
             self._squeeze_breakout_time = None
+            self._position_premium_history.clear()
+            self._last_30s_premium = None
 
     def on_rejected(self, signal: Signal) -> None:
         """Handle rejected option orders."""
