@@ -317,7 +317,6 @@ class AlphaBot:
         self._scheduler.add_job(self._run_reconciliation, "interval", minutes=60)
         self._scheduler.add_job(self._watchdog_ping, "interval", seconds=60)
         self._scheduler.start()
-        asyncio.create_task(self._options_position_loop())
 
         # Signal systemd that we are ready and alive
         self._sd_notifier.notify("READY=1")
@@ -441,6 +440,7 @@ class AlphaBot:
 
         # Run initial analysis immediately
         await self._analysis_cycle()
+        asyncio.ensure_future(self._options_position_loop())
 
         # Keep running
         logger.info(
@@ -499,16 +499,11 @@ class AlphaBot:
     # -- Core cycle ------------------------------------------------------------
 
     async def _options_position_loop(self) -> None:
-        """Fast path for option exit checks — runs every 10s, independent of analysis interval."""
-        while not self._running:
-            await asyncio.sleep(0.25)
+        """Option exit checks every 10s, independent of analysis interval."""
         while self._running:
-            try:
-                for opts in self._options_strategies.values():
-                    if opts.in_position:
-                        await opts._check_option_exit()
-            except Exception:
-                logger.exception("Options position loop iteration failed")
+            for strategy in self._options_strategies.values():
+                if strategy.in_position:
+                    await strategy._check_option_exit()
             await asyncio.sleep(10)
 
     async def _analysis_cycle(self) -> None:
@@ -1127,23 +1122,36 @@ class AlphaBot:
         regime_priority = {"CHOPPY": 4, "TRENDING_DOWN": 3, "TRENDING_UP": 2, "SIDEWAYS": 1}
         worst_regime = "SIDEWAYS"
         worst_score = 0
-        best_chop = 0.0
-        best_atr_ratio = 1.0
-        best_net_change = 0.0
-        regime_since_ts = None
         for s in self._scalp_strategies.values():
             r = getattr(s, "_market_regime", "SIDEWAYS")
             p = regime_priority.get(r, 1)
             if p > worst_score:
                 worst_score = p
                 worst_regime = r
-                best_chop = getattr(s, "_chop_score", 0.0)
-                best_atr_ratio = getattr(s, "_atr_ratio", 1.0)
-                best_net_change = getattr(s, "_net_change_30m", 0.0)
-                since_mono = getattr(s, "_regime_since", 0.0)
-                if since_mono > 0 and self._start_time:
-                    elapsed = time.monotonic() - since_mono
-                    regime_since_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=elapsed)).isoformat()
+
+        # Metrics: merge across pairs sharing the winning regime (max chop/ATR stress; strongest |net|)
+        best_chop = 0.0
+        best_atr_ratio = 1.0
+        best_net_change = 0.0
+        regime_since_ts = None
+        oldest_since_mono: float | None = None
+        for s in self._scalp_strategies.values():
+            r = getattr(s, "_market_regime", "SIDEWAYS")
+            if r != worst_regime:
+                continue
+            best_chop = max(best_chop, float(getattr(s, "_chop_score", 0.0)))
+            best_atr_ratio = max(best_atr_ratio, float(getattr(s, "_atr_ratio", 1.0)))
+            nc = float(getattr(s, "_net_change_30m", 0.0))
+            if abs(nc) > abs(best_net_change):
+                best_net_change = nc
+            since_mono = float(getattr(s, "_regime_since", 0.0))
+            if since_mono > 0:
+                if oldest_since_mono is None or since_mono < oldest_since_mono:
+                    oldest_since_mono = since_mono
+
+        if oldest_since_mono is not None and self._start_time:
+            elapsed = time.monotonic() - oldest_since_mono
+            regime_since_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=elapsed)).isoformat()
 
         status["market_regime"] = worst_regime
         status["chop_score"] = round(best_chop, 3)

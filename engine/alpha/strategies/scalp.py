@@ -185,6 +185,8 @@ class ScalpStrategy(BaseStrategy):
 
     name = StrategyName.SCALP
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
+    # Delta perp entries disabled (options-only): still refresh regime/ATR for dashboard + gates
+    DELTA_OPTIONS_REGIME_REFRESH_TICKS = 12  # 12 × 5s ≈ 60s between OHLCV fetches
 
     # ── Per-pair SL distances — FIXED on entry, locked for 3 min ─────
     STOP_LOSS_PCT = 0.30              # default fallback (was 0.25 — noise sweeps)
@@ -953,6 +955,25 @@ class ScalpStrategy(BaseStrategy):
             self.logger.debug("[%s] Regime detection error, keeping %s", self.pair, self._market_regime)
             return self._market_regime
 
+    async def _refresh_regime_delta_options_only(self, exchange: Any) -> None:
+        """When Delta futures entries are skipped, still update ATR + regime from 1m OHLCV.
+
+        Feeds `_chop_score`, `_atr_ratio`, `_net_change_30m`, `_market_regime` for dashboard
+        and downstream options logic without running full entry detection.
+        """
+        try:
+            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=30)
+            if len(ohlcv) < 15:
+                return
+            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            current_price = float(df["close"].iloc[-1])
+            if current_price <= 0:
+                return
+            self._update_dynamic_sl_tp(df, current_price)
+            self._detect_market_regime(df)
+        except Exception:
+            self.logger.debug("[%s] Delta options-only regime refresh failed", self.pair, exc_info=True)
+
     async def check(self) -> list[Signal]:
         """One scalping tick — fetch candles, detect QUALITY momentum, manage exits."""
         signals: list[Signal] = []
@@ -965,6 +986,12 @@ class ScalpStrategy(BaseStrategy):
             if not self.in_position:
                 if self._tick_count % 120 == 0:
                     self.logger.info("[%s] DELTA FUTURES DISABLED — options only", self.pair)
+                # Refresh regime/ATR/chop on a light cadence so dashboard + options see live structure
+                if (
+                    self._tick_count == 1
+                    or self._tick_count % self.DELTA_OPTIONS_REGIME_REFRESH_TICKS == 0
+                ):
+                    await self._refresh_regime_delta_options_only(exchange)
                 return signals
             # If in position, still allow exit checks
 

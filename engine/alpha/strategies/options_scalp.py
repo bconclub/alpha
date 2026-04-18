@@ -2856,9 +2856,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # ── 2b. Dynamic momentum-based ratchet floor ──
         if peak_pnl_pct < 5.0:
             pass  # skip ratchet — use SL only for tiny peaks
-        elif premium_change_pct <= dynamic_floor and not self._should_ride_momentum(
-            premium_change_pct
-        ):
+        elif premium_change_pct <= dynamic_floor and not self._should_ride_momentum(premium_change_pct):
             self.logger.info(
                 "[%s] OPT_RATCHET_DYNAMIC — pnl=%+.1f%% <= floor=%+.1f%% "
                 "(peak=%+.1f%% energy=%.3f%%)",
