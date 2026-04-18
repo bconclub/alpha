@@ -141,3 +141,34 @@ a,
 .animate-pulse-subtle {
   animation: pulse-subtle 2s ease-in-out infinite;
 }
+
+/* Market regime card — ATR-scaled pulse ring */
+@keyframes regime-ring-pulse {
+  0% {
+    transform: scale(0.88);
+    opacity: 0.65;
+  }
+  100% {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+}
+
+/* Net % cell flash on value change */
+@keyframes regime-net-flash-pos {
+  0% {
+    box-shadow: inset 0 0 0 999px rgba(34, 197, 94, 0.22);
+  }
+  100% {
+    box-shadow: inset 0 0 0 999px transparent;
+  }
+}
+
+@keyframes regime-net-flash-neg {
+  0% {
+    box-shadow: inset 0 0 0 999px rgba(239, 68, 68, 0.22);
+  }
+  100% {
+    box-shadow: inset 0 0 0 999px transparent;
+  }
+}
