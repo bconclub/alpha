@@ -2349,6 +2349,7 @@ class OptionsScalpStrategy(BaseStrategy):
             },
         )
 
+        breakout_dir = self._breakout_direction
         self._reset_breakout_state()
 
         return self._build_entry_signal(
@@ -2357,13 +2358,14 @@ class OptionsScalpStrategy(BaseStrategy):
             selected_strike=selected_strike,
             premium=premium,
             strength=0,
-            signals_str=f"{setup_type} dir={self._breakout_direction} width={bb_width_pct:.3f}%",
+            signals_str=f"{setup_type} dir={breakout_dir} width={bb_width_pct:.3f}%",
             current_price=current_price,
             setup_type=setup_type,
             expiry_str=expiry_str,
             strike_label=strike_label,
             contracts=opt_contracts,
             confidence=entry_confidence,
+            direction=breakout_dir,
         )
 
     def _build_entry_signal(
@@ -2380,6 +2382,7 @@ class OptionsScalpStrategy(BaseStrategy):
         strike_label: str,
         contracts: int = 1,
         confidence: float = 0.7,
+        direction: str | None = None,
     ) -> list[Signal]:
         """Build the entry Signal for an option trade."""
         self._contracts = contracts
@@ -2422,6 +2425,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     "pending_side": option_type,
                     "pending_amount": float(contracts),
                     "option_type": option_type,
+                    "direction": direction,
+                    "breakout_direction": direction,
                     "strike": selected_strike,
                     "strike_label": strike_label,
                     "expiry": self._selected_expiry.isoformat()
