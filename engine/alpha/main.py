@@ -499,12 +499,15 @@ class AlphaBot:
     # -- Core cycle ------------------------------------------------------------
 
     async def _options_position_loop(self) -> None:
-        """Option exit checks every 10s, independent of analysis interval."""
+        """Fast 10s exit check loop for open options positions — independent of 5min analysis cycle."""
         while self._running:
-            for strategy in self._options_strategies.values():
-                if strategy.in_position:
-                    await strategy._check_option_exit()
             await asyncio.sleep(10)
+            for opts in self._options_strategies.values():
+                if opts.in_position:
+                    try:
+                        await opts._check_option_exit()
+                    except Exception:
+                        pass
 
     async def _analysis_cycle(self) -> None:
         """Analyze all pairs (both exchanges) concurrently, switch strategies by signal strength."""

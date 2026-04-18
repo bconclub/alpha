@@ -1603,6 +1603,10 @@ class OptionsScalpStrategy(BaseStrategy):
         if abs(momentum_60s) < self.MOMENTUM_BURST_THRESHOLD_PCT:
             return []
 
+        # Don't fire momentum burst during active squeeze — let squeeze handle breakout
+        if self._squeeze_status == "ACTIVE":
+            return []
+
         if not self._selected_expiry or not self.options_exchange:
             return []
 
