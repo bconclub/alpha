@@ -2727,6 +2727,14 @@ class OptionsScalpStrategy(BaseStrategy):
         recoverable_drawdown = current_pnl_pct > -15.0
         return recoverable_drawdown and (underlying_favorable or premium_expanding)
 
+    def _opt_trail_distance_pct(self, peak_pnl_pct: float) -> float:
+        """Trail width %% below peak premium; tightens with the highest qualifying tier."""
+        dist = self.OPT_TRAIL_TIERS[0][1]
+        for activation, trail_pct in self.OPT_TRAIL_TIERS:
+            if peak_pnl_pct >= activation:
+                dist = trail_pct
+        return dist
+
     # ==================================================================
     # EXIT LOGIC
     # ==================================================================
@@ -2911,6 +2919,56 @@ class OptionsScalpStrategy(BaseStrategy):
                 return await self._do_option_exit(
                     current_premium, premium_change_pct, "OPT_RATCHET_DYNAMIC"
                 )
+
+        # ── 2c. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail — ratchet is floor) ──
+        first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
+        if premium_change_pct >= first_trail_activation:
+            self._trailing_active = True
+
+        if (
+            self._trailing_active
+            and premium_change_pct > 0
+            and self.entry_premium > 0
+            and self.highest_premium > 0
+        ):
+            trail_dist_pct = self._opt_trail_distance_pct(peak_pnl_pct)
+            trail_floor = self.highest_premium * (1.0 - trail_dist_pct / 100.0)
+            if current_premium < trail_floor:
+                self.logger.info(
+                    "[%s] OPT_TRAIL — premium $%.4f < trail_floor $%.4f "
+                    "(peak=$%.4f dist=%.1f%% pnl=%+.1f%% peak_pnl=%+.1f%%)",
+                    self.option_symbol,
+                    current_premium,
+                    trail_floor,
+                    self.highest_premium,
+                    trail_dist_pct,
+                    premium_change_pct,
+                    peak_pnl_pct,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "OPT_TRAIL"
+                )
+
+            peak_gain = self.highest_premium - self.entry_premium
+            if (
+                peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT
+                and peak_gain > 0
+                and self.highest_premium > current_premium
+            ):
+                gave_back = self.highest_premium - current_premium
+                if gave_back / peak_gain >= (self.PULLBACK_EXIT_PCT / 100.0):
+                    self.logger.info(
+                        "[%s] OPT_PEAK_TRAIL — gave back %.1f%% of peak gain "
+                        "(peak=$%.4f now=$%.4f pnl=%+.1f%%)",
+                        self.option_symbol,
+                        100.0 * gave_back / peak_gain,
+                        self.highest_premium,
+                        current_premium,
+                        premium_change_pct,
+                    )
+                    return await self._do_option_exit(
+                        current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
+                    )
 
         # ── 3. Energy-based dead loser exit (disabled in expiry mode) ──
         if not in_expiry_mode:
