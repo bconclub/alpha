@@ -2072,7 +2072,9 @@ class OptionsScalpStrategy(BaseStrategy):
         opt_contracts = self._breakout_contracts
         entry_confidence = self._breakout_confidence
         bb_width_pct = self._breakout_bb_width
-        setup_type = "BB_SQUEEZE_BREAKOUT" if self._is_squeeze_entry else (self._pending_entry_setup or "BB_SQUEEZE_BREAKOUT")
+        setup_type = "BB_SQUEEZE" if (
+            self._is_squeeze_entry or self._pending_entry_setup == "BB_SQUEEZE_BREAKOUT"
+        ) else (self._pending_entry_setup or "BB_SQUEEZE")
 
         # Recalculate contracts at confirmed ask price
         opt_contracts = self._calculate_option_contracts(
@@ -2262,7 +2264,7 @@ class OptionsScalpStrategy(BaseStrategy):
         premium = fill_price
         self._limit_entry_filled = True
         self._last_action = (
-            "SQUEEZE_FILL" if setup_type == "BB_SQUEEZE_BREAKOUT" else "MOMENTUM_BURST_FILL"
+            "SQUEEZE_FILL" if setup_type == "BB_SQUEEZE" else "MOMENTUM_BURST_FILL"
         )
         self._last_action_at = time.time()
 
@@ -2289,14 +2291,14 @@ class OptionsScalpStrategy(BaseStrategy):
         self.highest_premium = fill_price
         self._last_known_premium = fill_price
         self.strike_price = selected_strike
-        self._is_squeeze_entry = setup_type == "BB_SQUEEZE_BREAKOUT"
+        self._is_squeeze_entry = setup_type == "BB_SQUEEZE"
         self._squeeze_breakout_time = (
             time.monotonic() if self._is_squeeze_entry else None
         )
         if self._selected_expiry:
             self.expiry_dt = self._selected_expiry
 
-        if setup_type == "BB_SQUEEZE_BREAKOUT":
+        if setup_type == "BB_SQUEEZE":
             self.logger.info(
                 "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed, no stale for %dm)",
                 self.pair,
@@ -2308,7 +2310,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 else self.SQUEEZE_NO_STALE_MIN_ETH,
             )
             self._entry_context = (
-                f"BB_SQUEEZE_BREAKOUT dir={self._breakout_direction} BB_width={bb_width_pct:.3f}% "
+                f"BB_SQUEEZE dir={self._breakout_direction} BB_width={bb_width_pct:.3f}% "
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
             )
         else:
