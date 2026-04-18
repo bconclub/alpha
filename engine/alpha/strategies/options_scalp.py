@@ -2912,21 +2912,24 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── 3. Energy-based dead loser exit (disabled in expiry mode) ──
         if not in_expiry_mode:
+            _spot_mom_pct = self._underlying_momentum_pct()
             if (
                 hold_seconds >= 180.0
                 and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
                 and self._low_energy_ticks >= 3
                 and premium_change_pct < 0
+                and abs(_spot_mom_pct) < 0.05
             ):
                 self.logger.info(
                     "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% "
-                    "(low_energy_ticks=%d) and pnl=%+.1f%%",
+                    "(low_energy_ticks=%d) pnl=%+.1f%% spot_mom=%+.3f%%",
                     self.option_symbol,
                     int(hold_seconds),
                     energy_score,
                     self._ENERGY_DEAD_THRESHOLD_PCT,
                     self._low_energy_ticks,
                     premium_change_pct,
+                    _spot_mom_pct,
                 )
                 return await self._do_option_exit(
                     current_premium, premium_change_pct, "OPT_ENERGY_DEAD_LOSER"
