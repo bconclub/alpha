@@ -2886,41 +2886,7 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_DEAD")
 
-        # ── 2b. Dynamic momentum-based ratchet floor ──
-        if peak_pnl_pct < 10.0:
-            pass  # skip ratchet — let small peaks breathe, use SL only
-        elif premium_change_pct <= dynamic_floor and not self._should_ride_momentum(
-            premium_change_pct
-        ):
-            drop_30s = self._premium_pct_change_vs_seconds_ago(
-                current_premium, now, 30.0
-            )
-            # Only ratchet on a fast premium reversal (≥3% drop in 30s), not slow drift
-            if drop_30s is None or drop_30s > -3.0:
-                self.logger.debug(
-                    "[%s] OPT_RATCHET_SKIP slow drift — pnl=%+.1f%% floor=%+.1f%% "
-                    "drop_30s=%s (need <=-3.0%%)",
-                    self.option_symbol,
-                    premium_change_pct,
-                    dynamic_floor,
-                    f"{drop_30s:+.2f}%" if drop_30s is not None else "n/a",
-                )
-            else:
-                self.logger.info(
-                    "[%s] OPT_RATCHET_DYNAMIC — pnl=%+.1f%% <= floor=%+.1f%% "
-                    "(peak=%+.1f%% energy=%.3f%% drop_30s=%+.2f%%)",
-                    self.option_symbol,
-                    premium_change_pct,
-                    dynamic_floor,
-                    peak_pnl_pct,
-                    energy_score,
-                    drop_30s,
-                )
-                return await self._do_option_exit(
-                    current_premium, premium_change_pct, "OPT_RATCHET_DYNAMIC"
-                )
-
-        # ── 2c. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail — ratchet is floor) ──
+        # ── 2b. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
         first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
         if premium_change_pct >= first_trail_activation:
             self._trailing_active = True
@@ -2970,32 +2936,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
                     )
 
-        # ── 3. Energy-based dead loser exit (disabled in expiry mode) ──
-        if not in_expiry_mode:
-            _spot_mom_pct = self._underlying_momentum_pct()
-            if (
-                hold_seconds >= 180.0
-                and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
-                and self._low_energy_ticks >= 3
-                and premium_change_pct < 0
-                and abs(_spot_mom_pct) < 0.05
-            ):
-                self.logger.info(
-                    "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% "
-                    "(low_energy_ticks=%d) pnl=%+.1f%% spot_mom=%+.3f%%",
-                    self.option_symbol,
-                    int(hold_seconds),
-                    energy_score,
-                    self._ENERGY_DEAD_THRESHOLD_PCT,
-                    self._low_energy_ticks,
-                    premium_change_pct,
-                    _spot_mom_pct,
-                )
-                return await self._do_option_exit(
-                    current_premium, premium_change_pct, "OPT_ENERGY_DEAD_LOSER"
-                )
-
-        # ── 4. Energy-based winner fading exit ──
+        # ── 3. Energy-based winner fading exit ──
         if (
             energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
             and self._low_energy_ticks >= 3
