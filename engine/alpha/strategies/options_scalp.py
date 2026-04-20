@@ -2875,18 +2875,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 current_premium, premium_change_pct, "OPT_HARD_SL"
             )
 
-        # ── 2. Expiry-mode dead loser exit (price-based) ──
-        if in_expiry_mode and premium_change_pct < -20.0 and hold_seconds > 120:
-            self.logger.info(
-                "[%s] EXPIRY_DEAD — hold=%ds pnl=%+.1f%% with %.1fh to expiry",
-                self.option_symbol,
-                int(hold_seconds),
-                premium_change_pct,
-                hours_to_expiry,
-            )
-            return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_DEAD")
-
-        # ── 2b. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
+        # ── 2. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
         first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
         if premium_change_pct >= first_trail_activation:
             self._trailing_active = True
