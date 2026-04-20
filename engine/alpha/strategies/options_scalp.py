@@ -105,7 +105,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Option chain refresh ──────────────────────────────────────
     CHAIN_REFRESH_INTERVAL = 30 * 60  # Refresh every 30 min
-    MIN_EXPIRY_HOURS = 1  # Must be 1+ hour to expiry
+    MIN_EXPIRY_HOURS = 5.0  # Must be 5+ hours to expiry
     EXPIRY_SWITCH_HOURS = (
         3.0  # Switch to next-day expiry when < 3h remain on current day
     )
