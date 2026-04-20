@@ -168,8 +168,9 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
         (10.0, 8.0),  # +10% peak → 8% trail distance
         (20.0, 6.0),  # +20% peak → 6% trail
-        (30.0, 5.0),  # +30% peak → 5% trail
-        (50.0, 4.0),  # +50% peak → 4% trail
+        (30.0, 4.0),  # +30% peak → 4% trail
+        (40.0, 3.0),  # +40% peak → 3% trail
+        (50.0, 2.0),  # +50% peak → 2% trail
     ]
     PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
     PULLBACK_ACTIVATE_PCT = 8.0  # Pullback only fires after +8% peak
@@ -3387,6 +3388,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     "peak_pnl": round(peak_pnl_pct, 4),
                     "exit_type": exit_type,
                     "db_already_closed": False,
+                    "exit_retry_attempts": 5,
+                    "exit_retry_delay_sec": 1.0,
                 },
             )
         ]

@@ -837,6 +837,12 @@ class TradeExecutor:
         # Skip for options_scalp — options positions are on a separate exchange,
         # fetch_positions (futures) won't find them.
         is_options = signal.strategy == StrategyName.OPTIONS_SCALP
+        retry_limit = MAX_RETRIES
+        retry_delay_sec = 2.0 if is_exit else BASE_DELAY
+        if is_exit:
+            md = signal.metadata or {}
+            retry_limit = int(md.get("exit_retry_attempts", retry_limit))
+            retry_delay_sec = float(md.get("exit_retry_delay_sec", retry_delay_sec))
 
         # Bybit exit verification (coin amounts, no contract conversion)
         if is_exit and signal.exchange_id == "bybit" and signal.reduce_only:
@@ -1111,7 +1117,7 @@ class TradeExecutor:
 
         # If limit exit already succeeded, skip the market retry loop
         if order is None:
-            for attempt in range(1, MAX_RETRIES + 1):
+            for attempt in range(1, retry_limit + 1):
                 try:
                     if use_quote_fallback and is_exit:
                         # Sell by USDT value — for small balances below MIN_NOTIONAL
@@ -1267,10 +1273,10 @@ class TradeExecutor:
                     break
                 except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
                     last_error = e
-                    delay = BASE_DELAY * (2 ** (attempt - 1))
+                    delay = retry_delay_sec if is_exit else BASE_DELAY * (2 ** (attempt - 1))
                     logger.warning(
                         "Order attempt %d/%d failed (retryable): %s -- retrying in %.1fs",
-                        attempt, MAX_RETRIES, e, delay,
+                        attempt, retry_limit, e, delay,
                     )
                     await asyncio.sleep(delay)
                 except ccxt.InsufficientFunds as e:
@@ -1278,10 +1284,10 @@ class TradeExecutor:
                     if is_exit:
                         # Exit: retry — balance may have updated
                         logger.warning(
-                            "Exit attempt %d/%d insufficient funds: %s -- retrying in 2s",
-                            attempt, MAX_RETRIES, e,
+                            "Exit attempt %d/%d insufficient funds: %s -- retrying in %.1fs",
+                            attempt, retry_limit, e, retry_delay_sec,
                         )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(retry_delay_sec)
                     else:
                         logger.error("Insufficient funds for order: %s", e)
                         await self._notify_error(signal, str(e))
@@ -1328,10 +1334,10 @@ class TradeExecutor:
                     elif is_exit:
                         # Exit: retry all errors
                         logger.warning(
-                            "Exit attempt %d/%d invalid order: %s -- retrying in 2s",
-                            attempt, MAX_RETRIES, e,
+                            "Exit attempt %d/%d invalid order: %s -- retrying in %.1fs",
+                            attempt, retry_limit, e, retry_delay_sec,
                         )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(retry_delay_sec)
                     else:
                         logger.error("Invalid order: %s", e)
                         await self._notify_error(signal, str(e))
@@ -1341,10 +1347,10 @@ class TradeExecutor:
                     if is_exit:
                         # Exit: retry ALL errors — never give up silently
                         logger.warning(
-                            "Exit attempt %d/%d error: %s -- retrying in 2s",
-                            attempt, MAX_RETRIES, e,
+                            "Exit attempt %d/%d error: %s -- retrying in %.1fs",
+                            attempt, retry_limit, e, retry_delay_sec,
                         )
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(retry_delay_sec)
                     else:
                         logger.exception("Unexpected error placing order")
                         await self._notify_error(signal, str(e))
@@ -1355,11 +1361,11 @@ class TradeExecutor:
                 # CRITICAL: exit failed — alert for manual intervention
                 logger.error(
                     "EXIT FAILED: All %d retries exhausted for %s %s. STUCK IN POSITION! Last error: %s",
-                    MAX_RETRIES, signal.pair, signal.side, last_error,
+                    retry_limit, signal.pair, signal.side, last_error,
                 )
                 await self._notify_exit_failure(signal, last_error)
             else:
-                logger.error("All %d retries exhausted for order. Last error: %s", MAX_RETRIES, last_error)
+                logger.error("All %d retries exhausted for order. Last error: %s", retry_limit, last_error)
                 await self._notify_error(signal, f"Retries exhausted: {last_error}")
             return None
 
