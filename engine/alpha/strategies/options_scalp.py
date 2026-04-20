@@ -163,7 +163,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds ────────────────
     TP_PREMIUM_GAIN_PCT = 30.0  # Take profit at +30% premium gain
-    SL_PREMIUM_LOSS_PCT = 30.0  # Stop loss at -30% premium drop
+    SL_PREMIUM_LOSS_PCT = 20.0  # Stop loss at -30% premium drop
     # Tiered trailing: start wide, tighten as profit grows
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
         (10.0, 8.0),  # +10% peak → 8% trail distance
@@ -1632,7 +1632,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_target_strike = atm_strike
 
         if (
-            momentum_60s > 0
+            momentum_60s >= 0.001
             and self._prev2_call_ask > 0
             and self._prev_call_ask > 0
             and self._atm_call_ask > self._prev_call_ask > self._prev2_call_ask
@@ -1642,7 +1642,7 @@ class OptionsScalpStrategy(BaseStrategy):
             entry_ask = self._atm_call_ask
             prev_ask = self._prev_call_ask
         elif (
-            momentum_60s < 0
+            momentum_60s <= -0.001
             and self._prev2_put_ask > 0
             and self._prev_put_ask > 0
             and self._atm_put_ask > self._prev_put_ask > self._prev2_put_ask
@@ -2925,7 +2925,31 @@ class OptionsScalpStrategy(BaseStrategy):
                         current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
                     )
 
-        # ── 3. Energy-based winner fading exit ──
+        # ── 3. Energy-based dead loser exit (losers only) ──
+        _spot_mom_pct = self._underlying_momentum_pct()
+        if (
+            premium_change_pct < -10.0
+            and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
+            and self._low_energy_ticks >= 3
+            and hold_seconds >= 120.0
+            and abs(_spot_mom_pct) < 0.05
+        ):
+            self.logger.info(
+                "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% "
+                "(low_energy_ticks=%d) pnl=%+.1f%% spot_mom=%+.3f%%",
+                self.option_symbol,
+                int(hold_seconds),
+                energy_score,
+                self._ENERGY_DEAD_THRESHOLD_PCT,
+                self._low_energy_ticks,
+                premium_change_pct,
+                _spot_mom_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_ENERGY_DEAD_LOSER"
+            )
+
+        # ── 4. Energy-based winner fading exit ──
         if (
             energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
             and self._low_energy_ticks >= 3
