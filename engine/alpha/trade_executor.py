@@ -1344,6 +1344,35 @@ class TradeExecutor:
                         return None
                 except Exception as e:
                     last_error = e
+                    err_str = str(e).lower()
+                    # Delta sometimes raises "no_position_for_reduce_only" as a generic
+                    # ExchangeError / BadRequest rather than ccxt.InvalidOrder. Treat it
+                    # the same way: position is already closed, mark it gone instead of
+                    # spamming exit-failure alerts and retrying forever.
+                    if is_exit and signal.exchange_id == "delta" and (
+                        "no_position" in err_str or "reduce_only" in err_str
+                    ):
+                        logger.warning(
+                            "[%s] Position already closed on exchange (generic err): %s",
+                            signal.pair, e,
+                        )
+                        if _use_limit_exit and limit_order_id:
+                            try:
+                                final_order = await exchange.fetch_order(limit_order_id, signal.pair)
+                                final_fill = float(final_order.get("filled", 0) or 0)
+                                final_price = final_order.get("average") or final_order.get("price")
+                                if final_fill > 0 and final_price:
+                                    logger.info(
+                                        "[%s] Limit order %s actually filled: %.0f @ $%.2f — using as exit",
+                                        signal.pair, limit_order_id, final_fill, float(final_price),
+                                    )
+                                    order = final_order
+                                    break
+                            except Exception:
+                                pass
+                        if order is None:
+                            await self._mark_position_gone(signal)
+                            return None
                     if is_exit:
                         # Exit: retry ALL errors — never give up silently
                         logger.warning(

@@ -131,7 +131,7 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_BB_WIDTH_ETH = 1.0  # ETH: BB width must be < 1.0% for valid squeeze
     SQUEEZE_BB_WIDTH_BTC = 0.7  # BTC: BB width must be < 0.7% (tighter price action)
     SQUEEZE_FILL_WAIT_SEC = 300  # Wait up to 5 min for fill
-    SQUEEZE_FILL_POLL_SEC = 30  # Poll every 30s during fill wait
+    SQUEEZE_FILL_POLL_SEC = 3  # Poll every 3s so highest_premium tracking starts fast after fill
     SQUEEZE_CHEAP_PERCENTILE = 0.25  # Buy bottom 25% of 30-min premium range
     SQUEEZE_HISTORY_MIN = 30  # Track premium history for 30 min
     # GPFC #23: Extended stale windows for squeeze entries (squeezes need time to resolve)
@@ -2448,6 +2448,32 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
             )
 
+        # Write DB row NOW — synchronously — so the 60s reconciler sweep
+        # can't see an exchange position without a matching DB row and
+        # register it as an "ORPHAN POSITION / discovered_by_reconcile".
+        # This is the fix for BB_SQUEEZE "zero peak" entries: without it,
+        # the reconciler was inserting the trade with a stale mark-price
+        # snapshot and the strategy's fire-and-forget insert (in on_fill)
+        # was silently lost to the race.
+        self._db_trade_id = None
+        self._pending_entry_setup = setup_type
+        try:
+            await self._write_entry_to_db(
+                fill_price,
+                opt_contracts,
+                {"id": limit_order_id} if limit_order_id else {},
+                None,
+                option_symbol=selected_symbol,
+                option_side=option_type,
+                strike_price=selected_strike,
+                base_asset=self._base_asset,
+            )
+        except Exception:
+            self.logger.exception(
+                "[%s] BREAKOUT: signal-path DB write failed — reconciler may backfill",
+                self.pair,
+            )
+
         expiry_str = self._selected_expiry.strftime("%b %d %H:%M")
         strike_label = "ATM" if selected_strike == atm_strike else "OTM"
 
@@ -4067,7 +4093,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 fill_price,
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
-            self._db_trade_id = None
 
             try:
                 alerts = getattr(self.executor, "alerts", None)
@@ -4094,20 +4119,34 @@ class OptionsScalpStrategy(BaseStrategy):
             except Exception:
                 pass
 
-            import asyncio as _aio_entry
-
-            _aio_entry.get_event_loop().create_task(
-                self._write_entry_to_db(
-                    fill_price,
-                    self._contracts,
-                    order,
-                    signal,
-                    option_symbol=self.option_symbol,
-                    option_side=self.option_side,
-                    strike_price=self.strike_price,
-                    base_asset=self._base_asset,
+            # If _execute_breakout_entry already wrote the DB row on the
+            # signal path (the normal BB_SQUEEZE / MOMENTUM_BURST flow), skip
+            # the insert here. This both prevents duplicate rows and protects
+            # peak_pnl tracking (_db_trade_id is already set, so
+            # _update_position_state_in_db starts updating the real row
+            # immediately on the next tick).
+            if self._db_trade_id:
+                self.logger.info(
+                    "[%s] on_fill: DB row already written by signal path "
+                    "(id=%s) — skipping duplicate insert",
+                    self.option_symbol,
+                    self._db_trade_id,
                 )
-            )
+            else:
+                import asyncio as _aio_entry
+
+                _aio_entry.get_event_loop().create_task(
+                    self._write_entry_to_db(
+                        fill_price,
+                        self._contracts,
+                        order,
+                        signal,
+                        option_symbol=self.option_symbol,
+                        option_side=self.option_side,
+                        strike_price=self.strike_price,
+                        base_asset=self._base_asset,
+                    )
+                )
         else:
             exit_fill = float(order.get("average") or order.get("price") or 0)
             if not exit_fill:

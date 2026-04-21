@@ -1690,7 +1690,7 @@ class AlphaBot:
                 "GHOST TRADE CLOSED: %s (trade_id=%s) exit=$%.4f pnl=$%.4f (%.2f%%)",
                 pair_str, trade_id, exit_price, result.net_pnl, result.pnl_pct,
             )
-            return f"Ghost trade closed: {pair_str} exit=${exit_price:.4f} P&L={pnl_pct:+.2f}%"
+            return f"Ghost trade closed: {pair_str} exit=${exit_price:.4f} P&L={result.pnl_pct:+.2f}%"
 
         except Exception as e:
             logger.exception("Failed to close ghost trade %s", pair_str)
