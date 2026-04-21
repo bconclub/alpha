@@ -166,11 +166,11 @@ class OptionsScalpStrategy(BaseStrategy):
     SL_PREMIUM_LOSS_PCT = 20.0  # Stop loss at -30% premium drop
     # Tiered trailing: start wide, tighten as profit grows
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
-        (10.0, 8.0),  # +10% peak → 8% trail distance
-        (20.0, 6.0),  # +20% peak → 6% trail
-        (30.0, 4.0),  # +30% peak → 4% trail
-        (40.0, 3.0),  # +40% peak → 3% trail
-        (50.0, 2.0),  # +50% peak → 2% trail
+        (5.0, 8.0),   # +5% peak → 8% trail distance
+        (10.0, 5.0),  # +10% peak → 5% trail
+        (15.0, 3.0),  # +15% peak → 3% trail
+        (30.0, 2.0),  # +30% peak → 2% trail
+        (50.0, 1.5),  # +50% peak → 1.5% trail
     ]
     PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
     PULLBACK_ACTIVATE_PCT = 8.0  # Pullback only fires after +8% peak
@@ -2879,7 +2879,15 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── 2. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
         first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
-        if premium_change_pct >= first_trail_activation:
+        if peak_pnl_pct >= first_trail_activation:
+            if not self._trailing_active:
+                self.logger.info(
+                    "[%s] TRAIL ARMED — peak +%.1f%% ≥ activation %.1f%% | floor will be %.1f%% below peak",
+                    self.option_symbol,
+                    peak_pnl_pct,
+                    first_trail_activation,
+                    self._opt_trail_distance_pct(peak_pnl_pct),
+                )
             self._trailing_active = True
 
         if (
@@ -2930,9 +2938,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # ── 3. Energy-based dead loser exit (losers only) ──
         _spot_mom_pct = self._underlying_momentum_pct()
         if (
-            premium_change_pct < -10.0
+            premium_change_pct < -15.0
             and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
-            and self._low_energy_ticks >= 3
+            and self._low_energy_ticks >= 5
             and hold_seconds >= 120.0
             and abs(_spot_mom_pct) < 0.05
         ):
@@ -2994,7 +3002,23 @@ class OptionsScalpStrategy(BaseStrategy):
             mult = self.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
             spot = self._last_spot_price or 0
             entry_fee = round(contracts * mult * spot * 0.000118, 8) if spot else 0
-            setup_type = getattr(signal, "metadata", {}).get("setup_type") or "BB_SQUEEZE"
+            setup_type = "BB_SQUEEZE"
+            if signal and hasattr(signal, "metadata") and signal.metadata:
+                setup_type = signal.metadata.get("setup_type") or setup_type
+            elif self._pending_entry_setup:
+                setup_type = self._pending_entry_setup
+            elif self._is_squeeze_entry:
+                setup_type = "BB_SQUEEZE"
+            else:
+                setup_type = "MOMENTUM_BURST_ENTRY"
+
+            # FORCE write to DB — ensure it's never None
+            if not setup_type:
+                setup_type = "MOMENTUM_BURST_ENTRY"
+
+            self.logger.info(
+                "[%s] Setup type determined: %s", self.option_symbol, setup_type
+            )
             signals_fired = getattr(signal, "metadata", {}).get("signals_fired") or (
                 f"option_side={option_side} " + getattr(self, "_entry_context", "")
             )
