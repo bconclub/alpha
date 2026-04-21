@@ -1100,6 +1100,22 @@ class OptionsScalpStrategy(BaseStrategy):
                 "breakout_time": self._squeeze_breakout_time,
             }
 
+        # ── MB entry-quality telemetry (GPFC #38 / #38b) ──
+        # Acceleration ratio: |move_last_20s| / |move_last_60s|. Useful for
+        # post-hoc review of why MB did or didn't fire.
+        mb_acceleration = round(self._underlying_acceleration_ratio(), 3)
+        _now_mono = time.monotonic()
+        _call_last_loss = self._last_mb_loss_time.get("call", 0.0)
+        _put_last_loss = self._last_mb_loss_time.get("put", 0.0)
+        mb_cooldown_call_remaining = (
+            max(0, int(self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC - (_now_mono - _call_last_loss)))
+            if _call_last_loss > 0 else 0
+        )
+        mb_cooldown_put_remaining = (
+            max(0, int(self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC - (_now_mono - _put_last_loss)))
+            if _put_last_loss > 0 else 0
+        )
+
         # ── Signals panel state ──
         signals_panel = {
             "bb_width_pct": round(self._bb_width_pct, 3),
@@ -1109,6 +1125,11 @@ class OptionsScalpStrategy(BaseStrategy):
                 else self.SQUEEZE_BB_WIDTH_ETH
             ),
             "momentum_60s_pct": round(self._underlying_momentum_pct(), 3),
+            "momentum_acceleration_ratio": mb_acceleration,
+            "momentum_acceleration_min": self.MOMENTUM_BURST_MIN_ACCELERATION,
+            "momentum_burst_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
+            "mb_cooldown_call_secs_remaining": mb_cooldown_call_remaining,
+            "mb_cooldown_put_secs_remaining": mb_cooldown_put_remaining,
             "squeeze_status": self._squeeze_status,
             "bb_position": round(self._bb_position, 2),
             "direction_bias": self._direction_bias,
@@ -1149,6 +1170,36 @@ class OptionsScalpStrategy(BaseStrategy):
             "balance": round(balance, 2) if balance is not None else None,
             "squeeze_info": squeeze_info,
             "signals_panel": signals_panel,
+            # ── Exit/entry config snapshot (GPFC #38 / #38b) ─────────────
+            # Echoes the live values so we can confirm on the dashboard that
+            # the deployed bot is actually running the tuned thresholds and
+            # review behaviour later without digging into source.
+            "exit_config": {
+                "sl_premium_loss_pct": self.SL_PREMIUM_LOSS_PCT,
+                "tp_premium_gain_pct": self.TP_PREMIUM_GAIN_PCT,
+                "pullback_activate_pct": self.PULLBACK_ACTIVATE_PCT,
+                "pullback_exit_pct": self.PULLBACK_EXIT_PCT,
+                "breakeven_stop_activate_pct": self.BREAKEVEN_STOP_ACTIVATE_PCT,
+                "breakeven_stop_exit_pct": self.BREAKEVEN_STOP_EXIT_PCT,
+            },
+            "entry_config": {
+                "mb_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
+                "mb_min_ask_rise_pct": self.MOMENTUM_BURST_MIN_ASK_RISE_PCT,
+                "mb_min_acceleration": self.MOMENTUM_BURST_MIN_ACCELERATION,
+                "mb_loss_cooldown_sec": self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC,
+                "mb_loss_cooldown_threshold_pct": self.MOMENTUM_BURST_LOSS_COOLDOWN_THRESHOLD_PCT,
+            },
+            # Breakeven-stop arm state for the current position. True when the
+            # trade's peak has crossed the arm threshold, so one more adverse
+            # tick to <= +0.5% will flatten it.
+            "breakeven_stop_armed": (
+                self.in_position
+                and self.highest_premium > 0
+                and self.entry_premium > 0
+                and (
+                    (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+                ) >= self.BREAKEVEN_STOP_ACTIVATE_PCT
+            ),
             # Top-level squeeze fields (read directly by dashboard)
             "bb_width_pct": round(self._bb_width_pct, 3),
             "bb_width_threshold": (
