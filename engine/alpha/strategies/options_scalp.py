@@ -151,8 +151,15 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
     BREAKOUT_FAKEOUT_DROP_PCT = 5.0  # Premium drop > 5% from breakout = fakeout
     BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
-    MOMENTUM_BURST_THRESHOLD_PCT = 0.30  # 60s spot momentum required for burst entry (doubled from 0.15)
-    MOMENTUM_BURST_MIN_ASK_RISE_PCT = 5.0  # cumulative % rise across the 3 ticks (was: any strict increase)
+    MOMENTUM_BURST_THRESHOLD_PCT = 0.15  # 60s spot momentum required for burst entry
+    MOMENTUM_BURST_MIN_ASK_RISE_PCT = 5.0  # cumulative % rise across the 3 ATM ticks
+    # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
+    # than fading. This rejects "tail-end" moves (premium already priced the move)
+    # without forcing us to wait for a bigger move to develop.
+    # Ratio = |move_last_20s| / |move_last_60s|. Linear move = 0.33, accelerating
+    # move = 0.6+, fading move = 0.0–0.3. We require the last 20s to contain
+    # >= 50% of the net move, i.e. the move is at least linear-or-fresher.
+    MOMENTUM_BURST_MIN_ACCELERATION = 0.50
     MOMENTUM_BURST_LOSS_COOLDOWN_SEC = 300.0  # skip same-side MB for 5 min after a >10% loss
     MOMENTUM_BURST_LOSS_COOLDOWN_THRESHOLD_PCT = -10.0
 
@@ -1618,6 +1625,20 @@ class OptionsScalpStrategy(BaseStrategy):
         if self._squeeze_status == "ACTIVE":
             return []
 
+        # Freshness gate: require the move to be concentrated in the last 20s.
+        # This filters stale tail-end moves (where premium is already priced
+        # and edge is gone) without making us wait for a bigger absolute move.
+        accel = self._underlying_acceleration_ratio()
+        if accel > 0 and accel < self.MOMENTUM_BURST_MIN_ACCELERATION:
+            if self._tick_count % 10 == 0:
+                self.logger.info(
+                    "[%s] MB_STALE: 60s_mom=%+.2f%% but only %.0f%% in last 20s "
+                    "(need >=%.0f%%) — move is fading, skipping",
+                    self.pair, momentum_60s, accel * 100,
+                    self.MOMENTUM_BURST_MIN_ACCELERATION * 100,
+                )
+            return []
+
         # Cooldown after recent same-side MB loss (avoid revenge trading)
         provisional_side = "call" if momentum_60s >= 0 else "put"
         last_loss = self._last_mb_loss_time.get(provisional_side, 0.0)
@@ -2696,6 +2717,42 @@ class OptionsScalpStrategy(BaseStrategy):
             return 0.0
         current_price = self._momentum_price_history[-1][1]
         return (current_price - old_price) / old_price * 100
+
+    def _underlying_acceleration_ratio(self) -> float:
+        """Fraction of the |60s move| that occurred in the last 20s.
+
+        Returns:
+            0.0 if insufficient history or zero net 60s move.
+            ~0.33 for a perfectly linear 60s move.
+            >= 0.5 when the move is accelerating into the present (fresh).
+            > 1.0 when the recent move overshot a smaller net move (very fresh,
+            e.g. dipped then exploded back).
+
+        Used as a freshness filter for momentum-burst entries — keeps us out of
+        stale tail-end moves without demanding a bigger headline move (which
+        would only buy us latency, not confidence).
+        """
+        if len(self._momentum_price_history) < 3:
+            return 0.0
+        now = time.monotonic()
+        cutoff_60s = now - self._MOMENTUM_CHECK_WINDOW_SEC
+        cutoff_20s = now - 20.0
+        p_60s: float | None = None
+        p_20s: float | None = None
+        for t, price in reversed(self._momentum_price_history):
+            if p_20s is None and t <= cutoff_20s:
+                p_20s = price
+            if t <= cutoff_60s:
+                p_60s = price
+                break
+        if p_60s is None or p_20s is None or p_60s <= 0:
+            return 0.0
+        p_now = self._momentum_price_history[-1][1]
+        move_60s = abs(p_now - p_60s)
+        if move_60s <= 0:
+            return 0.0
+        move_20s = abs(p_now - p_20s)
+        return move_20s / move_60s
 
     def _compute_energy(self, current_premium: float) -> float:
         """Combined energy = abs(underlying momentum) + abs(premium velocity) over 60s."""
