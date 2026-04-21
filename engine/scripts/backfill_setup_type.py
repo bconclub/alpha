@@ -54,33 +54,27 @@ sb = create_client(url, key)
 
 
 def infer(row: dict) -> str:
-    """Map (strategy, reason, exit_reason) → a best-guess setup_type label."""
-    strategy = (row.get("strategy") or "").lower()
+    """Map each row to one of the two real setup labels the dashboard renders.
+
+    Only BB_SQUEEZE and MOMENTUM_BURST_ENTRY are valid — the dashboard ignores
+    anything else. For reconciled/legacy rows where the original setup wasn't
+    logged, we default to BB_SQUEEZE (the primary setup) and upgrade to
+    MOMENTUM_BURST_ENTRY only if reason/signals_fired explicitly say so.
+    """
     reason = (row.get("reason") or "").lower()
     exit_reason = (row.get("exit_reason") or "").lower()
-    combined = f"{reason} {exit_reason}"
+    signals = (row.get("signals_fired") or "").lower()
+    haystack = f"{reason} {exit_reason} {signals}"
 
-    if "discovered_by_reconcile" in reason:
-        return "RECONCILED_DISCOVERED"
-    if "discovered_on_restart" in reason:
-        return "RECONCILED_RESTART"
-    if "ghost" in combined or "smart_reconcile" in combined:
-        return "MOMENTUM_BURST"
-    if "backfill" in combined:
-        return "backfill"
-    if "bb_squeeze" in combined or "squeeze" in combined:
-        return "BB_SQUEEZE"
-    if "momentum" in combined:
+    if "momentum_burst" in haystack or "mom_burst" in haystack or "momentum burst" in haystack:
         return "MOMENTUM_BURST_ENTRY"
-
-    if strategy == "options_scalp":
+    if "bb_squeeze" in haystack or "squeeze" in haystack:
         return "BB_SQUEEZE"
-    if strategy == "scalp":
-        return "UNSPECIFIED_LEGACY"
-    return "UNSPECIFIED_LEGACY"
+    # No hint available — default to primary setup.
+    return "BB_SQUEEZE"
 
 
-SELECT_COLS = "id,strategy,reason,exit_reason,pair,status,opened_at,setup_type"
+SELECT_COLS = "id,strategy,reason,exit_reason,signals_fired,pair,status,opened_at,setup_type"
 
 
 def fetch_missing_rows() -> list[dict]:
