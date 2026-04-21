@@ -56,6 +56,14 @@ class Database:
         """Insert a new trade row and return its Supabase row ID."""
         if not self.is_connected:
             return None
+        # Safety net: setup_type must never be NULL in DB. Callers should set it
+        # explicitly, but if they forget, tag the row so it's still identifiable.
+        if not data.get("setup_type"):
+            logger.warning(
+                "log_trade: setup_type missing for %s %s %s — defaulting to UNSPECIFIED",
+                data.get("strategy"), data.get("pair"), data.get("exchange"),
+            )
+            data["setup_type"] = "UNSPECIFIED"
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(

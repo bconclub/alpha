@@ -3002,17 +3002,15 @@ class OptionsScalpStrategy(BaseStrategy):
             mult = self.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
             spot = self._last_spot_price or 0
             entry_fee = round(contracts * mult * spot * 0.000118, 8) if spot else 0
-            setup_type = "BB_SQUEEZE"
+            # Resolve setup_type with ordered fallbacks; every branch evaluated
+            # so a present-but-sparse signal.metadata can't shadow _pending_entry_setup.
+            setup_type = None
             if signal and hasattr(signal, "metadata") and signal.metadata:
-                setup_type = signal.metadata.get("setup_type") or setup_type
-            elif self._pending_entry_setup:
+                setup_type = signal.metadata.get("setup_type")
+            if not setup_type and self._pending_entry_setup:
                 setup_type = self._pending_entry_setup
-            elif self._is_squeeze_entry:
+            if not setup_type and self._is_squeeze_entry:
                 setup_type = "BB_SQUEEZE"
-            else:
-                setup_type = "MOMENTUM_BURST_ENTRY"
-
-            # FORCE write to DB — ensure it's never None
             if not setup_type:
                 setup_type = "MOMENTUM_BURST_ENTRY"
 

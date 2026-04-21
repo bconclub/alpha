@@ -2193,6 +2193,7 @@ class AlphaBot:
                         "status": "open",
                         "opened_at": iso_now(),
                         "reason": "discovered_on_restart",
+                        "setup_type": "RECONCILED_RESTART",
                     })
                     self._restored_trades.append({
                         "pair": symbol,
@@ -2820,6 +2821,7 @@ class AlphaBot:
                     "status": "open",
                     "opened_at": iso_now(),
                     "reason": "discovered_by_reconcile",
+                    "setup_type": "RECONCILED_DISCOVERED",
                 })
             except Exception as e:
                 logger.error("Missing options sync: failed to insert DB record for %s: %s", symbol, e)
