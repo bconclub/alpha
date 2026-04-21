@@ -13,18 +13,27 @@ from __future__ import annotations
 import os
 import sys
 from collections import Counter
+from pathlib import Path
 
 from dotenv import load_dotenv
 from supabase import create_client
 
-load_dotenv(".env")
+# Match engine/alpha/config.py: load engine/.env first, then any nearby .env
+_engine_env = Path(__file__).resolve().parent.parent / ".env"
+if _engine_env.exists():
+    load_dotenv(_engine_env)
+load_dotenv(".env")  # also pick up cwd .env if present
 
 APPLY = "--apply" in sys.argv
 
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 if not url or not key:
-    print("ERROR: SUPABASE_URL / SUPABASE_KEY missing from env", file=sys.stderr)
+    print(
+        f"ERROR: SUPABASE_URL / SUPABASE_KEY missing from env\n"
+        f"  Looked in: {_engine_env} and ./.env",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 sb = create_client(url, key)

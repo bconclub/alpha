@@ -18,11 +18,16 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from supabase import create_client
 
+# Match engine/alpha/config.py: load engine/.env first, then any nearby .env
+_engine_env = Path(__file__).resolve().parent.parent / ".env"
+if _engine_env.exists():
+    load_dotenv(_engine_env)
 load_dotenv(".env")
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -56,7 +61,11 @@ def fetch_trades(args: argparse.Namespace) -> list[dict]:
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
-        print("ERROR: SUPABASE_URL / SUPABASE_KEY missing", file=sys.stderr)
+        print(
+            f"ERROR: SUPABASE_URL / SUPABASE_KEY missing\n"
+            f"  Looked in: {_engine_env} and ./.env",
+            file=sys.stderr,
+        )
         sys.exit(1)
     sb = create_client(url, key)
 
