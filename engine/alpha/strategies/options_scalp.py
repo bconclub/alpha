@@ -151,7 +151,10 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
     BREAKOUT_FAKEOUT_DROP_PCT = 5.0  # Premium drop > 5% from breakout = fakeout
     BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
-    MOMENTUM_BURST_THRESHOLD_PCT = 0.15  # 60s momentum threshold for burst entries
+    MOMENTUM_BURST_THRESHOLD_PCT = 0.30  # 60s spot momentum required for burst entry (doubled from 0.15)
+    MOMENTUM_BURST_MIN_ASK_RISE_PCT = 5.0  # cumulative % rise across the 3 ticks (was: any strict increase)
+    MOMENTUM_BURST_LOSS_COOLDOWN_SEC = 300.0  # skip same-side MB for 5 min after a >10% loss
+    MOMENTUM_BURST_LOSS_COOLDOWN_THRESHOLD_PCT = -10.0
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
@@ -163,7 +166,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds ────────────────
     TP_PREMIUM_GAIN_PCT = 30.0  # Take profit at +30% premium gain
-    SL_PREMIUM_LOSS_PCT = 20.0  # Stop loss at -30% premium drop
+    SL_PREMIUM_LOSS_PCT = 15.0  # Hard stop at -15% premium drop (was -20%)
     # Tiered trailing: start wide, tighten as profit grows
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
         (5.0, 8.0),   # +5% peak → 8% trail distance
@@ -175,6 +178,9 @@ class OptionsScalpStrategy(BaseStrategy):
     PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
     PULLBACK_ACTIVATE_PCT = 8.0  # Pullback only fires after +8% peak
     DECAY_THRESHOLD_PCT = 3.0  # Exit if was +10%+ and faded to +3%
+    # Breakeven safety net: once peak is meaningful, never let trade go red
+    BREAKEVEN_STOP_ACTIVATE_PCT = 8.0  # arm once peak hits +8%
+    BREAKEVEN_STOP_EXIT_PCT = 0.5      # exit if pnl drops to +0.5% or lower
 
     # ── Stale SL tightening — progressive exit for stuck trades ─────
     STALE_MOVE_THRESHOLD = 5.0  # < 5% from entry = stale (not going anywhere)
@@ -360,6 +366,10 @@ class OptionsScalpStrategy(BaseStrategy):
         self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
         self._ENERGY_DEAD_THRESHOLD_PCT = 0.05
         self._low_energy_ticks: int = 0
+        # MB cooldown — last loss timestamp per direction (call/put).
+        # Populated on exit when an MB trade closes red, consulted in
+        # _check_momentum_burst_entry to suppress revenge trades.
+        self._last_mb_loss_time: dict[str, float] = {"call": 0.0, "put": 0.0}
         self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
         # GPFC #26: premium ~30s ago for ratchet velocity (fast reversal vs slow drift)
         self._last_30s_premium: float | None = None
@@ -1608,6 +1618,20 @@ class OptionsScalpStrategy(BaseStrategy):
         if self._squeeze_status == "ACTIVE":
             return []
 
+        # Cooldown after recent same-side MB loss (avoid revenge trading)
+        provisional_side = "call" if momentum_60s >= 0 else "put"
+        last_loss = self._last_mb_loss_time.get(provisional_side, 0.0)
+        if last_loss > 0:
+            secs_since = time.monotonic() - last_loss
+            if secs_since < self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC:
+                if self._tick_count % 10 == 0:
+                    self.logger.info(
+                        "[%s] MB_COOLDOWN: %s skipped (%.0fs since loss < %.0fs)",
+                        self.pair, provisional_side, secs_since,
+                        self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC,
+                    )
+                return []
+
         if not self._selected_expiry or not self.options_exchange:
             return []
 
@@ -1632,11 +1656,15 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
         self._cached_target_strike = atm_strike
 
+        # Require BOTH a strict rise AND a meaningful cumulative climb across the
+        # 3 ticks (default ≥5%) so micro-jitters in illiquid options don't qualify.
+        min_rise = self.MOMENTUM_BURST_MIN_ASK_RISE_PCT / 100.0
         if (
             momentum_60s >= 0.001
             and self._prev2_call_ask > 0
             and self._prev_call_ask > 0
             and self._atm_call_ask > self._prev_call_ask > self._prev2_call_ask
+            and (self._atm_call_ask - self._prev2_call_ask) / self._prev2_call_ask >= min_rise
         ):
             option_type = "call"
             direction = "UP"
@@ -1647,6 +1675,7 @@ class OptionsScalpStrategy(BaseStrategy):
             and self._prev2_put_ask > 0
             and self._prev_put_ask > 0
             and self._atm_put_ask > self._prev_put_ask > self._prev2_put_ask
+            and (self._atm_put_ask - self._prev2_put_ask) / self._prev2_put_ask >= min_rise
         ):
             option_type = "put"
             direction = "DOWN"
@@ -2935,49 +2964,26 @@ class OptionsScalpStrategy(BaseStrategy):
                         current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
                     )
 
-        # ── 3. Energy-based dead loser exit (losers only) ──
-        _spot_mom_pct = self._underlying_momentum_pct()
+        # ── 3. Breakeven stop — once we've been meaningfully green, don't go red ──
+        # Replaces the legacy ENERGY_DEAD_LOSER / ENERGY_WINNER_FADING gates which
+        # over-cut recoverable trades. This fires only when a real peak existed
+        # AND the trade has retraced to roughly entry, so it converts would-be
+        # losers (peak +10% → -12%) into scratches (peak +10% → ~0%).
         if (
-            premium_change_pct < -15.0
-            and energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
-            and self._low_energy_ticks >= 5
-            and hold_seconds >= 120.0
-            and abs(_spot_mom_pct) < 0.05
+            peak_pnl_pct >= self.BREAKEVEN_STOP_ACTIVATE_PCT
+            and premium_change_pct <= self.BREAKEVEN_STOP_EXIT_PCT
         ):
             self.logger.info(
-                "[%s] OPT_ENERGY_DEAD_LOSER — hold=%ds energy=%.3f%% < %.3f%% "
-                "(low_energy_ticks=%d) pnl=%+.1f%% spot_mom=%+.3f%%",
+                "[%s] OPT_BREAKEVEN_STOP — peak=%+.1f%% reverted to %+.1f%% "
+                "(activate≥%.1f%% exit≤%.1f%%)",
                 self.option_symbol,
-                int(hold_seconds),
-                energy_score,
-                self._ENERGY_DEAD_THRESHOLD_PCT,
-                self._low_energy_ticks,
-                premium_change_pct,
-                _spot_mom_pct,
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_ENERGY_DEAD_LOSER"
-            )
-
-        # ── 4. Energy-based winner fading exit ──
-        if (
-            energy_score < self._ENERGY_DEAD_THRESHOLD_PCT
-            and self._low_energy_ticks >= 3
-            and premium_change_pct > 0
-            and peak_pnl_pct > 20.0
-        ):
-            self.logger.info(
-                "[%s] OPT_ENERGY_WINNER_FADING — energy=%.3f%% < %.3f%% "
-                "(low_energy_ticks=%d) with pnl=%+.1f%% peak=%+.1f%%",
-                self.option_symbol,
-                energy_score,
-                self._ENERGY_DEAD_THRESHOLD_PCT,
-                self._low_energy_ticks,
-                premium_change_pct,
                 peak_pnl_pct,
+                premium_change_pct,
+                self.BREAKEVEN_STOP_ACTIVATE_PCT,
+                self.BREAKEVEN_STOP_EXIT_PCT,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_ENERGY_WINNER_FADING"
+                current_premium, premium_change_pct, "OPT_BREAKEVEN_STOP"
             )
 
         return []
@@ -3325,6 +3331,20 @@ class OptionsScalpStrategy(BaseStrategy):
         exit_type: str,
     ) -> list[Signal]:
         """Build exit signal for option position."""
+        # Record MB cooldown if this was a momentum-burst entry that's closing red.
+        # Squeeze entries are tracked separately and don't trigger MB cooldown.
+        if (
+            not self._is_squeeze_entry
+            and self.option_side
+            and pnl_pct <= self.MOMENTUM_BURST_LOSS_COOLDOWN_THRESHOLD_PCT
+        ):
+            self._last_mb_loss_time[self.option_side] = time.monotonic()
+            self.logger.info(
+                "[%s] MB_COOLDOWN_ARMED: %s loss %.1f%% — next %s MB suppressed for %.0fs",
+                self.option_symbol or self.pair, self.option_side, pnl_pct,
+                self.option_side, self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC,
+            )
+
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             live_bid = ticker.get("bid") or ticker.get("last") or 0
