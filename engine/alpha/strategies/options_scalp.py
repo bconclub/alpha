@@ -184,6 +184,16 @@ class OptionsScalpStrategy(BaseStrategy):
     ]
     PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
     PULLBACK_ACTIVATE_PCT = 8.0  # Pullback only fires after +8% peak
+    # Confirmation before firing OPT_PEAK_TRAIL — absorbs single-tick illiquidity
+    # wicks in the option premium. Require the pullback condition to persist for
+    # N consecutive ticks (ticks are ~10s apart).
+    PULLBACK_CONFIRMATION_TICKS = 2
+    # Spot-momentum veto — if the underlying is still actively pushing in our
+    # favour on the short window, defer the trail exit. The underlying is the
+    # cleaner signal; option premium is a noisy derivative with theta + spread.
+    # Units: %. For a call, veto when spot_mom_20s >= +this; for a put, veto
+    # when spot_mom_20s <= -this.
+    PULLBACK_SPOT_VETO_PCT = 0.05
     DECAY_THRESHOLD_PCT = 3.0  # Exit if was +10%+ and faded to +3%
     # Breakeven safety net: once peak is meaningful, never let trade go red
     BREAKEVEN_STOP_ACTIVATE_PCT = 8.0  # arm once peak hits +8%
@@ -251,6 +261,11 @@ class OptionsScalpStrategy(BaseStrategy):
         self._candle_alloc_pct: float = 35.0  # dynamic — set by signal strength
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
+        # Pending-tick counter for OPT_PEAK_TRAIL confirmation. Incremented on
+        # each tick where the pullback condition is met, reset when it isn't.
+        # Exit only fires once this reaches PULLBACK_CONFIRMATION_TICKS AND the
+        # spot-momentum veto doesn't hold.
+        self._peak_trail_pending_ticks: int = 0
         self.strike_price: float = 0.0
         self.expiry_dt: datetime | None = None
 
@@ -1179,9 +1194,13 @@ class OptionsScalpStrategy(BaseStrategy):
                 "tp_premium_gain_pct": self.TP_PREMIUM_GAIN_PCT,
                 "pullback_activate_pct": self.PULLBACK_ACTIVATE_PCT,
                 "pullback_exit_pct": self.PULLBACK_EXIT_PCT,
+                "pullback_confirmation_ticks": self.PULLBACK_CONFIRMATION_TICKS,
+                "pullback_spot_veto_pct": self.PULLBACK_SPOT_VETO_PCT,
                 "breakeven_stop_activate_pct": self.BREAKEVEN_STOP_ACTIVATE_PCT,
                 "breakeven_stop_exit_pct": self.BREAKEVEN_STOP_EXIT_PCT,
             },
+            "peak_trail_pending_ticks": self._peak_trail_pending_ticks,
+            "spot_momentum_20s_pct": round(self._underlying_short_momentum_pct(20.0), 3),
             "entry_config": {
                 "mb_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
                 "mb_min_ask_rise_pct": self.MOMENTUM_BURST_MIN_ASK_RISE_PCT,
@@ -2769,6 +2788,28 @@ class OptionsScalpStrategy(BaseStrategy):
         current_price = self._momentum_price_history[-1][1]
         return (current_price - old_price) / old_price * 100
 
+    def _underlying_short_momentum_pct(self, window_secs: float = 20.0) -> float:
+        """Spot momentum % over a short window (default 20s).
+
+        Used by OPT_PEAK_TRAIL spot-momentum veto to decide whether the
+        underlying is still pushing in our favour. The main 60s window is
+        too lagged for this decision — a move can be dying on the 20s window
+        while the 60s still looks positive.
+        """
+        if len(self._momentum_price_history) < 2:
+            return 0.0
+        now = time.monotonic()
+        cutoff = now - window_secs
+        old_price: float | None = None
+        for t, price in reversed(self._momentum_price_history):
+            if t <= cutoff:
+                old_price = price
+                break
+        if old_price is None or old_price <= 0:
+            return 0.0
+        current_price = self._momentum_price_history[-1][1]
+        return (current_price - old_price) / old_price * 100
+
     def _underlying_acceleration_ratio(self) -> float:
         """Fraction of the |60s move| that occurred in the last 20s.
 
@@ -3052,25 +3093,67 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
 
             peak_gain = self.highest_premium - self.entry_premium
-            if (
+            pullback_condition_met = (
                 peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT
                 and peak_gain > 0
                 and self.highest_premium > current_premium
-            ):
+                and (self.highest_premium - current_premium) / peak_gain
+                    >= (self.PULLBACK_EXIT_PCT / 100.0)
+            )
+
+            if pullback_condition_met:
+                self._peak_trail_pending_ticks += 1
                 gave_back = self.highest_premium - current_premium
-                if gave_back / peak_gain >= (self.PULLBACK_EXIT_PCT / 100.0):
+
+                # Spot-momentum veto: if the underlying is still actively pushing
+                # in our direction, the premium dip is likely illiquidity noise.
+                # Defer the trail exit — the move is not actually over.
+                spot_mom_20s = self._underlying_short_momentum_pct(20.0)
+                our_dir = 1.0 if self.option_side == "call" else -1.0
+                spot_still_favoring = (
+                    spot_mom_20s * our_dir
+                ) >= self.PULLBACK_SPOT_VETO_PCT
+
+                confirmed = (
+                    self._peak_trail_pending_ticks >= self.PULLBACK_CONFIRMATION_TICKS
+                )
+
+                if confirmed and not spot_still_favoring:
                     self.logger.info(
                         "[%s] OPT_PEAK_TRAIL — gave back %.1f%% of peak gain "
-                        "(peak=$%.4f now=$%.4f pnl=%+.1f%%)",
+                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d spot20s=%+.3f%%)",
                         self.option_symbol,
                         100.0 * gave_back / peak_gain,
                         self.highest_premium,
                         current_premium,
                         premium_change_pct,
+                        self._peak_trail_pending_ticks,
+                        spot_mom_20s,
                     )
+                    self._peak_trail_pending_ticks = 0
                     return await self._do_option_exit(
                         current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
                     )
+                else:
+                    reason = (
+                        "spot_still_pushing"
+                        if spot_still_favoring
+                        else f"awaiting_tick_{self._peak_trail_pending_ticks}/{self.PULLBACK_CONFIRMATION_TICKS}"
+                    )
+                    self.logger.info(
+                        "[%s] OPT_PEAK_TRAIL_DEFER (%s) — gave back %.1f%% "
+                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% spot20s=%+.3f%%)",
+                        self.option_symbol,
+                        reason,
+                        100.0 * gave_back / peak_gain,
+                        self.highest_premium,
+                        current_premium,
+                        premium_change_pct,
+                        spot_mom_20s,
+                    )
+            else:
+                # Pullback condition not met this tick — reset confirmation.
+                self._peak_trail_pending_ticks = 0
 
         # ── 3. Breakeven stop — once we've been meaningfully green, don't go red ──
         # Replaces the legacy ENERGY_DEAD_LOSER / ENERGY_WINNER_FADING gates which
@@ -3806,6 +3889,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.highest_premium = 0.0
         self._last_known_premium = 0.0
         self._trailing_active = False
+        self._peak_trail_pending_ticks = 0
         self._position_opened_at = None
         self.strike_price = 0.0
         self.expiry_dt = None
@@ -3966,6 +4050,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.highest_premium = fill_price
             self._last_known_premium = fill_price
             self._trailing_active = False
+            self._peak_trail_pending_ticks = 0
             self._consecutive_ticker_failures = 0
             self._opt_ratchet_floor = 0.0
             self.strike_price = signal.metadata.get("strike", 0)
@@ -4068,6 +4153,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_premium = 0.0
             self.highest_premium = 0.0
             self._trailing_active = False
+            self._peak_trail_pending_ticks = 0
             self._position_opened_at = None
             self.strike_price = 0.0
             self.expiry_dt = None
@@ -4101,6 +4187,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_premium = 0.0
             self.highest_premium = 0.0
             self._trailing_active = False
+            self._peak_trail_pending_ticks = 0
             self._position_opened_at = None
             self.strike_price = 0.0
             self.expiry_dt = None
