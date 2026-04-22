@@ -2838,7 +2838,7 @@ class AlphaBot:
                 try:
                     stale_rows = (
                         self.db.client.table("trades")
-                        .select("id,entry_price,contracts")
+                        .select("id,entry_price,contracts,entry_fee")
                         .eq("pair", symbol)
                         .eq("strategy", "options_scalp")
                         .eq("exchange", "delta")
@@ -2851,6 +2851,27 @@ class AlphaBot:
                             _mult = opts.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
                         except Exception:
                             pass
+
+                    # ─── GPFC #42: proper fee/net-pnl accounting on flatten ───
+                    # Without this the dashboard shows a -43% pnl_pct but no
+                    # gross/net/fees columns, making reconciled trades look
+                    # like they have "no details". Estimate underlying spot
+                    # from strategy state (tick-updated) or ticker, then apply
+                    # Delta's 0.0118% options fee-per-side on notional.
+                    _spot = 0.0
+                    if opts is not None:
+                        _spot = float(getattr(opts, "_last_spot_price", 0.0) or 0.0)
+                    if _spot <= 0.0 and self.delta is not None:
+                        try:
+                            _tkr = await self.delta.fetch_ticker(
+                                f"{base_asset}/USD:USD"
+                            )
+                            _spot = float(
+                                _tkr.get("last") or _tkr.get("bid") or 0
+                            )
+                        except Exception:
+                            _spot = 0.0
+
                     for sr in (stale_rows.data or []):
                         _entry = float(sr.get("entry_price") or 0)
                         _ct = float(sr.get("contracts") or pos["contracts"])
@@ -2864,14 +2885,32 @@ class AlphaBot:
                             if _entry > 0 and exit_fill > 0
                             else 0.0
                         )
+                        # Use captured entry_fee when available (strategy-path
+                        # rows), fall back to estimate for pure-orphan rows
+                        # that were inserted without fee context.
+                        _entry_fee_existing = sr.get("entry_fee")
+                        _fee_est = (
+                            round(_ct * _mult * _spot * 0.000118, 8)
+                            if _spot > 0
+                            else 0.0
+                        )
+                        _entry_fee = (
+                            float(_entry_fee_existing)
+                            if _entry_fee_existing not in (None, 0, "0")
+                            else _fee_est
+                        )
+                        _exit_fee = _fee_est
+                        _net = round(gross - _entry_fee - _exit_fee, 8)
                         await self.db.update_trade(sr["id"], {
                             "status": "closed",
                             "closed_at": iso_now(),
                             "exit_price": round(
                                 exit_fill if exit_fill > 0 else _entry, 8,
                             ),
+                            "entry_fee": round(_entry_fee, 8),
+                            "exit_fee": round(_exit_fee, 8),
                             "gross_pnl": round(gross, 8),
-                            "pnl": round(gross, 8),
+                            "pnl": _net,
                             "pnl_pct": round(pnl_pct, 4),
                             "exit_reason": "RECONCILE_FLATTEN",
                             "reason": (
@@ -2881,8 +2920,9 @@ class AlphaBot:
                         })
                         logger.info(
                             "RECONCILE_FLATTEN: DB row id=%s %s marked closed "
-                            "@ $%.4f (gross=$%.4f)",
-                            sr["id"], symbol, exit_fill, gross,
+                            "@ $%.4f (gross=$%.4f, net=$%.4f, fees=$%.4f)",
+                            sr["id"], symbol, exit_fill, gross, _net,
+                            _entry_fee + _exit_fee,
                         )
                 except Exception as _db_e:
                     logger.error(

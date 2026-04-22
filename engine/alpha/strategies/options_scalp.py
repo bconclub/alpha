@@ -1775,6 +1775,51 @@ class OptionsScalpStrategy(BaseStrategy):
         else:
             return []
 
+        # ═════════════════════════════════════════════════════════════════════
+        # GPFC #42: REGIME GATE — reject counter-trend MB entries.
+        #
+        # User observation: "If it's trending up, it'll take calls and once
+        # call is done, it sees a momentum put it again enters." The 60s
+        # momentum flips on every minor pullback, so without a higher-timeframe
+        # filter MB was flip-flopping call→put→call against the prevailing
+        # 5-minute trend. This gate blocks counter-regime entries while still
+        # allowing MB to scalp when the 5-min trend is sideways (|pct| < thr).
+        #
+        # Threshold 0.10% over 5min ≈ same price-per-time conviction as the
+        # 60s MB threshold (0.15%/60s ≈ 0.12%/5min) but slightly looser to
+        # avoid blocking legitimate momentum at the start of a fresh trend.
+        # ═════════════════════════════════════════════════════════════════════
+        regime_threshold = 0.10
+        ohlcv = self._cached_ohlcv
+        if ohlcv and len(ohlcv) >= 6:
+            try:
+                close_now = float(ohlcv[-1][4])
+                close_5m_ago = float(ohlcv[-6][4])
+                if close_5m_ago > 0:
+                    regime_pct = (close_now - close_5m_ago) / close_5m_ago * 100
+                    counter_call = (
+                        option_type == "call" and regime_pct <= -regime_threshold
+                    )
+                    counter_put = (
+                        option_type == "put" and regime_pct >= regime_threshold
+                    )
+                    if counter_call or counter_put:
+                        if self._tick_count % 5 == 0:
+                            self.logger.info(
+                                "[%s] MB_REGIME_REJECT: 5min=%+.2f%% vs wanted %s "
+                                "(60s=%+.2f%%) — counter-trend, skipping",
+                                self.pair, regime_pct, option_type.upper(),
+                                momentum_60s,
+                            )
+                        return []
+                    # Log successful alignment at INFO so we can audit post-deploy.
+                    self.logger.info(
+                        "[%s] MB_REGIME_OK: 5min=%+.2f%% aligned with %s (60s=%+.2f%%)",
+                        self.pair, regime_pct, option_type.upper(), momentum_60s,
+                    )
+            except (ValueError, TypeError, IndexError):
+                pass
+
         selected_symbol = self._build_option_symbol(atm_strike, option_type, self._selected_expiry)
         if not selected_symbol:
             return []
