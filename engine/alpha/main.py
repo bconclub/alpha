@@ -54,6 +54,15 @@ class AlphaBot:
         # Options overlay strategies: pair -> OptionsScalpStrategy
         self._options_strategies: dict[str, OptionsScalpStrategy] = {}
 
+        # ─── GPFC #43: orphan-adopt cooldowns ───
+        # Reconciler tries to adopt any live Delta options position the bot
+        # isn't actively managing. When adoption must be deferred (strategy
+        # already busy with another symbol, or no strategy registered for
+        # that asset), we fire a single telegram alert per symbol rather
+        # than spamming every 60 s. Keys are cleared once the orphan is
+        # either adopted or disappears from Delta.
+        self._orphan_defer_alerted: set[str] = set()
+
         # Strategy enable/disable flags (toggled from dashboard)
         self._options_enabled: bool = True
 
@@ -2752,6 +2761,13 @@ class AlphaBot:
                 "mark_price": float(pos.get("mark_price", 0) or 0),
             }
 
+        # GPFC #43: clear defer-alert flags for orphans that no longer exist on
+        # Delta, so if the same symbol ever reappears it gets a fresh alert.
+        _live_syms = set(live_positions.keys())
+        stale_defer = self._orphan_defer_alerted - _live_syms
+        if stale_defer:
+            self._orphan_defer_alerted -= stale_defer
+
         if not live_positions:
             return
 
@@ -2782,171 +2798,97 @@ class AlphaBot:
 
             # CASE A: strategy is actively tracking THIS symbol → leave alone.
             if opts is not None and opts.in_position and opts.option_symbol == symbol:
+                # Orphan resolved — clear any stale defer-alert flag.
+                self._orphan_defer_alerted.discard(symbol)
                 continue
 
-            # CASE B: strategy is tracking a DIFFERENT symbol, OR there is an
-            # existing DB row for this symbol that the strategy isn't managing.
-            # In BOTH sub-cases we can't safely re-hydrate state (entry timestamp /
-            # highest_premium are lost), so flatten on Delta and close the DB row.
-            # This is what produces the "ORPHAN POSITION / peak=None / pnl=0 /
-            # 3 live positions on dashboard" pattern that we're fixing.
-            strategy_busy = (
-                opts is not None
-                and opts.in_position
-                and opts.option_symbol
-                and opts.option_symbol != symbol
-            )
-            has_stale_db_row = symbol in db_option_pairs
-            if strategy_busy or has_stale_db_row:
-                _reason_str = (
-                    f"strategy already tracks {opts.option_symbol}"
-                    if strategy_busy
-                    else "stale DB row with no active strategy tracking"
-                )
-                logger.warning(
-                    "RECONCILE_FLATTEN: %s — flattening unmanageable live "
-                    "position %s x%.0f on Delta",
-                    _reason_str, symbol, pos["contracts"],
-                )
-                exit_fill = 0.0
-                try:
-                    _close_order = await self.delta_options.create_order(
-                        symbol=symbol,
-                        type="market",
-                        side="sell",  # long-only options: sell to close
-                        amount=float(pos["contracts"]),
-                        params={"reduce_only": True},
+            # ═════════════════════════════════════════════════════════════
+            # GPFC #43: ADOPT-FIRST RECONCILER
+            #
+            # Prior behaviour (GPFC #41/42) flattened any live Delta options
+            # position the bot wasn't actively managing. User feedback:
+            # "Orphan should be taken back into position and the bot should
+            # be able to manage it." So we now:
+            #
+            #   • Re-hydrate strategy state from Delta (entry avg, mark,
+            #     contracts, strike, expiry) + any existing DB row, so the
+            #     normal exit engine (hard-SL, breakeven, peak-trail) takes
+            #     over from the next tick.
+            #   • Defer adoption (alert once + wait) when the strategy is
+            #     already tracking a *different* symbol — the strategy is
+            #     single-position by design, so the next sweep after the
+            #     current trade closes will pick the orphan up.
+            #
+            # Peak-trail granularity for adopted positions is degraded
+            # (historical highest_premium is gone) but hard-SL, breakeven,
+            # and fresh-peak tracking from adoption time all still fire,
+            # so the position is no longer bleeding unmanaged.
+            # ═════════════════════════════════════════════════════════════
+
+            # CASE B1: no strategy registered for this base asset (e.g. you
+            # manually opened a BTC option while the bot runs ETH-only).
+            # We can't manage it — alert once, leave on exchange.
+            if opts is None:
+                if symbol not in self._orphan_defer_alerted:
+                    self._orphan_defer_alerted.add(symbol)
+                    logger.warning(
+                        "ORPHAN_UNMANAGED: %s x%.0f on Delta but no %s "
+                        "strategy registered — leaving on exchange, "
+                        "please close manually if unintended",
+                        symbol, pos["contracts"], base_asset,
                     )
                     try:
-                        exit_fill = float(
-                            _close_order.get("average")
-                            or _close_order.get("price")
-                            or pos.get("mark_price")
-                            or 0
+                        await self.alerts.send_orphan_alert(
+                            pair=symbol,
+                            side=option_side,
+                            contracts=pos["contracts"],
+                            action="UNMANAGED (no strategy)",
+                            detail=(
+                                f"No {base_asset} strategy registered. "
+                                f"Position will sit idle on Delta until you "
+                                f"close it manually."
+                            ),
                         )
                     except Exception:
-                        exit_fill = float(pos.get("mark_price") or 0)
-                except Exception as e:
-                    logger.error(
-                        "RECONCILE_FLATTEN: Delta close failed for %s: %s — "
-                        "will retry next sweep",
-                        symbol, e,
-                    )
-                    continue
-
-                # Close any pre-existing open DB row(s) for this symbol.
-                try:
-                    stale_rows = (
-                        self.db.client.table("trades")
-                        .select("id,entry_price,contracts,entry_fee")
-                        .eq("pair", symbol)
-                        .eq("strategy", "options_scalp")
-                        .eq("exchange", "delta")
-                        .eq("status", "open")
-                        .execute()
-                    )
-                    _mult = 0.01
-                    if opts is not None:
-                        try:
-                            _mult = opts.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
-                        except Exception:
-                            pass
-
-                    # ─── GPFC #42: proper fee/net-pnl accounting on flatten ───
-                    # Without this the dashboard shows a -43% pnl_pct but no
-                    # gross/net/fees columns, making reconciled trades look
-                    # like they have "no details". Estimate underlying spot
-                    # from strategy state (tick-updated) or ticker, then apply
-                    # Delta's 0.0118% options fee-per-side on notional.
-                    _spot = 0.0
-                    if opts is not None:
-                        _spot = float(getattr(opts, "_last_spot_price", 0.0) or 0.0)
-                    if _spot <= 0.0 and self.delta is not None:
-                        try:
-                            _tkr = await self.delta.fetch_ticker(
-                                f"{base_asset}/USD:USD"
-                            )
-                            _spot = float(
-                                _tkr.get("last") or _tkr.get("bid") or 0
-                            )
-                        except Exception:
-                            _spot = 0.0
-
-                    for sr in (stale_rows.data or []):
-                        _entry = float(sr.get("entry_price") or 0)
-                        _ct = float(sr.get("contracts") or pos["contracts"])
-                        gross = (
-                            (exit_fill - _entry) * _ct * _mult
-                            if _entry > 0 and exit_fill > 0
-                            else 0.0
-                        )
-                        pnl_pct = (
-                            ((exit_fill - _entry) / _entry * 100)
-                            if _entry > 0 and exit_fill > 0
-                            else 0.0
-                        )
-                        # Use captured entry_fee when available (strategy-path
-                        # rows), fall back to estimate for pure-orphan rows
-                        # that were inserted without fee context.
-                        _entry_fee_existing = sr.get("entry_fee")
-                        _fee_est = (
-                            round(_ct * _mult * _spot * 0.000118, 8)
-                            if _spot > 0
-                            else 0.0
-                        )
-                        _entry_fee = (
-                            float(_entry_fee_existing)
-                            if _entry_fee_existing not in (None, 0, "0")
-                            else _fee_est
-                        )
-                        _exit_fee = _fee_est
-                        _net = round(gross - _entry_fee - _exit_fee, 8)
-                        await self.db.update_trade(sr["id"], {
-                            "status": "closed",
-                            "closed_at": iso_now(),
-                            "exit_price": round(
-                                exit_fill if exit_fill > 0 else _entry, 8,
-                            ),
-                            "entry_fee": round(_entry_fee, 8),
-                            "exit_fee": round(_exit_fee, 8),
-                            "gross_pnl": round(gross, 8),
-                            "pnl": _net,
-                            "pnl_pct": round(pnl_pct, 4),
-                            "exit_reason": "RECONCILE_FLATTEN",
-                            "reason": (
-                                f"flattened orphan: {_reason_str}"
-                            ),
-                            "position_state": None,
-                        })
-                        logger.info(
-                            "RECONCILE_FLATTEN: DB row id=%s %s marked closed "
-                            "@ $%.4f (gross=$%.4f, net=$%.4f, fees=$%.4f)",
-                            sr["id"], symbol, exit_fill, gross, _net,
-                            _entry_fee + _exit_fee,
-                        )
-                except Exception as _db_e:
-                    logger.error(
-                        "RECONCILE_FLATTEN: DB update failed for %s: %s",
-                        symbol, _db_e,
-                    )
-
-                try:
-                    await self.alerts.send_orphan_alert(
-                        pair=symbol,
-                        side=option_side,
-                        contracts=pos["contracts"],
-                        action="FLATTENED (unmanageable)",
-                        detail=f"{_reason_str}. Closed on Delta @ ${exit_fill:.4f}",
-                    )
-                except Exception:
-                    pass
+                        pass
                 continue
 
-            # CASE C: strategy is idle, no DB row, single live position — safe
-            # to adopt. Fall through to the existing insert-and-inject path.
+            # CASE B2: strategy is busy managing a DIFFERENT symbol.
+            # Single-position strategy can't juggle two — defer adoption
+            # until current trade closes. Next sweep (≤60 s) handles it.
+            if opts.in_position and opts.option_symbol and opts.option_symbol != symbol:
+                if symbol not in self._orphan_defer_alerted:
+                    self._orphan_defer_alerted.add(symbol)
+                    logger.warning(
+                        "ORPHAN_DEFER: %s x%.0f — strategy busy with %s, "
+                        "will adopt when current trade closes",
+                        symbol, pos["contracts"], opts.option_symbol,
+                    )
+                    try:
+                        await self.alerts.send_orphan_alert(
+                            pair=symbol,
+                            side=option_side,
+                            contracts=pos["contracts"],
+                            action="DEFERRED (strategy busy)",
+                            detail=(
+                                f"Strategy is managing {opts.option_symbol}. "
+                                f"This orphan will be adopted after the "
+                                f"current trade closes (≤60 s)."
+                            ),
+                        )
+                    except Exception:
+                        pass
+                continue
+
+            # CASE C: strategy is idle → adopt. Reuse existing DB row if one
+            # exists (preserves opened_at, original entry_fee, setup_type),
+            # otherwise create a new one. In both paths we inject live state
+            # into the strategy so exit management resumes immediately.
+            has_stale_db_row = symbol in db_option_pairs
             logger.warning(
-                "MISSING OPTIONS SYNC: %s x%.0f @ $%.4f exists on exchange but NOT in DB — creating record",
+                "ORPHAN_ADOPT: %s x%.0f @ $%.4f — %s, injecting into strategy",
                 symbol, pos["contracts"], pos["entry_price"],
+                "reusing existing DB row" if has_stale_db_row else "creating new DB row",
             )
 
             # Parse strike
@@ -2969,75 +2911,114 @@ class AlphaBot:
                 except (ValueError, IndexError):
                     pass
 
-            # Find matching strategy
-            opts = None
-            for pair_key, strategy in self._options_strategies.items():
-                if strategy._base_asset == base_asset:
-                    opts = strategy
-                    break
+            # opts is already resolved at the top of the loop; no re-lookup.
 
-            # Create DB record
-            try:
-                await self.db.log_trade({
-                    "pair": symbol,
-                    "exchange": "delta",
-                    "strategy": "options_scalp",
-                    "side": "buy",
-                    "entry_price": pos["entry_price"],
-                    "contracts": pos["contracts"],
-                    "leverage": 50,
-                    "position_type": "long",
-                    "status": "open",
-                    "opened_at": iso_now(),
-                    "reason": "discovered_by_reconcile",
-                    "setup_type": "BB_SQUEEZE",
-                })
-            except Exception as e:
-                logger.error("Missing options sync: failed to insert DB record for %s: %s", symbol, e)
-                continue
-
-            # Inject into strategy memory so bot manages the exit
-            if opts:
-                opts.in_position = True
-                OptionsScalpStrategy._global_in_position = True
-                OptionsScalpStrategy._global_position_asset = base_asset
-                opts.option_symbol = symbol
-                opts.option_side = option_side
-                opts.entry_premium = pos["entry_price"]
-                opts.entry_time = time.monotonic()
-                # Use mark_price if higher than entry, but we can't recover historical peak here
-                # At least ensure we start with max of entry vs current mark
-                opts.highest_premium = max(
-                    pos["entry_price"], pos.get("mark_price") or pos["entry_price"]
-                )
-                # Then recalculate floor immediately based on what we have
-                if opts.entry_premium > 0:
-                    current_peak_pct = (
-                        (opts.highest_premium - opts.entry_premium)
-                        / opts.entry_premium
-                        * 100
+            # Adopt DB row: reuse existing if present (preserves opened_at,
+            # original entry_fee, setup_type), otherwise create a new one.
+            adopted_db_id: int | None = None
+            if has_stale_db_row:
+                try:
+                    _rows = (
+                        self.db.client.table("trades")
+                        .select("id,entry_price,opened_at")
+                        .eq("pair", symbol)
+                        .eq("strategy", "options_scalp")
+                        .eq("exchange", "delta")
+                        .eq("status", "open")
+                        .order("opened_at", desc=True)
+                        .execute()
                     )
-                    opts._opt_ratchet_floor = opts._compute_dynamic_floor(
-                        current_peak_pct, 0.0
+                    _data = _rows.data or []
+                    if _data:
+                        adopted_db_id = int(_data[0]["id"])
+                    # If multiple open rows exist for the same symbol (legacy
+                    # dup artifact), keep the newest and null-close the rest
+                    # so the dashboard position count is correct.
+                    for _extra in _data[1:]:
+                        try:
+                            await self.db.update_trade(int(_extra["id"]), {
+                                "status": "cancelled",
+                                "exit_reason": "DUPLICATE_ADOPTED",
+                                "reason": "adopt_dedup_on_reconcile",
+                                "closed_at": iso_now(),
+                                "position_state": None,
+                            })
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.error(
+                        "ORPHAN_ADOPT: failed to look up existing DB row for "
+                        "%s: %s — will create a new one", symbol, e,
                     )
-                opts._last_known_premium = pos["mark_price"] or pos["entry_price"]
-                opts._contracts = int(pos["contracts"])
-                opts.strike_price = strike_price
-                opts.expiry_dt = expiry_dt
-                opts._trailing_active = False
-                opts._consecutive_ticker_failures = 0
-                opts._position_verify_failures = 0
-                logger.info(
-                    "Injected missing options position into strategy: %s %s x%d strike=$%.0f",
-                    symbol, option_side, opts._contracts, strike_price,
-                )
-            else:
-                logger.warning(
-                    "Missing options sync: no strategy found for %s — DB record created but not managed",
-                    symbol,
-                )
 
-            # Register with risk manager
+            if adopted_db_id is None:
+                try:
+                    _new_row = await self.db.log_trade({
+                        "pair": symbol,
+                        "exchange": "delta",
+                        "strategy": "options_scalp",
+                        "side": "buy",
+                        "entry_price": pos["entry_price"],
+                        "contracts": pos["contracts"],
+                        "leverage": 50,
+                        "position_type": "long",
+                        "status": "open",
+                        "opened_at": iso_now(),
+                        "reason": "discovered_by_reconcile",
+                        "setup_type": "BB_SQUEEZE",
+                    })
+                    if isinstance(_new_row, dict) and _new_row.get("id"):
+                        adopted_db_id = int(_new_row["id"])
+                except Exception as e:
+                    logger.error(
+                        "ORPHAN_ADOPT: failed to insert DB record for %s: %s",
+                        symbol, e,
+                    )
+                    continue
+
+            # Inject live state into the strategy so exits resume on the
+            # next tick. Historical peak is lost on pure-orphan adoptions;
+            # hard-SL / breakeven / fresh peak-trail all still work.
+            opts.in_position = True
+            OptionsScalpStrategy._global_in_position = True
+            OptionsScalpStrategy._global_position_asset = base_asset
+            opts.option_symbol = symbol
+            opts.option_side = option_side
+            opts.entry_premium = pos["entry_price"]
+            opts.entry_time = time.monotonic()
+            opts.highest_premium = max(
+                pos["entry_price"], pos.get("mark_price") or pos["entry_price"]
+            )
+            if opts.entry_premium > 0:
+                current_peak_pct = (
+                    (opts.highest_premium - opts.entry_premium)
+                    / opts.entry_premium
+                    * 100
+                )
+                opts._opt_ratchet_floor = opts._compute_dynamic_floor(
+                    current_peak_pct, 0.0
+                )
+            opts._last_known_premium = pos["mark_price"] or pos["entry_price"]
+            opts._contracts = int(pos["contracts"])
+            opts.strike_price = strike_price
+            opts.expiry_dt = expiry_dt
+            opts._trailing_active = False
+            opts._consecutive_ticker_failures = 0
+            opts._position_verify_failures = 0
+            if adopted_db_id is not None:
+                try:
+                    opts._db_trade_id = adopted_db_id
+                except Exception:
+                    pass
+            logger.info(
+                "ORPHAN_ADOPT: %s %s x%d strike=$%.0f entry=$%.4f mark=$%.4f "
+                "peak=$%.4f db_id=%s — strategy now managing",
+                symbol, option_side, opts._contracts, strike_price,
+                opts.entry_premium, pos.get("mark_price") or 0,
+                opts.highest_premium, adopted_db_id,
+            )
+
+            # Register with risk manager so position counts stay accurate.
             from alpha.strategies.base import Signal, StrategyName
             synthetic_signal = Signal(
                 side="buy",
@@ -3053,13 +3034,20 @@ class AlphaBot:
             )
             self.risk_manager.record_open(synthetic_signal)
 
+            # Adoption succeeded — clear any prior defer-alert flag.
+            self._orphan_defer_alerted.discard(symbol)
+
             try:
                 await self.alerts.send_orphan_alert(
                     pair=symbol,
                     side=option_side,
                     contracts=pos["contracts"],
-                    action="SYNCED TO DB & STRATEGY",
-                    detail=f"Entry: ${pos['entry_price']:.4f} — discovered live on exchange",
+                    action="ADOPTED (strategy now managing)",
+                    detail=(
+                        f"Entry: ${pos['entry_price']:.4f}  mark: "
+                        f"${pos.get('mark_price') or 0:.4f}. Hard-SL, "
+                        f"breakeven, and peak-trail active from this tick."
+                    ),
                 )
             except Exception:
                 pass
