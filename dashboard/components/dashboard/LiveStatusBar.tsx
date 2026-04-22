@@ -4,6 +4,13 @@ import { useEffect, useState, useMemo, useRef } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, cn } from '@/lib/utils';
+import {
+  computePnLStats,
+  istTodayStartMs,
+  istTodayStartISO,
+  emptyPnLStats,
+  type PnLStats,
+} from '@/lib/pnl-utils';
 
 function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -410,23 +417,15 @@ export function LiveStatusBar() {
 
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
 
-  const todayStats = useMemo(() => {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-    const todayTrades = trades.filter(t => {
-      const opened = new Date(t.timestamp); // timestamp is normalized from opened_at
-      return opened >= todayStart && t.status !== 'open';
+  // In-memory fallback from the trades array (fast, reactive, pre-filtered
+  // by SupabaseProvider to exclude cancelled rows).
+  const todayStats = useMemo<PnLStats>(() => {
+    const cutoffMs = istTodayStartMs();
+    const todaysTrades = trades.filter((t) => {
+      if (!t.timestamp) return false;
+      return new Date(t.timestamp).getTime() >= cutoffMs;
     });
-
-    const pnl = todayTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const fees = todayTrades.reduce((s, t) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
-    const wins = todayTrades.filter(t => (t.pnl ?? 0) > 0).length;
-    const losses = todayTrades.filter(t => (t.pnl ?? 0) <= 0).length;
-    const total = todayTrades.length;
-    const winRate = total > 0 ? (wins / total) * 100 : 0;
-
-    return { pnl, wins, losses, fees, total, winRate };
+    return computePnLStats(todaysTrades);
   }, [trades]);
 
   const recentTrades = useMemo(() => {
@@ -436,40 +435,36 @@ export function LiveStatusBar() {
       .slice(0, 10);
   }, [trades]);
 
-  // Direct Supabase fetch for today's trades — refreshes every 30s
-  interface LiveTodayStats {
-    pnl: number; fees: number; wins: number; losses: number; total: number; winRate: number;
-  }
-  const [liveToday, setLiveToday] = useState<LiveTodayStats | null>(null);
+  // Authoritative: direct Supabase query for today's CLOSED trades, 30s
+  // poll + refetch on tab-focus. `status = 'closed'` strictly excludes
+  // open positions AND cancelled/voided ghosts.
+  const [liveToday, setLiveToday] = useState<PnLStats | null>(null);
 
   useEffect(() => {
     const fetchToday = async () => {
       const db = getSupabase();
       if (!db) return;
-      const istOffset = 5.5 * 60 * 60 * 1000;
-      const nowIST = new Date(Date.now() + istOffset);
-      const todayIST = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
-      const todayStartISO = new Date(todayIST + 'T00:00:00+05:30').toISOString();
       const { data } = await db
         .from('trades')
-        .select('pnl, entry_fee, exit_fee, status')
-        .gte('opened_at', todayStartISO)
-        .neq('status', 'open');
+        .select('pnl, gross_pnl, entry_fee, exit_fee, status')
+        .eq('status', 'closed')
+        .gte('opened_at', istTodayStartISO());
       if (!data) return;
-      const pnl = data.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
-      const fees = data.reduce((s: number, t: any) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
-      const wins = data.filter((t: any) => (t.pnl ?? 0) > 0).length;
-      const losses = data.filter((t: any) => (t.pnl ?? 0) <= 0).length;
-      const total = data.length;
-      setLiveToday({ pnl, fees, wins, losses, total, winRate: total > 0 ? (wins / total) * 100 : 0 });
+      setLiveToday(computePnLStats(data as never));
     };
     fetchToday();
     const id = setInterval(fetchToday, 30_000);
-    return () => clearInterval(id);
+    const onVisible = () => { if (!document.hidden) fetchToday(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', fetchToday);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', fetchToday);
+    };
   }, []);
 
-  // Use live fetch when available, fall back to context-derived stats
-  const today = liveToday ?? todayStats;
+  const today: PnLStats = liveToday ?? todayStats ?? emptyPnLStats();
 
   const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
   const [cardView, setCardView] = useState<CardView>('pnl');

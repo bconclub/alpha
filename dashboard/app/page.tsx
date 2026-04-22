@@ -4,6 +4,13 @@ import { useState, useMemo, useEffect } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, formatNumber, cn } from '@/lib/utils';
+import {
+  computePnLStats,
+  istTodayStartMs,
+  istTodayStartISO,
+  emptyPnLStats,
+  type PnLStats,
+} from '@/lib/pnl-utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
@@ -403,65 +410,45 @@ export default function DashboardPage() {
   const capitalInr = Math.round(totalCapital * inrRate);
 
   // Stats for today
-  const todayStats = useMemo(() => {
-    const now = Date.now();
-    const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    const istNow = new Date(now + istOffsetMs);
-    const todayIST = istNow.toISOString().slice(0, 10);
-    const cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
-
-    let pnl = 0;
-    let total = 0;
-    let wins = 0;
-    let fees = 0;
-    let grossPnl = 0;
-    
-    for (const t of trades) {
-      if (t.status !== 'closed') continue;
-      const tradeTime = new Date(t.timestamp).getTime();
-      if (tradeTime >= cutoffMs) {
-        pnl += t.pnl ?? 0;
-        total++;
-        if ((t.pnl ?? 0) > 0) wins++;
-        const tradeFees = (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
-        fees += tradeFees;
-        grossPnl += t.gross_pnl != null ? t.gross_pnl : ((t.pnl ?? 0) + tradeFees);
-      }
-    }
-    
-    const winRate = total > 0 ? (wins / total) * 100 : 0;
-    return { pnl, total, wins, losses: total - wins, winRate, fees, grossPnl };
+  // In-memory fallback: compute from the local trades array (fast, reactive).
+  const todayStats = useMemo<PnLStats>(() => {
+    const cutoffMs = istTodayStartMs();
+    const todaysTrades = trades.filter((t) => {
+      if (!t.timestamp) return false;
+      return new Date(t.timestamp).getTime() >= cutoffMs;
+    });
+    return computePnLStats(todaysTrades);
   }, [trades]);
 
-  // Direct Supabase fetch for today's trades — refreshes every 30s
-  const [liveToday, setLiveToday] = useState<{ pnl: number; fees: number; wins: number; losses: number; total: number; winRate: number; totalLoss: number } | null>(null);
+  // Authoritative: direct Supabase query for today's CLOSED trades, polled
+  // every 30 s. `status = 'closed'` is the strict filter — it excludes
+  // both open positions and cancelled/voided ghost rows so the "Today"
+  // widget always matches the DB exactly.
+  const [liveToday, setLiveToday] = useState<PnLStats | null>(null);
   useEffect(() => {
     const fetchToday = async () => {
       const db = getSupabase();
       if (!db) return;
-      const istOffset = 5.5 * 60 * 60 * 1000;
-      const nowIST = new Date(Date.now() + istOffset);
-      const todayIST = nowIST.toISOString().slice(0, 10);
-      const todayStartISO = new Date(todayIST + 'T00:00:00+05:30').toISOString();
       const { data } = await db
         .from('trades')
-        .select('pnl, entry_fee, exit_fee, status')
-        .gte('opened_at', todayStartISO)
-        .neq('status', 'open');
+        .select('pnl, gross_pnl, entry_fee, exit_fee, status')
+        .eq('status', 'closed')
+        .gte('opened_at', istTodayStartISO());
       if (!data) return;
-      const pnl = data.reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
-      const fees = data.reduce((s: number, t: any) => s + (t.entry_fee ?? 0) + (t.exit_fee ?? 0), 0);
-      const wins = data.filter((t: any) => (t.pnl ?? 0) > 0).length;
-      const losses = data.filter((t: any) => (t.pnl ?? 0) < 0).length;
-      const totalLoss = data.filter((t: any) => (t.pnl ?? 0) < 0).reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
-      const total = data.length;
-      setLiveToday({ pnl, fees, wins, losses, total, winRate: total > 0 ? (wins / total) * 100 : 0, totalLoss });
+      setLiveToday(computePnLStats(data as never));
     };
     fetchToday();
     const id = setInterval(fetchToday, 30_000);
-    return () => clearInterval(id);
+    const onVisible = () => { if (!document.hidden) fetchToday(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', fetchToday);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', fetchToday);
+    };
   }, []);
-  const today = liveToday ?? { ...todayStats, totalLoss: 0 };
+  const today: PnLStats = liveToday ?? todayStats ?? emptyPnLStats();
 
   const todayRecentTrades = useMemo(() => {
     const now = Date.now();

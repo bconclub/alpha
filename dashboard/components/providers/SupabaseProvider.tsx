@@ -417,8 +417,14 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       } catch (e) { /* silent */ }
     }, 10_000);
 
-    // Poll every 60s as fallback (realtime may disconnect silently)
-    const pollInterval = setInterval(async () => {
+    // Pull trades + critical context from the DB. Called both on the 60 s
+    // timer below AND on window-focus / tab-visibility so the client state
+    // cannot silently diverge from the DB when realtime drops an event
+    // (e.g. laptop sleep, network blip, rotated websocket, or a row flipped
+    // to status='cancelled' between the initial fetch and the first UPDATE
+    // event reaching us). This is the guard that keeps the "Today" widgets,
+    // P&L page calendar, trades table and charts honest.
+    const resyncAll = async () => {
       try {
         const [logRes, latestRes, statusRes, allTradeRows] = await Promise.all([
           client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200),
@@ -429,7 +435,6 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
         if (logRes.data) {
           const logs = logRes.data.map(normalizeStrategyLog);
-          // Merge latest-per-pair so all pairs always appear
           const seenIds = new Set(logs.map(l => l.id));
           const extra = (latestRes.data ?? []).map(normalizeStrategyLog).filter(r => !seenIds.has(r.id));
           setStrategyLog([...logs, ...extra]);
@@ -437,15 +442,28 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
         if (statusRes.data && statusRes.data.length > 0) setBotStatus(normalizeBotStatus(statusRes.data[0]));
         if (allTradeRows) setTrades(allTradeRows.map(normalizeTrade));
-      } catch (e) { console.warn('[Alpha] Poll refresh failed', e); }
+      } catch (e) { console.warn('[Alpha] resyncAll failed', e); }
 
       fetchViews();
-    }, 60_000);
+    };
+
+    // Poll every 60s as fallback (realtime may disconnect silently).
+    const pollInterval = setInterval(resyncAll, 60_000);
+
+    // Resync immediately whenever the tab becomes visible or regains focus.
+    // Cheaper and tighter than waiting for the next 60 s tick, and it's
+    // exactly when stale state becomes obvious to the user.
+    const onVisibility = () => { if (!document.hidden) resyncAll(); };
+    const onFocus = () => resyncAll();
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onFocus);
 
     return () => {
       clearInterval(livePositionsPoll);
       clearInterval(optionsStatePoll);
       clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onFocus);
     };
   }, [fetchViews, buildInitialFeed]);
 
@@ -547,7 +565,41 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         client!.from('signal_state').select('*').then(res => { if (res.data) setSignalStates(res.data as SignalState[]); });
       })
       .subscribe((status) => {
-        setIsConnected(status === 'SUBSCRIBED');
+        const connected = status === 'SUBSCRIBED';
+        setIsConnected((prev) => {
+          // Realtime just (re)connected — re-fetch the full trades list so
+          // any UPDATE events that fired while the channel was dropped
+          // (cancellations, closes, fills) can't leave the client state
+          // diverged from the DB. Cheap, idempotent, runs at most whenever
+          // the socket flips to SUBSCRIBED.
+          if (connected && !prev) {
+            (async () => {
+              const c = getSupabase();
+              if (!c) return;
+              try {
+                const PAGE = 1000;
+                let allRows: any[] = [];
+                let from = 0;
+                // eslint-disable-next-line no-constant-condition
+                while (true) {
+                  const { data, error } = await c
+                    .from('trades')
+                    .select('*')
+                    .neq('status', 'cancelled')
+                    .order('opened_at', { ascending: false })
+                    .range(from, from + PAGE - 1);
+                  if (error || !data || data.length === 0) break;
+                  allRows = allRows.concat(data);
+                  if (data.length < PAGE) break;
+                  from += PAGE;
+                }
+                setTrades(allRows.map(normalizeTrade));
+              } catch { /* silent */ }
+              fetchViews();
+            })();
+          }
+          return connected;
+        });
       });
 
     return () => {
