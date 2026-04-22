@@ -3096,10 +3096,15 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if (
             self._trailing_active
-            and premium_change_pct > 0
             and self.entry_premium > 0
             and self.highest_premium > 0
         ):
+            # NOTE: previously gated on `premium_change_pct > 0`, but that
+            # caused fast-crashing winners to blow through the trail floor and
+            # fall into HARD_SL / BREAKEVEN territory (e.g. id=3039: peak +44%
+            # → exit -16% because the tick that broke the trail floor was
+            # already below entry). The trail must fire whenever the premium
+            # is below its trail floor, regardless of current P&L sign.
             trail_dist_pct = self._opt_trail_distance_pct(peak_pnl_pct)
             trail_floor = self.highest_premium * (1.0 - trail_dist_pct / 100.0)
             if current_premium < trail_floor:

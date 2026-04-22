@@ -2768,17 +2768,146 @@ class AlphaBot:
         }
 
         for symbol, pos in live_positions.items():
-            if symbol in db_option_pairs:
-                continue  # already tracked
+            # Parse symbol: e.g. ETH/USD:USD-260331-2100-C
+            base_asset = symbol.split("/")[0] if "/" in symbol else ""
+            option_side = "call" if symbol.endswith("-C") else ("put" if symbol.endswith("-P") else "call")
 
+            # Find matching strategy up-front — we need it for ownership checks
+            # and for the adoption path below.
+            opts = None
+            for _pk, _strategy in self._options_strategies.items():
+                if _strategy._base_asset == base_asset:
+                    opts = _strategy
+                    break
+
+            # CASE A: strategy is actively tracking THIS symbol → leave alone.
+            if opts is not None and opts.in_position and opts.option_symbol == symbol:
+                continue
+
+            # CASE B: strategy is tracking a DIFFERENT symbol, OR there is an
+            # existing DB row for this symbol that the strategy isn't managing.
+            # In BOTH sub-cases we can't safely re-hydrate state (entry timestamp /
+            # highest_premium are lost), so flatten on Delta and close the DB row.
+            # This is what produces the "ORPHAN POSITION / peak=None / pnl=0 /
+            # 3 live positions on dashboard" pattern that we're fixing.
+            strategy_busy = (
+                opts is not None
+                and opts.in_position
+                and opts.option_symbol
+                and opts.option_symbol != symbol
+            )
+            has_stale_db_row = symbol in db_option_pairs
+            if strategy_busy or has_stale_db_row:
+                _reason_str = (
+                    f"strategy already tracks {opts.option_symbol}"
+                    if strategy_busy
+                    else "stale DB row with no active strategy tracking"
+                )
+                logger.warning(
+                    "RECONCILE_FLATTEN: %s — flattening unmanageable live "
+                    "position %s x%.0f on Delta",
+                    _reason_str, symbol, pos["contracts"],
+                )
+                exit_fill = 0.0
+                try:
+                    _close_order = await self.delta_options.create_order(
+                        symbol=symbol,
+                        type="market",
+                        side="sell",  # long-only options: sell to close
+                        amount=float(pos["contracts"]),
+                        params={"reduce_only": True},
+                    )
+                    try:
+                        exit_fill = float(
+                            _close_order.get("average")
+                            or _close_order.get("price")
+                            or pos.get("mark_price")
+                            or 0
+                        )
+                    except Exception:
+                        exit_fill = float(pos.get("mark_price") or 0)
+                except Exception as e:
+                    logger.error(
+                        "RECONCILE_FLATTEN: Delta close failed for %s: %s — "
+                        "will retry next sweep",
+                        symbol, e,
+                    )
+                    continue
+
+                # Close any pre-existing open DB row(s) for this symbol.
+                try:
+                    stale_rows = (
+                        self.db.client.table("trades")
+                        .select("id,entry_price,contracts")
+                        .eq("pair", symbol)
+                        .eq("strategy", "options_scalp")
+                        .eq("exchange", "delta")
+                        .eq("status", "open")
+                        .execute()
+                    )
+                    _mult = 0.01
+                    if opts is not None:
+                        try:
+                            _mult = opts.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
+                        except Exception:
+                            pass
+                    for sr in (stale_rows.data or []):
+                        _entry = float(sr.get("entry_price") or 0)
+                        _ct = float(sr.get("contracts") or pos["contracts"])
+                        gross = (
+                            (exit_fill - _entry) * _ct * _mult
+                            if _entry > 0 and exit_fill > 0
+                            else 0.0
+                        )
+                        pnl_pct = (
+                            ((exit_fill - _entry) / _entry * 100)
+                            if _entry > 0 and exit_fill > 0
+                            else 0.0
+                        )
+                        await self.db.update_trade(sr["id"], {
+                            "status": "closed",
+                            "closed_at": iso_now(),
+                            "exit_price": round(
+                                exit_fill if exit_fill > 0 else _entry, 8,
+                            ),
+                            "gross_pnl": round(gross, 8),
+                            "pnl": round(gross, 8),
+                            "pnl_pct": round(pnl_pct, 4),
+                            "exit_reason": "RECONCILE_FLATTEN",
+                            "reason": (
+                                f"flattened orphan: {_reason_str}"
+                            ),
+                            "position_state": None,
+                        })
+                        logger.info(
+                            "RECONCILE_FLATTEN: DB row id=%s %s marked closed "
+                            "@ $%.4f (gross=$%.4f)",
+                            sr["id"], symbol, exit_fill, gross,
+                        )
+                except Exception as _db_e:
+                    logger.error(
+                        "RECONCILE_FLATTEN: DB update failed for %s: %s",
+                        symbol, _db_e,
+                    )
+
+                try:
+                    await self.alerts.send_orphan_alert(
+                        pair=symbol,
+                        side=option_side,
+                        contracts=pos["contracts"],
+                        action="FLATTENED (unmanageable)",
+                        detail=f"{_reason_str}. Closed on Delta @ ${exit_fill:.4f}",
+                    )
+                except Exception:
+                    pass
+                continue
+
+            # CASE C: strategy is idle, no DB row, single live position — safe
+            # to adopt. Fall through to the existing insert-and-inject path.
             logger.warning(
                 "MISSING OPTIONS SYNC: %s x%.0f @ $%.4f exists on exchange but NOT in DB — creating record",
                 symbol, pos["contracts"], pos["entry_price"],
             )
-
-            # Parse symbol: e.g. ETH/USD:USD-260331-2100-C
-            base_asset = symbol.split("/")[0] if "/" in symbol else ""
-            option_side = "call" if symbol.endswith("-C") else ("put" if symbol.endswith("-P") else "call")
 
             # Parse strike
             strike_price = 0.0
