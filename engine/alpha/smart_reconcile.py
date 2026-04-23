@@ -561,66 +561,43 @@ class SmartDeltaReconciler:
         except Exception:
             return None
 
-    def _count_pair_trades_in_time_window(
-        self, db_list: list[dict], center: datetime, window_sec: float = 120.0,
-    ) -> int:
-        """How many trades for this pair have opened_at within ±window_sec of center."""
-        n = 0
-        for t in db_list:
-            ot = self._parse_opened_at(t.get("opened_at"))
-            if ot is None:
-                continue
-            if abs((ot - center).total_seconds()) <= window_sec:
-                n += 1
-        return n
-
     def _has_exact_duplicate_peer(
         self,
         db_trade: dict,
         db_list: list[dict],
-        window_sec: float = 120.0,
     ) -> bool:
-        """Another row with same pair list, exact entry + contracts, opened_at within window."""
+        """GPFC #44: Match only when another row shares the same exchange
+        order_id. Strike+side+time-window matching generated false positives
+        that killed real winners as DUPLICATE_UNMATCHED.
+        """
         tid = db_trade.get("id")
-        ep = self._normalize_trade_price(
-            db_trade.get("entry_price", db_trade.get("price", 0)),
-        )
-        ct = self._normalize_trade_contracts(
-            db_trade.get("contracts", db_trade.get("amount", 0)),
-        )
-        ot = self._parse_opened_at(db_trade.get("opened_at"))
-        if ot is None or ep <= 0 or ct <= 0:
+        oid = str(db_trade.get("order_id") or "").strip()
+        if not oid:
             return False
         for other in db_list:
             if other.get("id") == tid:
                 continue
-            o_ep = self._normalize_trade_price(
-                other.get("entry_price", other.get("price", 0)),
-            )
-            o_ct = self._normalize_trade_contracts(
-                other.get("contracts", other.get("amount", 0)),
-            )
-            o_ot = self._parse_opened_at(other.get("opened_at"))
-            if o_ot is None:
-                continue
-            if o_ep != ep or o_ct != ct:
-                continue
-            if abs((o_ot - ot).total_seconds()) <= window_sec:
+            o_oid = str(other.get("order_id") or "").strip()
+            if o_oid and o_oid == oid:
                 return True
         return False
 
     def _should_mark_duplicate_unmatched(
         self, db_trade: dict, db_list: list[dict],
     ) -> bool:
-        """Strict duplicate fingerprint: never tag lone pair rows or non-twins."""
+        """GPFC #44: only mark DUPLICATE_UNMATCHED when an exchange_fill_id
+        (order_id) peer exists. If in doubt, log a WARNING and do NOT close.
+        """
         if len(db_list) <= 1:
             return False
-        ot = self._parse_opened_at(db_trade.get("opened_at"))
-        if ot is None:
+        if not self._has_exact_duplicate_peer(db_trade, db_list):
+            self.log.warning(
+                "SMART RECONCILE: trade #%s unmatched but has no order_id "
+                "duplicate peer — letting normal exit logic handle it",
+                db_trade.get("id"),
+            )
             return False
-        if self._count_pair_trades_in_time_window(db_list, ot) < 2:
-            return False
-        return self._has_exact_duplicate_peer(db_trade, db_list)
+        return True
 
     def _find_best_match(
         self, delta_rt: dict, db_list: list[dict]

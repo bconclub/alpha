@@ -145,7 +145,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # velocity >= 0.3% → 20s, 0.15-0.3% → 40s, < 0.15% → 60s
     BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3  # >= 0.3% → 20s confirmation
     BREAKOUT_CONFIRM_MED_VELOCITY = 0.15  # 0.15-0.3% → 40s confirmation
-    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.0  # < 0.15% → 60s confirmation (weak move)
+    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.08  # minimum 8bps velocity required to even consider entry
     BREAKOUT_CONFIRM_SEC_HIGH = 20  # Fast for strong moves
     BREAKOUT_CONFIRM_SEC_MED = 40  # Medium wait for medium moves
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
@@ -176,14 +176,14 @@ class OptionsScalpStrategy(BaseStrategy):
     SL_PREMIUM_LOSS_PCT = 15.0  # Hard stop at -15% premium drop (was -20%)
     # Tiered trailing: start wide, tighten as profit grows
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
-        (5.0, 8.0),   # +5% peak → 8% trail distance
-        (10.0, 5.0),  # +10% peak → 5% trail
-        (15.0, 3.0),  # +15% peak → 3% trail
-        (30.0, 2.0),  # +30% peak → 2% trail
-        (50.0, 1.5),  # +50% peak → 1.5% trail
+        (5.0, 3.0),    # +5% peak → 3% trail  (locks ~+2%)
+        (10.0, 4.0),   # +10% peak → 4% trail
+        (15.0, 3.0),   # +15% peak → 3% trail
+        (30.0, 2.0),   # +30% peak → 2% trail
+        (50.0, 1.5),   # +50% peak → 1.5% trail
     ]
     PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
-    PULLBACK_ACTIVATE_PCT = 8.0  # Pullback only fires after +8% peak
+    PULLBACK_ACTIVATE_PCT = 5.0  # Pullback only fires after +5% peak (GPFC #44)
     # Confirmation before firing OPT_PEAK_TRAIL — absorbs single-tick illiquidity
     # wicks in the option premium. Require the pullback condition to persist for
     # N consecutive ticks (ticks are ~10s apart).
@@ -313,6 +313,11 @@ class OptionsScalpStrategy(BaseStrategy):
         self._position_verify_tick: int = 0
         self._position_verify_failures: int = 0
         self._MAX_VERIFY_FAILURES = 10
+        # GPFC #44: require 2 consecutive empty positions API responses before
+        # treating a position as "gone". A single empty response was closing
+        # real winners due to transient Delta positions-API staleness.
+        self._position_verify_empty_count: int = 0
+        self._MIN_VERIFY_EMPTY_CYCLES = 2
 
         # Dynamic ratchet floor (computed from peak + energy)
         self._opt_ratchet_floor: float = 0.0
@@ -386,8 +391,6 @@ class OptionsScalpStrategy(BaseStrategy):
         )  # (time, option premium)
         self._MOMENTUM_CHECK_WINDOW_SEC = 60.0  # Look back 60s for momentum
         self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
-        self._ENERGY_DEAD_THRESHOLD_PCT = 0.05
-        self._low_energy_ticks: int = 0
         # MB cooldown — last loss timestamp per direction (call/put).
         # Populated on exit when an MB trade closes red, consulted in
         # _check_momentum_burst_entry to suppress revenge trades.
@@ -642,8 +645,11 @@ class OptionsScalpStrategy(BaseStrategy):
             current_bid = self._last_known_premium
             try:
                 ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-                current_bid = (
-                    ticker.get("bid") or ticker.get("last") or self.entry_premium
+                mtm = self._long_option_mtm_premium(ticker)
+                current_bid = mtm or (
+                    float(ticker.get("bid") or 0)
+                    or float(ticker.get("last") or 0)
+                    or self.entry_premium
                 )
             except Exception:
                 pass
@@ -727,6 +733,50 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
     # OPTIONS P&L HELPER
     # ==================================================================
+
+    @staticmethod
+    def _long_option_mtm_premium(ticker: dict[str, Any]) -> float:
+        """Mark-to-mid fair value for a long options leg (position monitoring).
+
+        Entries fill at/near the **ask**; the old path used only ``last``|``bid``
+        for live P&L and peak. For typical spreads, both often sit **below** the
+        entry fill for the whole hold, so ``highest_premium`` never beat
+        ``entry_premium`` and *peak P&L% stayed 0% for hours* even when the
+        contract had moved favorably. Prefer mark / index, then mid (bid+ask),
+        then last, then bid.
+        """
+        if not ticker:
+            return 0.0
+        for key in (
+            "mark",
+            "indexPrice",
+            "index",
+            "settle",
+            "settlementPrice",
+        ):
+            v = ticker.get(key)
+            if v is not None and float(v) > 0:
+                return float(v)
+        info = ticker.get("info")
+        if isinstance(info, dict):
+            for key in (
+                "mark_price",
+                "mark",
+                "index_price",
+                "mp",
+                "settlement_price",
+            ):
+                v = info.get(key)
+                if v is not None and float(v) > 0:
+                    return float(v)
+        bid = float(ticker.get("bid") or 0)
+        ask = float(ticker.get("ask") or 0)
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        last = float(ticker.get("last") or 0)
+        if last > 0:
+            return last
+        return max(bid, 0.0)
 
     def _calc_options_pnl(
         self,
@@ -1100,7 +1150,11 @@ class OptionsScalpStrategy(BaseStrategy):
                     ticker = await self.options_exchange.fetch_ticker(
                         self.option_symbol
                     )
-                    current_prem = ticker.get("last") or ticker.get("bid") or None
+                    current_prem = self._long_option_mtm_premium(ticker) or None
+                    if not current_prem:
+                        current_prem = float(
+                            ticker.get("last") or ticker.get("bid") or 0
+                        ) or None
                     if current_prem and entry_prem and entry_prem > 0:
                         pnl_pct = (current_prem - entry_prem) / entry_prem * 100
                         pnl_usd = (current_prem - entry_prem) * self._contracts
@@ -1751,7 +1805,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # 3 ticks (default ≥5%) so micro-jitters in illiquid options don't qualify.
         min_rise = self.MOMENTUM_BURST_MIN_ASK_RISE_PCT / 100.0
         if (
-            momentum_60s >= 0.001
+            momentum_60s >= self.MOMENTUM_BURST_THRESHOLD_PCT
             and self._prev2_call_ask > 0
             and self._prev_call_ask > 0
             and self._atm_call_ask > self._prev_call_ask > self._prev2_call_ask
@@ -1762,7 +1816,7 @@ class OptionsScalpStrategy(BaseStrategy):
             entry_ask = self._atm_call_ask
             prev_ask = self._prev_call_ask
         elif (
-            momentum_60s <= -0.001
+            momentum_60s <= -self.MOMENTUM_BURST_THRESHOLD_PCT
             and self._prev2_put_ask > 0
             and self._prev_put_ask > 0
             and self._atm_put_ask > self._prev_put_ask > self._prev2_put_ask
@@ -1848,7 +1902,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_contracts = opt_contracts
         self._breakout_confidence = 0.7
         self._breakout_bb_width = self._bb_width_pct
-        self._pending_entry_setup = "MOMENTUM_BURST_ENTRY"
+        self._pending_entry_setup = "MOMENTUM_BURST"
         return await self._execute_breakout_entry(entry_ask)
 
     async def _handle_squeeze_breakout(
@@ -1894,7 +1948,14 @@ class OptionsScalpStrategy(BaseStrategy):
         velocity_pct = await self._calculate_breakout_velocity()
         self._breakout_velocity_pct = velocity_pct
 
-        if velocity_pct < 0.10: self.logger.info("[%s] LOW_VELOCITY_SKIP: velocity=%.2f%% < 0.10%% — skipping", self.pair, velocity_pct * 100); return
+        # GPFC #44: skip entry entirely if velocity below BREAKOUT_CONFIRM_MIN_VELOCITY
+        # floor — do NOT fall through to the 60s weak-move window (fake breakouts).
+        if velocity_pct * 100 < self.BREAKOUT_CONFIRM_MIN_VELOCITY:
+            self.logger.info(
+                "[%s] LOW_VELOCITY_SKIP: velocity=%.3f%% < %.2f%% — skipping",
+                self.pair, velocity_pct * 100, self.BREAKOUT_CONFIRM_MIN_VELOCITY,
+            )
+            return
 
         # GPFC #21: Set dynamic confirmation window based on velocity
         confirmation_secs = self._get_confirmation_secs(velocity_pct)
@@ -2241,7 +2302,7 @@ class OptionsScalpStrategy(BaseStrategy):
         setup_type = "BB_SQUEEZE" if (
             self._is_squeeze_entry
             or self._pending_entry_setup in ("BB_SQUEEZE_BREAKOUT", "BB_SQUEEZE")
-        ) else "MOMENTUM_BURST_ENTRY"
+        ) else "MOMENTUM_BURST"
 
         # Recalculate contracts at confirmed ask price
         opt_contracts = self._calculate_option_contracts(
@@ -2448,7 +2509,6 @@ class OptionsScalpStrategy(BaseStrategy):
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
-        self._low_energy_ticks = 0
         self.entry_premium = fill_price
         self._contracts = opt_contracts
         self.option_symbol = selected_symbol
@@ -2489,7 +2549,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 fill_price,
             )
             self._entry_context = (
-                f"MOMENTUM_BURST_ENTRY dir={self._breakout_direction} mom={self._underlying_momentum_pct():+.2f}% "
+                f"MOMENTUM_BURST dir={self._breakout_direction} mom={self._underlying_momentum_pct():+.2f}% "
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
             )
 
@@ -2789,60 +2849,6 @@ class OptionsScalpStrategy(BaseStrategy):
         now = time.monotonic()
         self._momentum_price_history.append((now, current_price))
 
-    def _should_ride_momentum(self, current_pnl_pct: float) -> bool:
-        """Check if we should skip exit and ride the momentum.
-
-        Returns True if:
-        - Current P&L is positive (we're winning)
-        - Underlying price momentum in position direction > 0.1% over last 60s
-
-        Hard override: Always exit if peak > +50% AND pullback > 60% of peak gain
-        """
-        if current_pnl_pct <= 0:
-            return False  # Only ride momentum when profitable
-
-        if len(self._momentum_price_history) < 2:
-            return False  # Not enough data
-
-        now = time.monotonic()
-        cutoff = now - self._MOMENTUM_CHECK_WINDOW_SEC
-
-        # Find price from ~60s ago
-        old_price = None
-        for t, price in reversed(self._momentum_price_history):
-            if t <= cutoff:
-                old_price = price
-                break
-
-        if old_price is None or old_price <= 0:
-            return False
-
-        # Get current price
-        current_price = self._momentum_price_history[-1][1]
-
-        # Calculate momentum %
-        momentum_pct = (current_price - old_price) / old_price * 100
-
-        # Check if momentum is in our favor
-        # For CALL: positive momentum is good
-        # For PUT: negative momentum is good
-        if self.option_side == "call":
-            momentum_favorable = momentum_pct >= self._MOMENTUM_THRESHOLD_PCT
-        elif self.option_side == "put":
-            momentum_favorable = momentum_pct <= -self._MOMENTUM_THRESHOLD_PCT
-        else:
-            return False
-
-        if momentum_favorable:
-            self.logger.debug(
-                "[%s] RIDE_MOMENTUM check: momentum=%+.2f%% threshold=%.2f%% — RIDING",
-                self.option_symbol,
-                momentum_pct,
-                self._MOMENTUM_THRESHOLD_PCT,
-            )
-
-        return momentum_favorable
-
     def _underlying_momentum_pct(self) -> float:
         """Underlying momentum % over the configured momentum window."""
         if len(self._momentum_price_history) < 2:
@@ -2965,19 +2971,6 @@ class OptionsScalpStrategy(BaseStrategy):
         premium_range_pct = ((max(prices) - min(prices)) / first_price * 100) if prices else 0.0
         return (premium_momentum_pct, premium_range_pct)
 
-    def _has_expansion_signals(self, current_pnl_pct: float) -> bool:
-        """True when momentum/volatility suggests we should keep riding."""
-        underlying_mom = self._underlying_momentum_pct()
-        premium_mom, premium_range = self._premium_regime()
-        underlying_favorable = (
-            underlying_mom >= self._MOMENTUM_THRESHOLD_PCT
-            if self.option_side == "call"
-            else underlying_mom <= -self._MOMENTUM_THRESHOLD_PCT
-        )
-        premium_expanding = premium_mom >= 0.8 or premium_range >= self.STALE_PREMIUM_RANGE_MIN_PCT
-        recoverable_drawdown = current_pnl_pct > -15.0
-        return recoverable_drawdown and (underlying_favorable or premium_expanding)
-
     def _opt_trail_distance_pct(self, peak_pnl_pct: float) -> float:
         """Trail width %% below peak premium; tightens with the highest qualifying tier."""
         dist = self.OPT_TRAIL_TIERS[0][1]
@@ -3005,7 +2998,11 @@ class OptionsScalpStrategy(BaseStrategy):
         # Fetch current premium
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-            current_premium = ticker.get("last") or ticker.get("bid") or 0
+            current_premium = self._long_option_mtm_premium(ticker)
+            if current_premium <= 0:
+                current_premium = float(
+                    ticker.get("last") or ticker.get("bid") or 0
+                )
             self._consecutive_ticker_failures = 0
             if current_premium > 0:
                 self._last_known_premium = current_premium
@@ -3081,10 +3078,6 @@ class OptionsScalpStrategy(BaseStrategy):
         energy_score = self._compute_energy(current_premium)
         dynamic_floor = self._compute_dynamic_floor(peak_pnl_pct, energy_score)
         self._opt_ratchet_floor = dynamic_floor
-        if energy_score < self._ENERGY_DEAD_THRESHOLD_PCT:
-            self._low_energy_ticks += 1
-        else:
-            self._low_energy_ticks = 0
         hold_seconds = (
             time.monotonic() - self.entry_time if self.entry_time else 0.0
         )
@@ -3181,51 +3174,40 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._peak_trail_pending_ticks += 1
                 gave_back = self.highest_premium - current_premium
 
-                # Spot-momentum veto: if the underlying is still actively pushing
-                # in our direction, the premium dip is likely illiquidity noise.
-                # Defer the trail exit — the move is not actually over.
-                spot_mom_20s = self._underlying_short_momentum_pct(20.0)
-                our_dir = 1.0 if self.option_side == "call" else -1.0
-                spot_still_favoring = (
-                    spot_mom_20s * our_dir
-                ) >= self.PULLBACK_SPOT_VETO_PCT
-
+                # GPFC #44: Removed spot_still_favoring veto. Premium decays on IV
+                # crush while spot still grinds; waiting for spot to agree killed
+                # winners. Premium is truth — if it pulls back past the floor for
+                # PULLBACK_CONFIRMATION_TICKS, exit.
                 confirmed = (
                     self._peak_trail_pending_ticks >= self.PULLBACK_CONFIRMATION_TICKS
                 )
 
-                if confirmed and not spot_still_favoring:
+                if confirmed:
                     self.logger.info(
                         "[%s] OPT_PEAK_TRAIL — gave back %.1f%% of peak gain "
-                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d spot20s=%+.3f%%)",
+                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d)",
                         self.option_symbol,
                         100.0 * gave_back / peak_gain,
                         self.highest_premium,
                         current_premium,
                         premium_change_pct,
                         self._peak_trail_pending_ticks,
-                        spot_mom_20s,
                     )
                     self._peak_trail_pending_ticks = 0
                     return await self._do_option_exit(
                         current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
                     )
                 else:
-                    reason = (
-                        "spot_still_pushing"
-                        if spot_still_favoring
-                        else f"awaiting_tick_{self._peak_trail_pending_ticks}/{self.PULLBACK_CONFIRMATION_TICKS}"
-                    )
                     self.logger.info(
-                        "[%s] OPT_PEAK_TRAIL_DEFER (%s) — gave back %.1f%% "
-                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% spot20s=%+.3f%%)",
+                        "[%s] OPT_PEAK_TRAIL_DEFER (awaiting_tick_%d/%d) — gave back %.1f%% "
+                        "(peak=$%.4f now=$%.4f pnl=%+.1f%%)",
                         self.option_symbol,
-                        reason,
+                        self._peak_trail_pending_ticks,
+                        self.PULLBACK_CONFIRMATION_TICKS,
                         100.0 * gave_back / peak_gain,
                         self.highest_premium,
                         current_premium,
                         premium_change_pct,
-                        spot_mom_20s,
                     )
             else:
                 # Pullback condition not met this tick — reset confirmation.
@@ -3285,7 +3267,7 @@ class OptionsScalpStrategy(BaseStrategy):
             if not setup_type and self._is_squeeze_entry:
                 setup_type = "BB_SQUEEZE"
             if not setup_type:
-                setup_type = "MOMENTUM_BURST_ENTRY"
+                setup_type = "MOMENTUM_BURST"
 
             self.logger.info(
                 "[%s] Setup type determined: %s", self.option_symbol, setup_type
@@ -3719,7 +3701,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 symbol = pos.get("symbol", "")
                 contracts = float(pos.get("contracts", 0) or 0)
                 if symbol == self.option_symbol and contracts != 0:
+                    # Found — reset empty streak counter
+                    self._position_verify_empty_count = 0
                     return None
+
+            # GPFC #44: require MIN_VERIFY_EMPTY_CYCLES consecutive empty
+            # responses before logging POSITION_GONE. If in doubt, do NOT
+            # close — let the normal exit logic handle it.
+            self._position_verify_empty_count += 1
 
             now_utc = datetime.now(timezone.utc)
             if self.expiry_dt:
@@ -3733,9 +3722,21 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     return []
 
+            if self._position_verify_empty_count < self._MIN_VERIFY_EMPTY_CYCLES:
+                self.logger.warning(
+                    "[%s] POSITION VERIFY: not found (%d/%d consecutive) — "
+                    "waiting for confirmation, not closing",
+                    self.option_symbol,
+                    self._position_verify_empty_count,
+                    self._MIN_VERIFY_EMPTY_CYCLES,
+                )
+                return []
+
             self.logger.warning(
-                "[%s] POSITION VERIFY: not found on exchange — log only (verify does not close)",
+                "[%s] POSITION VERIFY: not found on exchange (%d consecutive cycles) — "
+                "log only (verify does not close)",
                 self.option_symbol,
+                self._position_verify_empty_count,
             )
             return []
 
@@ -3971,6 +3972,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.expiry_dt = None
         self._consecutive_ticker_failures = 0
         self._position_verify_failures = 0
+        self._position_verify_empty_count = 0
         self._last_state_write = 0.0
         self._is_squeeze_entry = False
         self._squeeze_breakout_time = None
@@ -4117,7 +4119,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True
             OptionsScalpStrategy._global_position_asset = self._base_asset
-            self._low_energy_ticks = 0
             self.option_side = pending_side
             self.option_symbol = signal.pair
             self.entry_premium = fill_price
@@ -4236,7 +4237,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self.in_position = False
             OptionsScalpStrategy._global_in_position = False
             OptionsScalpStrategy._global_position_asset = None
-            self._low_energy_ticks = 0
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0
@@ -4270,7 +4270,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self.in_position = False
             OptionsScalpStrategy._global_in_position = False
             OptionsScalpStrategy._global_position_asset = None
-            self._low_energy_ticks = 0
             self.option_side = None
             self.option_symbol = None
             self.entry_premium = 0.0
