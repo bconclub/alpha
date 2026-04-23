@@ -218,6 +218,11 @@ class OptionsScalpStrategy(BaseStrategy):
     EXPIRY_GUARD_HOURS = 2.0  # if expiry < 2h AND pnl < +10% → exit
     EXPIRY_GUARD_MIN_MIN = 30  # if expiry < 30 min → always exit regardless of P&L
 
+    # ── GPFC #45: Hard max-hold safety net (all positions, winner or loser) ──
+    # Options decay. Sitting on any position for hours is never the plan.
+    # Fires as a final backstop if every other exit gate misses.
+    OPT_HARD_MAX_HOLD_HOURS = 4.0
+
     # ── Dynamic ratchet floor (GPFC #26 — tiered by peak_pnl_pct in _compute_dynamic_floor)
 
     # ── Position limits ───────────────────────────────────────────
@@ -685,6 +690,25 @@ class OptionsScalpStrategy(BaseStrategy):
         if not self._db or not self._db.is_connected:
             return
         if not self.in_position or not self.option_symbol:
+            return
+
+        # GPFC #45: PREMIUM_SANITY guard — a real option premium physically
+        # cannot move 500% in a single tick. Values like that are a corrupt
+        # ticker (underlying spot leaking in, stale cache, etc.). Refuse to
+        # write anything for this tick so the DB keeps its last good state.
+        if (
+            self.entry_premium > 0
+            and current_premium > 0
+            and abs(current_premium - self.entry_premium) / self.entry_premium > 5.0
+        ):
+            self.logger.warning(
+                "[%s] PREMIUM_SANITY_REJECT current=$%.4f entry=$%.4f "
+                "(move=%.0f%%) — not writing",
+                self.option_symbol,
+                current_premium,
+                self.entry_premium,
+                abs(current_premium - self.entry_premium) / self.entry_premium * 100,
+            )
             return
 
         try:
@@ -3003,6 +3027,32 @@ class OptionsScalpStrategy(BaseStrategy):
                 current_premium = float(
                     ticker.get("last") or ticker.get("bid") or 0
                 )
+            # GPFC #45: TICKER_ABSURD — Delta occasionally returns values
+            # orders of magnitude off (e.g. spot price leaking into the
+            # option last field). Reject them and fall back to the last
+            # known good premium so downstream P&L math stays sane.
+            if current_premium > 0:
+                absurd = False
+                if (
+                    self.entry_premium > 0
+                    and current_premium > self.entry_premium * 10.0
+                ):
+                    absurd = True
+                spot_px = float(self._last_spot_price or 0)
+                if spot_px > 0 and current_premium > spot_px * 0.5:
+                    absurd = True
+                if absurd:
+                    self.logger.warning(
+                        "[%s] TICKER_ABSURD symbol=%s last=$%.4f spot=$%.2f "
+                        "entry=$%.4f — falling back to last_known=$%.4f",
+                        self.pair,
+                        self.option_symbol,
+                        current_premium,
+                        spot_px,
+                        self.entry_premium,
+                        self._last_known_premium,
+                    )
+                    current_premium = self._last_known_premium or 0.0
             self._consecutive_ticker_failures = 0
             if current_premium > 0:
                 self._last_known_premium = current_premium
@@ -3104,6 +3154,24 @@ class OptionsScalpStrategy(BaseStrategy):
                 energy_score,
                 dynamic_floor,
                 expiry_tag,
+            )
+
+        # ── 0. GPFC #45: OPT_MAX_HOLD safety net ─────────────────────────
+        # Options decay. No position should sit open beyond this cap — if
+        # every other exit gate has missed, cut at market.
+        if (
+            self.entry_time is not None
+            and hold_seconds >= self.OPT_HARD_MAX_HOLD_HOURS * 3600
+        ):
+            self.logger.warning(
+                "[%s] OPT_MAX_HOLD — held %.1fh >= cap %.1fh, premium=%+.1f%% — force exit",
+                self.option_symbol,
+                hold_seconds / 3600,
+                self.OPT_HARD_MAX_HOLD_HOURS,
+                premium_change_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_MAX_HOLD"
             )
 
         # ── 1. Hard fallback stop loss ──

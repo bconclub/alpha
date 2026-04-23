@@ -153,22 +153,49 @@ class Database:
                     trade_id, float(ep), data,
                 )
                 return
-        # ── SANITY: warn on bogus P&L values ──
-        if "pnl" in data:
-            _pnl = float(data.get("pnl", 0) or 0)
-            _pnl_pct = float(data.get("pnl_pct", 0) or 0)
-            if abs(_pnl) > 10_000:
-                logger.error(
-                    "PNL_SANITY: update_trade id=%s pnl=$%.2f exceeds $10k — "
-                    "likely a calculation bug. data=%s",
-                    trade_id, _pnl, data,
-                )
-            if abs(_pnl_pct) > 1000:
-                logger.error(
-                    "PNL_SANITY: update_trade id=%s pnl_pct=%.1f%% exceeds 1000%% — "
-                    "likely a calculation bug. data=%s",
-                    trade_id, _pnl_pct, data,
-                )
+        # ── GPFC #45: reject corrupt current_price/pnl writes at DB boundary ──
+        # PNL_SANITY: if pnl_pct exceeds 1000%, the source premium is corrupt
+        # (e.g. ticker returned spot price instead of option bid/ask). Strip
+        # the polluted numeric fields so the row keeps its last good values.
+        # The DB row still gets status/state/timestamp updates.
+        _pnl = float(data.get("pnl", 0) or 0)
+        _pnl_pct = float(data.get("pnl_pct", 0) or 0)
+        if abs(_pnl) > 10_000:
+            logger.error(
+                "PNL_SANITY: update_trade id=%s pnl=$%.2f exceeds $10k — "
+                "likely a calculation bug. data=%s",
+                trade_id, _pnl, data,
+            )
+        corrupt = abs(_pnl_pct) > 1000 or abs(_pnl) > 10_000
+        if corrupt and data.get("status") != "closed":
+            logger.error(
+                "PNL_SANITY: update_trade id=%s pnl=$%.2f pnl_pct=%.1f%% — "
+                "rejecting corrupt price/pnl fields (live tick), keeping metadata only",
+                trade_id, _pnl, _pnl_pct,
+            )
+            # Strip every field derived from the corrupt premium
+            for bad in ("current_price", "current_pnl", "pnl", "pnl_pct"):
+                data.pop(bad, None)
+            # peak_pnl: only keep if not a 1.5x ratchet over what DB already has
+            if "peak_pnl" in data:
+                try:
+                    existing_peak = await self._fetch_existing_peak_pnl(trade_id)
+                except Exception:
+                    existing_peak = None
+                try:
+                    new_peak = float(data.get("peak_pnl") or 0)
+                except (TypeError, ValueError):
+                    new_peak = 0.0
+                if existing_peak is not None and abs(new_peak) > abs(existing_peak) * 1.5 + 5.0:
+                    logger.error(
+                        "PNL_SANITY: suppressing peak_pnl ratchet for id=%s "
+                        "new=%.1f%% existing=%.1f%% (cap=existing*1.5+5)",
+                        trade_id, new_peak, existing_peak,
+                    )
+                    data.pop("peak_pnl", None)
+            # If nothing meaningful left to write, skip entirely
+            if not any(k for k in data if k not in ("updated_at",)):
+                return
         loop = asyncio.get_running_loop()
 
         def _do_update() -> Any:
@@ -193,6 +220,34 @@ class Database:
             return result
 
         await loop.run_in_executor(None, _do_update)
+
+    async def _fetch_existing_peak_pnl(self, trade_id: int) -> float | None:
+        """Return the current peak_pnl for a trade row, or None if unavailable.
+
+        Used by update_trade's PNL_SANITY path to cap runaway peak ratcheting
+        when a corrupt ticker tick tries to write a fake peak.
+        """
+        if not self.is_connected:
+            return None
+        loop = asyncio.get_running_loop()
+
+        def _query() -> Any:
+            return (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("peak_pnl")
+                .eq("id", trade_id)
+                .limit(1)
+                .execute()
+            )
+
+        try:
+            result = await loop.run_in_executor(None, _query)
+            rows = result.data or []
+            if not rows:
+                return None
+            return float(rows[0].get("peak_pnl") or 0)
+        except Exception:
+            return None
 
     async def get_open_trade(
         self, pair: str, exchange: str, strategy: str | None = None,

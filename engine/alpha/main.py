@@ -2488,6 +2488,14 @@ class AlphaBot:
         except Exception:
             logger.exception("Missing options sync failed")
 
+        # ── GPFC #45: OPTIONS SELF-HEAL ─────────────────────────────────
+        # Close ghost / expired rows, force-refresh corrupt current_price
+        # from a fresh ticker so dashboards stop showing hallucinated values.
+        try:
+            await self._reconcile_option_open_rows()
+        except Exception:
+            logger.exception("Options self-heal reconcile failed")
+
     async def _orphan_sweep_futures(self, all_open: list[dict]) -> None:
         """DISABLED — futures sweep removed (Delta options only mode)."""
         return  # noqa: no futures orphan sweep
@@ -2603,6 +2611,210 @@ class AlphaBot:
                 "options positions are restored on restart, not auto-closed",
                 trade_id, pair, exchange,
             )
+
+    async def _reconcile_option_open_rows(self) -> None:
+        """GPFC #45: self-heal open option rows against Delta truth.
+
+        For every DB row where status='open' AND strategy='options_scalp':
+          - Ghost (no Delta position)               -> RECONCILE_ORPHAN_CLOSED
+          - Expired (hours_to_expiry < 0)           -> RECONCILE_EXPIRED
+          - Corrupt current_price (>99% off real)   -> force-refresh from ticker
+
+        Runs on every 60 s reconcile cycle. Makes the DB self-correcting so
+        the dashboard never carries hallucinated / stale premium values.
+        """
+        if not self.delta_options or not self.db.is_connected:
+            return
+
+        try:
+            all_open = await self.db.get_all_open_trades()
+        except Exception:
+            logger.exception("SELF_HEAL: failed to fetch open trades")
+            return
+
+        option_rows = [
+            t for t in all_open
+            if t.get("strategy") == "options_scalp"
+            and t.get("exchange") == "delta"
+            and is_option_symbol(t.get("pair", ""))
+        ]
+        if not option_rows:
+            return
+
+        # Fetch Delta truth once per cycle.
+        try:
+            positions = await self.delta_options.fetch_positions()
+        except Exception:
+            logger.debug("SELF_HEAL: fetch_positions failed; skipping this cycle")
+            return
+
+        live_contracts: dict[str, float] = {}
+        for pos in positions:
+            contracts = float(pos.get("contracts", 0) or 0)
+            if abs(contracts) < 1e-8:
+                continue
+            sym = pos.get("symbol", "")
+            if sym:
+                live_contracts[sym] = contracts
+
+        now_utc = _dt.datetime.now(_dt.timezone.utc)
+
+        for trade in option_rows:
+            trade_id = trade.get("id")
+            pair = trade.get("pair", "")
+            if not trade_id or not pair:
+                continue
+
+            # ── 1. EXPIRED check (close regardless of positions-API state) ──
+            expiry_str = ""
+            md = trade.get("metadata") or {}
+            if isinstance(md, dict):
+                expiry_str = str(md.get("expiry") or "")
+            if not expiry_str:
+                # fall back to parsing symbol YYMMDD segment if present
+                expiry_str = ""
+            expired = False
+            if expiry_str:
+                try:
+                    expiry_dt = _dt.datetime.fromisoformat(
+                        expiry_str.replace("Z", "+00:00"),
+                    )
+                    if expiry_dt.tzinfo is None:
+                        expiry_dt = expiry_dt.replace(tzinfo=_dt.timezone.utc)
+                    expired = now_utc >= expiry_dt
+                except Exception:
+                    expired = False
+            if expired:
+                entry_price = float(trade.get("entry_price", 0) or 0)
+                contracts = int(
+                    trade.get("contracts") or trade.get("amount") or 0,
+                )
+                try:
+                    await self.db.update_trade(trade_id, {
+                        "status": "closed",
+                        "closed_at": iso_now(),
+                        "exit_price": 0.0 if entry_price > 0 else 0.0,
+                        "pnl": -entry_price * contracts * 0.01,
+                        "pnl_pct": -100.0,
+                        "exit_reason": "RECONCILE_EXPIRED",
+                        "reason": "expired_on_reconcile",
+                        "position_state": None,
+                    })
+                    logger.warning(
+                        "SELF_HEAL: id=%s %s expired — closed as RECONCILE_EXPIRED",
+                        trade_id, pair,
+                    )
+                except Exception:
+                    logger.exception("SELF_HEAL: failed to close expired id=%s", trade_id)
+                continue
+
+            # ── 2. GHOST check (no matching Delta position) ─────────────
+            if pair not in live_contracts:
+                # Grace: don't close trades opened < 5 min ago (fill race)
+                opened_str = trade.get("opened_at", "")
+                if opened_str:
+                    try:
+                        if isinstance(opened_str, str):
+                            op = opened_str.replace("Z", "+00:00")
+                            opened_dt = _dt.datetime.fromisoformat(op)
+                        else:
+                            opened_dt = opened_str
+                        age = (now_utc - opened_dt).total_seconds()
+                        if age < 300:
+                            continue
+                    except Exception:
+                        pass
+
+                # Try to fetch a current bid so we close with real price.
+                exit_price = 0.0
+                try:
+                    ticker = await self.delta_options.fetch_ticker(pair)
+                    exit_price = float(
+                        ticker.get("bid")
+                        or ticker.get("last")
+                        or ticker.get("ask")
+                        or 0,
+                    )
+                except Exception:
+                    exit_price = 0.0
+
+                entry_price = float(trade.get("entry_price", 0) or 0)
+                contracts = int(trade.get("contracts") or trade.get("amount") or 0)
+                try:
+                    pnl = 0.0
+                    pnl_pct = 0.0
+                    if entry_price > 0 and contracts > 0 and exit_price > 0:
+                        # ETH = 0.01, BTC = 0.001
+                        mult = 0.001 if "BTC" in pair else 0.01
+                        pnl = (exit_price - entry_price) * contracts * mult
+                        pnl_pct = (exit_price - entry_price) / entry_price * 100
+                    await self.db.update_trade(trade_id, {
+                        "status": "closed",
+                        "closed_at": iso_now(),
+                        "exit_price": exit_price,
+                        "pnl": round(pnl, 8),
+                        "pnl_pct": round(pnl_pct, 4),
+                        "exit_reason": "RECONCILE_ORPHAN_CLOSED",
+                        "reason": "no_delta_position_on_reconcile",
+                        "position_state": None,
+                    })
+                    logger.warning(
+                        "SELF_HEAL: id=%s %s has no Delta position — "
+                        "RECONCILE_ORPHAN_CLOSED at $%.4f (pnl=$%.4f)",
+                        trade_id, pair, exit_price, pnl,
+                    )
+                except Exception:
+                    logger.exception(
+                        "SELF_HEAL: failed to close ghost id=%s", trade_id,
+                    )
+                continue
+
+            # ── 3. Corrupt current_price check ──────────────────────────
+            stored_cp = float(trade.get("current_price", 0) or 0)
+            if stored_cp <= 0:
+                continue
+            try:
+                ticker = await self.delta_options.fetch_ticker(pair)
+                real_premium = float(
+                    ticker.get("mark")
+                    or ticker.get("last")
+                    or ticker.get("bid")
+                    or 0,
+                )
+            except Exception:
+                continue
+            if real_premium <= 0:
+                continue
+            deviation = abs(stored_cp - real_premium) / real_premium
+            if deviation > 0.99:
+                entry_price = float(trade.get("entry_price", 0) or 0)
+                fresh_pnl_pct = (
+                    (real_premium - entry_price) / entry_price * 100
+                    if entry_price > 0 else 0.0
+                )
+                fresh_peak = max(
+                    float(trade.get("peak_pnl") or 0),
+                    fresh_pnl_pct,
+                )
+                # Don't let a previously-corrupted peak stay sky-high.
+                if abs(float(trade.get("peak_pnl") or 0)) > 500:
+                    fresh_peak = fresh_pnl_pct
+                try:
+                    await self.db.update_trade(trade_id, {
+                        "current_price": round(real_premium, 8),
+                        "current_pnl": round(fresh_pnl_pct, 4),
+                        "peak_pnl": round(fresh_peak, 4),
+                    })
+                    logger.warning(
+                        "SELF_HEAL: id=%s %s corrupt current_price "
+                        "$%.4f → $%.4f (real), pnl=%.1f%% peak=%.1f%%",
+                        trade_id, pair, stored_cp, real_premium,
+                        fresh_pnl_pct, fresh_peak,
+                    )
+                except Exception:
+                    logger.exception(
+                        "SELF_HEAL: failed to refresh corrupt id=%s", trade_id,
+                    )
 
     async def _close_orphan_options_on_startup(self) -> None:
         """Close stale options trades in DB that have no matching exchange position.
