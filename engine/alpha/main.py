@@ -2726,12 +2726,12 @@ class AlphaBot:
                         pass
 
                 # Try to fetch a current bid so we close with real price.
+                # GPFC #47: never use `last` — Delta leaks spot there.
                 exit_price = 0.0
                 try:
                     ticker = await self.delta_options.fetch_ticker(pair)
                     exit_price = float(
                         ticker.get("bid")
-                        or ticker.get("last")
                         or ticker.get("ask")
                         or 0,
                     )
@@ -2770,17 +2770,29 @@ class AlphaBot:
                 continue
 
             # ── 3. Corrupt current_price check ──────────────────────────
+            # GPFC #47: prefer info.mark_price; never trust `last` on Delta.
             stored_cp = float(trade.get("current_price", 0) or 0)
             if stored_cp <= 0:
                 continue
             try:
                 ticker = await self.delta_options.fetch_ticker(pair)
-                real_premium = float(
-                    ticker.get("mark")
-                    or ticker.get("last")
-                    or ticker.get("bid")
-                    or 0,
-                )
+                info = ticker.get("info") or {}
+                real_premium = 0.0
+                mark = info.get("mark_price") if isinstance(info, dict) else None
+                if mark is not None:
+                    try:
+                        real_premium = float(mark)
+                    except (TypeError, ValueError):
+                        real_premium = 0.0
+                if real_premium <= 0:
+                    bid = float(ticker.get("bid") or 0)
+                    ask = float(ticker.get("ask") or 0)
+                    if bid > 0 and ask > 0:
+                        real_premium = (bid + ask) / 2.0
+                    elif bid > 0:
+                        real_premium = bid
+                    elif ask > 0:
+                        real_premium = ask
             except Exception:
                 continue
             if real_premium <= 0:

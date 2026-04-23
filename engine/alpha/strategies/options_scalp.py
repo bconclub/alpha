@@ -301,6 +301,9 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_known_premium: float = 0.0
         self._last_spot_price: float = 0.0
         self._entry_context: str = ""
+        # GPFC #47: monotonic timestamp of last non-absurd ticker fetch — used
+        # to gate the last_known fallback so one bad tick doesn't freeze writes.
+        self._last_good_ticker_at: float = 0.0
 
         # Cooldowns
         self._position_gone_cooldown_until: float = 0.0
@@ -650,10 +653,10 @@ class OptionsScalpStrategy(BaseStrategy):
             current_bid = self._last_known_premium
             try:
                 ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-                mtm = self._long_option_mtm_premium(ticker)
-                current_bid = mtm or (
-                    float(ticker.get("bid") or 0)
-                    or float(ticker.get("last") or 0)
+                # GPFC #47: mark-first, never `last`.
+                current_bid = (
+                    self._get_option_premium(ticker)
+                    or float(ticker.get("bid") or 0)
                     or self.entry_premium
                 )
             except Exception:
@@ -759,28 +762,16 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
 
     @staticmethod
-    def _long_option_mtm_premium(ticker: dict[str, Any]) -> float:
-        """Mark-to-mid fair value for a long options leg (position monitoring).
+    def _get_option_premium(ticker: dict[str, Any]) -> float:
+        """GPFC #47: return best-estimate premium for an option.
 
-        Entries fill at/near the **ask**; the old path used only ``last``|``bid``
-        for live P&L and peak. For typical spreads, both often sit **below** the
-        entry fill for the whole hold, so ``highest_premium`` never beat
-        ``entry_premium`` and *peak P&L% stayed 0% for hours* even when the
-        contract had moved favorably. Prefer mark / index, then mid (bid+ask),
-        then last, then bid.
+        Delta's ``last`` field is unreliable for thinly-traded options — it
+        returns ``None`` or occasionally the underlying spot price when no
+        recent trade exists. ``info.mark_price`` is always correct. Prefer:
+        mark_price → mid(bid, ask) → bid → ask. Never use ``last``.
         """
         if not ticker:
             return 0.0
-        for key in (
-            "mark",
-            "indexPrice",
-            "index",
-            "settle",
-            "settlementPrice",
-        ):
-            v = ticker.get(key)
-            if v is not None and float(v) > 0:
-                return float(v)
         info = ticker.get("info")
         if isinstance(info, dict):
             for key in (
@@ -791,16 +782,47 @@ class OptionsScalpStrategy(BaseStrategy):
                 "settlement_price",
             ):
                 v = info.get(key)
-                if v is not None and float(v) > 0:
-                    return float(v)
+                if v is not None:
+                    try:
+                        fv = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if fv > 0:
+                        return fv
+        for key in (
+            "mark",
+            "indexPrice",
+            "index",
+            "settle",
+            "settlementPrice",
+        ):
+            v = ticker.get(key)
+            if v is not None:
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if fv > 0:
+                    return fv
         bid = float(ticker.get("bid") or 0)
         ask = float(ticker.get("ask") or 0)
         if bid > 0 and ask > 0:
             return (bid + ask) / 2.0
-        last = float(ticker.get("last") or 0)
-        if last > 0:
-            return last
-        return max(bid, 0.0)
+        if bid > 0:
+            return bid
+        if ask > 0:
+            return ask
+        return 0.0
+
+    @staticmethod
+    def _long_option_mtm_premium(ticker: dict[str, Any]) -> float:
+        """Back-compat wrapper — delegates to GPFC #47 ``_get_option_premium``.
+
+        Previously had a ``last``-price fallback which was the root cause of
+        spot-price leakage into option P&L (#3070, #3071). Now routes through
+        the safe helper so every caller gets mark-first pricing.
+        """
+        return OptionsScalpStrategy._get_option_premium(ticker)
 
     def _calc_options_pnl(
         self,
@@ -1047,7 +1069,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     if call_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(call_sym)
-                        raw_call_ask = float(t.get("ask") or t.get("last") or 0)
+                        # GPFC #47: never fall back to `last` — Delta leaks spot there.
+                        raw_call_ask = float(t.get("ask") or t.get("bid") or 0)
                         call_premium = raw_call_ask or None
                 except Exception:
                     pass
@@ -1060,7 +1083,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     if put_sym and self.options_exchange:
                         t = await self.options_exchange.fetch_ticker(put_sym)
-                        raw_put_ask = float(t.get("ask") or t.get("last") or 0)
+                        # GPFC #47: never fall back to `last` — Delta leaks spot there.
+                        raw_put_ask = float(t.get("ask") or t.get("bid") or 0)
                         put_premium = raw_put_ask or None
                 except Exception:
                     pass
@@ -1174,11 +1198,10 @@ class OptionsScalpStrategy(BaseStrategy):
                     ticker = await self.options_exchange.fetch_ticker(
                         self.option_symbol
                     )
-                    current_prem = self._long_option_mtm_premium(ticker) or None
+                    # GPFC #47: mark-first, never `last`.
+                    current_prem = self._get_option_premium(ticker) or None
                     if not current_prem:
-                        current_prem = float(
-                            ticker.get("last") or ticker.get("bid") or 0
-                        ) or None
+                        current_prem = float(ticker.get("bid") or 0) or None
                     if current_prem and entry_prem and entry_prem > 0:
                         pnl_pct = (current_prem - entry_prem) / entry_prem * 100
                         pnl_usd = (current_prem - entry_prem) * self._contracts
@@ -2016,7 +2039,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 continue
             try:
                 ticker = await self.options_exchange.fetch_ticker(sym)
-                ask = float(ticker.get("ask") or ticker.get("last") or 0)
+                # GPFC #47: never fall back to `last` — Delta leaks spot there.
+                ask = float(ticker.get("ask") or ticker.get("bid") or 0)
             except Exception as e:
                 self.logger.debug(
                     "[%s] Ticker fetch failed for %s: %s", self.pair, sym, e
@@ -2137,7 +2161,8 @@ class OptionsScalpStrategy(BaseStrategy):
         current_ask = 0.0
         try:
             ticker = await self.options_exchange.fetch_ticker(self._breakout_symbol)
-            current_ask = float(ticker.get("ask") or ticker.get("last") or 0)
+            # GPFC #47: never fall back to `last` — Delta leaks spot there.
+            current_ask = float(ticker.get("ask") or ticker.get("bid") or 0)
         except Exception as e:
             self.logger.debug("[%s] Confirmation tick fetch failed: %s", self.pair, e)
             remaining = max(0, self._breakout_confirmation_secs - int(elapsed))
@@ -3022,37 +3047,45 @@ class OptionsScalpStrategy(BaseStrategy):
         # Fetch current premium
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-            current_premium = self._long_option_mtm_premium(ticker)
-            if current_premium <= 0:
-                current_premium = float(
-                    ticker.get("last") or ticker.get("bid") or 0
-                )
-            # GPFC #45: TICKER_ABSURD — Delta occasionally returns values
-            # orders of magnitude off (e.g. spot price leaking into the
-            # option last field). Reject them and fall back to the last
-            # known good premium so downstream P&L math stays sane.
+            # GPFC #47: mark-first pricing; Delta's ``last`` is unreliable.
+            current_premium = self._get_option_premium(ticker)
+            # GPFC #45 + #47: TICKER_ABSURD — even with mark_price we can get
+            # garbage (e.g. stale mark during expiry roll). Only trip on truly
+            # impossible values; otherwise skip the tick rather than freezing
+            # writes with a stale last_known forever.
             if current_premium > 0:
                 absurd = False
                 if (
                     self.entry_premium > 0
-                    and current_premium > self.entry_premium * 10.0
+                    and current_premium > self.entry_premium * 50.0
                 ):
                     absurd = True
                 spot_px = float(self._last_spot_price or 0)
                 if spot_px > 0 and current_premium > spot_px * 0.5:
                     absurd = True
                 if absurd:
+                    now_mono = time.monotonic()
+                    last_good = getattr(self, "_last_good_ticker_at", 0.0)
+                    stale_for = now_mono - last_good if last_good > 0 else 0
                     self.logger.warning(
-                        "[%s] TICKER_ABSURD symbol=%s last=$%.4f spot=$%.2f "
-                        "entry=$%.4f — falling back to last_known=$%.4f",
+                        "[%s] TICKER_ABSURD symbol=%s premium=$%.4f spot=$%.2f "
+                        "entry=$%.4f stale_for=%.0fs — skipping tick",
                         self.pair,
                         self.option_symbol,
                         current_premium,
                         spot_px,
                         self.entry_premium,
-                        self._last_known_premium,
+                        stale_for,
                     )
-                    current_premium = self._last_known_premium or 0.0
+                    # Only fall back to last_known after 30s of consecutive
+                    # absurd ticks so exit gates (max-hold, expiry) can still
+                    # fire on a stale position. Otherwise skip the tick.
+                    if last_good > 0 and stale_for > 30 and self._last_known_premium > 0:
+                        current_premium = self._last_known_premium
+                    else:
+                        return []
+                else:
+                    self._last_good_ticker_at = time.monotonic()
             self._consecutive_ticker_failures = 0
             if current_premium > 0:
                 self._last_known_premium = current_premium
@@ -3664,7 +3697,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
-            live_bid = ticker.get("bid") or ticker.get("last") or 0
+            # GPFC #47: for SELL placement we need a real executable price.
+            # Bid is what we can actually sell at. Never use `last` (Delta
+            # leaks spot) and never use mark (theoretical, not executable).
+            live_bid = float(ticker.get("bid") or 0)
             if live_bid > 0:
                 self.logger.info(
                     "[%s] LIVE_BID: $%.4f (cached=$%.4f, diff=%+.2f%%)",
