@@ -145,7 +145,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # velocity >= 0.3% → 20s, 0.15-0.3% → 40s, < 0.15% → 60s
     BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3  # >= 0.3% → 20s confirmation
     BREAKOUT_CONFIRM_MED_VELOCITY = 0.15  # 0.15-0.3% → 40s confirmation
-    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.08  # minimum 8bps velocity required to even consider entry
+    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.12  # GPFC #49: 12bps floor (was 8bps) — weeds out fake breakouts
     BREAKOUT_CONFIRM_SEC_HIGH = 20  # Fast for strong moves
     BREAKOUT_CONFIRM_SEC_MED = 40  # Medium wait for medium moves
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
@@ -222,6 +222,12 @@ class OptionsScalpStrategy(BaseStrategy):
     # Options decay. Sitting on any position for hours is never the plan.
     # Fires as a final backstop if every other exit gate misses.
     OPT_HARD_MAX_HOLD_HOURS = 4.0
+
+    # ── GPFC #49: Post-loss cooldown ──
+    # Two consecutive HARD_SL losses means the regime is unfavorable — hold off
+    # new entries for 10 min so we stop bleeding on the same fakeout pattern.
+    HARD_SL_LOSS_STREAK_THRESHOLD = 2
+    HARD_SL_LOSS_COOLDOWN_SEC = 10 * 60  # 10 minutes
 
     # ── Dynamic ratchet floor (GPFC #26 — tiered by peak_pnl_pct in _compute_dynamic_floor)
 
@@ -403,6 +409,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Populated on exit when an MB trade closes red, consulted in
         # _check_momentum_burst_entry to suppress revenge trades.
         self._last_mb_loss_time: dict[str, float] = {"call": 0.0, "put": 0.0}
+        # GPFC #49: HARD_SL streak tracking for post-loss cooldown
+        self._hard_sl_streak: int = 0
+        self._hard_sl_cooldown_until: float = 0.0
         self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
         # GPFC #26: premium ~30s ago for ratchet velocity (fast reversal vs slow drift)
         self._last_30s_premium: float | None = None
@@ -1694,6 +1703,23 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return []
 
+        # GPFC #49: HARD_SL streak cooldown — block new entries after 2
+        # consecutive HARD_SL losses to stop bleeding on the same bad regime.
+        if time.monotonic() < self._hard_sl_cooldown_until:
+            remaining = self._hard_sl_cooldown_until - time.monotonic()
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] HARD_SL_COOLDOWN active — %.0fs remaining "
+                    "(streak=%d)",
+                    self.pair,
+                    remaining,
+                    self._hard_sl_streak,
+                )
+            self._cached_bot_state = (
+                f"blocked:hard_sl_cooldown:{int(remaining)}s"
+            )
+            return []
+
         # STEP 3: If breakout detected, run confirmation window check
         if self._breakout_pending:
             return await self._check_breakout_confirmation()
@@ -2263,31 +2289,38 @@ class OptionsScalpStrategy(BaseStrategy):
             self._breakout_state = "DETECTED"
             return []
 
-        # GPFC #24: Window complete — check if premium is rising or stable (not falling)
-        # Premium must be >= start premium (within 2% tolerance) to confirm
-        CHANGE_TOLERANCE_PCT = 2.0  # Allow up to 2% drop (considered "stable")
+        # GPFC #49: Window complete — require premium *rising*, not just stable.
+        # Previously accepted anything >= -2% ("stable"); too many HARD_SL trades
+        # (#3072, #3083) filled after flat confirmation windows then collapsed.
+        # Now demand premium > entry_ask (strict rise) — if the breakout is real,
+        # the option will have ticked up during the 20-60s window.
+        MIN_RISE_PCT = 0.5   # must be at least +0.5% above entry ask
+        CHANGE_TOLERANCE_PCT = 2.0  # legacy fakeout threshold (kept for log parity)
         change_pct = (
             (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
         )
 
-        if change_pct < -CHANGE_TOLERANCE_PCT:
-            # Premium fell during confirmation — fakeout
+        if change_pct < MIN_RISE_PCT:
+            # GPFC #49: flat-or-falling confirmation → fake breakout
             self.logger.info(
-                "[%s] BREAKOUT_FAKEOUT: premium falling during confirmation $%.4f → $%.4f (%.1f%%) — abort",
+                "[%s] BREAKOUT_FAKEOUT: premium did not rise during confirmation "
+                "$%.4f → $%.4f (%.2f%% < required +%.1f%%) — abort",
                 self.pair,
                 self._breakout_entry_ask,
                 current_ask,
                 change_pct,
+                MIN_RISE_PCT,
             )
             await self._log_activity(
                 "options_skip",
-                f"{self.pair} — BREAKOUT_FAKEOUT: premium falling during confirmation "
-                f"${self._breakout_entry_ask:.4f} → ${current_ask:.4f} ({change_pct:.1f}%) — abort",
+                f"{self.pair} — BREAKOUT_FAKEOUT_FLAT: premium {change_pct:+.2f}% "
+                f"(needed ≥ +{MIN_RISE_PCT}%) — aborting",
                 {
                     "direction": self._breakout_direction,
                     "ask": current_ask,
                     "entry_ask": self._breakout_entry_ask,
                     "change_pct": round(change_pct, 2),
+                    "min_rise_pct": MIN_RISE_PCT,
                 },
             )
             self._last_action = "BREAKOUT_FAKEOUT"
@@ -2296,7 +2329,10 @@ class OptionsScalpStrategy(BaseStrategy):
             self._reset_breakout_state()
             return []
 
-        # Premium rising or stable — CONFIRMED, enter now
+        # GPFC #49: legacy "-CHANGE_TOLERANCE_PCT" branch removed — the new
+        # MIN_RISE_PCT guard above already catches any non-rising premium.
+
+        # Premium rising — CONFIRMED, enter now
         self._direction_bias = self._breakout_option_type.upper()
         self._breakout_state = "CONFIRMED"
         self.logger.info(
@@ -3279,20 +3315,27 @@ class OptionsScalpStrategy(BaseStrategy):
                 # crush while spot still grinds; waiting for spot to agree killed
                 # winners. Premium is truth — if it pulls back past the floor for
                 # PULLBACK_CONFIRMATION_TICKS, exit.
-                confirmed = (
-                    self._peak_trail_pending_ticks >= self.PULLBACK_CONFIRMATION_TICKS
+                # GPFC #49: at peaks >= 10%, protect locked-in profit with a
+                # 1-tick trigger. #3078 peaked +12.61% and gave back to -2.33%
+                # because the 2-tick wait let the premium gap through the floor.
+                required_ticks = (
+                    1
+                    if peak_pnl_pct >= 10.0
+                    else self.PULLBACK_CONFIRMATION_TICKS
                 )
+                confirmed = self._peak_trail_pending_ticks >= required_ticks
 
                 if confirmed:
                     self.logger.info(
                         "[%s] OPT_PEAK_TRAIL — gave back %.1f%% of peak gain "
-                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d)",
+                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d/%d)",
                         self.option_symbol,
                         100.0 * gave_back / peak_gain,
                         self.highest_premium,
                         current_premium,
                         premium_change_pct,
                         self._peak_trail_pending_ticks,
+                        required_ticks,
                     )
                     self._peak_trail_pending_ticks = 0
                     return await self._do_option_exit(
@@ -3304,7 +3347,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         "(peak=$%.4f now=$%.4f pnl=%+.1f%%)",
                         self.option_symbol,
                         self._peak_trail_pending_ticks,
-                        self.PULLBACK_CONFIRMATION_TICKS,
+                        required_ticks,
                         100.0 * gave_back / peak_gain,
                         self.highest_premium,
                         current_premium,
@@ -3795,6 +3838,31 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.option_symbol or self.pair, self.option_side, pnl_pct,
                 self.option_side, self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC,
             )
+
+        # GPFC #49: HARD_SL streak tracking. Two consecutive HARD_SL losses arms
+        # a 10-minute entry cooldown (regime-unfavorable). Any non-HARD_SL exit
+        # (TRAIL, PEAK_TRAIL, winner, expiry, etc.) resets the streak.
+        if exit_type == "OPT_HARD_SL":
+            self._hard_sl_streak += 1
+            if self._hard_sl_streak >= self.HARD_SL_LOSS_STREAK_THRESHOLD:
+                self._hard_sl_cooldown_until = (
+                    time.monotonic() + self.HARD_SL_LOSS_COOLDOWN_SEC
+                )
+                self.logger.warning(
+                    "[%s] HARD_SL_STREAK_COOLDOWN: %d consecutive HARD_SL — "
+                    "entry suppressed for %.0fs",
+                    self.pair,
+                    self._hard_sl_streak,
+                    self.HARD_SL_LOSS_COOLDOWN_SEC,
+                )
+        else:
+            if self._hard_sl_streak > 0:
+                self.logger.info(
+                    "[%s] HARD_SL_STREAK_RESET: was=%d (reset by %s)",
+                    self.pair, self._hard_sl_streak, exit_type,
+                )
+            self._hard_sl_streak = 0
+            self._hard_sl_cooldown_until = 0.0
 
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
