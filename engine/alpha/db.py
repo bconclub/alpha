@@ -323,6 +323,34 @@ class Database:
             logger.error("Failed to close duplicate open trades for %s/%s: %s", pair, exchange, e)
             return 0
 
+    async def delete_trade(self, trade_id: int) -> bool:
+        """GPFC #48: hard-delete a trade row.
+
+        Used by _merge_duplicate_open_options so phantom rows that were
+        inserted by the signal/on_fill race disappear entirely instead of
+        polluting trade counts / win-rate / dashboards as ``DUPLICATE_MERGED``.
+        Returns True on success, False on failure or when disconnected.
+        """
+        if not self.is_connected:
+            return False
+        loop = asyncio.get_running_loop()
+
+        def _do_delete() -> Any:
+            return (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .delete()
+                .eq("id", trade_id)
+                .execute()
+            )
+
+        try:
+            await loop.run_in_executor(None, _do_delete)
+            logger.warning("delete_trade: id=%s removed", trade_id)
+            return True
+        except Exception as e:
+            logger.error("delete_trade id=%s failed: %s", trade_id, e)
+            return False
+
     async def cancel_trade(self, order_id: str, reason: str = "cancelled") -> None:
         """Mark a trade as cancelled."""
         if not self.is_connected:

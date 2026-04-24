@@ -2873,7 +2873,8 @@ class AlphaBot:
         fill (pre-GPFC #48 races), we end up with 2+ open rows per symbol.
         At startup, keep the row with the most populated state (highest
         ``current_price`` / ``peak_pnl`` / non-zero ``entry_price``) and
-        close the rest as ``DUPLICATE_MERGED`` with ``pnl = 0``.
+        **hard-delete** the rest so they don't pollute trade counts, win
+        rate, or dashboard history.
         """
         if not self.db.is_connected:
             return
@@ -2921,7 +2922,7 @@ class AlphaBot:
             drops = rows_sorted[1:]
             logger.warning(
                 "MERGE_DUPES: %s has %d open rows — keeping id=%s, "
-                "closing %d as DUPLICATE_MERGED",
+                "hard-deleting %d duplicate row(s)",
                 pair, len(rows), keeper.get("id"), len(drops),
             )
             for drop in drops:
@@ -2929,20 +2930,15 @@ class AlphaBot:
                 if not drop_id:
                     continue
                 try:
-                    await self.db.update_trade(drop_id, {
-                        "status": "closed",
-                        "closed_at": iso_now(),
-                        "pnl": 0,
-                        "pnl_pct": 0,
-                        "gross_pnl": 0,
-                        "net_pnl": 0,
-                        "exit_reason": "DUPLICATE_MERGED",
-                        "reason": f"duplicate_of_id_{keeper.get('id')}",
-                        "position_state": None,
-                    })
+                    ok = await self.db.delete_trade(drop_id)
+                    if not ok:
+                        logger.warning(
+                            "MERGE_DUPES: delete_trade returned False for id=%s",
+                            drop_id,
+                        )
                 except Exception:
                     logger.exception(
-                        "MERGE_DUPES: failed to close duplicate id=%s", drop_id,
+                        "MERGE_DUPES: failed to delete duplicate id=%s", drop_id,
                     )
 
     async def _close_orphan_options_on_startup(self) -> None:
