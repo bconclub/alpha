@@ -63,6 +63,13 @@ class AlphaBot:
         # either adopted or disappears from Delta.
         self._orphan_defer_alerted: set[str] = set()
 
+        # ─── GPFC #48: per-symbol empty-cycle counter ───
+        # Only close an option row as RECONCILE_ORPHAN_CLOSED after Delta has
+        # returned *no* position for that symbol across 2 consecutive
+        # reconcile cycles — one empty read is often a transient positions-API
+        # glitch. Keys: option symbol. Value: consecutive empty cycles.
+        self._option_symbol_empty_cycles: dict[str, int] = {}
+
         # Strategy enable/disable flags (toggled from dashboard)
         self._options_enabled: bool = True
 
@@ -276,6 +283,9 @@ class AlphaBot:
             await opts.start()
         if self._options_strategies:
             logger.info("Options overlay started on %d pairs", len(self._options_strategies))
+
+        # ── GPFC #48: merge duplicate open rows for the same symbol ──
+        await self._merge_duplicate_open_options()
 
         # ── ORPHAN_STARTUP: close stale DB trades with no exchange position ──
         await self._close_orphan_options_on_startup()
@@ -2657,6 +2667,22 @@ class AlphaBot:
             if sym:
                 live_contracts[sym] = contracts
 
+        # GPFC #48: increment/clear per-symbol empty-cycle counters BEFORE
+        # looping the DB rows, so every row for the same symbol sees the same
+        # counter this pass. Counter resets the moment Delta reports a position.
+        symbols_this_pass = {t.get("pair", "") for t in option_rows if t.get("pair")}
+        for sym in symbols_this_pass:
+            if sym in live_contracts:
+                self._option_symbol_empty_cycles.pop(sym, None)
+            else:
+                self._option_symbol_empty_cycles[sym] = (
+                    self._option_symbol_empty_cycles.get(sym, 0) + 1
+                )
+        # Drop counters for symbols no longer in any open DB row.
+        for stale_sym in list(self._option_symbol_empty_cycles.keys()):
+            if stale_sym not in symbols_this_pass:
+                self._option_symbol_empty_cycles.pop(stale_sym, None)
+
         now_utc = _dt.datetime.now(_dt.timezone.utc)
 
         for trade in option_rows:
@@ -2724,6 +2750,18 @@ class AlphaBot:
                             continue
                     except Exception:
                         pass
+
+                # GPFC #48: require 2 consecutive empty cycles before closing.
+                # One empty positions-API read is often a transient glitch;
+                # real orphans stay empty across successive reconciles.
+                empty_cycles = self._option_symbol_empty_cycles.get(pair, 0)
+                if empty_cycles < 2:
+                    logger.warning(
+                        "SELF_HEAL: id=%s %s not in Delta positions "
+                        "(cycle %d/2) — waiting for confirmation, NOT closing",
+                        trade_id, pair, empty_cycles,
+                    )
+                    continue
 
                 # Try to fetch a current bid so we close with real price.
                 # GPFC #47: never use `last` — Delta leaks spot there.
@@ -2826,6 +2864,85 @@ class AlphaBot:
                 except Exception:
                     logger.exception(
                         "SELF_HEAL: failed to refresh corrupt id=%s", trade_id,
+                    )
+
+    async def _merge_duplicate_open_options(self) -> None:
+        """GPFC #48: collapse duplicate open option rows for the same symbol.
+
+        When the signal path and on_fill callback both insert for the same
+        fill (pre-GPFC #48 races), we end up with 2+ open rows per symbol.
+        At startup, keep the row with the most populated state (highest
+        ``current_price`` / ``peak_pnl`` / non-zero ``entry_price``) and
+        close the rest as ``DUPLICATE_MERGED`` with ``pnl = 0``.
+        """
+        if not self.db.is_connected:
+            return
+        try:
+            all_open = await self.db.get_all_open_trades()
+        except Exception:
+            logger.exception("MERGE_DUPES: failed to fetch open trades")
+            return
+
+        opts_open = [
+            t for t in all_open
+            if t.get("strategy") == "options_scalp"
+            and t.get("exchange") == "delta"
+        ]
+        if len(opts_open) < 2:
+            return
+
+        by_pair: dict[str, list[dict]] = {}
+        for t in opts_open:
+            pair = t.get("pair") or ""
+            if not pair:
+                continue
+            by_pair.setdefault(pair, []).append(t)
+
+        def _richness(row: dict) -> tuple[float, float, float, float, int]:
+            # Rank by data completeness, newer row wins on ties.
+            entry_p = float(row.get("entry_price") or 0)
+            cur_p = float(row.get("current_price") or 0)
+            peak = float(row.get("peak_pnl") or 0)
+            fee = float(row.get("entry_fee") or 0)
+            rid = int(row.get("id") or 0)
+            return (
+                1.0 if entry_p > 0 else 0.0,
+                1.0 if cur_p > 0 else 0.0,
+                abs(peak),
+                fee,
+                rid,
+            )
+
+        for pair, rows in by_pair.items():
+            if len(rows) < 2:
+                continue
+            rows_sorted = sorted(rows, key=_richness, reverse=True)
+            keeper = rows_sorted[0]
+            drops = rows_sorted[1:]
+            logger.warning(
+                "MERGE_DUPES: %s has %d open rows — keeping id=%s, "
+                "closing %d as DUPLICATE_MERGED",
+                pair, len(rows), keeper.get("id"), len(drops),
+            )
+            for drop in drops:
+                drop_id = drop.get("id")
+                if not drop_id:
+                    continue
+                try:
+                    await self.db.update_trade(drop_id, {
+                        "status": "closed",
+                        "closed_at": iso_now(),
+                        "pnl": 0,
+                        "pnl_pct": 0,
+                        "gross_pnl": 0,
+                        "net_pnl": 0,
+                        "exit_reason": "DUPLICATE_MERGED",
+                        "reason": f"duplicate_of_id_{keeper.get('id')}",
+                        "position_state": None,
+                    })
+                except Exception:
+                    logger.exception(
+                        "MERGE_DUPES: failed to close duplicate id=%s", drop_id,
                     )
 
     async def _close_orphan_options_on_startup(self) -> None:

@@ -32,6 +32,7 @@ def _extract_exit_reason(reason: str) -> str:
                "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET", "OPT_STALE",
                "OPT_REVERSAL", "OPT_PEAK_TRAIL", "OPT_MAX_HOLD",
                "RECONCILE_ORPHAN_CLOSED", "RECONCILE_EXPIRED",
+               "DUPLICATE_MERGED", "DUPLICATE_ROW_FIXED",
                "EXPIRED_WORTHLESS",
                "EXPIRY_GUARD", "SQUEEZE_RELEASE",
                "HARD_TP", "PROFIT_LOCK", "DEAD_MOMENTUM", "DECAY_EMERGENCY",

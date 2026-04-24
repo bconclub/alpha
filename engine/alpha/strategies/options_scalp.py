@@ -3355,6 +3355,79 @@ class OptionsScalpStrategy(BaseStrategy):
     ):
         """Insert a new options trade row into the DB."""
         try:
+            # GPFC #48: DUPLICATE_INSERT_BLOCKED — the signal path and the
+            # on_fill callback can race and insert two rows for the same fill
+            # (#3082/#3083). Before inserting, check if an open row already
+            # exists for this symbol+strategy within the last 60 s; if so,
+            # adopt it and skip the insert.
+            order_id_val = str(order.get("id") or "").strip() if order else ""
+            try:
+                if self._db and self._db.is_connected:
+                    existing = await self._db.get_open_trade(
+                        pair=option_symbol,
+                        exchange="delta",
+                        strategy="options_scalp",
+                    )
+                    if existing and existing.get("id"):
+                        existing_id = existing["id"]
+                        existing_oid = str(existing.get("order_id") or "").strip()
+                        existing_fid = str(existing.get("exchange_fill_id") or "").strip()
+                        # Same Delta order ID → definitely the same fill.
+                        same_fill = bool(
+                            order_id_val
+                            and (
+                                existing_oid == order_id_val
+                                or existing_fid == order_id_val
+                            )
+                        )
+                        recent = False
+                        opened_str = existing.get("opened_at", "")
+                        if opened_str:
+                            try:
+                                opened_dt = datetime.fromisoformat(
+                                    str(opened_str).replace("Z", "+00:00")
+                                )
+                                if opened_dt.tzinfo is None:
+                                    opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+                                recent = (
+                                    datetime.now(timezone.utc) - opened_dt
+                                ).total_seconds() <= 60
+                            except Exception:
+                                recent = False
+                        if same_fill or recent:
+                            self.logger.warning(
+                                "[%s] DUPLICATE_INSERT_BLOCKED symbol=%s "
+                                "existing_id=%s order_id=%s (same_fill=%s recent=%s) — "
+                                "adopting existing row, skipping insert",
+                                self.option_symbol or option_symbol,
+                                option_symbol,
+                                existing_id,
+                                order_id_val or "<none>",
+                                same_fill,
+                                recent,
+                            )
+                            self._db_trade_id = existing_id
+                            # Backfill order_id onto the existing row if missing.
+                            if order_id_val and not existing_oid:
+                                try:
+                                    self.executor.db.client.table("trades").update(
+                                        {
+                                            "order_id": order_id_val,
+                                            "exchange_fill_id": order_id_val,
+                                        }
+                                    ).eq("id", existing_id).execute()
+                                except Exception:
+                                    self.logger.debug(
+                                        "[%s] failed to backfill order_id on adopted row",
+                                        option_symbol,
+                                    )
+                            return
+            except Exception:
+                self.logger.debug(
+                    "[%s] dedupe check failed — proceeding with insert",
+                    option_symbol,
+                )
+
             mult = self.CONTRACT_MULTIPLIER.get(base_asset, 0.01)
             spot = self._last_spot_price or 0
             entry_fee = round(contracts * mult * spot * 0.000118, 8) if spot else 0
@@ -3397,8 +3470,36 @@ class OptionsScalpStrategy(BaseStrategy):
                 "signals_fired": signals_fired,
                 "opened_at": datetime.utcnow().isoformat() + "Z",
             }
+            # GPFC #48: persist Delta order id so the unique index on
+            # (exchange, exchange_fill_id) can enforce dedup at the DB level.
+            if order_id_val:
+                row["order_id"] = order_id_val
+                row["exchange_fill_id"] = order_id_val
 
-            result = self.executor.db.client.table("trades").insert(row).execute()
+            try:
+                result = self.executor.db.client.table("trades").insert(row).execute()
+            except Exception as insert_err:
+                # Unique-index violation from (exchange, exchange_fill_id) —
+                # another coroutine beat us to the insert. Adopt that row.
+                err_str = str(insert_err).lower()
+                if "unique" in err_str or "duplicate" in err_str or "23505" in err_str:
+                    self.logger.warning(
+                        "[%s] DUPLICATE_INSERT_BLOCKED via DB unique constraint "
+                        "order_id=%s — looking up winner",
+                        option_symbol, order_id_val,
+                    )
+                    try:
+                        existing = await self._db.get_open_trade(
+                            pair=option_symbol,
+                            exchange="delta",
+                            strategy="options_scalp",
+                        )
+                        if existing and existing.get("id"):
+                            self._db_trade_id = existing["id"]
+                            return
+                    except Exception:
+                        pass
+                raise
             if result.data:
                 self._db_trade_id = result.data[0].get("id")
             else:
