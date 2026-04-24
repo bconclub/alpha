@@ -151,7 +151,7 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
     BREAKOUT_FAKEOUT_DROP_PCT = 5.0  # Premium drop > 5% from breakout = fakeout
     BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
-    MOMENTUM_BURST_THRESHOLD_PCT = 0.15  # 60s spot momentum required for burst entry
+    MOMENTUM_BURST_THRESHOLD_PCT = 0.20  # GPFC #52: 0.15 -> 0.20 (skip 0.15-0.20 noise band)
     MOMENTUM_BURST_MIN_ASK_RISE_PCT = 5.0  # cumulative % rise across the 3 ATM ticks
     # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
     # than fading. This rejects "tail-end" moves (premium already priced the move)
@@ -228,6 +228,20 @@ class OptionsScalpStrategy(BaseStrategy):
     # new entries for 10 min so we stop bleeding on the same fakeout pattern.
     HARD_SL_LOSS_STREAK_THRESHOLD = 2
     HARD_SL_LOSS_COOLDOWN_SEC = 10 * 60  # 10 minutes
+
+    # ── GPFC #52: breathing-room + behavior-based exits ──
+    # First 90s after fill: only OPT_HARD_SL fires. Lets trades develop without
+    # early-kill logic cutting them on normal post-fill noise.
+    PHASE_BREATHING_SEC = 90
+    # OPT_BLEEDING_FAST: fires when a real peak (>= 3%) gives back at a rate
+    # of >= 3 points per minute for >= 15s since peak. Catches premium decay
+    # that trail tolerance would otherwise eat.
+    BLEEDING_MIN_PEAK_PCT = 3.0
+    BLEEDING_MIN_AGE_SINCE_PEAK = 15.0   # seconds
+    BLEEDING_GIVEBACK_PER_MIN = 3.0      # % per minute
+    # OPT_UNDERLYING_REVERSED: fires AFTER peak >= 2% if spot has moved the
+    # wrong way (relative to our option side) since entry.
+    UNDERLYING_REVERSED_MIN_PEAK_PCT = 2.0
 
     # ── Dynamic ratchet floor (GPFC #26 — tiered by peak_pnl_pct in _compute_dynamic_floor)
 
@@ -412,6 +426,14 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #49: HARD_SL streak tracking for post-loss cooldown
         self._hard_sl_streak: int = 0
         self._hard_sl_cooldown_until: float = 0.0
+        # GPFC #52: per-trade tracking for dynamic exits.
+        # ``_spot_at_entry`` is the underlying spot at fill; ``_entry_underlying_move``
+        # is the 60s underlying %-move at fill (sets dynamic thesis tolerance);
+        # ``_peak_timestamp`` is the monotonic timestamp of the highest premium.
+        self._spot_at_entry: float = 0.0
+        self._entry_underlying_move: float = 0.0
+        self._peak_timestamp: float = 0.0
+        self._prev_highest_premium: float = 0.0
         self._position_premium_history: deque[tuple[float, float]] = deque(maxlen=180)
         # GPFC #26: premium ~30s ago for ratchet velocity (fast reversal vs slow drift)
         self._last_30s_premium: float | None = None
@@ -559,6 +581,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.option_symbol = trade_pair
                 self.entry_premium = trade.get("entry_price", 0)
                 self.entry_time = time.monotonic()
+                # GPFC #52: we can't recover pre-restart spot_at_entry; best-effort
+                # use current spot so direction comparisons don't run wild.
+                self._spot_at_entry = float(self._last_spot_price or 0)
+                self._entry_underlying_move = 0.15  # conservative mid-band tolerance
+                self._peak_timestamp = self.entry_time
+                self._prev_highest_premium = self.entry_premium
                 self._position_opened_at = (
                     trade.get("opened_at") or datetime.now(timezone.utc).isoformat()
                 )
@@ -1836,6 +1864,23 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
+        # GPFC #52: continuation check — the recent 20s half of the move must
+        # go the SAME direction as the net 60s. Catches the "move already over"
+        # case where spot popped then reversed in the last 20s.
+        mom_20s = self._underlying_short_momentum_pct(20.0)
+        same_dir = (
+            (momentum_60s > 0 and mom_20s > 0)
+            or (momentum_60s < 0 and mom_20s < 0)
+        )
+        if not same_dir:
+            if self._tick_count % 10 == 0:
+                self.logger.info(
+                    "[%s] MB_DIRECTION_MISMATCH: 60s=%+.2f%% vs 20s=%+.2f%% "
+                    "— recent half reversed, skipping",
+                    self.pair, momentum_60s, mom_20s,
+                )
+            return []
+
         # Cooldown after recent same-side MB loss (avoid revenge trading)
         provisional_side = "call" if momentum_60s >= 0 else "put"
         last_loss = self._last_mb_loss_time.get(provisional_side, 0.0)
@@ -1952,6 +1997,27 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
         if entry_ask < self.MIN_PREMIUM_USD:
             return []
+
+        # GPFC #52: Spread guard — wide spread = guaranteed instant -4% entry.
+        # Fetch live bid/ask and skip if (ask - bid) / ask > 8%.
+        try:
+            spread_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+            _bid = float(spread_ticker.get("bid") or 0)
+            _ask = float(spread_ticker.get("ask") or 0)
+            if _ask > 0 and _bid > 0:
+                spread_pct = (_ask - _bid) / _ask
+                if spread_pct > 0.08:
+                    if self._tick_count % 5 == 0:
+                        self.logger.info(
+                            "[%s] MB_SPREAD_WIDE: %s bid=$%.4f ask=$%.4f "
+                            "spread=%.1f%% > 8%% — skipping",
+                            self.pair, selected_symbol, _bid, _ask,
+                            spread_pct * 100,
+                        )
+                    return []
+        except Exception:
+            # If spread fetch fails, fall through; don't penalize for tick glitches.
+            pass
 
         opt_contracts = self._calculate_option_contracts(entry_ask, confidence=0.7)
         if opt_contracts < 1:
@@ -2603,6 +2669,11 @@ class OptionsScalpStrategy(BaseStrategy):
         self.highest_premium = fill_price
         self._last_known_premium = fill_price
         self.strike_price = selected_strike
+        # GPFC #52: snapshot spot + 60s momentum at fill (drives dynamic exits).
+        self._spot_at_entry = float(self._last_spot_price or 0)
+        self._entry_underlying_move = abs(self._underlying_momentum_pct())
+        self._peak_timestamp = self.entry_time
+        self._prev_highest_premium = fill_price
         self._is_squeeze_entry = setup_type == "BB_SQUEEZE"
         self._squeeze_breakout_time = (
             time.monotonic() if self._is_squeeze_entry else None
@@ -3056,13 +3127,64 @@ class OptionsScalpStrategy(BaseStrategy):
         premium_range_pct = ((max(prices) - min(prices)) / first_price * 100) if prices else 0.0
         return (premium_momentum_pct, premium_range_pct)
 
-    def _opt_trail_distance_pct(self, peak_pnl_pct: float) -> float:
-        """Trail width %% below peak premium; tightens with the highest qualifying tier."""
+    def _opt_trail_distance_pct(
+        self, peak_pnl_pct: float, age_sec: float = 0.0,
+    ) -> float:
+        """Trail width %% below peak premium; tightens with tier + trade age.
+
+        GPFC #52: after 10 min of holding the trail starts tightening linearly
+        down to 0.6x of tier width at 40 min — options decay accelerates and
+        fat trail distances that were fine fresh become theta bleed later.
+        """
         dist = self.OPT_TRAIL_TIERS[0][1]
         for activation, trail_pct in self.OPT_TRAIL_TIERS:
             if peak_pnl_pct >= activation:
                 dist = trail_pct
+        if age_sec > 600:
+            # 1.0x at 10min linearly to 0.6x at 40min.
+            age_factor = 1.0 - min(0.4, (age_sec - 600) / 1800 * 0.4)
+            dist = dist * age_factor
         return dist
+
+    def _dynamic_sl_pct(self, age_sec: float, peak_pnl_pct: float) -> float:
+        """GPFC #52: trajectory-aware stop-loss %.
+
+        Fresh trade (< 2 min): full -30% cushion.
+        Trade that never peaked by 2 min: tighten to -20% (proved nothing).
+        Trade that did peak >= 1%: keep -30% (trail handles real exits).
+        """
+        if age_sec < 120:
+            return -30.0
+        if peak_pnl_pct < 1.0:
+            return -20.0
+        return -30.0
+
+    def _thesis_broken(
+        self,
+        age_sec: float,
+        peak_pnl_pct: float,
+        underlying_move_since_entry: float,
+    ) -> tuple[bool, str]:
+        """GPFC #52: is the reason we took this trade clearly broken?
+
+        Returns (broken, reason_tag). ``underlying_move_since_entry`` is
+        signed — positive = moving our direction, negative = against us.
+        """
+        if age_sec < self.PHASE_BREATHING_SEC:
+            return False, ""
+        # Tolerance scales with how strong the entry signal was (60s mom at fill).
+        # A 0.25% entry can absorb a 0.25% reversal; a 0.15% entry can't.
+        tolerance = max(0.10, self._entry_underlying_move or 0.15)
+        if underlying_move_since_entry < -tolerance:
+            return True, "underlying_reversed_beyond_tolerance"
+        # No peak after 3 min AND underlying is dead flat: nothing is happening.
+        if (
+            age_sec > 180
+            and peak_pnl_pct <= 1.0
+            and abs(underlying_move_since_entry) < 0.05
+        ):
+            return True, "flat_underlying_no_peak"
+        return False, ""
 
     # ==================================================================
     # EXIT LOGIC
@@ -3172,8 +3294,11 @@ class OptionsScalpStrategy(BaseStrategy):
         except Exception:
             pass  # Non-critical, continue without momentum data
 
-        # Track peak premium
-        self.highest_premium = max(self.highest_premium, current_premium)
+        # Track peak premium (and timestamp of new peak — GPFC #52).
+        if current_premium > self.highest_premium:
+            self.highest_premium = current_premium
+            self._peak_timestamp = time.monotonic()
+            self._prev_highest_premium = current_premium
         now = time.monotonic()
         self._position_premium_history.append((now, current_premium))
         self._last_30s_premium = self._premium_price_at_least_seconds_ago(now, 30.0)
@@ -3243,17 +3368,101 @@ class OptionsScalpStrategy(BaseStrategy):
                 current_premium, premium_change_pct, "OPT_MAX_HOLD"
             )
 
-        # ── 1. Hard fallback stop loss ──
-        if premium_change_pct <= -30.0:
+        # ── 1. GPFC #52: trajectory-aware OPT_HARD_SL ─────────────────────
+        sl_pct = self._dynamic_sl_pct(hold_seconds, peak_pnl_pct)
+        if premium_change_pct <= sl_pct:
             self.logger.info(
-                "[%s] OPT_HARD_SL — premium %+.1f%% ($%.4f → $%.4f)",
+                "[%s] OPT_HARD_SL — premium %+.1f%% <= %.1f%% "
+                "(age=%.0fs peak=%+.1f%%)",
                 self.option_symbol,
                 premium_change_pct,
-                self.entry_premium,
-                current_premium,
+                sl_pct,
+                hold_seconds,
+                peak_pnl_pct,
             )
             return await self._do_option_exit(
                 current_premium, premium_change_pct, "OPT_HARD_SL"
+            )
+
+        # ── GPFC #52: BREATHING PERIOD ────────────────────────────────────
+        # First 90s after fill: only HARD_SL fires. Every other exit gate
+        # below is skipped so post-fill noise doesn't kill trades that just
+        # need a moment to develop.
+        if hold_seconds < self.PHASE_BREATHING_SEC:
+            return []
+
+        # ── GPFC #52: signed underlying move since entry ──────────────────
+        # Positive = spot moving the direction our option wants.
+        our_dir = 1.0 if self.option_side == "call" else -1.0
+        spot_now = float(self._last_spot_price or 0)
+        underlying_move_signed = 0.0
+        if self._spot_at_entry > 0 and spot_now > 0:
+            underlying_move_signed = (
+                (spot_now - self._spot_at_entry) / self._spot_at_entry * 100 * our_dir
+            )
+
+        # ── 1a. GPFC #52: OPT_UNDERLYING_REVERSED ─────────────────────────
+        # We had a real peak (>= 2%), and spot has now moved against us.
+        if (
+            peak_pnl_pct >= self.UNDERLYING_REVERSED_MIN_PEAK_PCT
+            and self._spot_at_entry > 0
+            and underlying_move_signed < 0
+        ):
+            self.logger.info(
+                "[%s] OPT_UNDERLYING_REVERSED — peak=%+.1f%% spot_move=%+.2f%% "
+                "against us, pnl=%+.1f%% — exit",
+                self.option_symbol,
+                peak_pnl_pct,
+                underlying_move_signed,
+                premium_change_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_UNDERLYING_REVERSED"
+            )
+
+        # ── 1b. GPFC #52: OPT_BLEEDING_FAST ───────────────────────────────
+        # Peak was real (>= 3%), it's been at least 15s since peak, and we're
+        # giving back faster than BLEEDING_GIVEBACK_PER_MIN.
+        time_since_peak = time.monotonic() - (self._peak_timestamp or self.entry_time)
+        giveback_pct = peak_pnl_pct - premium_change_pct
+        if (
+            peak_pnl_pct >= self.BLEEDING_MIN_PEAK_PCT
+            and time_since_peak >= self.BLEEDING_MIN_AGE_SINCE_PEAK
+            and giveback_pct > 0
+            and (giveback_pct / max(time_since_peak / 60.0, 0.01))
+                >= self.BLEEDING_GIVEBACK_PER_MIN
+        ):
+            self.logger.info(
+                "[%s] OPT_BLEEDING_FAST — peak=%+.1f%% now=%+.1f%% giveback=%.1f%% "
+                "in %.0fs (rate=%.1f%%/min) — exit",
+                self.option_symbol,
+                peak_pnl_pct,
+                premium_change_pct,
+                giveback_pct,
+                time_since_peak,
+                giveback_pct / max(time_since_peak / 60.0, 0.01),
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_BLEEDING_FAST"
+            )
+
+        # ── 1c. GPFC #52: OPT_THESIS_BROKEN ───────────────────────────────
+        broken, reason_tag = self._thesis_broken(
+            hold_seconds, peak_pnl_pct, underlying_move_signed,
+        )
+        if broken:
+            self.logger.info(
+                "[%s] OPT_THESIS_BROKEN — %s (age=%.0fs peak=%+.1f%% "
+                "underlying_since_entry=%+.2f%% tol=%.2f%%) — exit",
+                self.option_symbol,
+                reason_tag,
+                hold_seconds,
+                peak_pnl_pct,
+                underlying_move_signed,
+                max(0.10, self._entry_underlying_move or 0.15),
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "OPT_THESIS_BROKEN"
             )
 
         # ── 2. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
@@ -3265,7 +3474,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     self.option_symbol,
                     peak_pnl_pct,
                     first_trail_activation,
-                    self._opt_trail_distance_pct(peak_pnl_pct),
+                    self._opt_trail_distance_pct(peak_pnl_pct, hold_seconds),
                 )
             self._trailing_active = True
 
@@ -3280,7 +3489,7 @@ class OptionsScalpStrategy(BaseStrategy):
             # → exit -16% because the tick that broke the trail floor was
             # already below entry). The trail must fire whenever the premium
             # is below its trail floor, regardless of current P&L sign.
-            trail_dist_pct = self._opt_trail_distance_pct(peak_pnl_pct)
+            trail_dist_pct = self._opt_trail_distance_pct(peak_pnl_pct, hold_seconds)
             trail_floor = self.highest_premium * (1.0 - trail_dist_pct / 100.0)
             if current_premium < trail_floor:
                 self.logger.info(
@@ -4403,6 +4612,11 @@ class OptionsScalpStrategy(BaseStrategy):
             self._peak_trail_pending_ticks = 0
             self._consecutive_ticker_failures = 0
             self._opt_ratchet_floor = 0.0
+            # GPFC #52: snapshot spot + 60s momentum at fill.
+            self._spot_at_entry = float(self._last_spot_price or 0)
+            self._entry_underlying_move = abs(self._underlying_momentum_pct())
+            self._peak_timestamp = self.entry_time
+            self._prev_highest_premium = fill_price
             self.strike_price = signal.metadata.get("strike", 0)
             self._contracts = int(signal.metadata.get("contracts", 1) or 1)
             expiry_str = signal.metadata.get("expiry")

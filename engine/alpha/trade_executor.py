@@ -152,6 +152,7 @@ def _extract_exit_reason(reason: str) -> str:
                "OPT_ENERGY_DEAD_LOSER", "OPT_ENERGY_WINNER_FADING", "OPT_HARD_SL",
                "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET", "OPT_STALE",
                "OPT_REVERSAL", "OPT_PEAK_TRAIL", "OPT_MAX_HOLD",
+               "OPT_THESIS_BROKEN", "OPT_BLEEDING_FAST", "OPT_UNDERLYING_REVERSED",
                "RECONCILE_ORPHAN_CLOSED", "RECONCILE_EXPIRED",
                "DUPLICATE_MERGED", "DUPLICATE_ROW_FIXED",
                "EXPIRED_WORTHLESS",
