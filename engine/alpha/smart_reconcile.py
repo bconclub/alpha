@@ -740,7 +740,7 @@ class SmartDeltaReconciler:
 
         self.db.table("trades").update({
             "status": "cancelled",
-            "exit_reason": "DUPLICATE_UNMATCHED",
+            "exit_reason": "DUPLICATE",
             "reason": "smart_reconcile_cleanup",
             "closed_at": datetime.now(timezone.utc).isoformat(),
             "metadata": metadata,
@@ -770,9 +770,9 @@ class SmartDeltaReconciler:
             "entry_fee": float(rt["efee"]),
             "exit_fee": float(rt["xfee"]),
             "status": "closed",
-            "exit_reason": "GHOST_RECONCILED",
+            "exit_reason": "GONE",
             "reason": "smart_reconcile_insert_missing",
-            "setup_type": "MOMENTUM_BURST",
+            "setup_type": "MOM_BURST",
             "opened_at": buy_time,
             "closed_at": sell_time,
             "metadata": {

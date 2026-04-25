@@ -21,6 +21,8 @@ import {
   getStrategyBadgeVariant,
 } from '@/lib/utils';
 import { Badge } from '@/components/ui/Badge';
+import { ExitChip } from '@/components/ui/ExitChip';
+import { SetupChip } from '@/components/ui/SetupChip';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { useLivePrices } from '@/hooks/useLivePrices';
@@ -1061,13 +1063,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {getStrategyLabel(trade.strategy)}
                       </Badge>
                       {inferSetupType(trade) && (
-                        <span className={cn(
-                          'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold',
-                          SETUP_COLORS[inferSetupType(trade) as string]?.bg ?? 'bg-zinc-500/10',
-                          SETUP_COLORS[inferSetupType(trade) as string]?.text ?? 'text-zinc-400',
-                        )}>
-                          {getSetupLabel(inferSetupType(trade))}
-                        </span>
+                        <SetupChip setup={inferSetupType(trade)} />
                       )}
                       {trade.leverage > 1 && (
                         <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
@@ -1137,12 +1133,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       })()}
                       {trade.status !== 'open' && (() => {
                         const reason = getExitReason(trade);
-                        const displayReason = reason ? getExitReasonDisplay(reason) : null;
-                        return reason ? (
-                          <span className="font-semibold" style={{ color: getExitReasonColor(displayReason || reason) }}>
-                            {displayReason}
-                          </span>
-                        ) : null;
+                        return reason ? <ExitChip exit={reason} /> : null;
                       })()}
                     </div>
                   </div>
@@ -1394,17 +1385,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* Setup Type */}
                         <td className="whitespace-nowrap px-4 py-3">
-                          {inferSetupType(trade) ? (
-                            <span className={cn(
-                              'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold',
-                              SETUP_COLORS[inferSetupType(trade) as string]?.bg ?? 'bg-zinc-500/10',
-                              SETUP_COLORS[inferSetupType(trade) as string]?.text ?? 'text-zinc-400',
-                            )}>
-                              {getSetupLabel(inferSetupType(trade))}
-                            </span>
-                          ) : (
-                            <span className="text-zinc-600 text-xs">—</span>
-                          )}
+                          <SetupChip setup={inferSetupType(trade)} />
                         </td>
 
                         {/* Gross P&L */}
@@ -1571,17 +1552,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             <span className="text-xs font-semibold text-emerald-400">
                               {(trade.position_state || 'LIVE').toUpperCase()}
                             </span>
-                          ) : (() => {
-                            const reason = getExitReason(trade);
-                            const displayReason = reason ? getExitReasonDisplay(reason) : null;
-                            return reason ? (
-                              <span className="text-xs font-semibold" style={{ color: getExitReasonColor(displayReason || reason) }}>
-                                {displayReason}
-                              </span>
-                            ) : (
-                              <span className="text-zinc-600">&mdash;</span>
-                            );
-                          })()}
+                          ) : (
+                            <ExitChip exit={getExitReason(trade)} />
+                          )}
                         </td>
 
                         {/* Status */}

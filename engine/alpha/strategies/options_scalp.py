@@ -386,7 +386,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # Last spot price when breakout was detected (for velocity calc)
         self._breakout_spot_price: float = 0.0
         # Entry setup tag for pending execution path
-        self._pending_entry_setup: str = "BB_SQUEEZE_BREAKOUT"
+        self._pending_entry_setup: str = "SQUEEZE"
 
         # Dashboard chain panel cached state
         self._cached_candle_momentum: dict | None = None
@@ -2041,7 +2041,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_contracts = opt_contracts
         self._breakout_confidence = 0.7
         self._breakout_bb_width = self._bb_width_pct
-        self._pending_entry_setup = "MOMENTUM_BURST"
+        self._pending_entry_setup = "MOM_BURST"
         return await self._execute_breakout_entry(entry_ask)
 
     async def _handle_squeeze_breakout(
@@ -2212,7 +2212,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_contracts = opt_contracts
         self._breakout_confidence = entry_confidence
         self._breakout_bb_width = bb_width_pct
-        self._pending_entry_setup = "BB_SQUEEZE_BREAKOUT"
+        self._pending_entry_setup = "SQUEEZE"
         self._breakout_state = "DETECTED"
 
         # GPFC #21: Log BREAKOUT_DETECTED with velocity and confirmation window
@@ -2438,7 +2438,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_velocity_pct = 0.0
         self._breakout_confirmation_secs = 60
         self._breakout_spot_price = 0.0
-        self._pending_entry_setup = "BB_SQUEEZE_BREAKOUT"
+        self._pending_entry_setup = "SQUEEZE"
         self._direction_bias = "NEUTRAL"
         # Note: _breakout_state is preserved until next detection for dashboard visibility
 
@@ -2450,10 +2450,10 @@ class OptionsScalpStrategy(BaseStrategy):
         opt_contracts = self._breakout_contracts
         entry_confidence = self._breakout_confidence
         bb_width_pct = self._breakout_bb_width
-        setup_type = "BB_SQUEEZE" if (
+        setup_type = "SQUEEZE" if (
             self._is_squeeze_entry
-            or self._pending_entry_setup in ("BB_SQUEEZE_BREAKOUT", "BB_SQUEEZE")
-        ) else "MOMENTUM_BURST"
+            or self._pending_entry_setup in ("SQUEEZE", "SQUEEZE")
+        ) else "MOM_BURST"
 
         # Recalculate contracts at confirmed ask price
         opt_contracts = self._calculate_option_contracts(
@@ -2643,7 +2643,7 @@ class OptionsScalpStrategy(BaseStrategy):
         premium = fill_price
         self._limit_entry_filled = True
         self._last_action = (
-            "SQUEEZE_FILL" if setup_type == "BB_SQUEEZE" else "MOMENTUM_BURST_FILL"
+            "SQUEEZE_FILL" if setup_type == "SQUEEZE" else "MOMENTUM_BURST_FILL"
         )
         self._last_action_at = time.time()
 
@@ -2674,14 +2674,14 @@ class OptionsScalpStrategy(BaseStrategy):
         self._entry_underlying_move = abs(self._underlying_momentum_pct())
         self._peak_timestamp = self.entry_time
         self._prev_highest_premium = fill_price
-        self._is_squeeze_entry = setup_type == "BB_SQUEEZE"
+        self._is_squeeze_entry = setup_type == "SQUEEZE"
         self._squeeze_breakout_time = (
             time.monotonic() if self._is_squeeze_entry else None
         )
         if self._selected_expiry:
             self.expiry_dt = self._selected_expiry
 
-        if setup_type == "BB_SQUEEZE":
+        if setup_type == "SQUEEZE":
             self.logger.info(
                 "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed, no stale for %dm)",
                 self.pair,
@@ -3365,7 +3365,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 premium_change_pct,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_MAX_HOLD"
+                current_premium, premium_change_pct, "TIMEOUT"
             )
 
         # ── 1. GPFC #52: trajectory-aware OPT_HARD_SL ─────────────────────
@@ -3381,7 +3381,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 peak_pnl_pct,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_HARD_SL"
+                current_premium, premium_change_pct, "STOP"
             )
 
         # ── GPFC #52: BREATHING PERIOD ────────────────────────────────────
@@ -3417,7 +3417,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 premium_change_pct,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_UNDERLYING_REVERSED"
+                current_premium, premium_change_pct, "REVERSE"
             )
 
         # ── 1b. GPFC #52: OPT_BLEEDING_FAST ───────────────────────────────
@@ -3443,7 +3443,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 giveback_pct / max(time_since_peak / 60.0, 0.01),
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_BLEEDING_FAST"
+                current_premium, premium_change_pct, "BLEED"
             )
 
         # ── 1c. GPFC #52: OPT_THESIS_BROKEN ───────────────────────────────
@@ -3462,7 +3462,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 max(0.10, self._entry_underlying_move or 0.15),
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_THESIS_BROKEN"
+                current_premium, premium_change_pct, "STALLED"
             )
 
         # ── 2. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
@@ -3504,7 +3504,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     peak_pnl_pct,
                 )
                 return await self._do_option_exit(
-                    current_premium, premium_change_pct, "OPT_TRAIL"
+                    current_premium, premium_change_pct, "TRAIL"
                 )
 
             peak_gain = self.highest_premium - self.entry_premium
@@ -3548,7 +3548,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     )
                     self._peak_trail_pending_ticks = 0
                     return await self._do_option_exit(
-                        current_premium, premium_change_pct, "OPT_PEAK_TRAIL"
+                        current_premium, premium_change_pct, "PEAK"
                     )
                 else:
                     self.logger.info(
@@ -3585,7 +3585,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.BREAKEVEN_STOP_EXIT_PCT,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "OPT_BREAKEVEN_STOP"
+                current_premium, premium_change_pct, "BREAKEVEN"
             )
 
         return []
@@ -3691,9 +3691,9 @@ class OptionsScalpStrategy(BaseStrategy):
             if not setup_type and self._pending_entry_setup:
                 setup_type = self._pending_entry_setup
             if not setup_type and self._is_squeeze_entry:
-                setup_type = "BB_SQUEEZE"
+                setup_type = "SQUEEZE"
             if not setup_type:
-                setup_type = "MOMENTUM_BURST"
+                setup_type = "MOM_BURST"
 
             self.logger.info(
                 "[%s] Setup type determined: %s", self.option_symbol, setup_type
@@ -4051,7 +4051,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #49: HARD_SL streak tracking. Two consecutive HARD_SL losses arms
         # a 10-minute entry cooldown (regime-unfavorable). Any non-HARD_SL exit
         # (TRAIL, PEAK_TRAIL, winner, expiry, etc.) resets the streak.
-        if exit_type == "OPT_HARD_SL":
+        if exit_type == "STOP":
             self._hard_sl_streak += 1
             if self._hard_sl_streak >= self.HARD_SL_LOSS_STREAK_THRESHOLD:
                 self._hard_sl_cooldown_until = (
@@ -4249,7 +4249,7 @@ class OptionsScalpStrategy(BaseStrategy):
             ).total_seconds()
             is_expiry = time_past_expiry >= 0
 
-        exit_reason = "EXPIRY" if is_expiry else "POSITION_GONE"
+        exit_reason = "EXPIRY" if is_expiry else "GONE"
         exit_reason_detail = f"{exit_reason}_{reason}" if reason else exit_reason
 
         exit_premium = self._last_known_premium

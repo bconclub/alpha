@@ -2162,7 +2162,7 @@ class AlphaBot:
                     await self.db.close_trade(
                         order_id, exit_price, pnl, pnl_pct,
                         reason="position_not_found_on_restart",
-                        exit_reason="POSITION_GONE",
+                        exit_reason="GONE",
                         gross_pnl=result.gross_pnl,
                         entry_fee=result.entry_fee,
                         exit_fee=result.exit_fee,
@@ -2178,7 +2178,7 @@ class AlphaBot:
                         "entry_fee": round(result.entry_fee, 8),
                         "exit_fee": round(result.exit_fee, 8),
                         "reason": "position_not_found_on_restart",
-                        "exit_reason": "POSITION_GONE",
+                        "exit_reason": "GONE",
                     })
 
                 closed += 1
@@ -2212,7 +2212,7 @@ class AlphaBot:
                         "status": "open",
                         "opened_at": iso_now(),
                         "reason": "discovered_on_restart",
-                        "setup_type": "BB_SQUEEZE",
+                        "setup_type": "SQUEEZE",
                     })
                     self._restored_trades.append({
                         "pair": symbol,
@@ -2580,7 +2580,7 @@ class AlphaBot:
                 "gross_pnl": round(result.gross_pnl, 8),
                 "entry_fee": round(result.entry_fee, 8),
                 "exit_fee": round(result.exit_fee, 8),
-                "exit_reason": "ORPHAN_SWEEP",
+                "exit_reason": "ORPHAN",
                 "position_state": None,
             })
             logger.info(
@@ -2722,7 +2722,7 @@ class AlphaBot:
                         "exit_price": 0.0 if entry_price > 0 else 0.0,
                         "pnl": -entry_price * contracts * 0.01,
                         "pnl_pct": -100.0,
-                        "exit_reason": "RECONCILE_EXPIRED",
+                        "exit_reason": "EXPIRY",
                         "reason": "expired_on_reconcile",
                         "position_state": None,
                     })
@@ -2792,7 +2792,7 @@ class AlphaBot:
                         "exit_price": exit_price,
                         "pnl": round(pnl, 8),
                         "pnl_pct": round(pnl_pct, 4),
-                        "exit_reason": "RECONCILE_ORPHAN_CLOSED",
+                        "exit_reason": "ORPHAN",
                         "reason": "no_delta_position_on_reconcile",
                         "position_state": None,
                     })
@@ -3027,7 +3027,7 @@ class AlphaBot:
                 "exit_price": entry_price,
                 "pnl": 0.0,
                 "pnl_pct": 0.0,
-                "exit_reason": "ORPHAN_STARTUP",
+                "exit_reason": "ORPHAN",
                 "reason": f"stale orphan closed on startup (age {age})",
             })
 
@@ -3302,7 +3302,7 @@ class AlphaBot:
                         "status": "open",
                         "opened_at": iso_now(),
                         "reason": "discovered_by_reconcile",
-                        "setup_type": "BB_SQUEEZE",
+                        "setup_type": "SQUEEZE",
                     })
                     if isinstance(_new_row, dict) and _new_row.get("id"):
                         adopted_db_id = int(_new_row["id"])

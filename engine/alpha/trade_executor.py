@@ -144,36 +144,86 @@ def calc_pnl(
 
 
 def _extract_exit_reason(reason: str) -> str:
-    """Extract clean exit_reason enum from verbose reason string."""
+    """Extract clean exit_reason enum from verbose reason string.
+
+    GPFC #54: 15 canonical exit names. Legacy long-form names (OPT_HARD_SL,
+    POSITION_GONE, RECONCILE_ORPHAN_CLOSED, etc.) are mapped to their short
+    equivalents so historical rows continue to render with the same chip
+    style as new rows.
+    """
     if not reason:
         return "UNKNOWN"
     upper = reason.upper()
-    for kw in ("OPT_ENTRY_DROP", "OPT_MOMENTUM_FADE", "OPT_DEAD_MOMENTUM",
-               "OPT_ENERGY_DEAD_LOSER", "OPT_ENERGY_WINNER_FADING", "OPT_HARD_SL",
-               "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET", "OPT_STALE",
-               "OPT_REVERSAL", "OPT_PEAK_TRAIL", "OPT_MAX_HOLD",
-               "OPT_THESIS_BROKEN", "OPT_BLEEDING_FAST", "OPT_UNDERLYING_REVERSED",
-               "RECONCILE_ORPHAN_CLOSED", "RECONCILE_EXPIRED",
-               "DUPLICATE_MERGED", "DUPLICATE_ROW_FIXED",
-               "EXPIRED_WORTHLESS",
-               "EXPIRY_GUARD", "SQUEEZE_RELEASE",
-               "HARD_TP", "PROFIT_LOCK", "DEAD_MOMENTUM", "MOMENTUM_FADE",
-               "DECAY_EMERGENCY", "MANUAL_CLOSE", "SPOT_PULLBACK", "SPOT_DECAY",
-               "SPOT_BREAKEVEN", "TRAIL", "RATCHET", "SL", "FLAT", "TIMEOUT",
-               "BREAKEVEN", "REVERSAL", "PULLBACK", "DECAY", "SAFETY", "EXPIRY",
-               "TP"):
+
+    # Legacy → new short name (checked FIRST because keys are more specific).
+    legacy_map = (
+        ("OPT_HARD_SL", "STOP"),
+        ("OPT_THESIS_BROKEN", "STALLED"),
+        ("OPT_BLEEDING_FAST", "BLEED"),
+        ("OPT_PEAK_TRAIL", "PEAK"),
+        ("OPT_BREAKEVEN_STOP", "BREAKEVEN"),
+        ("OPT_UNDERLYING_REVERSED", "REVERSE"),
+        ("OPT_MAX_HOLD", "TIMEOUT"),
+        ("OPT_ENERGY_DEAD_LOSER", "DEAD"),
+        ("OPT_ENERGY_WINNER_FADING", "PEAK"),
+        ("OPT_ENTRY_DROP", "STOP"),
+        ("OPT_DEAD_MOMENTUM", "DEAD"),
+        ("OPT_MOMENTUM_FADE", "STALLED"),
+        ("OPT_REVERSAL", "REVERSE"),
+        ("OPT_STALE", "STALLED"),
+        ("OPT_TIMEOUT", "TIMEOUT"),
+        ("OPT_RATCHET", "RATCHET"),
+        ("OPT_TRAIL", "TRAIL"),
+        ("OPT_SL", "STOP"),
+        ("RECONCILE_ORPHAN_CLOSED", "ORPHAN"),
+        ("RECONCILE_FLATTEN", "ORPHAN"),
+        ("RECONCILE_EXPIRED", "EXPIRY"),
+        ("ORPHAN_STARTUP", "ORPHAN"),
+        ("ORPHAN_SWEEP", "ORPHAN"),
+        ("DUPLICATE_UNMATCHED", "DUPLICATE"),
+        ("DUPLICATE_MERGED", "DUPLICATE"),
+        ("DUPLICATE_ROW_FIXED", "DUPLICATE"),
+        ("GHOST_RECONCILED", "GONE"),
+        ("GHOST_CLEANUP", "MANUAL"),
+        ("MANUAL_CLEANUP_GPFC46", "MANUAL"),
+        ("MANUAL_CLOSE", "MANUAL"),
+        ("POSITION_GONE", "GONE"),
+        ("PHANTOM_CLEARED", "GONE"),
+        ("VERIFY_GONE", "GONE"),
+        ("VERIFY_EXPIRY", "EXPIRY"),
+        ("VERIFY_API_FAIL", "GONE"),
+        ("EXPIRED_WORTHLESS", "EXPIRY"),
+        ("EXPIRY_GUARD", "EXPIRY"),
+        ("SQUEEZE_RELEASE", "STALLED"),
+        ("HARD_TP", "TP"),
+        ("PROFIT_LOCK", "TP"),
+        ("DEAD_MOMENTUM", "DEAD"),
+        ("MOMENTUM_FADE", "STALLED"),
+        ("DECAY_EMERGENCY", "DEAD"),
+        ("DECAY", "DEAD"),
+        ("SPOT_PULLBACK", "PEAK"),
+        ("SPOT_DECAY", "DEAD"),
+        ("SPOT_BREAKEVEN", "BREAKEVEN"),
+        ("SL_EXCHANGE", "STOP"),
+        ("TP_EXCHANGE", "TP"),
+        ("CLOSED_BY_EXCHANGE", "GONE"),
+        ("DUST", "DUST"),
+        ("PULLBACK", "PEAK"),
+        ("REVERSAL", "REVERSE"),
+        ("BREAKEVEN", "BREAKEVEN"),
+        ("SAFETY", "MANUAL"),
+        ("FLAT", "MANUAL"),
+    )
+    for legacy, new in legacy_map:
+        if legacy in upper:
+            return new
+
+    # New short names — return as-is if present.
+    for kw in ("STOP", "STALLED", "BLEED", "TRAIL", "PEAK", "RATCHET",
+               "BREAKEVEN", "REVERSE", "TIMEOUT", "GONE", "EXPIRY",
+               "ORPHAN", "DUPLICATE", "MANUAL", "DEAD", "TP"):
         if kw in upper:
-            return "MANUAL" if kw == "MANUAL_CLOSE" else kw
-    direct = {
-        "POSITION_GONE": "POSITION_GONE", "PHANTOM_CLEARED": "PHANTOM",
-        "SL_EXCHANGE": "SL_EXCHANGE", "TP_EXCHANGE": "TP_EXCHANGE",
-        "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE", "ORPHAN": "ORPHAN",
-        "DUST": "DUST", "VERIFY_GONE": "POSITION_GONE",
-        "VERIFY_EXPIRY": "EXPIRY", "VERIFY_API_FAIL": "POSITION_GONE",
-    }
-    for key, val in direct.items():
-        if key in upper:
-            return val
+            return kw
     return "UNKNOWN"
 
 

@@ -4229,13 +4229,13 @@ class ScalpStrategy(BaseStrategy):
         if "ACCEL:" in r:
             return ["ACCEL_ENTRY"]
 
-        # Priority 4: BB_SQUEEZE
+        # Priority 4: SQUEEZE (GPFC #54: was BB_SQUEEZE)
         if "BBSQZ:" in r:
-            return ["BB_SQUEEZE"]
+            return ["SQUEEZE"]
 
-        # Priority 5: MOMENTUM_BURST
+        # Priority 5: MOM_BURST (GPFC #54: was MOMENTUM_BURST)
         if has_mom and has_vol:
-            return ["MOMENTUM_BURST"]
+            return ["MOM_BURST"]
 
         # Priority 6: MEAN_REVERT
         if has_bb and has_rsi:

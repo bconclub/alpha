@@ -584,8 +584,8 @@ class DeltaReconciler:
             "entry_fee": rt["efee"],
             "exit_fee": rt["xfee"],
             "status": "closed",
-            "exit_reason": "GHOST_RECONCILED",
-            "setup_type": "MOMENTUM_BURST",
+            "exit_reason": "GONE",
+            "setup_type": "MOM_BURST",
             "opened_at": opened_at,
             "closed_at": closed_at,
         }

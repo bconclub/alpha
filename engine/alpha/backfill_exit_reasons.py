@@ -27,6 +27,45 @@ def _extract_exit_reason(reason: str) -> str:
     if not reason:
         return "UNKNOWN"
     upper = reason.upper()
+    # GPFC #54: legacy → short canonical. Preserves historical normalization.
+    legacy_map = (
+        ("OPT_HARD_SL", "STOP"),
+        ("OPT_THESIS_BROKEN", "STALLED"),
+        ("OPT_BLEEDING_FAST", "BLEED"),
+        ("OPT_PEAK_TRAIL", "PEAK"),
+        ("OPT_BREAKEVEN_STOP", "BREAKEVEN"),
+        ("OPT_UNDERLYING_REVERSED", "REVERSE"),
+        ("OPT_MAX_HOLD", "TIMEOUT"),
+        ("OPT_ENERGY_DEAD_LOSER", "DEAD"),
+        ("OPT_ENERGY_WINNER_FADING", "PEAK"),
+        ("OPT_ENTRY_DROP", "STOP"),
+        ("OPT_DEAD_MOMENTUM", "DEAD"),
+        ("OPT_MOMENTUM_FADE", "STALLED"),
+        ("OPT_REVERSAL", "REVERSE"),
+        ("OPT_STALE", "STALLED"),
+        ("OPT_TIMEOUT", "TIMEOUT"),
+        ("OPT_RATCHET", "RATCHET"),
+        ("OPT_TRAIL", "TRAIL"),
+        ("OPT_SL", "STOP"),
+        ("RECONCILE_ORPHAN_CLOSED", "ORPHAN"),
+        ("RECONCILE_FLATTEN", "ORPHAN"),
+        ("RECONCILE_EXPIRED", "EXPIRY"),
+        ("ORPHAN_STARTUP", "ORPHAN"),
+        ("ORPHAN_SWEEP", "ORPHAN"),
+        ("DUPLICATE_UNMATCHED", "DUPLICATE"),
+        ("DUPLICATE_MERGED", "DUPLICATE"),
+        ("DUPLICATE_ROW_FIXED", "DUPLICATE"),
+        ("GHOST_RECONCILED", "GONE"),
+        ("GHOST_CLEANUP", "MANUAL"),
+        ("MANUAL_CLEANUP_GPFC46", "MANUAL"),
+        ("POSITION_GONE", "GONE"),
+        ("EXPIRED_WORTHLESS", "EXPIRY"),
+        ("EXPIRY_GUARD", "EXPIRY"),
+        ("SQUEEZE_RELEASE", "STALLED"),
+    )
+    for legacy, new in legacy_map:
+        if legacy in upper:
+            return new
     for kw in ("OPT_ENTRY_DROP", "OPT_MOMENTUM_FADE", "OPT_DEAD_MOMENTUM",
                "OPT_ENERGY_DEAD_LOSER", "OPT_ENERGY_WINNER_FADING", "OPT_HARD_SL",
                "OPT_TIMEOUT", "OPT_SL", "OPT_TRAIL", "OPT_RATCHET", "OPT_STALE",
@@ -34,6 +73,9 @@ def _extract_exit_reason(reason: str) -> str:
                "OPT_THESIS_BROKEN", "OPT_BLEEDING_FAST", "OPT_UNDERLYING_REVERSED",
                "RECONCILE_ORPHAN_CLOSED", "RECONCILE_EXPIRED",
                "DUPLICATE_MERGED", "DUPLICATE_ROW_FIXED",
+               "STOP", "STALLED", "BLEED", "TRAIL", "PEAK", "RATCHET",
+               "BREAKEVEN", "REVERSE", "TIMEOUT", "GONE", "EXPIRY",
+               "ORPHAN", "DUPLICATE", "MANUAL", "DEAD", "TP",
                "EXPIRED_WORTHLESS",
                "EXPIRY_GUARD", "SQUEEZE_RELEASE",
                "HARD_TP", "PROFIT_LOCK", "DEAD_MOMENTUM", "DECAY_EMERGENCY",

@@ -56,15 +56,15 @@ class Database:
         """Insert a new trade row and return its Supabase row ID."""
         if not self.is_connected:
             return None
-        # Safety net: the dashboard only renders BB_SQUEEZE or MOMENTUM_BURST[_ENTRY].
-        # Anything else (including NULL / "") shows as blank, so default missing
-        # values to BB_SQUEEZE — the primary setup — and log it for visibility.
+        # GPFC #54: setup_type values are SQUEEZE | MOM_BURST. Anything else
+        # (including NULL / "") shows as blank in the dashboard, so default
+        # missing values to SQUEEZE — the primary setup — and log it.
         if not data.get("setup_type"):
             logger.warning(
-                "log_trade: setup_type missing for %s %s %s — defaulting to BB_SQUEEZE",
+                "log_trade: setup_type missing for %s %s %s — defaulting to SQUEEZE",
                 data.get("strategy"), data.get("pair"), data.get("exchange"),
             )
-            data["setup_type"] = "BB_SQUEEZE"
+            data["setup_type"] = "SQUEEZE"
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(

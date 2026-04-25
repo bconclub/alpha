@@ -14,6 +14,7 @@ import {
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
+import { ExitChip } from '@/components/ui/ExitChip';
 import { ArrowUp, ArrowDown } from 'lucide-react';
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -329,8 +330,7 @@ function RecentTradeCard({ trade }: { trade: { pair: string; position_type: stri
   };
   
   const optionDisplay = getOptionSide();
-  const exitReasonLabel = formatExitReasonLabel(trade.exit_reason);
-  
+
   return (
     <div className="bg-[#141419] border border-white/5 rounded-lg p-3 min-w-[200px]">
       <div className="flex items-center justify-between mb-2">
@@ -354,10 +354,10 @@ function RecentTradeCard({ trade }: { trade: { pair: string; position_type: stri
         {isProfit ? '+' : ''}{formatCurrency(trade.pnl)}
       </div>
       <div className="flex items-center justify-between mt-2">
-        {trade.exit_reason && (
-          <span className="text-[10px] bg-gray-800 px-1.5 py-0.5 rounded text-gray-400">
-            {exitReasonLabel}
-          </span>
+        {trade.exit_reason ? (
+          <ExitChip exit={trade.exit_reason} />
+        ) : (
+          <span />
         )}
         <span className="text-[10px] text-gray-600">{timeText}</span>
       </div>
