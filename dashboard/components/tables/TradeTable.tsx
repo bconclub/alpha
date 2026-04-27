@@ -1483,14 +1483,14 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           <HoldTimeCell trade={trade} now={now} />
                         </td>
 
-                        {/* SL Price */}
+                        {/* SL Price — GPFC #56: only meaningful for live positions */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
-                          {trade.stop_loss != null ? (
-                            <span className={trade.status === 'open' ? 'text-red-400' : 'text-zinc-500'}>
-                              {isOptionTrade(trade) ? formatPrice(trade.stop_loss) : formatPrice(trade.stop_loss)}
+                          {trade.status === 'open' && trade.stop_loss != null ? (
+                            <span className="text-red-400">
+                              {formatPrice(trade.stop_loss)}
                             </span>
                           ) : (
-                            <span className="text-zinc-600">&mdash;</span>
+                            <span />
                           )}
                         </td>
 
@@ -1522,13 +1522,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               );
                             }
                             return <span className="text-zinc-600">&mdash;</span>;
-                          })() : (() => {
-                            const exitR = getExitReason(trade);
-                            if (exitR === 'TRAIL') return <span className="text-emerald-400">Trailed</span>;
-                            if (exitR === 'PROFIT_LOCK') return <span className="text-emerald-400">Locked</span>;
-                            if (trade.trail_stop_price != null) return <span className="text-zinc-500">@ {formatPrice(trade.trail_stop_price)}</span>;
-                            return <span className="text-zinc-600">&mdash;</span>;
-                          })()}
+                          })() : (
+                            // GPFC #56: closed trades — Trail column hidden;
+                            // exit info is the dedicated Exit chip.
+                            <span />
+                          )}
                         </td>
 
                         {/* Peak P&L */}

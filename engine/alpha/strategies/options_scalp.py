@@ -233,15 +233,16 @@ class OptionsScalpStrategy(BaseStrategy):
     # First 90s after fill: only OPT_HARD_SL fires. Lets trades develop without
     # early-kill logic cutting them on normal post-fill noise.
     PHASE_BREATHING_SEC = 90
-    # OPT_BLEEDING_FAST: fires when a real peak (>= 3%) gives back at a rate
-    # of >= 3 points per minute for >= 15s since peak. Catches premium decay
-    # that trail tolerance would otherwise eat.
-    BLEEDING_MIN_PEAK_PCT = 3.0
+    # OPT_BLEEDING_FAST: fires when a real peak (>= 6%, GPFC #56 was 3%)
+    # gives back at a rate of >= 3 points per minute for >= 15s since peak.
+    # Below 6% peak, trail/stalled handle it; below trail floor it must also
+    # have already breached so trail is the primary exit.
+    BLEEDING_MIN_PEAK_PCT = 6.0
     BLEEDING_MIN_AGE_SINCE_PEAK = 15.0   # seconds
     BLEEDING_GIVEBACK_PER_MIN = 3.0      # % per minute
-    # OPT_UNDERLYING_REVERSED: fires AFTER peak >= 2% if spot has moved the
-    # wrong way (relative to our option side) since entry.
-    UNDERLYING_REVERSED_MIN_PEAK_PCT = 2.0
+    # OPT_UNDERLYING_REVERSED: fires AFTER peak >= 5% (GPFC #56 was 2%) if
+    # spot has moved the wrong way relative to our option side since entry.
+    UNDERLYING_REVERSED_MIN_PEAK_PCT = 5.0
 
     # ── Dynamic ratchet floor (GPFC #26 — tiered by peak_pnl_pct in _compute_dynamic_floor)
 
@@ -3165,12 +3166,17 @@ class OptionsScalpStrategy(BaseStrategy):
         peak_pnl_pct: float,
         underlying_move_since_entry: float,
     ) -> tuple[bool, str]:
-        """GPFC #52: is the reason we took this trade clearly broken?
+        """GPFC #52 / #56: is the reason we took this trade clearly broken?
 
-        Returns (broken, reason_tag). ``underlying_move_since_entry`` is
-        signed — positive = moving our direction, negative = against us.
+        Returns (broken, reason_tag). STALLED is only meaningful when no
+        real peak has occurred — anything that did peak is owned by
+        TRAIL / PEAK / BLEED / REVERSE / BREAKEVEN. So both branches now
+        require peak_pnl_pct <= 1.0 (GPFC #56).
         """
         if age_sec < self.PHASE_BREATHING_SEC:
+            return False, ""
+        # GPFC #56: STALLED never fires on a trade that already showed a peak.
+        if peak_pnl_pct > 1.0:
             return False, ""
         # Tolerance scales with how strong the entry signal was (60s mom at fill).
         # A 0.25% entry can absorb a 0.25% reversal; a 0.15% entry can't.
@@ -3178,11 +3184,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if underlying_move_since_entry < -tolerance:
             return True, "underlying_reversed_beyond_tolerance"
         # No peak after 3 min AND underlying is dead flat: nothing is happening.
-        if (
-            age_sec > 180
-            and peak_pnl_pct <= 1.0
-            and abs(underlying_move_since_entry) < 0.05
-        ):
+        if age_sec > 180 and abs(underlying_move_since_entry) < 0.05:
             return True, "flat_underlying_no_peak"
         return False, ""
 
@@ -3401,69 +3403,19 @@ class OptionsScalpStrategy(BaseStrategy):
                 (spot_now - self._spot_at_entry) / self._spot_at_entry * 100 * our_dir
             )
 
-        # ── 1a. GPFC #52: OPT_UNDERLYING_REVERSED ─────────────────────────
-        # We had a real peak (>= 2%), and spot has now moved against us.
-        if (
-            peak_pnl_pct >= self.UNDERLYING_REVERSED_MIN_PEAK_PCT
-            and self._spot_at_entry > 0
-            and underlying_move_signed < 0
-        ):
-            self.logger.info(
-                "[%s] OPT_UNDERLYING_REVERSED — peak=%+.1f%% spot_move=%+.2f%% "
-                "against us, pnl=%+.1f%% — exit",
-                self.option_symbol,
-                peak_pnl_pct,
-                underlying_move_signed,
-                premium_change_pct,
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "REVERSE"
-            )
-
-        # ── 1b. GPFC #52: OPT_BLEEDING_FAST ───────────────────────────────
-        # Peak was real (>= 3%), it's been at least 15s since peak, and we're
-        # giving back faster than BLEEDING_GIVEBACK_PER_MIN.
-        time_since_peak = time.monotonic() - (self._peak_timestamp or self.entry_time)
-        giveback_pct = peak_pnl_pct - premium_change_pct
-        if (
-            peak_pnl_pct >= self.BLEEDING_MIN_PEAK_PCT
-            and time_since_peak >= self.BLEEDING_MIN_AGE_SINCE_PEAK
-            and giveback_pct > 0
-            and (giveback_pct / max(time_since_peak / 60.0, 0.01))
-                >= self.BLEEDING_GIVEBACK_PER_MIN
-        ):
-            self.logger.info(
-                "[%s] OPT_BLEEDING_FAST — peak=%+.1f%% now=%+.1f%% giveback=%.1f%% "
-                "in %.0fs (rate=%.1f%%/min) — exit",
-                self.option_symbol,
-                peak_pnl_pct,
-                premium_change_pct,
-                giveback_pct,
-                time_since_peak,
-                giveback_pct / max(time_since_peak / 60.0, 0.01),
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "BLEED"
-            )
-
-        # ── 1c. GPFC #52: OPT_THESIS_BROKEN ───────────────────────────────
-        broken, reason_tag = self._thesis_broken(
-            hold_seconds, peak_pnl_pct, underlying_move_signed,
-        )
-        if broken:
-            self.logger.info(
-                "[%s] OPT_THESIS_BROKEN — %s (age=%.0fs peak=%+.1f%% "
-                "underlying_since_entry=%+.2f%% tol=%.2f%%) — exit",
-                self.option_symbol,
-                reason_tag,
-                hold_seconds,
-                peak_pnl_pct,
-                underlying_move_signed,
-                max(0.10, self._entry_underlying_move or 0.15),
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "STALLED"
-            )
+        # ══════════════════════════════════════════════════════════════════
+        # GPFC #56: EXIT ORDER PRIORITY
+        #   1. STOP   (handled above)
+        #   2. TRAIL  (premium < trail_floor)        ← PEAK-LOCKING FIRST
+        #   3. PEAK   (confirmed pullback)
+        #   4. RATCHET (legacy, no emit site)
+        #   5. BLEED  (only peak >= 6%, current < trail floor)
+        #   6. REVERSE (only peak >= 5%, underlying flipped)
+        #   7. STALLED (only peak <= 1%, after breathing)
+        #   8. BREAKEVEN
+        # BLEED used to fire before TRAIL had a chance to lock a proper
+        # floor — that ate 4-7% off every winning peak. TRAIL now goes first.
+        # ══════════════════════════════════════════════════════════════════
 
         # ── 2. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
         first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
@@ -3566,7 +3518,79 @@ class OptionsScalpStrategy(BaseStrategy):
                 # Pullback condition not met this tick — reset confirmation.
                 self._peak_trail_pending_ticks = 0
 
-        # ── 3. Breakeven stop — once we've been meaningfully green, don't go red ──
+        # ── 5. GPFC #56: OPT_BLEED — fast giveback past trail floor ───────
+        # Only fires when:
+        #   - a meaningful peak existed (>= 6%, was 3% in #52)
+        #   - it's been at least 15s since peak
+        #   - current pnl is BELOW the trail floor (TRAIL didn't get to it
+        #     because the gap was bigger than one tick of the trail check)
+        #   - giveback rate >= BLEEDING_GIVEBACK_PER_MIN
+        time_since_peak = time.monotonic() - (self._peak_timestamp or self.entry_time)
+        giveback_pct = peak_pnl_pct - premium_change_pct
+        bleed_trail_floor_pct = peak_pnl_pct - self._opt_trail_distance_pct(
+            peak_pnl_pct, hold_seconds,
+        )
+        if (
+            peak_pnl_pct >= self.BLEEDING_MIN_PEAK_PCT
+            and time_since_peak >= self.BLEEDING_MIN_AGE_SINCE_PEAK
+            and giveback_pct > 0
+            and (giveback_pct / max(time_since_peak / 60.0, 0.01))
+                >= self.BLEEDING_GIVEBACK_PER_MIN
+            and premium_change_pct < bleed_trail_floor_pct
+        ):
+            self.logger.info(
+                "[%s] OPT_BLEED — peak=%+.1f%% now=%+.1f%% giveback=%.1f%% "
+                "in %.0fs (rate=%.1f%%/min, trail_floor=%+.1f%%) — exit",
+                self.option_symbol,
+                peak_pnl_pct,
+                premium_change_pct,
+                giveback_pct,
+                time_since_peak,
+                giveback_pct / max(time_since_peak / 60.0, 0.01),
+                bleed_trail_floor_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "BLEED"
+            )
+
+        # ── 6. GPFC #56: OPT_REVERSE — peak >= 5% AND underlying flipped ──
+        if (
+            peak_pnl_pct >= self.UNDERLYING_REVERSED_MIN_PEAK_PCT
+            and self._spot_at_entry > 0
+            and underlying_move_signed < 0
+        ):
+            self.logger.info(
+                "[%s] OPT_REVERSE — peak=%+.1f%% spot_move=%+.2f%% "
+                "against us, pnl=%+.1f%% — exit",
+                self.option_symbol,
+                peak_pnl_pct,
+                underlying_move_signed,
+                premium_change_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "REVERSE"
+            )
+
+        # ── 7. GPFC #56: OPT_STALLED — only when peak <= 1% (no real move) ──
+        broken, reason_tag = self._thesis_broken(
+            hold_seconds, peak_pnl_pct, underlying_move_signed,
+        )
+        if broken:
+            self.logger.info(
+                "[%s] OPT_STALLED — %s (age=%.0fs peak=%+.1f%% "
+                "underlying_since_entry=%+.2f%% tol=%.2f%%) — exit",
+                self.option_symbol,
+                reason_tag,
+                hold_seconds,
+                peak_pnl_pct,
+                underlying_move_signed,
+                max(0.10, self._entry_underlying_move or 0.15),
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "STALLED"
+            )
+
+        # ── 8. Breakeven stop — once we've been meaningfully green, don't go red ──
         # Replaces the legacy ENERGY_DEAD_LOSER / ENERGY_WINNER_FADING gates which
         # over-cut recoverable trades. This fires only when a real peak existed
         # AND the trade has retraced to roughly entry, so it converts would-be
