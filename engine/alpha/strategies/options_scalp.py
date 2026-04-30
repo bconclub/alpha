@@ -3384,12 +3384,13 @@ class OptionsScalpStrategy(BaseStrategy):
                 current_premium, premium_change_pct, "STOP"
             )
 
-        # ── GPFC #52: BREATHING PERIOD ────────────────────────────────────
-        # First 90s after fill: only HARD_SL fires. Every other exit gate
-        # below is skipped so post-fill noise doesn't kill trades that just
-        # need a moment to develop.
-        if hold_seconds < self.PHASE_BREATHING_SEC:
-            return []
+        # ── GPFC #59: BREATHING PERIOD (refined) ──────────────────────────
+        # First 90s: skip the AGGRESSIVE kill exits (STALLED, BREAKEVEN).
+        # But ALWAYS allow trail floor protection — if a trade rockets to
+        # +20% peak and gives back, we MUST lock that. Trail is profit
+        # protection, not noise kill. STALLED/BREAKEVEN gate on in_breathing
+        # themselves below; this block does NOT return early.
+        in_breathing = hold_seconds < self.PHASE_BREATHING_SEC
 
         # ── GPFC #52: signed underlying move since entry ──────────────────
         # Positive = spot moving the direction our option wants.
@@ -3515,31 +3516,35 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._peak_trail_pending_ticks = 0
 
         # ── 5. GPFC #58: OPT_STALLED — layered patience for sub-3% peak trades ──
-        broken, reason_tag = self._thesis_broken(
-            hold_seconds, peak_pnl_pct, underlying_move_signed, premium_change_pct,
-        )
-        if broken:
-            self.logger.info(
-                "[%s] OPT_STALLED — %s (age=%.0fs peak=%+.1f%% "
-                "underlying_since_entry=%+.2f%% tol=%.2f%%) — exit",
-                self.option_symbol,
-                reason_tag,
-                hold_seconds,
-                peak_pnl_pct,
-                underlying_move_signed,
-                max(0.10, self._entry_underlying_move or 0.15),
+        # GPFC #59: gated on in_breathing — don't kill noise during first 90s.
+        if not in_breathing:
+            broken, reason_tag = self._thesis_broken(
+                hold_seconds, peak_pnl_pct, underlying_move_signed, premium_change_pct,
             )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "STALLED"
-            )
+            if broken:
+                self.logger.info(
+                    "[%s] OPT_STALLED — %s (age=%.0fs peak=%+.1f%% "
+                    "underlying_since_entry=%+.2f%% tol=%.2f%%) — exit",
+                    self.option_symbol,
+                    reason_tag,
+                    hold_seconds,
+                    peak_pnl_pct,
+                    underlying_move_signed,
+                    max(0.10, self._entry_underlying_move or 0.15),
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "STALLED"
+                )
 
         # ── 8. Breakeven stop — once we've been meaningfully green, don't go red ──
         # Replaces the legacy ENERGY_DEAD_LOSER / ENERGY_WINNER_FADING gates which
         # over-cut recoverable trades. This fires only when a real peak existed
         # AND the trade has retraced to roughly entry, so it converts would-be
         # losers (peak +10% → -12%) into scratches (peak +10% → ~0%).
+        # GPFC #59: gated on in_breathing — don't kill noise during first 90s.
         if (
-            peak_pnl_pct >= self.BREAKEVEN_STOP_ACTIVATE_PCT
+            not in_breathing
+            and peak_pnl_pct >= self.BREAKEVEN_STOP_ACTIVATE_PCT
             and premium_change_pct <= self.BREAKEVEN_STOP_EXIT_PCT
         ):
             self.logger.info(
