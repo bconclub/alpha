@@ -134,18 +134,11 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_FILL_POLL_SEC = 3  # Poll every 3s so highest_premium tracking starts fast after fill
     SQUEEZE_CHEAP_PERCENTILE = 0.25  # Buy bottom 25% of 30-min premium range
     SQUEEZE_HISTORY_MIN = 30  # Track premium history for 30 min
-    # GPFC #23: Extended stale windows for squeeze entries (squeezes need time to resolve)
-    SQUEEZE_NO_STALE_MIN_ETH = (
-        15  # No stale SL for first 15 min after squeeze fill (ETH)
-    )
-    SQUEEZE_NO_STALE_MIN_BTC = (
-        35  # No stale SL for first 35 min after squeeze fill (BTC)
-    )
     # Dynamic confirmation window thresholds (GPFC #21) — UPDATED
     # velocity >= 0.3% → 20s, 0.15-0.3% → 40s, < 0.15% → 60s
     BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3  # >= 0.3% → 20s confirmation
     BREAKOUT_CONFIRM_MED_VELOCITY = 0.15  # 0.15-0.3% → 40s confirmation
-    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.12  # GPFC #49: 12bps floor (was 8bps) — weeds out fake breakouts
+    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.0  # GPFC #60: floor reverted to 0 — was killing real squeeze breakouts
     BREAKOUT_CONFIRM_SEC_HIGH = 20  # Fast for strong moves
     BREAKOUT_CONFIRM_SEC_MED = 40  # Medium wait for medium moves
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
@@ -159,10 +152,6 @@ class OptionsScalpStrategy(BaseStrategy):
     # Ratio = |move_last_20s| / |move_last_60s|. Linear move = 0.33, accelerating
     # move = 0.6+, fading move = 0.0–0.3. We require the last 20s to contain
     # >= 50% of the net move, i.e. the move is at least linear-or-fresher.
-    MOMENTUM_BURST_MIN_ACCELERATION = 0.50
-    MOMENTUM_BURST_LOSS_COOLDOWN_SEC = 300.0  # skip same-side MB for 5 min after a >10% loss
-    MOMENTUM_BURST_LOSS_COOLDOWN_THRESHOLD_PCT = -10.0
-
     # ── Dynamic option sizing ──────────────────────────────────────
     # NEW: Fixed 20-30% capital allocation per trade (GPFC #20)
     # allocation_pct = 0.20 + (confidence * 0.10)  # 20% at conf=0.0, 30% at conf=1.0
@@ -172,7 +161,6 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
     # ── Exit thresholds ────────────────
-    TP_PREMIUM_GAIN_PCT = 30.0  # Take profit at +30% premium gain
     SL_PREMIUM_LOSS_PCT = 15.0  # Hard stop at -15% premium drop (was -20%)
     # Tiered trailing: start wide, tighten as profit grows
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
@@ -195,24 +183,17 @@ class OptionsScalpStrategy(BaseStrategy):
     # Units: %. For a call, veto when spot_mom_20s >= +this; for a put, veto
     # when spot_mom_20s <= -this.
     PULLBACK_SPOT_VETO_PCT = 0.05
-    DECAY_THRESHOLD_PCT = 3.0  # Exit if was +10%+ and faded to +3%
     # Breakeven safety net: once peak is meaningful, never let trade go red
     BREAKEVEN_STOP_ACTIVATE_PCT = 8.0  # arm once peak hits +8%
     BREAKEVEN_STOP_EXIT_PCT = 0.5      # exit if pnl drops to +0.5% or lower
 
     # ── Stale SL tightening — progressive exit for stuck trades ─────
-    STALE_MOVE_THRESHOLD = 5.0  # < 5% from entry = stale (not going anywhere)
-    STALE_MIN_WEAK_SIGNALS = 2  # require multiple weakness signals before stale exit
-    STALE_PREMIUM_RANGE_MIN_PCT = 2.0  # if premium range over window is below this, trade is truly dead
-    STALE_PREMIUM_WINDOW_SEC = 90.0  # short-term premium behavior window
     # ETH stale thresholds
     STALE_SL_5M_ETH = -10.0  # 5 min: SL → -10%
     STALE_SL_8M_ETH = -5.0  # 8 min: SL → -5%
-    STALE_EXIT_MIN_ETH = 12  # 12 min: force OPT_STALE (but starts at 15m for squeeze)
     # BTC stale thresholds
     STALE_SL_8M_BTC = -15.0  # 8 min: SL → -15%
     STALE_SL_12M_BTC = -10.0  # 12 min: SL → -10%
-    STALE_EXIT_MIN_BTC = 18  # 18 min: force OPT_STALE (but starts at 20m for squeeze)
     PHASE1_HANDS_OFF_SEC = 30  # Only SL fires in first 30s after fill
 
     # ── Expiry guard ────────
@@ -223,12 +204,6 @@ class OptionsScalpStrategy(BaseStrategy):
     # Options decay. Sitting on any position for hours is never the plan.
     # Fires as a final backstop if every other exit gate misses.
     OPT_HARD_MAX_HOLD_HOURS = 4.0
-
-    # ── GPFC #49: Post-loss cooldown ──
-    # Two consecutive HARD_SL losses means the regime is unfavorable — hold off
-    # new entries for 10 min so we stop bleeding on the same fakeout pattern.
-    HARD_SL_LOSS_STREAK_THRESHOLD = 2
-    HARD_SL_LOSS_COOLDOWN_SEC = 10 * 60  # 10 minutes
 
     # ── GPFC #52: breathing-room + behavior-based exits ──
     # First 90s after fill: only OPT_HARD_SL fires. Lets trades develop without
@@ -413,13 +388,6 @@ class OptionsScalpStrategy(BaseStrategy):
         )  # (time, option premium)
         self._MOMENTUM_CHECK_WINDOW_SEC = 60.0  # Look back 60s for momentum
         self._MOMENTUM_THRESHOLD_PCT = 0.1  # Min 0.1% momentum to ride
-        # MB cooldown — last loss timestamp per direction (call/put).
-        # Populated on exit when an MB trade closes red, consulted in
-        # _check_momentum_burst_entry to suppress revenge trades.
-        self._last_mb_loss_time: dict[str, float] = {"call": 0.0, "put": 0.0}
-        # GPFC #49: HARD_SL streak tracking for post-loss cooldown
-        self._hard_sl_streak: int = 0
-        self._hard_sl_cooldown_until: float = 0.0
         # GPFC #52: per-trade tracking for dynamic exits.
         # ``_spot_at_entry`` is the underlying spot at fill; ``_entry_underlying_move``
         # is the 60s underlying %-move at fill (sets dynamic thesis tolerance);
@@ -521,29 +489,17 @@ class OptionsScalpStrategy(BaseStrategy):
             if self._base_asset == "BTC"
             else self.SQUEEZE_BB_WIDTH_ETH
         )
-        _no_stale = (
-            self.SQUEEZE_NO_STALE_MIN_BTC
-            if self._base_asset == "BTC"
-            else self.SQUEEZE_NO_STALE_MIN_ETH
-        )
         self.logger.info(
             "[%s] OPTIONS SCALP ACTIVE — BB_SQUEEZE strategy (GPFC #23) | "
             "BB_width<%.1f%% KC_squeeze fill_wait=%ds "
-            "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
-            "NoStale=%dm StaleCheck=%dm Phase1=%ds Alloc=%s%s",
+            "SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Phase1=%ds Alloc=%s%s",
             self.pair,
             _bb_w,
             self.SQUEEZE_FILL_WAIT_SEC,
-            int(self.TP_PREMIUM_GAIN_PCT),
             int(self.SL_PREMIUM_LOSS_PCT),
             int(self.OPT_TRAIL_TIERS[0][0]),
             int(self.OPT_TRAIL_TIERS[0][1]),
             int(self.PULLBACK_EXIT_PCT),
-            int(self.DECAY_THRESHOLD_PCT),
-            _no_stale,
-            self.STALE_EXIT_MIN_BTC
-            if self._base_asset == "BTC"
-            else self.STALE_EXIT_MIN_ETH,
             self.PHASE1_HANDS_OFF_SEC,
             f"{int(self.CAPITAL_PER_TRADE_MIN_PCT * 100)}-{int(self.CAPITAL_PER_TRADE_MAX_PCT * 100)}% per trade",
             f" | RESTORED: {self.option_side} {self.option_symbol}"
@@ -1251,17 +1207,6 @@ class OptionsScalpStrategy(BaseStrategy):
         # Acceleration ratio: |move_last_20s| / |move_last_60s|. Useful for
         # post-hoc review of why MB did or didn't fire.
         mb_acceleration = round(self._underlying_acceleration_ratio(), 3)
-        _now_mono = time.monotonic()
-        _call_last_loss = self._last_mb_loss_time.get("call", 0.0)
-        _put_last_loss = self._last_mb_loss_time.get("put", 0.0)
-        mb_cooldown_call_remaining = (
-            max(0, int(self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC - (_now_mono - _call_last_loss)))
-            if _call_last_loss > 0 else 0
-        )
-        mb_cooldown_put_remaining = (
-            max(0, int(self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC - (_now_mono - _put_last_loss)))
-            if _put_last_loss > 0 else 0
-        )
 
         # ── Signals panel state ──
         signals_panel = {
@@ -1273,10 +1218,7 @@ class OptionsScalpStrategy(BaseStrategy):
             ),
             "momentum_60s_pct": round(self._underlying_momentum_pct(), 3),
             "momentum_acceleration_ratio": mb_acceleration,
-            "momentum_acceleration_min": self.MOMENTUM_BURST_MIN_ACCELERATION,
             "momentum_burst_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
-            "mb_cooldown_call_secs_remaining": mb_cooldown_call_remaining,
-            "mb_cooldown_put_secs_remaining": mb_cooldown_put_remaining,
             "squeeze_status": self._squeeze_status,
             "bb_position": round(self._bb_position, 2),
             "direction_bias": self._direction_bias,
@@ -1323,7 +1265,6 @@ class OptionsScalpStrategy(BaseStrategy):
             # review behaviour later without digging into source.
             "exit_config": {
                 "sl_premium_loss_pct": self.SL_PREMIUM_LOSS_PCT,
-                "tp_premium_gain_pct": self.TP_PREMIUM_GAIN_PCT,
                 "pullback_activate_pct": self.PULLBACK_ACTIVATE_PCT,
                 "pullback_exit_pct": self.PULLBACK_EXIT_PCT,
                 "pullback_confirmation_ticks": self.PULLBACK_CONFIRMATION_TICKS,
@@ -1336,9 +1277,6 @@ class OptionsScalpStrategy(BaseStrategy):
             "entry_config": {
                 "mb_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
                 "mb_min_ask_rise_pct": self.MOMENTUM_BURST_MIN_ASK_RISE_PCT,
-                "mb_min_acceleration": self.MOMENTUM_BURST_MIN_ACCELERATION,
-                "mb_loss_cooldown_sec": self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC,
-                "mb_loss_cooldown_threshold_pct": self.MOMENTUM_BURST_LOSS_COOLDOWN_THRESHOLD_PCT,
             },
             # Breakeven-stop arm state for the current position. True when the
             # trade's peak has crossed the arm threshold, so one more adverse
@@ -1725,23 +1663,6 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = f"blocked:position_gone_cooldown:{int(remaining)}s"
             return []
 
-        # GPFC #49: HARD_SL streak cooldown — block new entries after 2
-        # consecutive HARD_SL losses to stop bleeding on the same bad regime.
-        if time.monotonic() < self._hard_sl_cooldown_until:
-            remaining = self._hard_sl_cooldown_until - time.monotonic()
-            if self._tick_count % 6 == 0:
-                self.logger.info(
-                    "[%s] HARD_SL_COOLDOWN active — %.0fs remaining "
-                    "(streak=%d)",
-                    self.pair,
-                    remaining,
-                    self._hard_sl_streak,
-                )
-            self._cached_bot_state = (
-                f"blocked:hard_sl_cooldown:{int(remaining)}s"
-            )
-            return []
-
         # STEP 3: If breakout detected, run confirmation window check
         if self._breakout_pending:
             return await self._check_breakout_confirmation()
@@ -1844,17 +1765,16 @@ class OptionsScalpStrategy(BaseStrategy):
         if self._squeeze_status == "ACTIVE":
             return []
 
-        # Freshness gate: require the move to be concentrated in the last 20s.
-        # This filters stale tail-end moves (where premium is already priced
-        # and edge is gone) without making us wait for a bigger absolute move.
+        # Freshness gate: require the last 20s to contain >= 50% of the net
+        # 60s move. Filters stale tail-end moves (where premium is already
+        # priced and edge is gone) without forcing a bigger absolute move.
         accel = self._underlying_acceleration_ratio()
-        if accel > 0 and accel < self.MOMENTUM_BURST_MIN_ACCELERATION:
+        if accel > 0 and accel < 0.50:
             if self._tick_count % 10 == 0:
                 self.logger.info(
                     "[%s] MB_STALE: 60s_mom=%+.2f%% but only %.0f%% in last 20s "
-                    "(need >=%.0f%%) — move is fading, skipping",
+                    "(need >=50%%) — move is fading, skipping",
                     self.pair, momentum_60s, accel * 100,
-                    self.MOMENTUM_BURST_MIN_ACCELERATION * 100,
                 )
             return []
 
@@ -1874,20 +1794,6 @@ class OptionsScalpStrategy(BaseStrategy):
                     self.pair, momentum_60s, mom_20s,
                 )
             return []
-
-        # Cooldown after recent same-side MB loss (avoid revenge trading)
-        provisional_side = "call" if momentum_60s >= 0 else "put"
-        last_loss = self._last_mb_loss_time.get(provisional_side, 0.0)
-        if last_loss > 0:
-            secs_since = time.monotonic() - last_loss
-            if secs_since < self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC:
-                if self._tick_count % 10 == 0:
-                    self.logger.info(
-                        "[%s] MB_COOLDOWN: %s skipped (%.0fs since loss < %.0fs)",
-                        self.pair, provisional_side, secs_since,
-                        self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC,
-                    )
-                return []
 
         if not self._selected_expiry or not self.options_exchange:
             return []
@@ -2080,15 +1986,6 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #21: Calculate breakout velocity from last 3 candles
         velocity_pct = await self._calculate_breakout_velocity()
         self._breakout_velocity_pct = velocity_pct
-
-        # GPFC #44: skip entry entirely if velocity below BREAKOUT_CONFIRM_MIN_VELOCITY
-        # floor — do NOT fall through to the 60s weak-move window (fake breakouts).
-        if velocity_pct * 100 < self.BREAKOUT_CONFIRM_MIN_VELOCITY:
-            self.logger.info(
-                "[%s] LOW_VELOCITY_SKIP: velocity=%.3f%% < %.2f%% — skipping",
-                self.pair, velocity_pct * 100, self.BREAKOUT_CONFIRM_MIN_VELOCITY,
-            )
-            return
 
         # GPFC #21: Set dynamic confirmation window based on velocity
         confirmation_secs = self._get_confirmation_secs(velocity_pct)
@@ -2349,48 +2246,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self._breakout_state = "DETECTED"
             return []
 
-        # GPFC #49: Window complete — require premium *rising*, not just stable.
-        # Previously accepted anything >= -2% ("stable"); too many HARD_SL trades
-        # (#3072, #3083) filled after flat confirmation windows then collapsed.
-        # Now demand premium > entry_ask (strict rise) — if the breakout is real,
-        # the option will have ticked up during the 20-60s window.
-        MIN_RISE_PCT = 0.5   # must be at least +0.5% above entry ask
-        CHANGE_TOLERANCE_PCT = 2.0  # legacy fakeout threshold (kept for log parity)
         change_pct = (
             (current_ask - self._breakout_entry_ask) / self._breakout_entry_ask * 100
         )
-
-        if change_pct < MIN_RISE_PCT:
-            # GPFC #49: flat-or-falling confirmation → fake breakout
-            self.logger.info(
-                "[%s] BREAKOUT_FAKEOUT: premium did not rise during confirmation "
-                "$%.4f → $%.4f (%.2f%% < required +%.1f%%) — abort",
-                self.pair,
-                self._breakout_entry_ask,
-                current_ask,
-                change_pct,
-                MIN_RISE_PCT,
-            )
-            await self._log_activity(
-                "options_skip",
-                f"{self.pair} — BREAKOUT_FAKEOUT_FLAT: premium {change_pct:+.2f}% "
-                f"(needed ≥ +{MIN_RISE_PCT}%) — aborting",
-                {
-                    "direction": self._breakout_direction,
-                    "ask": current_ask,
-                    "entry_ask": self._breakout_entry_ask,
-                    "change_pct": round(change_pct, 2),
-                    "min_rise_pct": MIN_RISE_PCT,
-                },
-            )
-            self._last_action = "BREAKOUT_FAKEOUT"
-            self._last_action_at = time.time()
-            self._breakout_state = "FAKEOUT"
-            self._reset_breakout_state()
-            return []
-
-        # GPFC #49: legacy "-CHANGE_TOLERANCE_PCT" branch removed — the new
-        # MIN_RISE_PCT guard above already catches any non-rising premium.
 
         # Premium rising — CONFIRMED, enter now
         self._direction_bias = self._breakout_option_type.upper()
@@ -2677,14 +2535,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if setup_type == "SQUEEZE":
             self.logger.info(
-                "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed, no stale for %dm)",
+                "[%s] POSITION LOCKED — %s x%d @ $%.4f (breakout confirmed)",
                 self.pair,
                 option_type.upper(),
                 opt_contracts,
                 fill_price,
-                self.SQUEEZE_NO_STALE_MIN_BTC
-                if self._base_asset == "BTC"
-                else self.SQUEEZE_NO_STALE_MIN_ETH,
             )
             self._entry_context = (
                 f"BB_SQUEEZE dir={self._breakout_direction} BB_width={bb_width_pct:.3f}% "
@@ -2839,7 +2694,6 @@ class OptionsScalpStrategy(BaseStrategy):
                     else "",
                     "underlying_price": current_price,
                     "underlying_pair": self.pair,
-                    "tp_price": premium * (1 + self.TP_PREMIUM_GAIN_PCT / 100),
                     "sl_price": premium * (1 - self.SL_PREMIUM_LOSS_PCT / 100),
                     "setup_type": setup_type,
                     "contracts": contracts,
@@ -3108,7 +2962,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if len(self._position_premium_history) < 2:
             return (0.0, 0.0)
         now = time.monotonic()
-        cutoff = now - self.STALE_PREMIUM_WINDOW_SEC
+        cutoff = now - 90.0
         window = [(t, p) for t, p in self._position_premium_history if t >= cutoff]
         if len(window) < 2:
             window = list(self._position_premium_history)
@@ -4006,45 +3860,6 @@ class OptionsScalpStrategy(BaseStrategy):
         exit_type: str,
     ) -> list[Signal]:
         """Build exit signal for option position."""
-        # Record MB cooldown if this was a momentum-burst entry that's closing red.
-        # Squeeze entries are tracked separately and don't trigger MB cooldown.
-        if (
-            not self._is_squeeze_entry
-            and self.option_side
-            and pnl_pct <= self.MOMENTUM_BURST_LOSS_COOLDOWN_THRESHOLD_PCT
-        ):
-            self._last_mb_loss_time[self.option_side] = time.monotonic()
-            self.logger.info(
-                "[%s] MB_COOLDOWN_ARMED: %s loss %.1f%% — next %s MB suppressed for %.0fs",
-                self.option_symbol or self.pair, self.option_side, pnl_pct,
-                self.option_side, self.MOMENTUM_BURST_LOSS_COOLDOWN_SEC,
-            )
-
-        # GPFC #49: HARD_SL streak tracking. Two consecutive HARD_SL losses arms
-        # a 10-minute entry cooldown (regime-unfavorable). Any non-HARD_SL exit
-        # (TRAIL, PEAK_TRAIL, winner, expiry, etc.) resets the streak.
-        if exit_type == "STOP":
-            self._hard_sl_streak += 1
-            if self._hard_sl_streak >= self.HARD_SL_LOSS_STREAK_THRESHOLD:
-                self._hard_sl_cooldown_until = (
-                    time.monotonic() + self.HARD_SL_LOSS_COOLDOWN_SEC
-                )
-                self.logger.warning(
-                    "[%s] HARD_SL_STREAK_COOLDOWN: %d consecutive HARD_SL — "
-                    "entry suppressed for %.0fs",
-                    self.pair,
-                    self._hard_sl_streak,
-                    self.HARD_SL_LOSS_COOLDOWN_SEC,
-                )
-        else:
-            if self._hard_sl_streak > 0:
-                self.logger.info(
-                    "[%s] HARD_SL_STREAK_RESET: was=%d (reset by %s)",
-                    self.pair, self._hard_sl_streak, exit_type,
-                )
-            self._hard_sl_streak = 0
-            self._hard_sl_cooldown_until = 0.0
-
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             # GPFC #47: for SELL placement we need a real executable price.
