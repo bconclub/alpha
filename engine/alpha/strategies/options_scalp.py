@@ -49,13 +49,12 @@
 
 ═══════════════════════════════════════════════════════════════
 
-Exit (GPFC #60 round 2 — momentum-based, no time gates):
+Exit (GPFC #63 — gain-locking, no time gates):
   1. EXPIRED_WORTHLESS  (premium = 0)
   2. OPT_HARD_SL        (flat -15%, no age tightening)
-  3. OPT_MOM_DEATH      (premium velocity collapse vs underlying)
-  4. OPT_PEAK_TRAIL     (confirmed pullback ≥ 40% from peak ≥ 10%)
-  5. OPT_TRAIL          (premium below trail floor, peak ≥ 15%)
-  6. OPT_BREAKEVEN_STOP (peak ≥ 8% reverted to ≤ +0.5%)
+  3. OPT_TRAIL          (premium below tiered absolute floor, peak ≥ 4%)
+  4. OPT_PEAK_TRAIL     (confirmed pullback ≥ 30% from peak ≥ 4%)
+  5. OPT_BREAKEVEN_STOP (peak ≥ 8% reverted to ≤ +0.5%)
   Worthless-expiry safety: ticker fail with < 5 min to expiry → POSITION_GONE.
 
 Expected: 2–5 entries/day, premium $3–8, 70% lose small / 30% gain 200–400%.
@@ -160,11 +159,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds ────────────────
     SL_PREMIUM_LOSS_PCT = 15.0  # Hard stop at -15% premium drop (was -20%)
-    # GPFC #62: tighter low-peak tiers + extra step at peak 12% to lock the
-    # common 13% peak that GPFC #60r2's 15%-floor was leaving on the table.
+    # GPFC #63: trail activates at peak +4% to catch any meaningful peak (was 8%).
     # Format: (peak_threshold_pct, exit_floor_pct). When peak hits threshold,
-    # exit if premium drops below floor.
+    # exit if premium drops below floor (absolute %-from-entry).
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
+        (4.0, 1.0),     # peak +4%   → lock ~1%
         (8.0, 4.0),     # peak +8%   → lock ~4% (covers fees + small profit)
         (12.0, 7.0),    # peak +12%  → lock ~7%
         (18.0, 12.0),   # peak +18%  → lock ~12%
@@ -173,10 +172,11 @@ class OptionsScalpStrategy(BaseStrategy):
         (60.0, 48.0),   # peak +60%  → lock ~48%
         (100.0, 85.0),  # peak +100% → lock ~85%
     ]
-    # GPFC #62: tightened — backup behind tiered TRAIL. Trail should fire
-    # first because it's tier-aware; PEAK pullback catches if trail misses.
-    PULLBACK_EXIT_PCT = 30.0  # Exit when 30% of peak gain given back (was 40%)
-    PULLBACK_ACTIVATE_PCT = 8.0  # Arm at peak ≥ 8% (was 10% — matches new trail tier 0)
+    # GPFC #63: PEAK pullback now mirrors the new trail-tier-0 activation (4%).
+    # Backup behind tiered TRAIL — trail should fire first because it's
+    # tier-aware; PEAK pullback catches if trail misses.
+    PULLBACK_EXIT_PCT = 30.0  # Exit when 30% of peak gain given back
+    PULLBACK_ACTIVATE_PCT = 4.0  # Arm at peak ≥ 4% (was 8% — matches new trail tier 0)
     # Confirmation before firing OPT_PEAK_TRAIL — absorbs single-tick illiquidity
     # wicks in the option premium. Require the pullback condition to persist for
     # N consecutive ticks (ticks are ~10s apart).
@@ -400,16 +400,11 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_ohlcv_time: float = 0.0
         self._OHLCV_CACHE_SEC = 25  # Cache valid for 25 seconds
 
-        # ── GPFC #60 round 2: momentum-death + regime classifier state ───
-        # Counter of consecutive ticks where premium velocity <= 0. Reset on
-        # any positive tick. Used by _check_momentum_death condition #2.
-        self._consecutive_neg_velocity_ticks: int = 0
-        # Premium velocity tick history for acceleration (per-tick % deltas)
-        self._premium_velocity_history: deque[float] = deque(maxlen=12)
-        # Regime classifier cache — recomputed every 30s
+        # ── GPFC #60 round 2 / #63: regime classifier + entry-signal capture ───
+        # Regime classifier cache — recomputed every 30s.
         self._cached_regime: str = "UNKNOWN"
         self._regime_cache_at: float = 0.0
-        # Captured entry signal snapshot — built at entry, written to DB metadata
+        # Captured entry signal snapshot — built at entry, written to DB metadata.
         self._pending_entry_signals: dict[str, Any] | None = None
 
 
@@ -1208,7 +1203,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # post-hoc review of why MB did or didn't fire.
         mb_acceleration = round(self._underlying_acceleration_ratio(), 3)
 
-        # ── GPFC #62: post-#60 signals — regime, KC width, momentum-death state ──
+        # ── GPFC #62/#63: post-#60 signals — regime, KC width, in-position telemetry ──
         kc_w = self._last_kc_width_pct
         bb_kc_ratio = (
             round(self._bb_width_pct / kc_w, 3)
@@ -1222,7 +1217,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 our_dir * self._underlying_momentum_pct(), 3
             )
             premium_velocity_pct = round(self._calc_premium_velocity(), 4)
-            consecutive_neg_ticks = int(self._consecutive_neg_velocity_ticks)
             peak_pnl_for_trail = (
                 (self.highest_premium - self.entry_premium)
                 / self.entry_premium
@@ -1232,7 +1226,6 @@ class OptionsScalpStrategy(BaseStrategy):
         else:
             underlying_vs_position = None
             premium_velocity_pct = None
-            consecutive_neg_ticks = 0
             trail_armed = False
 
         # ── Signals panel state ──
@@ -1265,9 +1258,8 @@ class OptionsScalpStrategy(BaseStrategy):
             else None,
             "last_action": self._last_action,
             "squeeze_duration_candles": self._squeeze_duration_candles,
-            # GPFC #62: in-position momentum-death telemetry (None when flat)
+            # GPFC #63: in-position telemetry (None when flat)
             "premium_velocity_pct": premium_velocity_pct,
-            "consecutive_neg_velocity_ticks": consecutive_neg_ticks,
             "underlying_vs_position_pct": underlying_vs_position,
             "trail_armed": trail_armed,
             "trail_first_activation_pct": self.OPT_TRAIL_TIERS[0][0],
@@ -2560,9 +2552,6 @@ class OptionsScalpStrategy(BaseStrategy):
         # SET POSITION STATE
         self._position_premium_history.clear()
         self._last_30s_premium = None
-        # GPFC #60 round 2: reset momentum-death trackers per position.
-        self._consecutive_neg_velocity_ticks = 0
-        self._premium_velocity_history.clear()
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -3085,108 +3074,6 @@ class OptionsScalpStrategy(BaseStrategy):
             return self._underlying_momentum_pct()
         return self._underlying_short_momentum_pct(window_secs)
 
-    def _check_momentum_death(self) -> tuple[bool, str]:
-        """GPFC #60 round 2 / #62: momentum-based death detector for trades that
-        never developed.
-
-        Returns (should_exit, reason_code). No time gates; only velocity,
-        acceleration, and underlying-vs-direction checks.
-
-        GPFC #62: gated on peak_pnl_pct < 8.0. Once a trade peaks ≥ 8%, the
-        gain-locking exits (PEAK pullback, TRAIL, BREAKEVEN) own the exit;
-        MOM_DEATH must not preempt them and turn a winner into a scratch.
-
-        Conditions (any one triggers, only when peak < 8%):
-          1. Premium velocity <= -0.3%/tick AND acceleration <= 0 AND
-             underlying moving against position
-          2. Premium velocity <= 0 for 6 consecutive ticks AND underlying
-             moving against position
-          3. Underlying flipped direction (1m candle reversal) AND premium
-             velocity negative
-        """
-        if not self.in_position or self.entry_premium <= 0:
-            return False, ""
-        # Need at least 2 in-position ticks to compute velocity.
-        if len(self._position_premium_history) < 2:
-            return False, ""
-
-        # GPFC #62: pre-development killer only — once peak >= 8%, hand off
-        # to PEAK / TRAIL / BREAKEVEN.
-        peak_pnl_pct = (
-            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-        )
-        if peak_pnl_pct >= 8.0:
-            return False, ""
-
-        prem_velocity_now = self._calc_premium_velocity()
-        # Append to velocity history; track consecutive non-positive ticks.
-        self._premium_velocity_history.append(prem_velocity_now)
-        if prem_velocity_now <= 0:
-            self._consecutive_neg_velocity_ticks += 1
-        else:
-            self._consecutive_neg_velocity_ticks = 0
-
-        # Acceleration: velocity now - velocity ~30s ago (~3 ticks at ~10s).
-        prem_accel = 0.0
-        if len(self._premium_velocity_history) >= 4:
-            prem_accel = prem_velocity_now - self._premium_velocity_history[-4]
-
-        underlying_mom = self._calc_underlying_mom(60.0)
-        our_dir = 1.0 if self.option_side == "call" else -1.0
-        signed_underlying = our_dir * underlying_mom
-        against = signed_underlying < 0
-
-        # Condition #1: hard velocity collapse against us
-        if (
-            prem_velocity_now <= -0.3
-            and prem_accel <= 0
-            and against
-        ):
-            return True, (
-                f"velocity_collapse vel={prem_velocity_now:+.2f}%/tick "
-                f"accel={prem_accel:+.2f} underlying={underlying_mom:+.2f}%"
-            )
-
-        # Condition #2: sustained non-positive velocity against us
-        if (
-            self._consecutive_neg_velocity_ticks >= 6
-            and against
-        ):
-            return True, (
-                f"sustained_decay {self._consecutive_neg_velocity_ticks} "
-                f"non-positive ticks underlying={underlying_mom:+.2f}%"
-            )
-
-        # Condition #3: 1m candle direction reversal AND premium velocity neg.
-        # Compare last vs prior 1m candle close-open sign on cached OHLCV.
-        ohlcv = self._cached_ohlcv
-        if (
-            ohlcv
-            and len(ohlcv) >= 2
-            and prem_velocity_now < 0
-        ):
-            try:
-                last_o = float(ohlcv[-1][1])
-                last_c = float(ohlcv[-1][4])
-                prev_o = float(ohlcv[-2][1])
-                prev_c = float(ohlcv[-2][4])
-                last_dir = 1 if last_c >= last_o else -1
-                prev_dir = 1 if prev_c >= prev_o else -1
-                # Reversal that goes against our direction.
-                wanted_dir = 1 if self.option_side == "call" else -1
-                if (
-                    last_dir != prev_dir
-                    and last_dir != wanted_dir
-                ):
-                    return True, (
-                        f"candle_reversal prev={prev_dir:+d} now={last_dir:+d} "
-                        f"vs wanted={wanted_dir:+d} vel={prem_velocity_now:+.2f}%/tick"
-                    )
-            except (ValueError, TypeError, IndexError):
-                pass
-
-        return False, ""
-
     def _capture_entry_signals(
         self,
         ticker: dict[str, Any] | None,
@@ -3287,16 +3174,11 @@ class OptionsScalpStrategy(BaseStrategy):
         # cache KC width directly. BB inside KC ≡ active squeeze.
         bb_inside_kc = self._squeeze_status == "ACTIVE"
 
+        # GPFC #63: regime is TRENDING_UP / TRENDING_DOWN / CHOPPY only.
+        # Low-vol contraction is visible in BB width and KC width on the dashboard.
         regime = "CHOPPY"
-        # Trending: 4-of-5 candles same direction AND ATR > mean
         if abs(net_dir) >= 4 and atr_mean > 0 and atr_now > atr_mean:
             regime = "TRENDING_UP" if net_dir > 0 else "TRENDING_DOWN"
-        elif (
-            atr_mean > 0
-            and atr_now < 0.5 * atr_mean
-            and bb_inside_kc
-        ):
-            regime = "DEAD"
 
         self._cached_regime = regime
         self._regime_cache_at = now
@@ -3507,33 +3389,16 @@ class OptionsScalpStrategy(BaseStrategy):
                 current_premium, premium_change_pct, "STOP"
             )
 
-        # ── 2. MOM_DEATH — momentum-based death detector ─────────────────
-        # Premium velocity collapsing or underlying flipping against us.
-        # Replaces all age-based exit logic from previous GPFC rounds.
-        mom_dead, mom_reason = self._check_momentum_death()
-        if mom_dead:
-            self.logger.info(
-                "[%s] OPT_MOM_DEATH — %s (premium %+.1f%% peak %+.1f%%)",
-                self.option_symbol,
-                mom_reason,
-                premium_change_pct,
-                peak_pnl_pct,
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "MOM_DEATH"
-            )
-
         # ══════════════════════════════════════════════════════════════════
-        # GPFC #62: EXIT ORDER PRIORITY (no time gates)
-        #   0. EXPIRED_WORTHLESS (premium == 0, handled above)
-        #   1. STOP      (premium dropped past flat SL)         — handled above
-        #   2. MOM_DEATH (premium velocity collapsing, peak < 8%) — handled above
-        #   3. TRAIL     (premium < tier floor, peak ≥ 8%)        — gain-locking
-        #   4. PEAK      (confirmed pullback ≥ 30% from peak ≥ 8%) — fallback
-        #   5. BREAKEVEN (peak ≥ 8% reverted to ≤ +0.5%)
+        # GPFC #63: EXIT ORDER PRIORITY
+        #   0. EXPIRED_WORTHLESS  (premium == 0, handled above)
+        #   1. STOP               (premium dropped past flat SL, handled above)
+        #   2. TRAIL              (premium < tier floor, peak ≥ 4%)
+        #   3. PEAK               (confirmed pullback ≥ 30% from peak ≥ 4%)
+        #   4. BREAKEVEN          (peak ≥ 8% reverted to ≤ +0.5%)
         # ══════════════════════════════════════════════════════════════════
 
-        # ── 3. OPT_TRAIL — tiered absolute floor ──
+        # ── 2. OPT_TRAIL — tiered absolute floor ──
         first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
         if peak_pnl_pct >= first_trail_activation:
             if not self._trailing_active:
@@ -4591,9 +4456,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 "premium_cheap_threshold": None,
                 "last_action": "SCANNING",
                 "squeeze_duration_candles": 0,
-                # In-position telemetry — flat now, so all None / 0 / False.
+                # In-position telemetry — flat now.
                 "premium_velocity_pct": None,
-                "consecutive_neg_velocity_ticks": 0,
                 "underlying_vs_position_pct": None,
                 "trail_armed": False,
                 "trail_first_activation_pct": self.OPT_TRAIL_TIERS[0][0],

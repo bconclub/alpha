@@ -219,10 +219,10 @@ def _extract_exit_reason(reason: str) -> str:
             return new
 
     # New short names — return as-is if present.
+    # GPFC #63: legacy "DEAD" kept for back-compat with older trades.
     for kw in ("STOP", "STALLED", "BLEED", "TRAIL", "PEAK", "RATCHET",
                "BREAKEVEN", "REVERSE", "TIMEOUT", "GONE", "EXPIRY",
-               "ORPHAN", "DUPLICATE", "MANUAL", "DEAD", "TP",
-               "MOM_DEATH"):
+               "ORPHAN", "DUPLICATE", "MANUAL", "DEAD", "TP"):
         if kw in upper:
             return kw
     return "UNKNOWN"
