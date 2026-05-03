@@ -160,18 +160,23 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds ────────────────
     SL_PREMIUM_LOSS_PCT = 15.0  # Hard stop at -15% premium drop (was -20%)
-    # GPFC #60 round 2: trail only activates at peak >= 15%. Below that, premium
-    # gets room to develop or hits STOP / MOM_DEATH / PEAK pullback. No more
-    # break-even scratches at +5%/+10% peaks.
+    # GPFC #62: tighter low-peak tiers + extra step at peak 12% to lock the
+    # common 13% peak that GPFC #60r2's 15%-floor was leaving on the table.
+    # Format: (peak_threshold_pct, exit_floor_pct). When peak hits threshold,
+    # exit if premium drops below floor.
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
-        (15.0, 8.0),    # peak +15% → 8% trail (floor ~+7%)
-        (25.0, 18.0),   # peak +25% → 18% trail (floor ~+7%)
-        (40.0, 30.0),   # peak +40% → 30% trail (floor ~+10%)
-        (60.0, 48.0),   # peak +60% → 48% trail (floor ~+12%)
-        (100.0, 85.0),  # peak +100% → 85% trail (floor ~+15%)
+        (8.0, 4.0),     # peak +8%   → lock ~4% (covers fees + small profit)
+        (12.0, 7.0),    # peak +12%  → lock ~7%
+        (18.0, 12.0),   # peak +18%  → lock ~12%
+        (25.0, 18.0),   # peak +25%  → lock ~18%
+        (40.0, 30.0),   # peak +40%  → lock ~30%
+        (60.0, 48.0),   # peak +60%  → lock ~48%
+        (100.0, 85.0),  # peak +100% → lock ~85%
     ]
-    PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
-    PULLBACK_ACTIVATE_PCT = 10.0  # Pullback only fires after +10% peak (GPFC #58, was 5%)
+    # GPFC #62: tightened — backup behind tiered TRAIL. Trail should fire
+    # first because it's tier-aware; PEAK pullback catches if trail misses.
+    PULLBACK_EXIT_PCT = 30.0  # Exit when 30% of peak gain given back (was 40%)
+    PULLBACK_ACTIVATE_PCT = 8.0  # Arm at peak ≥ 8% (was 10% — matches new trail tier 0)
     # Confirmation before firing OPT_PEAK_TRAIL — absorbs single-tick illiquidity
     # wicks in the option premium. Require the pullback condition to persist for
     # N consecutive ticks (ticks are ~10s apart).
@@ -1203,6 +1208,33 @@ class OptionsScalpStrategy(BaseStrategy):
         # post-hoc review of why MB did or didn't fire.
         mb_acceleration = round(self._underlying_acceleration_ratio(), 3)
 
+        # ── GPFC #62: post-#60 signals — regime, KC width, momentum-death state ──
+        kc_w = self._last_kc_width_pct
+        bb_kc_ratio = (
+            round(self._bb_width_pct / kc_w, 3)
+            if kc_w > 0 and self._bb_width_pct > 0
+            else None
+        )
+        # Position-only telemetry — None when flat so the frontend can hide.
+        if self.in_position and self.option_side and self.entry_premium > 0:
+            our_dir = 1.0 if self.option_side == "call" else -1.0
+            underlying_vs_position = round(
+                our_dir * self._underlying_momentum_pct(), 3
+            )
+            premium_velocity_pct = round(self._calc_premium_velocity(), 4)
+            consecutive_neg_ticks = int(self._consecutive_neg_velocity_ticks)
+            peak_pnl_for_trail = (
+                (self.highest_premium - self.entry_premium)
+                / self.entry_premium
+                * 100
+            ) if self.highest_premium > 0 else 0.0
+            trail_armed = peak_pnl_for_trail >= self.OPT_TRAIL_TIERS[0][0]
+        else:
+            underlying_vs_position = None
+            premium_velocity_pct = None
+            consecutive_neg_ticks = 0
+            trail_armed = False
+
         # ── Signals panel state ──
         signals_panel = {
             "bb_width_pct": round(self._bb_width_pct, 3),
@@ -1211,7 +1243,15 @@ class OptionsScalpStrategy(BaseStrategy):
                 if self._base_asset == "BTC"
                 else self.SQUEEZE_BB_WIDTH_ETH
             ),
+            # GPFC #61/#62: KC width + BB/KC tightness ratio (< 0.5 ≈ true squeeze)
+            "kc_width_pct": round(kc_w, 3),
+            "bb_kc_width_ratio": bb_kc_ratio,
+            # GPFC #60r2: regime classifier (log-only gating, dashboard display)
+            "regime": self._cached_regime,
             "momentum_60s_pct": round(self._underlying_momentum_pct(), 3),
+            # GPFC #62: spot freshness — mom_20s / mom_60s. Same field as
+            # momentum_acceleration_ratio; aliased here for clarity in the UI.
+            "momentum_freshness_ratio": mb_acceleration,
             "momentum_acceleration_ratio": mb_acceleration,
             "momentum_burst_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
             "squeeze_status": self._squeeze_status,
@@ -1225,6 +1265,12 @@ class OptionsScalpStrategy(BaseStrategy):
             else None,
             "last_action": self._last_action,
             "squeeze_duration_candles": self._squeeze_duration_candles,
+            # GPFC #62: in-position momentum-death telemetry (None when flat)
+            "premium_velocity_pct": premium_velocity_pct,
+            "consecutive_neg_velocity_ticks": consecutive_neg_ticks,
+            "underlying_vs_position_pct": underlying_vs_position,
+            "trail_armed": trail_armed,
+            "trail_first_activation_pct": self.OPT_TRAIL_TIERS[0][0],
         }
 
         state = {
@@ -3040,12 +3086,17 @@ class OptionsScalpStrategy(BaseStrategy):
         return self._underlying_short_momentum_pct(window_secs)
 
     def _check_momentum_death(self) -> tuple[bool, str]:
-        """GPFC #60 round 2: momentum-based death detector (replaces age-based exits).
+        """GPFC #60 round 2 / #62: momentum-based death detector for trades that
+        never developed.
 
         Returns (should_exit, reason_code). No time gates; only velocity,
         acceleration, and underlying-vs-direction checks.
 
-        Conditions (any one triggers):
+        GPFC #62: gated on peak_pnl_pct < 8.0. Once a trade peaks ≥ 8%, the
+        gain-locking exits (PEAK pullback, TRAIL, BREAKEVEN) own the exit;
+        MOM_DEATH must not preempt them and turn a winner into a scratch.
+
+        Conditions (any one triggers, only when peak < 8%):
           1. Premium velocity <= -0.3%/tick AND acceleration <= 0 AND
              underlying moving against position
           2. Premium velocity <= 0 for 6 consecutive ticks AND underlying
@@ -3057,6 +3108,14 @@ class OptionsScalpStrategy(BaseStrategy):
             return False, ""
         # Need at least 2 in-position ticks to compute velocity.
         if len(self._position_premium_history) < 2:
+            return False, ""
+
+        # GPFC #62: pre-development killer only — once peak >= 8%, hand off
+        # to PEAK / TRAIL / BREAKEVEN.
+        peak_pnl_pct = (
+            (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+        )
+        if peak_pnl_pct >= 8.0:
             return False, ""
 
         prem_velocity_now = self._calc_premium_velocity()
@@ -3250,17 +3309,20 @@ class OptionsScalpStrategy(BaseStrategy):
             )
         return regime
 
-    def _opt_trail_distance_pct(self, peak_pnl_pct: float) -> float:
-        """Trail width %% below peak premium; width is determined by tier only.
+    def _opt_trail_floor_pct(self, peak_pnl_pct: float) -> float:
+        """GPFC #62: tier-driven absolute floor as %-of-entry, not give-back %.
 
-        GPFC #58: removed age-based tightening — direction reversal kills, not
-        time. A 30% peak at 15 min gets the same trail room as at 5 min.
+        The second element of each (peak_threshold, floor) tuple is the
+        absolute %-from-entry floor — e.g. tier (12, 7) means: once peak hits
+        +12%, exit if current pnl drops below +7% from entry. Returns the
+        floor pct or 0.0 if no tier has activated yet (caller gates on
+        peak >= first_activation before reading this).
         """
-        dist = self.OPT_TRAIL_TIERS[0][1]
-        for activation, trail_pct in self.OPT_TRAIL_TIERS:
+        floor = self.OPT_TRAIL_TIERS[0][1]
+        for activation, floor_pct in self.OPT_TRAIL_TIERS:
             if peak_pnl_pct >= activation:
-                dist = trail_pct
-        return dist
+                floor = floor_pct
+        return floor
 
     def _flat_sl_pct(self) -> float:
         """GPFC #60 round 2: flat stop-loss; previous age-based tightening removed.
@@ -3462,25 +3524,26 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         # ══════════════════════════════════════════════════════════════════
-        # GPFC #60 round 2: EXIT ORDER PRIORITY (no time gates)
+        # GPFC #62: EXIT ORDER PRIORITY (no time gates)
         #   0. EXPIRED_WORTHLESS (premium == 0, handled above)
-        #   1. STOP     (premium dropped past flat SL)        — handled above
-        #   2. MOM_DEATH (premium velocity collapsing)        — handled above
-        #   3. PEAK     (confirmed pullback ≥ 40% from peak ≥ 10%)
-        #   4. TRAIL    (premium < trail_floor, peak ≥ 15%)
-        #   5. BREAKEVEN
+        #   1. STOP      (premium dropped past flat SL)         — handled above
+        #   2. MOM_DEATH (premium velocity collapsing, peak < 8%) — handled above
+        #   3. TRAIL     (premium < tier floor, peak ≥ 8%)        — gain-locking
+        #   4. PEAK      (confirmed pullback ≥ 30% from peak ≥ 8%) — fallback
+        #   5. BREAKEVEN (peak ≥ 8% reverted to ≤ +0.5%)
         # ══════════════════════════════════════════════════════════════════
 
-        # ── 2. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
+        # ── 3. OPT_TRAIL — tiered absolute floor ──
         first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
         if peak_pnl_pct >= first_trail_activation:
             if not self._trailing_active:
                 self.logger.info(
-                    "[%s] TRAIL ARMED — peak +%.1f%% ≥ activation %.1f%% | floor will be %.1f%% below peak",
+                    "[%s] TRAIL ARMED — peak +%.1f%% ≥ activation %.1f%% | "
+                    "floor locks at +%.1f%% from entry",
                     self.option_symbol,
                     peak_pnl_pct,
                     first_trail_activation,
-                    self._opt_trail_distance_pct(peak_pnl_pct),
+                    self._opt_trail_floor_pct(peak_pnl_pct),
                 )
             self._trailing_active = True
 
@@ -3489,25 +3552,23 @@ class OptionsScalpStrategy(BaseStrategy):
             and self.entry_premium > 0
             and self.highest_premium > 0
         ):
-            # NOTE: previously gated on `premium_change_pct > 0`, but that
-            # caused fast-crashing winners to blow through the trail floor and
-            # fall into HARD_SL / BREAKEVEN territory (e.g. id=3039: peak +44%
-            # → exit -16% because the tick that broke the trail floor was
-            # already below entry). The trail must fire whenever the premium
-            # is below its trail floor, regardless of current P&L sign.
-            trail_dist_pct = self._opt_trail_distance_pct(peak_pnl_pct)
-            trail_floor = self.highest_premium * (1.0 - trail_dist_pct / 100.0)
+            # GPFC #62: tiered absolute floor as %-from-entry. e.g. tier (12, 7)
+            # means once peak hit +12%, exit if premium drops below the +7%
+            # mark. Decoupled from peak so a sharp giveback doesn't have to
+            # cross a moving "% below peak" line.
+            trail_floor_pct = self._opt_trail_floor_pct(peak_pnl_pct)
+            trail_floor = self.entry_premium * (1.0 + trail_floor_pct / 100.0)
             if current_premium < trail_floor:
                 self.logger.info(
                     "[%s] OPT_TRAIL — premium $%.4f < trail_floor $%.4f "
-                    "(peak=$%.4f dist=%.1f%% pnl=%+.1f%% peak_pnl=%+.1f%%)",
+                    "(floor=+%.1f%% peak=$%.4f peak_pnl=%+.1f%% pnl=%+.1f%%)",
                     self.option_symbol,
                     current_premium,
                     trail_floor,
+                    trail_floor_pct,
                     self.highest_premium,
-                    trail_dist_pct,
-                    premium_change_pct,
                     peak_pnl_pct,
+                    premium_change_pct,
                 )
                 return await self._do_option_exit(
                     current_premium, premium_change_pct, "TRAIL"
@@ -4505,6 +4566,24 @@ class OptionsScalpStrategy(BaseStrategy):
                     if self._base_asset == "BTC"
                     else self.SQUEEZE_BB_WIDTH_ETH
                 ),
+                # GPFC #62: keep the new fields populated post-exit so the
+                # dashboard doesn't show stale values when we flip back to
+                # scanning.
+                "kc_width_pct": round(self._last_kc_width_pct, 3),
+                "bb_kc_width_ratio": (
+                    round(self._bb_width_pct / self._last_kc_width_pct, 3)
+                    if self._last_kc_width_pct > 0 and self._bb_width_pct > 0
+                    else None
+                ),
+                "regime": self._cached_regime,
+                "momentum_60s_pct": round(self._underlying_momentum_pct(), 3),
+                "momentum_freshness_ratio": round(
+                    self._underlying_acceleration_ratio(), 3
+                ),
+                "momentum_acceleration_ratio": round(
+                    self._underlying_acceleration_ratio(), 3
+                ),
+                "momentum_burst_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
                 "squeeze_status": "WAITING",
                 "bb_position": round(self._bb_position, 2),
                 "direction_bias": "NEUTRAL",
@@ -4512,6 +4591,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 "premium_cheap_threshold": None,
                 "last_action": "SCANNING",
                 "squeeze_duration_candles": 0,
+                # In-position telemetry — flat now, so all None / 0 / False.
+                "premium_velocity_pct": None,
+                "consecutive_neg_velocity_ticks": 0,
+                "underlying_vs_position_pct": None,
+                "trail_armed": False,
+                "trail_first_activation_pct": self.OPT_TRAIL_TIERS[0][0],
             },
             # Top-level squeeze fields (read directly by dashboard)
             "bb_width_pct": round(self._bb_width_pct, 3),
