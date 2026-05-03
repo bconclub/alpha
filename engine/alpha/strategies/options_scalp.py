@@ -186,7 +186,9 @@ class OptionsScalpStrategy(BaseStrategy):
     # cleaner signal; option premium is a noisy derivative with theta + spread.
     # Units: %. For a call, veto when spot_mom_20s >= +this; for a put, veto
     # when spot_mom_20s <= -this.
-    PULLBACK_SPOT_VETO_PCT = 0.05
+    # GPFC #64: spot-direction veto threshold — require ≥0.10% aligned move
+    # over 60s to defer PEAK/TRAIL exits. 0.05 was noise-level.
+    PULLBACK_SPOT_VETO_PCT = 0.10
     # Breakeven safety net: once peak is meaningful, never let trade go red
     BREAKEVEN_STOP_ACTIVATE_PCT = 8.0  # arm once peak hits +8%
     BREAKEVEN_STOP_EXIT_PCT = 0.5      # exit if pnl drops to +0.5% or lower
@@ -3074,6 +3076,23 @@ class OptionsScalpStrategy(BaseStrategy):
             return self._underlying_momentum_pct()
         return self._underlying_short_momentum_pct(window_secs)
 
+    def _underlying_still_supports_position(self) -> tuple[bool, float]:
+        """GPFC #64: is the underlying spot still trending in our direction?
+
+        Returns (supports, aligned_mom_pct). True when the 60s aligned move
+        exceeds PULLBACK_SPOT_VETO_PCT — used by PEAK and TRAIL to defer
+        gain-locking exits while spot is still pushing in our favour.
+
+        Long call: positive mom helps. Long put: negative mom helps. The
+        signed product `our_dir * mom_pct` is the aligned move.
+        """
+        if not self.option_side:
+            return False, 0.0
+        mom_pct = self._underlying_momentum_pct()  # signed % over 60s
+        our_dir = 1.0 if self.option_side == "call" else -1.0
+        aligned_move = our_dir * mom_pct
+        return aligned_move > self.PULLBACK_SPOT_VETO_PCT, aligned_move
+
     def _capture_entry_signals(
         self,
         ticker: dict[str, Any] | None,
@@ -3424,20 +3443,38 @@ class OptionsScalpStrategy(BaseStrategy):
             trail_floor_pct = self._opt_trail_floor_pct(peak_pnl_pct)
             trail_floor = self.entry_premium * (1.0 + trail_floor_pct / 100.0)
             if current_premium < trail_floor:
-                self.logger.info(
-                    "[%s] OPT_TRAIL — premium $%.4f < trail_floor $%.4f "
-                    "(floor=+%.1f%% peak=$%.4f peak_pnl=%+.1f%% pnl=%+.1f%%)",
-                    self.option_symbol,
-                    current_premium,
-                    trail_floor,
-                    trail_floor_pct,
-                    self.highest_premium,
-                    peak_pnl_pct,
-                    premium_change_pct,
-                )
-                return await self._do_option_exit(
-                    current_premium, premium_change_pct, "TRAIL"
-                )
+                # GPFC #64: spot-direction veto — if underlying is still
+                # trending our way, premium decay is likely IV/spread noise
+                # rather than thesis failure. Defer the trail exit and let
+                # the move keep developing.
+                spot_supports, aligned_mom = self._underlying_still_supports_position()
+                if spot_supports:
+                    self.logger.info(
+                        "[%s] OPT_TRAIL_VETO — premium $%.4f < floor $%.4f "
+                        "BUT spot still %+.2f%% our way (>%.2f%%) — deferring",
+                        self.option_symbol,
+                        current_premium,
+                        trail_floor,
+                        aligned_mom,
+                        self.PULLBACK_SPOT_VETO_PCT,
+                    )
+                else:
+                    self.logger.info(
+                        "[%s] OPT_TRAIL — premium $%.4f < trail_floor $%.4f "
+                        "(floor=+%.1f%% peak=$%.4f peak_pnl=%+.1f%% pnl=%+.1f%% "
+                        "aligned_mom=%+.2f%%)",
+                        self.option_symbol,
+                        current_premium,
+                        trail_floor,
+                        trail_floor_pct,
+                        self.highest_premium,
+                        peak_pnl_pct,
+                        premium_change_pct,
+                        aligned_mom,
+                    )
+                    return await self._do_option_exit(
+                        current_premium, premium_change_pct, "TRAIL"
+                    )
 
             peak_gain = self.highest_premium - self.entry_premium
             pullback_condition_met = (
@@ -3452,10 +3489,6 @@ class OptionsScalpStrategy(BaseStrategy):
                 self._peak_trail_pending_ticks += 1
                 gave_back = self.highest_premium - current_premium
 
-                # GPFC #44: Removed spot_still_favoring veto. Premium decays on IV
-                # crush while spot still grinds; waiting for spot to agree killed
-                # winners. Premium is truth — if it pulls back past the floor for
-                # PULLBACK_CONFIRMATION_TICKS, exit.
                 # GPFC #49: at peaks >= 10%, protect locked-in profit with a
                 # 1-tick trigger. #3078 peaked +12.61% and gave back to -2.33%
                 # because the 2-tick wait let the premium gap through the floor.
@@ -3467,21 +3500,39 @@ class OptionsScalpStrategy(BaseStrategy):
                 confirmed = self._peak_trail_pending_ticks >= required_ticks
 
                 if confirmed:
-                    self.logger.info(
-                        "[%s] OPT_PEAK_TRAIL — gave back %.1f%% of peak gain "
-                        "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d/%d)",
-                        self.option_symbol,
-                        100.0 * gave_back / peak_gain,
-                        self.highest_premium,
-                        current_premium,
-                        premium_change_pct,
-                        self._peak_trail_pending_ticks,
-                        required_ticks,
-                    )
-                    self._peak_trail_pending_ticks = 0
-                    return await self._do_option_exit(
-                        current_premium, premium_change_pct, "PEAK"
-                    )
+                    # GPFC #64: spot-direction veto — if underlying is still
+                    # trending our way, the giveback is noise/IV crush rather
+                    # than thesis failure. Defer the PEAK exit and reset the
+                    # confirmation counter so we re-confirm on next pullback.
+                    spot_supports, aligned_mom = self._underlying_still_supports_position()
+                    if spot_supports:
+                        self.logger.info(
+                            "[%s] OPT_PEAK_VETO — gave back %.1f%% of peak BUT "
+                            "spot still %+.2f%% our way (>%.2f%%) — deferring",
+                            self.option_symbol,
+                            100.0 * gave_back / peak_gain,
+                            aligned_mom,
+                            self.PULLBACK_SPOT_VETO_PCT,
+                        )
+                        self._peak_trail_pending_ticks = 0
+                    else:
+                        self.logger.info(
+                            "[%s] OPT_PEAK_TRAIL — gave back %.1f%% of peak gain "
+                            "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d/%d "
+                            "aligned_mom=%+.2f%%)",
+                            self.option_symbol,
+                            100.0 * gave_back / peak_gain,
+                            self.highest_premium,
+                            current_premium,
+                            premium_change_pct,
+                            self._peak_trail_pending_ticks,
+                            required_ticks,
+                            aligned_mom,
+                        )
+                        self._peak_trail_pending_ticks = 0
+                        return await self._do_option_exit(
+                            current_premium, premium_change_pct, "PEAK"
+                        )
                 else:
                     self.logger.info(
                         "[%s] OPT_PEAK_TRAIL_DEFER (awaiting_tick_%d/%d) — gave back %.1f%% "
