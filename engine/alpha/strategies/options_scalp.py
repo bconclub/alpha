@@ -347,6 +347,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # ── Dashboard signals panel state ─────────────────────────
         self._squeeze_status: str = "WAITING"  # ACTIVE / WAITING
         self._bb_width_pct: float = 0.0  # Current BB width %
+        self._last_kc_width_pct: float = 0.0  # GPFC #61: last computed KC width %
         self._bb_position: float = 0.5  # Where price sits in bands (0-1)
         self._direction_bias: str = "NEUTRAL"  # CALL / PUT / NEUTRAL
         self._premium_current_ask: float = 0.0  # Current ATM ask
@@ -1693,6 +1694,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Update dashboard signals panel
         self._bb_width_pct = bb_width_pct
+        # GPFC #61: capture KC width % alongside BB width for entry-signals snapshot.
+        kc_mid = (kc_upper + kc_lower) / 2.0 if (kc_upper + kc_lower) else 0.0
+        kc_width_pct = ((kc_upper - kc_lower) / kc_mid * 100) if kc_mid > 0 else 0.0
+        self._last_kc_width_pct = kc_width_pct
         self._bb_position = bb_position
 
         if self._tick_count % 6 == 0:
@@ -3156,7 +3161,9 @@ class OptionsScalpStrategy(BaseStrategy):
             "vega": greeks.get("vega"),
             # Internal entry context
             "bb_width_pct": round(self._bb_width_pct, 4) if self._bb_width_pct else None,
-            "kc_width_pct": None,  # not currently tracked; placeholder for future
+            "kc_width_pct": (
+                round(self._last_kc_width_pct, 4) if self._last_kc_width_pct else None
+            ),
             "breakout_velocity_pct": (
                 round(self._breakout_velocity_pct, 5)
                 if getattr(self, "_breakout_velocity_pct", 0)

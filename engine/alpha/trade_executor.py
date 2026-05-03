@@ -221,7 +221,8 @@ def _extract_exit_reason(reason: str) -> str:
     # New short names — return as-is if present.
     for kw in ("STOP", "STALLED", "BLEED", "TRAIL", "PEAK", "RATCHET",
                "BREAKEVEN", "REVERSE", "TIMEOUT", "GONE", "EXPIRY",
-               "ORPHAN", "DUPLICATE", "MANUAL", "DEAD", "TP"):
+               "ORPHAN", "DUPLICATE", "MANUAL", "DEAD", "TP",
+               "MOM_DEATH"):
         if kw in upper:
             return kw
     return "UNKNOWN"
