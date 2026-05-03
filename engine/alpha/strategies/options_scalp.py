@@ -141,8 +141,10 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
     BREAKOUT_FAKEOUT_DROP_PCT = 5.0  # Premium drop > 5% from breakout = fakeout
     BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
-    MOMENTUM_BURST_THRESHOLD_PCT = 0.20  # GPFC #52: 0.15 -> 0.20 (skip 0.15-0.20 noise band)
-    MOMENTUM_BURST_MIN_ASK_RISE_PCT = 5.0  # cumulative % rise across the 3 ATM ticks
+    # GPFC #66: market is only delivering 0.04% peaks; 0.10 still filtered
+    # everything. Drop again to 0.05 + halve ask-rise gate so MB actually fires.
+    MOMENTUM_BURST_THRESHOLD_PCT = 0.05  # was 0.10
+    MOMENTUM_BURST_MIN_ASK_RISE_PCT = 1.5  # was 2.5; cumulative % rise across 3 ATM ticks
     # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
     # than fading. This rejects "tail-end" moves (premium already priced the move)
     # without forcing us to wait for a bigger move to develop.
@@ -2011,6 +2013,20 @@ class OptionsScalpStrategy(BaseStrategy):
             direction = "DOWN"
         else:
             # Squeeze ended but no clear KC exit yet — skip
+            return
+
+        # GPFC #65: block obviously-broken-out squeezes. bb_kc_ratio > 2.0
+        # means BB has already expanded to twice the KC width — the move has
+        # happened and entering now is post-breakout chasing, not compression.
+        kc_mid = (kc_upper + kc_lower) / 2.0 if (kc_upper + kc_lower) else 0.0
+        kc_width_pct = ((kc_upper - kc_lower) / kc_mid * 100) if kc_mid > 0 else 0.0
+        bb_kc_ratio = bb_width_pct / kc_width_pct if kc_width_pct > 0 else 99.0
+        if bb_kc_ratio > 2.0:
+            self.logger.info(
+                "[%s] SQUEEZE_SKIP — bb_kc_ratio %.2f > 2.0 "
+                "(BB width %.3f%% / KC width %.3f%%) — already broken out",
+                self.pair, bb_kc_ratio, bb_width_pct, kc_width_pct,
+            )
             return
 
         option_type = "call" if direction == "UP" else "put"
