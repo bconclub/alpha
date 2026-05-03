@@ -49,15 +49,14 @@
 
 ═══════════════════════════════════════════════════════════════
 
-Exit (GPFC #21 — SQUEEZE_RELEASE removed, replaced by BREAKOUT_FAKEOUT):
-  1. OPT_SL:           -30% premium (always active, even Phase 1)
-  2. OPT_ENTRY_DROP:   -8% in first 60s — bad entry, cut fast
-  3. Ratchet/Trail:    lock profit at tiers, trail at +8%, TP at +30%
-  4. EXPIRY_GUARD:     < 30 min → always exit; < 2h + pnl < +10% → exit
-  - Progressive SL for stale trades after squeeze hold time (GPFC #23):
-      ETH: 5m → -10%, 8m → -5%, 12m → OPT_STALE check (starts at 25m post-entry)
-      BTC: 8m → -15%, 12m → -10%, 18m → OPT_STALE check (starts at 35m post-entry)
-      If squeeze still active (bb_width < threshold) → STALE_HOLD, don't exit
+Exit (GPFC #60 round 2 — momentum-based, no time gates):
+  1. EXPIRED_WORTHLESS  (premium = 0)
+  2. OPT_HARD_SL        (flat -15%, no age tightening)
+  3. OPT_MOM_DEATH      (premium velocity collapse vs underlying)
+  4. OPT_PEAK_TRAIL     (confirmed pullback ≥ 40% from peak ≥ 10%)
+  5. OPT_TRAIL          (premium below trail floor, peak ≥ 15%)
+  6. OPT_BREAKEVEN_STOP (peak ≥ 8% reverted to ≤ +0.5%)
+  Worthless-expiry safety: ticker fail with < 5 min to expiry → POSITION_GONE.
 
 Expected: 2–5 entries/day, premium $3–8, 70% lose small / 30% gain 200–400%.
 """
@@ -138,7 +137,6 @@ class OptionsScalpStrategy(BaseStrategy):
     # velocity >= 0.3% → 20s, 0.15-0.3% → 40s, < 0.15% → 60s
     BREAKOUT_CONFIRM_HIGH_VELOCITY = 0.3  # >= 0.3% → 20s confirmation
     BREAKOUT_CONFIRM_MED_VELOCITY = 0.15  # 0.15-0.3% → 40s confirmation
-    BREAKOUT_CONFIRM_MIN_VELOCITY = 0.0  # GPFC #60: floor reverted to 0 — was killing real squeeze breakouts
     BREAKOUT_CONFIRM_SEC_HIGH = 20  # Fast for strong moves
     BREAKOUT_CONFIRM_SEC_MED = 40  # Medium wait for medium moves
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
@@ -162,14 +160,15 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds ────────────────
     SL_PREMIUM_LOSS_PCT = 15.0  # Hard stop at -15% premium drop (was -20%)
-    # Tiered trailing: start wide, tighten as profit grows
+    # GPFC #60 round 2: trail only activates at peak >= 15%. Below that, premium
+    # gets room to develop or hits STOP / MOM_DEATH / PEAK pullback. No more
+    # break-even scratches at +5%/+10% peaks.
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
-        (5.0, 5.0),    # +5% peak → 5% trail (floor ~0% — just arms, no real exit)
-        (10.0, 5.0),   # +10% peak → 5% trail (locks ~5%)
-        (15.0, 4.5),   # +15% peak → 4.5% trail (locks ~10%)
-        (25.0, 5.0),   # +25% peak → 5% trail (locks ~20%)
-        (40.0, 6.0),   # +40% peak → 6% trail (locks ~34%)
-        (60.0, 8.0),   # +60% peak → 8% trail (locks ~52%)
+        (15.0, 8.0),    # peak +15% → 8% trail (floor ~+7%)
+        (25.0, 18.0),   # peak +25% → 18% trail (floor ~+7%)
+        (40.0, 30.0),   # peak +40% → 30% trail (floor ~+10%)
+        (60.0, 48.0),   # peak +60% → 48% trail (floor ~+12%)
+        (100.0, 85.0),  # peak +100% → 85% trail (floor ~+15%)
     ]
     PULLBACK_EXIT_PCT = 40.0  # Exit if lost 40% of peak gain
     PULLBACK_ACTIVATE_PCT = 10.0  # Pullback only fires after +10% peak (GPFC #58, was 5%)
@@ -187,30 +186,13 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKEVEN_STOP_ACTIVATE_PCT = 8.0  # arm once peak hits +8%
     BREAKEVEN_STOP_EXIT_PCT = 0.5      # exit if pnl drops to +0.5% or lower
 
-    # ── Stale SL tightening — progressive exit for stuck trades ─────
-    # ETH stale thresholds
-    STALE_SL_5M_ETH = -10.0  # 5 min: SL → -10%
-    STALE_SL_8M_ETH = -5.0  # 8 min: SL → -5%
-    # BTC stale thresholds
-    STALE_SL_8M_BTC = -15.0  # 8 min: SL → -15%
-    STALE_SL_12M_BTC = -10.0  # 12 min: SL → -10%
-    PHASE1_HANDS_OFF_SEC = 30  # Only SL fires in first 30s after fill
+    PHASE1_HANDS_OFF_SEC = 30  # Only SL fires in first 30s after fill (instance-level, no time gating)
 
-    # ── Expiry guard ────────
-    EXPIRY_GUARD_HOURS = 2.0  # if expiry < 2h AND pnl < +10% → exit
-    EXPIRY_GUARD_MIN_MIN = 30  # if expiry < 30 min → always exit regardless of P&L
-
-    # ── GPFC #45: Hard max-hold safety net (all positions, winner or loser) ──
-    # Options decay. Sitting on any position for hours is never the plan.
-    # Fires as a final backstop if every other exit gate misses.
-    OPT_HARD_MAX_HOLD_HOURS = 4.0
-
-    # ── GPFC #52: breathing-room + behavior-based exits ──
-    # First 90s after fill: only OPT_HARD_SL fires. Lets trades develop without
-    # early-kill logic cutting them on normal post-fill noise.
-    PHASE_BREATHING_SEC = 90
-    # GPFC #58: BLEED and REVERSE removed — TRAIL handles real giveback,
-    # STALLED catches dead trades. No mid-range exits that kill runners.
+    # GPFC #60 (round 2): time-gate constants removed.
+    # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
+    # EXPIRY_GUARD_MIN_MIN deleted — exits are momentum-driven, not clock-driven.
+    # _EXPIRY_CLOSE_MINUTES (instance var, 5 min) still protects against
+    # worthless-expiry tickers, which is a price-of-zero condition not a clock.
 
     # ── Dynamic ratchet floor (GPFC #26 — tiered by peak_pnl_pct in _compute_dynamic_floor)
 
@@ -411,6 +393,18 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_ohlcv: list[list[float]] | None = None
         self._cached_ohlcv_time: float = 0.0
         self._OHLCV_CACHE_SEC = 25  # Cache valid for 25 seconds
+
+        # ── GPFC #60 round 2: momentum-death + regime classifier state ───
+        # Counter of consecutive ticks where premium velocity <= 0. Reset on
+        # any positive tick. Used by _check_momentum_death condition #2.
+        self._consecutive_neg_velocity_ticks: int = 0
+        # Premium velocity tick history for acceleration (per-tick % deltas)
+        self._premium_velocity_history: deque[float] = deque(maxlen=12)
+        # Regime classifier cache — recomputed every 30s
+        self._cached_regime: str = "UNKNOWN"
+        self._regime_cache_at: float = 0.0
+        # Captured entry signal snapshot — built at entry, written to DB metadata
+        self._pending_entry_signals: dict[str, Any] | None = None
 
 
     # ==================================================================
@@ -1395,6 +1389,12 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Periodic chain refresh
         await self._refresh_option_chain()
+
+        # GPFC #60 round 2: classify regime once per tick (cached 30s, log-only).
+        try:
+            await self._classify_regime()
+        except Exception as e:
+            self.logger.debug("[%s] regime classify failed: %s", self.pair, e)
 
         # Pre-compute bot state BEFORE dashboard write so timers are fresh
         self._precompute_bot_state()
@@ -2509,6 +2509,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # SET POSITION STATE
         self._position_premium_history.clear()
         self._last_30s_premium = None
+        # GPFC #60 round 2: reset momentum-death trackers per position.
+        self._consecutive_neg_velocity_ticks = 0
+        self._premium_velocity_history.clear()
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -2557,6 +2560,41 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"MOMENTUM_BURST dir={self._breakout_direction} mom={self._underlying_momentum_pct():+.2f}% "
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
             )
+
+        # GPFC #60 round 2: capture entry-signal snapshot for trades.metadata.
+        # Fetch a fresh ticker for IV / OI / greeks; classify regime; build
+        # dict and stash on `_pending_entry_signals` so `_write_entry_to_db`
+        # picks it up.
+        try:
+            entry_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+        except Exception as e:
+            self.logger.debug(
+                "[%s] entry signal ticker fetch failed: %s — proceeding without IV/OI",
+                selected_symbol, e,
+            )
+            entry_ticker = None
+        try:
+            regime_at_entry = await self._classify_regime()
+        except Exception:
+            regime_at_entry = "UNKNOWN"
+        try:
+            self._pending_entry_signals = self._capture_entry_signals(
+                entry_ticker, regime_at_entry
+            )
+            self.logger.info(
+                "[%s] ENTRY_SIGNALS captured: regime=%s iv=%s delta=%s oi=%s",
+                self.option_symbol,
+                regime_at_entry,
+                self._pending_entry_signals.get("iv"),
+                self._pending_entry_signals.get("delta"),
+                self._pending_entry_signals.get("oi"),
+            )
+        except Exception:
+            self.logger.exception(
+                "[%s] _capture_entry_signals failed — proceeding without metadata",
+                selected_symbol,
+            )
+            self._pending_entry_signals = None
 
         # Write DB row NOW — synchronously — so the 60s reconciler sweep
         # can't see an exchange position without a matching DB row and
@@ -2975,6 +3013,236 @@ class OptionsScalpStrategy(BaseStrategy):
         premium_range_pct = ((max(prices) - min(prices)) / first_price * 100) if prices else 0.0
         return (premium_momentum_pct, premium_range_pct)
 
+    def _calc_premium_velocity(self) -> float:
+        """Per-tick premium velocity %% (current vs previous position tick).
+
+        Returns 0.0 if fewer than 2 in-position ticks recorded. Positive when
+        premium is rising tick-over-tick.
+        """
+        hist = self._position_premium_history
+        if len(hist) < 2:
+            return 0.0
+        prev_p = hist[-2][1]
+        curr_p = hist[-1][1]
+        if prev_p <= 0:
+            return 0.0
+        return (curr_p - prev_p) / prev_p * 100.0
+
+    def _calc_underlying_mom(self, window_secs: float = 60.0) -> float:
+        """Spot momentum %% over a window. Wraps the existing 60s/short helpers."""
+        if window_secs >= 60.0:
+            return self._underlying_momentum_pct()
+        return self._underlying_short_momentum_pct(window_secs)
+
+    def _check_momentum_death(self) -> tuple[bool, str]:
+        """GPFC #60 round 2: momentum-based death detector (replaces age-based exits).
+
+        Returns (should_exit, reason_code). No time gates; only velocity,
+        acceleration, and underlying-vs-direction checks.
+
+        Conditions (any one triggers):
+          1. Premium velocity <= -0.3%/tick AND acceleration <= 0 AND
+             underlying moving against position
+          2. Premium velocity <= 0 for 6 consecutive ticks AND underlying
+             moving against position
+          3. Underlying flipped direction (1m candle reversal) AND premium
+             velocity negative
+        """
+        if not self.in_position or self.entry_premium <= 0:
+            return False, ""
+        # Need at least 2 in-position ticks to compute velocity.
+        if len(self._position_premium_history) < 2:
+            return False, ""
+
+        prem_velocity_now = self._calc_premium_velocity()
+        # Append to velocity history; track consecutive non-positive ticks.
+        self._premium_velocity_history.append(prem_velocity_now)
+        if prem_velocity_now <= 0:
+            self._consecutive_neg_velocity_ticks += 1
+        else:
+            self._consecutive_neg_velocity_ticks = 0
+
+        # Acceleration: velocity now - velocity ~30s ago (~3 ticks at ~10s).
+        prem_accel = 0.0
+        if len(self._premium_velocity_history) >= 4:
+            prem_accel = prem_velocity_now - self._premium_velocity_history[-4]
+
+        underlying_mom = self._calc_underlying_mom(60.0)
+        our_dir = 1.0 if self.option_side == "call" else -1.0
+        signed_underlying = our_dir * underlying_mom
+        against = signed_underlying < 0
+
+        # Condition #1: hard velocity collapse against us
+        if (
+            prem_velocity_now <= -0.3
+            and prem_accel <= 0
+            and against
+        ):
+            return True, (
+                f"velocity_collapse vel={prem_velocity_now:+.2f}%/tick "
+                f"accel={prem_accel:+.2f} underlying={underlying_mom:+.2f}%"
+            )
+
+        # Condition #2: sustained non-positive velocity against us
+        if (
+            self._consecutive_neg_velocity_ticks >= 6
+            and against
+        ):
+            return True, (
+                f"sustained_decay {self._consecutive_neg_velocity_ticks} "
+                f"non-positive ticks underlying={underlying_mom:+.2f}%"
+            )
+
+        # Condition #3: 1m candle direction reversal AND premium velocity neg.
+        # Compare last vs prior 1m candle close-open sign on cached OHLCV.
+        ohlcv = self._cached_ohlcv
+        if (
+            ohlcv
+            and len(ohlcv) >= 2
+            and prem_velocity_now < 0
+        ):
+            try:
+                last_o = float(ohlcv[-1][1])
+                last_c = float(ohlcv[-1][4])
+                prev_o = float(ohlcv[-2][1])
+                prev_c = float(ohlcv[-2][4])
+                last_dir = 1 if last_c >= last_o else -1
+                prev_dir = 1 if prev_c >= prev_o else -1
+                # Reversal that goes against our direction.
+                wanted_dir = 1 if self.option_side == "call" else -1
+                if (
+                    last_dir != prev_dir
+                    and last_dir != wanted_dir
+                ):
+                    return True, (
+                        f"candle_reversal prev={prev_dir:+d} now={last_dir:+d} "
+                        f"vs wanted={wanted_dir:+d} vel={prem_velocity_now:+.2f}%/tick"
+                    )
+            except (ValueError, TypeError, IndexError):
+                pass
+
+        return False, ""
+
+    def _capture_entry_signals(
+        self,
+        ticker: dict[str, Any] | None,
+        regime: str,
+    ) -> dict[str, Any]:
+        """GPFC #60 round 2: snapshot raw signals at entry for post-trade analysis.
+
+        Written to the trades.metadata jsonb column. Pure data capture — no
+        gating or branching uses these values yet.
+        """
+        info = (ticker or {}).get("info") or {}
+        greeks = info.get("greeks") or {}
+
+        def _get(key: str) -> Any:
+            v = info.get(key)
+            return v if v not in (None, "") else None
+
+        snapshot: dict[str, Any] = {
+            # IV / volatility
+            "iv": _get("mark_vol"),
+            "iv_24h": _get("mark_change_24h"),
+            # Open interest / turnover
+            "oi": _get("oi"),
+            "oi_value_usd": _get("oi_value_usd"),
+            "oi_change_6h": _get("oi_change_usd_6h"),
+            "turnover_usd": _get("turnover_usd"),
+            # Greeks
+            "delta": greeks.get("delta"),
+            "gamma": greeks.get("gamma"),
+            "theta": greeks.get("theta"),
+            "vega": greeks.get("vega"),
+            # Internal entry context
+            "bb_width_pct": round(self._bb_width_pct, 4) if self._bb_width_pct else None,
+            "kc_width_pct": None,  # not currently tracked; placeholder for future
+            "breakout_velocity_pct": (
+                round(self._breakout_velocity_pct, 5)
+                if getattr(self, "_breakout_velocity_pct", 0)
+                else None
+            ),
+            "premium_velocity_at_entry": round(self._calc_premium_velocity(), 4),
+            "underlying_mom_60s": round(self._calc_underlying_mom(60), 4),
+            "regime": regime,
+            "spot_at_entry": (
+                round(self._last_spot_price, 4) if self._last_spot_price else None
+            ),
+        }
+        return snapshot
+
+    async def _classify_regime(self) -> str:
+        """GPFC #60 round 2: classify current market regime from cached OHLCV.
+
+        Returns one of: TRENDING_UP / TRENDING_DOWN / CHOPPY / DEAD.
+        Result cached for 30s. Log-only — no entry/exit gating uses this yet;
+        we want 30+ tagged trades before learning which regimes win.
+        """
+        now = time.monotonic()
+        if (
+            self._cached_regime != "UNKNOWN"
+            and now - self._regime_cache_at < 30.0
+        ):
+            return self._cached_regime
+
+        ohlcv = self._cached_ohlcv or await self._get_ohlcv_for_squeeze()
+        if not ohlcv or len(ohlcv) < 20:
+            self._cached_regime = "UNKNOWN"
+            self._regime_cache_at = now
+            return self._cached_regime
+
+        # Last 5 candles direction (sum of close-open signs)
+        last5 = ohlcv[-5:]
+        dir_signs = [
+            1 if float(c[4]) >= float(c[1]) else -1
+            for c in last5
+        ]
+        net_dir = sum(dir_signs)
+
+        # ATR (true range) on last 14, mean of last 20 for comparison
+        def _tr(idx: int) -> float:
+            high = float(ohlcv[idx][2])
+            low = float(ohlcv[idx][3])
+            prev_close = float(ohlcv[idx - 1][4]) if idx > 0 else low
+            return max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
+            )
+
+        tr_recent = [_tr(i) for i in range(len(ohlcv) - 14, len(ohlcv))]
+        tr_baseline = [_tr(i) for i in range(len(ohlcv) - 20, len(ohlcv))]
+        atr_now = sum(tr_recent) / len(tr_recent) if tr_recent else 0.0
+        atr_mean = sum(tr_baseline) / len(tr_baseline) if tr_baseline else 0.0
+
+        # Use cached BB / KC widths from latest squeeze detection.
+        bb_width = self._bb_width_pct or 0.0
+        # Approximate KC width from the BB threshold for the asset; we don't
+        # cache KC width directly. BB inside KC ≡ active squeeze.
+        bb_inside_kc = self._squeeze_status == "ACTIVE"
+
+        regime = "CHOPPY"
+        # Trending: 4-of-5 candles same direction AND ATR > mean
+        if abs(net_dir) >= 4 and atr_mean > 0 and atr_now > atr_mean:
+            regime = "TRENDING_UP" if net_dir > 0 else "TRENDING_DOWN"
+        elif (
+            atr_mean > 0
+            and atr_now < 0.5 * atr_mean
+            and bb_inside_kc
+        ):
+            regime = "DEAD"
+
+        self._cached_regime = regime
+        self._regime_cache_at = now
+        if self._tick_count % 6 == 0:
+            self.logger.info(
+                "[%s] REGIME=%s net_dir=%+d atr_now=%.4f atr_mean=%.4f "
+                "bb_width=%.3f%% squeeze=%s",
+                self.pair, regime, net_dir, atr_now, atr_mean,
+                bb_width, bb_inside_kc,
+            )
+        return regime
+
     def _opt_trail_distance_pct(self, peak_pnl_pct: float) -> float:
         """Trail width %% below peak premium; width is determined by tier only.
 
@@ -2987,58 +3255,13 @@ class OptionsScalpStrategy(BaseStrategy):
                 dist = trail_pct
         return dist
 
-    def _dynamic_sl_pct(self, age_sec: float, peak_pnl_pct: float) -> float:
-        """GPFC #52/#57/#58: trajectory-aware stop-loss %.
+    def _flat_sl_pct(self) -> float:
+        """GPFC #60 round 2: flat stop-loss; previous age-based tightening removed.
 
-        Fresh trade (< 2 min): -25% cushion (GPFC #58, was -30%).
-        Trade that never peaked by 2 min: tighten to -20% (proved nothing).
-        Trade older than 10 min: -15% disaster cap (GPFC #57).
-        Otherwise: -25%.
+        Returns the negative SL percentage (e.g. -15.0). STOP fires when
+        premium drops past this threshold from entry.
         """
-        if age_sec < 120:
-            return -25.0
-        if peak_pnl_pct < 1.0:
-            return -20.0
-        if age_sec > 600:
-            return -15.0
-        return -25.0
-
-    def _thesis_broken(
-        self,
-        age_sec: float,
-        peak_pnl_pct: float,
-        underlying_move_since_entry: float,
-        current_pnl_pct: float = 0.0,
-    ) -> tuple[bool, str]:
-        """GPFC #52 / #56 / #58: is the reason we took this trade clearly broken?
-
-        Returns (broken, reason_tag). STALLED owns sub-3% peak trades.
-        Trades with real peaks (>= 3%) are handled by TRAIL / PEAK / BREAKEVEN.
-
-        GPFC #58 layered patience:
-          - 5 min: truly dead (no peak, < 1%)
-          - 8 min: medium-stuck (sub-3% peak)
-          - 12 min: underwater bleeder (current < -8%)
-        """
-        if age_sec < self.PHASE_BREATHING_SEC:
-            return False, ""
-        # GPFC #58: real peaks (>= 3%) are owned by TRAIL/BREAKEVEN
-        if peak_pnl_pct >= 3.0:
-            return False, ""
-        # Underlying reversed against us on a no-peak trade — kill early
-        tolerance = max(0.10, self._entry_underlying_move or 0.15)
-        if underlying_move_since_entry < -tolerance:
-            return True, "underlying_reversed_beyond_tolerance"
-        # 5 min: truly dead — no meaningful peak ever
-        if age_sec > 300 and peak_pnl_pct < 1.0:
-            return True, "no_peak_5min"
-        # 8 min: sub-3% peak, stuck and going nowhere
-        if age_sec > 480 and peak_pnl_pct < 3.0:
-            return True, "sub3pct_peak_8min"
-        # 12 min: still underwater > 8% — bleeding out before STOP fires
-        if age_sec > 720 and current_pnl_pct < -8.0:
-            return True, "underwater_12min"
-        return False, ""
+        return -float(self.SL_PREMIUM_LOSS_PCT)
 
     # ==================================================================
     # EXIT LOGIC
@@ -3176,9 +3399,6 @@ class OptionsScalpStrategy(BaseStrategy):
         energy_score = self._compute_energy(current_premium)
         dynamic_floor = self._compute_dynamic_floor(peak_pnl_pct, energy_score)
         self._opt_ratchet_floor = dynamic_floor
-        hold_seconds = (
-            time.monotonic() - self.entry_time if self.entry_time else 0.0
-        )
         hours_to_expiry = (
             (self.expiry_dt - datetime.now(timezone.utc)).total_seconds() / 3600
             if self.expiry_dt
@@ -3204,68 +3424,44 @@ class OptionsScalpStrategy(BaseStrategy):
                 expiry_tag,
             )
 
-        # ── 0. GPFC #45: OPT_MAX_HOLD safety net ─────────────────────────
-        # Options decay. No position should sit open beyond this cap — if
-        # every other exit gate has missed, cut at market.
-        if (
-            self.entry_time is not None
-            and hold_seconds >= self.OPT_HARD_MAX_HOLD_HOURS * 3600
-        ):
-            self.logger.warning(
-                "[%s] OPT_MAX_HOLD — held %.1fh >= cap %.1fh, premium=%+.1f%% — force exit",
-                self.option_symbol,
-                hold_seconds / 3600,
-                self.OPT_HARD_MAX_HOLD_HOURS,
-                premium_change_pct,
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "TIMEOUT"
-            )
-
-        # ── 1. GPFC #52: trajectory-aware OPT_HARD_SL ─────────────────────
-        sl_pct = self._dynamic_sl_pct(hold_seconds, peak_pnl_pct)
+        # ── 1. OPT_HARD_SL — flat stop-loss (no age tightening) ─────────
+        sl_pct = self._flat_sl_pct()
         if premium_change_pct <= sl_pct:
             self.logger.info(
-                "[%s] OPT_HARD_SL — premium %+.1f%% <= %.1f%% "
-                "(age=%.0fs peak=%+.1f%%)",
+                "[%s] OPT_HARD_SL — premium %+.1f%% <= %.1f%% (peak=%+.1f%%)",
                 self.option_symbol,
                 premium_change_pct,
                 sl_pct,
-                hold_seconds,
                 peak_pnl_pct,
             )
             return await self._do_option_exit(
                 current_premium, premium_change_pct, "STOP"
             )
 
-        # ── GPFC #59: BREATHING PERIOD (refined) ──────────────────────────
-        # First 90s: skip the AGGRESSIVE kill exits (STALLED, BREAKEVEN).
-        # But ALWAYS allow trail floor protection — if a trade rockets to
-        # +20% peak and gives back, we MUST lock that. Trail is profit
-        # protection, not noise kill. STALLED/BREAKEVEN gate on in_breathing
-        # themselves below; this block does NOT return early.
-        in_breathing = hold_seconds < self.PHASE_BREATHING_SEC
-
-        # ── GPFC #52: signed underlying move since entry ──────────────────
-        # Positive = spot moving the direction our option wants.
-        our_dir = 1.0 if self.option_side == "call" else -1.0
-        spot_now = float(self._last_spot_price or 0)
-        underlying_move_signed = 0.0
-        if self._spot_at_entry > 0 and spot_now > 0:
-            underlying_move_signed = (
-                (spot_now - self._spot_at_entry) / self._spot_at_entry * 100 * our_dir
+        # ── 2. MOM_DEATH — momentum-based death detector ─────────────────
+        # Premium velocity collapsing or underlying flipping against us.
+        # Replaces all age-based exit logic from previous GPFC rounds.
+        mom_dead, mom_reason = self._check_momentum_death()
+        if mom_dead:
+            self.logger.info(
+                "[%s] OPT_MOM_DEATH — %s (premium %+.1f%% peak %+.1f%%)",
+                self.option_symbol,
+                mom_reason,
+                premium_change_pct,
+                peak_pnl_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "MOM_DEATH"
             )
 
         # ══════════════════════════════════════════════════════════════════
-        # GPFC #58: EXIT ORDER PRIORITY
-        #   1. STOP      (handled above)
-        #   2. TRAIL     (premium < trail_floor)     ← PEAK-LOCKING FIRST
-        #   3. PEAK      (confirmed pullback >= 10%)
-        #   4. RATCHET   (legacy, no emit site)
-        #   5. STALLED   (sub-3% peak trades, layered patience)
-        #   6. BREAKEVEN
-        # BLEED and REVERSE removed (GPFC #58) — killed too many runners.
-        # TRAIL is wide enough to catch real giveback; STALLED catches dead.
+        # GPFC #60 round 2: EXIT ORDER PRIORITY (no time gates)
+        #   0. EXPIRED_WORTHLESS (premium == 0, handled above)
+        #   1. STOP     (premium dropped past flat SL)        — handled above
+        #   2. MOM_DEATH (premium velocity collapsing)        — handled above
+        #   3. PEAK     (confirmed pullback ≥ 40% from peak ≥ 10%)
+        #   4. TRAIL    (premium < trail_floor, peak ≥ 15%)
+        #   5. BREAKEVEN
         # ══════════════════════════════════════════════════════════════════
 
         # ── 2. OPT_TRAIL / OPT_PEAK_TRAIL (tiered peak trail) ──
@@ -3369,36 +3565,12 @@ class OptionsScalpStrategy(BaseStrategy):
                 # Pullback condition not met this tick — reset confirmation.
                 self._peak_trail_pending_ticks = 0
 
-        # ── 5. GPFC #58: OPT_STALLED — layered patience for sub-3% peak trades ──
-        # GPFC #59: gated on in_breathing — don't kill noise during first 90s.
-        if not in_breathing:
-            broken, reason_tag = self._thesis_broken(
-                hold_seconds, peak_pnl_pct, underlying_move_signed, premium_change_pct,
-            )
-            if broken:
-                self.logger.info(
-                    "[%s] OPT_STALLED — %s (age=%.0fs peak=%+.1f%% "
-                    "underlying_since_entry=%+.2f%% tol=%.2f%%) — exit",
-                    self.option_symbol,
-                    reason_tag,
-                    hold_seconds,
-                    peak_pnl_pct,
-                    underlying_move_signed,
-                    max(0.10, self._entry_underlying_move or 0.15),
-                )
-                return await self._do_option_exit(
-                    current_premium, premium_change_pct, "STALLED"
-                )
-
-        # ── 8. Breakeven stop — once we've been meaningfully green, don't go red ──
-        # Replaces the legacy ENERGY_DEAD_LOSER / ENERGY_WINNER_FADING gates which
-        # over-cut recoverable trades. This fires only when a real peak existed
-        # AND the trade has retraced to roughly entry, so it converts would-be
-        # losers (peak +10% → -12%) into scratches (peak +10% → ~0%).
-        # GPFC #59: gated on in_breathing — don't kill noise during first 90s.
+        # ── 5. Breakeven stop — once we've been meaningfully green, don't go red ──
+        # Fires only when a real peak existed AND the trade has retraced to
+        # roughly entry, converting would-be losers (peak +10% → -12%) into
+        # scratches (peak +10% → ~0%).
         if (
-            not in_breathing
-            and peak_pnl_pct >= self.BREAKEVEN_STOP_ACTIVATE_PCT
+            peak_pnl_pct >= self.BREAKEVEN_STOP_ACTIVATE_PCT
             and premium_change_pct <= self.BREAKEVEN_STOP_EXIT_PCT
         ):
             self.logger.info(
@@ -3553,6 +3725,10 @@ class OptionsScalpStrategy(BaseStrategy):
             if order_id_val:
                 row["order_id"] = order_id_val
                 row["exchange_fill_id"] = order_id_val
+            # GPFC #60 round 2: attach entry-signal snapshot if captured.
+            if self._pending_entry_signals:
+                row["metadata"] = self._pending_entry_signals
+                self._pending_entry_signals = None
 
             try:
                 result = self.executor.db.client.table("trades").insert(row).execute()
