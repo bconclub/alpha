@@ -2070,6 +2070,41 @@ class OptionsScalpStrategy(BaseStrategy):
 
         option_type = "call" if direction == "UP" else "put"
 
+        # ═════════════════════════════════════════════════════════════════════
+        # GPFC #70: REGIME GATE on SQUEEZE entries — mirrors GPFC #42 MB logic.
+        # Block counter-trend squeeze breakouts where the 5min trend is opposed
+        # to the BB-out-of-KC direction. Uses 0.10% / 5min threshold (same as
+        # MB regime gate) so a sideways 5min ribbon still allows entries.
+        # ═════════════════════════════════════════════════════════════════════
+        regime_threshold = 0.10
+        ohlcv = self._cached_ohlcv
+        if ohlcv and len(ohlcv) >= 6:
+            try:
+                close_now = float(ohlcv[-1][4])
+                close_5m_ago = float(ohlcv[-6][4])
+                if close_5m_ago > 0:
+                    regime_pct = (close_now - close_5m_ago) / close_5m_ago * 100
+                    counter_call = (
+                        option_type == "call" and regime_pct <= -regime_threshold
+                    )
+                    counter_put = (
+                        option_type == "put" and regime_pct >= regime_threshold
+                    )
+                    if counter_call or counter_put:
+                        self.logger.info(
+                            "[%s] SQUEEZE_SKIP_REGIME — %s blocked, 5m=%+.2f%% "
+                            "vs wanted %s (counter-trend)",
+                            self.pair, option_type.upper(), regime_pct,
+                            direction,
+                        )
+                        return
+                    self.logger.info(
+                        "[%s] SQUEEZE_REGIME_OK: 5m=%+.2f%% aligned with %s",
+                        self.pair, regime_pct, direction,
+                    )
+            except (ValueError, TypeError, IndexError):
+                pass
+
         # Need current price and exchange data to select strike
         current_price = 0.0
         try:
