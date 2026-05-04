@@ -243,6 +243,116 @@ function DualSignalBar({
 }
 
 // ---------------------------------------------------------------------------
+// SignalDetails — surfaces GPFC #62/#63/#67 fields from signals_panel
+// ---------------------------------------------------------------------------
+
+const REGIME_STYLE: Record<string, { color: string; bg: string; border: string; label: string }> = {
+  TRENDING_UP:   { color: '#22c55e', bg: 'rgba(34,197,94,0.12)',  border: 'rgba(34,197,94,0.35)',  label: 'TRENDING ↑' },
+  TRENDING_DOWN: { color: '#ef4444', bg: 'rgba(239,68,68,0.12)',  border: 'rgba(239,68,68,0.35)',  label: 'TRENDING ↓' },
+  CHOPPY:        { color: '#eab308', bg: 'rgba(234,179,8,0.12)',  border: 'rgba(234,179,8,0.35)',  label: 'CHOPPY' },
+  UNKNOWN:       { color: '#71717a', bg: 'rgba(113,113,122,0.12)', border: 'rgba(113,113,122,0.35)', label: 'UNKNOWN' },
+};
+
+function SignalDetails({ state, inPosition }: { state: OptionsState; inPosition: boolean }) {
+  const sp = state.signals_panel ?? null;
+  if (!sp) return null;
+
+  // Regime chip
+  const regime = (sp.regime as string | undefined | null) ?? 'UNKNOWN';
+  const regimeStyle = REGIME_STYLE[regime] ?? REGIME_STYLE.UNKNOWN;
+
+  // BB / KC / ratio row
+  const bbW = sp.bb_width_pct ?? null;
+  const kcW = sp.kc_width_pct ?? null;
+  const ratio = sp.bb_kc_width_ratio ?? (bbW != null && kcW && kcW > 0 ? bbW / kcW : null);
+  const ratioColor =
+    ratio == null ? '#71717a' :
+    ratio < 0.5 ? '#22c55e' :          // tight squeeze
+    ratio < 1.0 ? '#eab308' :          // BB approaching KC walls
+    ratio <= 2.0 ? '#f97316' :         // breaking out
+    '#ef4444';                         // already broken out — entry guard zone
+
+  const freshness = sp.momentum_freshness_ratio ?? sp.momentum_acceleration_ratio ?? null;
+  const freshnessColor = freshness == null ? '#71717a' : freshness >= 0.5 ? '#22c55e' : freshness >= 0.3 ? '#eab308' : '#71717a';
+
+  // In-position telemetry
+  const premVel = sp.premium_velocity_pct ?? null;
+  const underVsPos = sp.underlying_vs_position_pct ?? null;
+  const trailArmed = sp.trail_armed ?? false;
+  const trailActivation = sp.trail_first_activation_pct ?? 4;
+
+  return (
+    <div className="bg-zinc-900/40 border border-zinc-800/50 rounded p-2 mb-2 space-y-1.5">
+      {/* Regime + Freshness row */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[8px] text-zinc-500 uppercase tracking-wide">Regime</span>
+          <span
+            className="px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase border"
+            style={{ color: regimeStyle.color, backgroundColor: regimeStyle.bg, borderColor: regimeStyle.border }}
+          >
+            {regimeStyle.label}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[8px] text-zinc-500 uppercase tracking-wide">Freshness</span>
+          <span className="text-[10px] font-mono font-bold" style={{ color: freshnessColor }}>
+            {freshness != null ? freshness.toFixed(2) : '--'}
+          </span>
+        </div>
+      </div>
+
+      {/* BB / KC / ratio row */}
+      <div className="flex items-center justify-between gap-2 text-[8px] font-mono">
+        <span className="text-zinc-500 uppercase tracking-wide">BB / KC</span>
+        <span className="text-zinc-300">
+          {bbW != null ? `${bbW.toFixed(2)}%` : '--'} / {kcW != null ? `${kcW.toFixed(2)}%` : '--'}
+        </span>
+        <span className="text-zinc-500 uppercase tracking-wide">Ratio</span>
+        <span className="font-bold" style={{ color: ratioColor }}>
+          {ratio != null ? ratio.toFixed(2) : '--'}
+        </span>
+      </div>
+
+      {/* In-position telemetry (only when a position exists) */}
+      {inPosition && (
+        <>
+          <div className="flex items-center justify-between gap-2 text-[8px] font-mono pt-1 border-t border-zinc-800/50">
+            <span className="text-zinc-500 uppercase tracking-wide">Prem Vel</span>
+            <span className={cn(
+              'font-bold',
+              premVel == null ? 'text-zinc-500' : premVel >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'
+            )}>
+              {premVel != null ? `${premVel >= 0 ? '+' : ''}${premVel.toFixed(2)}%/tick` : '--'}
+            </span>
+            <span className="text-zinc-500 uppercase tracking-wide">Spot</span>
+            <span className={cn(
+              'font-bold',
+              underVsPos == null ? 'text-zinc-500' : underVsPos >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'
+            )}>
+              {underVsPos != null ? `${underVsPos >= 0 ? '+' : ''}${underVsPos.toFixed(2)}%` : '--'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-2 text-[8px] font-mono">
+            <span className="text-zinc-500 uppercase tracking-wide">Trail</span>
+            <span
+              className={cn(
+                'px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase border',
+                trailArmed
+                  ? 'bg-[#22c55e]/15 text-[#22c55e] border-[#22c55e]/30'
+                  : 'bg-zinc-800 text-zinc-500 border-zinc-700'
+              )}
+            >
+              {trailArmed ? 'ARMED' : `DISARMED (peak < ${trailActivation}%)`}
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Breakout Badge Component
 // ---------------------------------------------------------------------------
 
@@ -536,6 +646,9 @@ function ChainCard({
         squeeze_active={state.squeeze_active}
         signal_strength={(state as any).signal_strength}
       />
+
+      {/* 1b. GPFC #62/#63/#67 signals — regime, BB/KC ratio, freshness, in-position telemetry */}
+      <SignalDetails state={state} inPosition={inPosition} />
 
       {/* 2. Squeeze active message */}
       {state.squeeze_active && (

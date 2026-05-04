@@ -333,6 +333,18 @@ export interface SignalsPanel {
   premium_cheap_threshold: number | null;
   last_action: 'SQUEEZE_FILL' | 'SQUEEZE_NO_FILL' | 'SCANNING';
   squeeze_duration_candles: number;
+  // GPFC #61/#62/#63 signals — engine writes them; frontend renders since #67-bundle.
+  kc_width_pct?: number | null;
+  bb_kc_width_ratio?: number | null;
+  regime?: 'TRENDING_UP' | 'TRENDING_DOWN' | 'CHOPPY' | 'UNKNOWN' | string | null;
+  momentum_freshness_ratio?: number | null;
+  momentum_acceleration_ratio?: number | null;
+  momentum_burst_threshold_pct?: number | null;
+  // In-position telemetry (null when flat)
+  premium_velocity_pct?: number | null;
+  underlying_vs_position_pct?: number | null;
+  trail_armed?: boolean | null;
+  trail_first_activation_pct?: number | null;
 }
 
 /** options_state row from Supabase (engine upserts every ~30s per pair) */

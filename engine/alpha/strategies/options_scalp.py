@@ -197,6 +197,22 @@ class OptionsScalpStrategy(BaseStrategy):
 
     PHASE1_HANDS_OFF_SEC = 30  # Only SL fires in first 30s after fill (instance-level, no time gating)
 
+    # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
+    # Catches trades that NEVER moved up AND underlying turned against us.
+    # Fires before STOP so we cut at ~ -8% rather than letting it bleed to
+    # the -15% flat SL. All three conditions required, no time gates.
+    DEAD_PEAK_MAX_PCT = 0.5         # peak ≤ 0.5% means trade essentially never moved up
+    DEAD_PREMIUM_DROP_PCT = -8.0    # premium dropped ≥ 8% from entry
+    DEAD_UNDERLYING_AGAINST_PCT = 0.05  # underlying moved > 0.05% against us in 60s
+
+    # ── GPFC #67: entry-quality filters (winner-pattern analysis) ─────
+    # Winners cluster at |delta| 0.42-0.61, IV 0.41-0.54, turnover $2.84M-$13.68M.
+    # Block entries outside these bands.
+    ENTRY_MIN_TURNOVER_USD = 2_000_000
+    ENTRY_DELTA_MIN_ABS = 0.40
+    ENTRY_DELTA_MAX_ABS = 0.65
+    ENTRY_MIN_IV = 0.40
+
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
     # EXPIRY_GUARD_MIN_MIN deleted — exits are momentum-driven, not clock-driven.
@@ -1947,6 +1963,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # GPFC #52: Spread guard — wide spread = guaranteed instant -4% entry.
         # Fetch live bid/ask and skip if (ask - bid) / ask > 8%.
+        spread_ticker: dict[str, Any] | None = None
         try:
             spread_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
             _bid = float(spread_ticker.get("bid") or 0)
@@ -1965,6 +1982,16 @@ class OptionsScalpStrategy(BaseStrategy):
         except Exception:
             # If spread fetch fails, fall through; don't penalize for tick glitches.
             pass
+
+        # GPFC #67: entry-quality filter (turnover/delta/IV) reusing spread_ticker.
+        passes_quality, skip_reason = self._passes_entry_quality(spread_ticker)
+        if not passes_quality:
+            if self._tick_count % 5 == 0:
+                self.logger.info(
+                    "[%s] ENTRY_QUALITY_SKIP — %s (MOM_BURST %s)",
+                    self.pair, skip_reason, selected_symbol,
+                )
+            return []
 
         opt_contracts = self._calculate_option_contracts(entry_ask, confidence=0.7)
         if opt_contracts < 1:
@@ -2075,6 +2102,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         selected_strike: float | None = None
         selected_symbol: str | None = None
+        selected_ticker: dict[str, Any] | None = None
         current_ask: float = 0.0
 
         for strike in strikes_to_try:
@@ -2096,6 +2124,7 @@ class OptionsScalpStrategy(BaseStrategy):
             if n >= 1:
                 selected_strike = strike
                 selected_symbol = sym
+                selected_ticker = ticker
                 current_ask = ask
                 break
 
@@ -2104,6 +2133,15 @@ class OptionsScalpStrategy(BaseStrategy):
                 "[%s] SQUEEZE_BREAKOUT dir=%s: no affordable strike — skip",
                 self.pair,
                 direction,
+            )
+            return
+
+        # GPFC #67: entry-quality filter on the chosen strike's ticker.
+        passes_quality, skip_reason = self._passes_entry_quality(selected_ticker)
+        if not passes_quality:
+            self.logger.info(
+                "[%s] ENTRY_QUALITY_SKIP — %s (SQUEEZE %s)",
+                self.pair, skip_reason, selected_symbol,
             )
             return
 
@@ -3109,6 +3147,47 @@ class OptionsScalpStrategy(BaseStrategy):
         aligned_move = our_dir * mom_pct
         return aligned_move > self.PULLBACK_SPOT_VETO_PCT, aligned_move
 
+    def _passes_entry_quality(
+        self,
+        ticker: dict[str, Any] | None,
+    ) -> tuple[bool, str]:
+        """GPFC #67: liquidity + moneyness + IV gate before any entry fires.
+
+        Returns (passes, skip_reason). Winners cluster at |delta| 0.42-0.61,
+        IV 0.41-0.54, turnover $2.84M-$13.68M. Reject anything outside the
+        bands so we stop bleeding on illiquid tails / wrong-moneyness picks.
+        """
+        if not ticker:
+            return True, ""  # don't penalize if ticker fetch failed; spread guard already passed
+        info = ticker.get("info") or {}
+        greeks = info.get("greeks") or {}
+        try:
+            turnover = float(info.get("turnover_usd", 0) or 0)
+        except (TypeError, ValueError):
+            turnover = 0.0
+        try:
+            delta_abs = abs(float(greeks.get("delta", 0) or 0))
+        except (TypeError, ValueError):
+            delta_abs = 0.0
+        try:
+            iv = float(info.get("mark_vol", 0) or 0)
+        except (TypeError, ValueError):
+            iv = 0.0
+
+        skip_reasons: list[str] = []
+        if turnover < self.ENTRY_MIN_TURNOVER_USD:
+            skip_reasons.append(f"turnover_low_${turnover/1e6:.2f}M")
+        if delta_abs < self.ENTRY_DELTA_MIN_ABS:
+            skip_reasons.append(f"delta_too_low_{delta_abs:.2f}")
+        if delta_abs > self.ENTRY_DELTA_MAX_ABS:
+            skip_reasons.append(f"delta_too_high_{delta_abs:.2f}")
+        if iv < self.ENTRY_MIN_IV:
+            skip_reasons.append(f"iv_low_{iv:.2f}")
+
+        if skip_reasons:
+            return False, ", ".join(skip_reasons)
+        return True, ""
+
     def _capture_entry_signals(
         self,
         ticker: dict[str, Any] | None,
@@ -3410,6 +3489,32 @@ class OptionsScalpStrategy(BaseStrategy):
                 expiry_tag,
             )
 
+        # ── GPFC #67: OPT_DEAD — dead-on-arrival cutter ────────────────
+        # Fires before STOP. All three required: trade never moved up
+        # (peak ≤ 0.5%) AND premium has dropped ≥ 8% AND underlying is moving
+        # against us > 0.05% in 60s. Saves ~$0.20/trade vs letting STOP bleed
+        # to -15%. No time gate — purely state-based.
+        if (
+            peak_pnl_pct <= self.DEAD_PEAK_MAX_PCT
+            and premium_change_pct <= self.DEAD_PREMIUM_DROP_PCT
+            and self.option_side
+        ):
+            our_dir = 1.0 if self.option_side == "call" else -1.0
+            underlying_mom = self._underlying_momentum_pct()
+            aligned_mom = our_dir * underlying_mom
+            if aligned_mom < -self.DEAD_UNDERLYING_AGAINST_PCT:
+                self.logger.info(
+                    "[%s] OPT_DEAD — peak %+.2f%% never moved, premium %+.2f%%, "
+                    "underlying %+.3f%% against us",
+                    self.option_symbol,
+                    peak_pnl_pct,
+                    premium_change_pct,
+                    aligned_mom,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "DEAD"
+                )
+
         # ── 1. OPT_HARD_SL — flat stop-loss (no age tightening) ─────────
         sl_pct = self._flat_sl_pct()
         if premium_change_pct <= sl_pct:
@@ -3425,12 +3530,13 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         # ══════════════════════════════════════════════════════════════════
-        # GPFC #63: EXIT ORDER PRIORITY
+        # GPFC #67: EXIT ORDER PRIORITY
         #   0. EXPIRED_WORTHLESS  (premium == 0, handled above)
-        #   1. STOP               (premium dropped past flat SL, handled above)
-        #   2. TRAIL              (premium < tier floor, peak ≥ 4%)
-        #   3. PEAK               (confirmed pullback ≥ 30% from peak ≥ 4%)
-        #   4. BREAKEVEN          (peak ≥ 8% reverted to ≤ +0.5%)
+        #   1. DEAD               (peak ≤ 0.5% AND premium ≤ -8% AND underlying against, handled above)
+        #   2. STOP               (premium dropped past flat SL, handled above)
+        #   3. TRAIL              (premium < tier floor, peak ≥ 4%)
+        #   4. PEAK               (confirmed pullback ≥ 30% from peak ≥ 4%)
+        #   5. BREAKEVEN          (peak ≥ 8% reverted to ≤ +0.5%)
         # ══════════════════════════════════════════════════════════════════
 
         # ── 2. OPT_TRAIL — tiered absolute floor ──
