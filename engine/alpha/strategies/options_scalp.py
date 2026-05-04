@@ -141,10 +141,10 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKOUT_CONFIRM_SEC_MAX = 60  # Max wait for weak moves
     BREAKOUT_FAKEOUT_DROP_PCT = 5.0  # Premium drop > 5% from breakout = fakeout
     BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
-    # GPFC #66: market is only delivering 0.04% peaks; 0.10 still filtered
-    # everything. Drop again to 0.05 + halve ask-rise gate so MB actually fires.
-    MOMENTUM_BURST_THRESHOLD_PCT = 0.05  # was 0.10
-    MOMENTUM_BURST_MIN_ASK_RISE_PCT = 1.5  # was 2.5; cumulative % rise across 3 ATM ticks
+    # GPFC #69: 0.05 → 0.06 (slight tighten — winners had ≥0.05 aligned mom;
+    # #3279 slipped through with und_mom -0.008 ≈ zero).
+    MOMENTUM_BURST_THRESHOLD_PCT = 0.06  # was 0.05 (#66), 0.10 (#65), 0.20 (pre-#65)
+    MOMENTUM_BURST_MIN_ASK_RISE_PCT = 1.5  # cumulative % rise across 3 ATM ticks
     # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
     # than fading. This rejects "tail-end" moves (premium already priced the move)
     # without forcing us to wait for a bigger move to develop.
@@ -1995,6 +1995,18 @@ class OptionsScalpStrategy(BaseStrategy):
 
         opt_contracts = self._calculate_option_contracts(entry_ask, confidence=0.7)
         if opt_contracts < 1:
+            return []
+
+        # GPFC #69: stop-the-bleed — BB must be only mildly wider than KC for
+        # MOM_BURST entries (real compression preceding the move). Live data:
+        # bb_kc > 1.5 = 0/4 winners on MB entries, combined -$0.55.
+        bb_w = self._bb_width_pct or 0.0
+        kc_w = self._last_kc_width_pct or 0.0
+        if kc_w > 0 and (bb_w / kc_w) > 1.5:
+            self.logger.info(
+                "[%s] MOM_BURST_SKIP — bb_kc %.2f > 1.5 (BB %.3f%% / KC %.3f%%)",
+                self.pair, bb_w / kc_w, bb_w, kc_w,
+            )
             return []
 
         self.logger.info(
