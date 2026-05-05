@@ -4001,6 +4001,27 @@ class OptionsScalpStrategy(BaseStrategy):
                                         "[%s] failed to backfill order_id on adopted row",
                                         option_symbol,
                                     )
+                            # GPFC #71b fix: merge pending entry-signal snapshot
+                            # (confidence, sl_pct, trail_*, etc.) into the
+                            # adopted row's metadata. Otherwise the reconciler
+                            # path's pre-existing row never gets the snapshot.
+                            if self._pending_entry_signals:
+                                try:
+                                    await self._db.update_trade_metadata(
+                                        existing_id, self._pending_entry_signals
+                                    )
+                                    self.logger.info(
+                                        "[%s] METADATA_MERGED into adopted row id=%s "
+                                        "(confidence=%s)",
+                                        option_symbol, existing_id,
+                                        self._pending_entry_signals.get("confidence"),
+                                    )
+                                except Exception:
+                                    self.logger.debug(
+                                        "[%s] metadata merge into adopted row failed "
+                                        "(non-critical)", option_symbol,
+                                    )
+                                self._pending_entry_signals = None
                             return
             except Exception:
                 self.logger.debug(
@@ -4080,6 +4101,27 @@ class OptionsScalpStrategy(BaseStrategy):
                         )
                         if existing and existing.get("id"):
                             self._db_trade_id = existing["id"]
+                            # GPFC #71b fix: same metadata-merge path as the
+                            # pre-insert dedup branch above, for the case where
+                            # we lost the race at the DB layer rather than the
+                            # app layer.
+                            if self._pending_entry_signals:
+                                try:
+                                    await self._db.update_trade_metadata(
+                                        existing["id"], self._pending_entry_signals
+                                    )
+                                    self.logger.info(
+                                        "[%s] METADATA_MERGED into race-adopted "
+                                        "row id=%s (confidence=%s)",
+                                        option_symbol, existing["id"],
+                                        self._pending_entry_signals.get("confidence"),
+                                    )
+                                except Exception:
+                                    self.logger.debug(
+                                        "[%s] metadata merge into race-adopted "
+                                        "row failed (non-critical)", option_symbol,
+                                    )
+                                self._pending_entry_signals = None
                             return
                     except Exception:
                         pass
