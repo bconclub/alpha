@@ -98,6 +98,11 @@ function normalizeTrade(raw: any): Trade {
     dead_timer_active: raw.dead_timer_active ?? false,
     dead_elapsed: raw.dead_elapsed != null ? Number(raw.dead_elapsed) : null,
     dead_required: raw.dead_required != null ? Number(raw.dead_required) : null,
+    // GPFC #71b/c: pass through the entry-signal jsonb so the trades table
+    // can render Confidence / SL% / Trail floor without a second fetch.
+    metadata: raw.metadata != null && typeof raw.metadata === 'object'
+      ? raw.metadata
+      : null,
   };
 }
 
