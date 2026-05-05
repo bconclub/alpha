@@ -48,6 +48,20 @@ export interface Trade {
   dead_timer_active?: boolean;
   dead_elapsed?: number | null;
   dead_required?: number | null;
+  // GPFC #71: entry-signal snapshot + live trail state, jsonb on the row.
+  metadata?: {
+    confidence?: number;
+    confidence_breakdown?: Record<string, number>;
+    sl_pct?: number;
+    sl_price?: number;
+    trail_armed?: boolean;
+    trail_floor_pct?: number;
+    iv?: number | string | null;
+    delta?: number | null;
+    turnover_usd?: number | string | null;
+    regime?: string | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface StrategyLog {

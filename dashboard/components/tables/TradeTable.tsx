@@ -141,6 +141,7 @@ const COLUMNS: ColumnDef[] = [
   { key: 'sl_price', label: 'SL', align: 'right' },
   { key: 'trail_info', label: 'Trail' },
   { key: 'peak_info', label: 'Peak', align: 'right' },
+  { key: 'confidence', label: 'Conf', align: 'right' },
   { key: 'exit_reason', label: 'Exit' },
   { key: 'status', label: 'Status' },
 ];
@@ -692,7 +693,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'sl_price' || key === 'trail_info' || key === 'peak_info') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'sl_price' || key === 'trail_info' || key === 'peak_info' || key === 'confidence') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -1483,15 +1484,28 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           <HoldTimeCell trade={trade} now={now} />
                         </td>
 
-                        {/* SL Price — GPFC #56: only meaningful for live positions */}
+                        {/* SL — GPFC #71: prefer metadata.sl_pct (always present
+                            after #71); fall back to live trade.stop_loss for older rows. */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
-                          {trade.status === 'open' && trade.stop_loss != null ? (
-                            <span className="text-red-400">
-                              {formatPrice(trade.stop_loss)}
-                            </span>
-                          ) : (
-                            <span />
-                          )}
+                          {(() => {
+                            const meta = (trade as any).metadata || {};
+                            const slPct = meta.sl_pct;
+                            if (slPct != null && Number.isFinite(slPct)) {
+                              return (
+                                <span className="text-red-400">
+                                  {Number(slPct).toFixed(0)}%
+                                </span>
+                              );
+                            }
+                            if (trade.status === 'open' && trade.stop_loss != null) {
+                              return (
+                                <span className="text-red-400">
+                                  {formatPrice(trade.stop_loss)}
+                                </span>
+                              );
+                            }
+                            return <span className="text-zinc-600">&mdash;</span>;
+                          })()}
                         </td>
 
                         {/* Trail Info — Range bar for open, exit label for closed */}
@@ -1522,11 +1536,19 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               );
                             }
                             return <span className="text-zinc-600">&mdash;</span>;
-                          })() : (
-                            // GPFC #56: closed trades — Trail column hidden;
-                            // exit info is the dedicated Exit chip.
-                            <span />
-                          )}
+                          })() : (() => {
+                            // GPFC #71: closed trades — surface the locked trail floor.
+                            const meta = (trade as any).metadata || {};
+                            if (meta.trail_armed && meta.trail_floor_pct != null) {
+                              const floorPct = Number(meta.trail_floor_pct);
+                              return (
+                                <span className="font-mono text-emerald-400 text-xs">
+                                  +{floorPct.toFixed(0)}%
+                                </span>
+                              );
+                            }
+                            return <span className="text-zinc-600">&mdash;</span>;
+                          })()}
                         </td>
 
                         {/* Peak P&L */}
@@ -1542,6 +1564,29 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           ) : (
                             <span className="text-zinc-600">&mdash;</span>
                           )}
+                        </td>
+
+                        {/* Confidence — GPFC #71: 0–100 score from entry signals */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
+                          {(() => {
+                            const meta = (trade as any).metadata || {};
+                            const conf = meta.confidence;
+                            if (conf == null || !Number.isFinite(conf)) {
+                              return <span className="text-zinc-600">&mdash;</span>;
+                            }
+                            const score = Math.round(Number(conf));
+                            const colorClass =
+                              score >= 80 ? 'text-emerald-400' :
+                              score >= 65 ? 'text-lime-400' :
+                              score >= 50 ? 'text-yellow-400' :
+                              score >= 35 ? 'text-orange-400' :
+                              'text-red-400';
+                            return (
+                              <span className={cn('font-bold', colorClass)}>
+                                {score}
+                              </span>
+                            );
+                          })()}
                         </td>
 
                         {/* Exit Reason */}

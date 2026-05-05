@@ -265,6 +265,11 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #71: ratcheted absolute floor (only goes UP). Set on every TRAIL
         # tick to max(prev_locked, tier_floor_for_current_peak). Reset on entry.
         self._locked_trail_floor_pct: float = 0.0
+        # GPFC #71: last trail floor pct already persisted to trades.metadata.
+        # Bumped each time the locked floor escalates to a new tier so the
+        # dashboard can show {trail_armed: true, trail_floor_pct: X} without
+        # spamming a write every tick.
+        self._last_trail_floor_pct_written: float = -1.0
         # Pending-tick counter for OPT_PEAK_TRAIL confirmation. Incremented on
         # each tick where the pullback condition is met, reset when it isn't.
         # Exit only fires once this reaches PULLBACK_CONFIRMATION_TICKS AND the
@@ -2660,6 +2665,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_30s_premium = None
         # GPFC #71: reset the ratcheted trail floor for the new position.
         self._locked_trail_floor_pct = 0.0
+        self._last_trail_floor_pct_written = -1.0
         self._trailing_active = False
         self._peak_trail_pending_ticks = 0
         self.in_position = True
@@ -3242,6 +3248,93 @@ class OptionsScalpStrategy(BaseStrategy):
             return False, ", ".join(skip_reasons)
         return True, ""
 
+    def _calculate_confidence(
+        self,
+        ticker: dict[str, Any] | None,
+        option_type: str | None,
+    ) -> tuple[float, dict[str, float]]:
+        """GPFC #71: 0–100 confidence score with 6-component breakdown.
+
+        Returns (score, breakdown). Pure scoring — no gating uses this yet;
+        the value is captured into trades.metadata so we can drive a
+        threshold from real data after 30+ tagged trades.
+
+        Components (each scored 0–100, then averaged):
+          1. bb_tightness  — BB width relative to threshold (tighter = higher)
+          2. bb_kc_quality — bb_kc_ratio quality (≤1 = perfect, ≥2 = 0)
+          3. aligned_mom   — signed underlying 60s momentum vs option side
+          4. freshness     — 20s/60s acceleration ratio (≥0.7 = perfect)
+          5. liquidity     — turnover_usd, capped at $10M = perfect
+          6. moneyness     — |delta| proximity to 0.50 sweet spot
+        """
+        breakdown: dict[str, float] = {}
+
+        # 1. BB tightness — bb_width vs asset threshold
+        bb_w = self._bb_width_pct or 0.0
+        bb_thr = (
+            self.SQUEEZE_BB_WIDTH_BTC
+            if self._base_asset == "BTC"
+            else self.SQUEEZE_BB_WIDTH_ETH
+        )
+        if bb_w > 0 and bb_thr > 0:
+            breakdown["bb_tightness"] = max(0.0, min(100.0, (1.0 - bb_w / bb_thr) * 100.0))
+        else:
+            breakdown["bb_tightness"] = 0.0
+
+        # 2. BB/KC ratio — sweet zone is < 1.0 (BB inside KC); ratio ≥ 2 = 0
+        kc_w = self._last_kc_width_pct or 0.0
+        if kc_w > 0 and bb_w > 0:
+            ratio = bb_w / kc_w
+            breakdown["bb_kc_quality"] = max(0.0, min(100.0, (2.0 - ratio) / 2.0 * 100.0))
+        else:
+            breakdown["bb_kc_quality"] = 0.0
+
+        # 3. Aligned momentum — our_dir × 60s spot momentum, capped at 0.20%
+        our_dir = 1.0 if option_type == "call" else -1.0 if option_type == "put" else 0.0
+        try:
+            mom60 = self._underlying_momentum_pct()
+        except Exception:
+            mom60 = 0.0
+        aligned = our_dir * mom60
+        breakdown["aligned_mom"] = max(0.0, min(100.0, aligned / 0.20 * 100.0))
+
+        # 4. Freshness — 20s/60s ratio. 0.7+ = perfect, 0.0 = 0.
+        try:
+            fresh = self._underlying_acceleration_ratio()
+        except Exception:
+            fresh = 0.0
+        breakdown["freshness"] = max(0.0, min(100.0, fresh / 0.70 * 100.0))
+
+        # 5. Liquidity — turnover in USD, capped at $10M
+        info = (ticker or {}).get("info") or {}
+        try:
+            turnover = float(info.get("turnover_usd", 0) or 0)
+        except (TypeError, ValueError):
+            turnover = 0.0
+        breakdown["liquidity"] = max(0.0, min(100.0, turnover / 10_000_000.0 * 100.0))
+
+        # 6. Moneyness — |delta| proximity to 0.50 (zero penalty in [0.40, 0.60])
+        greeks = info.get("greeks") or {}
+        try:
+            delta_abs = abs(float(greeks.get("delta", 0) or 0))
+        except (TypeError, ValueError):
+            delta_abs = 0.0
+        if 0.40 <= delta_abs <= 0.60:
+            money = 100.0
+        elif delta_abs == 0.0:
+            money = 0.0
+        else:
+            # Linear falloff from sweet zone edges to 0 at 0.20 / 0.80.
+            edge_dist = min(abs(delta_abs - 0.40), abs(delta_abs - 0.60))
+            money = max(0.0, 100.0 - (edge_dist / 0.20) * 100.0)
+        breakdown["moneyness"] = money
+
+        # Average → 0–100 score.
+        score = round(sum(breakdown.values()) / len(breakdown), 1)
+        # Round each component for clean storage.
+        breakdown = {k: round(v, 1) for k, v in breakdown.items()}
+        return score, breakdown
+
     def _capture_entry_signals(
         self,
         ticker: dict[str, Any] | None,
@@ -3290,6 +3383,45 @@ class OptionsScalpStrategy(BaseStrategy):
                 round(self._last_spot_price, 4) if self._last_spot_price else None
             ),
         }
+
+        # GPFC #71: confidence + SL + trail fields for the dashboard. SL fields
+        # use the entry premium so the dashboard can show the absolute SL price
+        # without recomputing from pnl_pct columns.
+        try:
+            score, breakdown = self._calculate_confidence(
+                ticker, self._breakout_option_type
+            )
+            entry_prem = float(self.entry_premium or 0.0)
+            sl_pct = -float(self.SL_PREMIUM_LOSS_PCT)  # e.g. -15.0
+            sl_price = (
+                round(entry_prem * (1.0 + sl_pct / 100.0), 4)
+                if entry_prem > 0 else None
+            )
+            snapshot.update({
+                "confidence": score,
+                "confidence_breakdown": breakdown,
+                "sl_pct": sl_pct,
+                "sl_price": sl_price,
+                "trail_armed": False,    # updated when first tier escalates
+                "trail_floor_pct": 0.0,  # updated when tier escalates
+            })
+            self.logger.info(
+                "[%s] CONFIDENCE=%.0f bb=%.0f bb_kc=%.0f mom=%.0f fresh=%.0f "
+                "liq=%.0f money=%.0f",
+                self.pair, score,
+                breakdown.get("bb_tightness", 0),
+                breakdown.get("bb_kc_quality", 0),
+                breakdown.get("aligned_mom", 0),
+                breakdown.get("freshness", 0),
+                breakdown.get("liquidity", 0),
+                breakdown.get("moneyness", 0),
+            )
+        except Exception:
+            self.logger.exception(
+                "[%s] _calculate_confidence failed — capturing without it",
+                self.pair,
+            )
+
         return snapshot
 
     async def _classify_regime(self) -> str:
@@ -3623,6 +3755,29 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             trail_floor_pct = self._locked_trail_floor_pct
             trail_floor = self.entry_premium * (1.0 + trail_floor_pct / 100.0)
+
+            # GPFC #71: persist trail_armed + trail_floor_pct to trades.metadata
+            # whenever the locked floor escalates. Avoid spamming — only write
+            # when the value changes.
+            if (
+                self._db
+                and self._db_trade_id
+                and trail_floor_pct > self._last_trail_floor_pct_written
+            ):
+                self._last_trail_floor_pct_written = trail_floor_pct
+                try:
+                    await self._db.update_trade_metadata(
+                        self._db_trade_id,
+                        {
+                            "trail_armed": True,
+                            "trail_floor_pct": round(trail_floor_pct, 2),
+                        },
+                    )
+                except Exception:
+                    self.logger.debug(
+                        "[%s] trail metadata update failed (non-critical)",
+                        self.option_symbol,
+                    )
             if current_premium < trail_floor:
                 # GPFC #64: spot-direction veto — if underlying is still
                 # trending our way, premium decay is likely IV/spread noise
@@ -4633,6 +4788,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._trailing_active = False
         self._peak_trail_pending_ticks = 0
         self._locked_trail_floor_pct = 0.0
+        self._last_trail_floor_pct_written = -1.0
         self._position_opened_at = None
         self.strike_price = 0.0
         self.expiry_dt = None

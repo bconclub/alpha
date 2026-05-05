@@ -221,6 +221,49 @@ class Database:
 
         await loop.run_in_executor(None, _do_update)
 
+    async def update_trade_metadata(
+        self, trade_id: int, patch: dict[str, Any]
+    ) -> None:
+        """GPFC #71: shallow-merge `patch` into the trade row's metadata jsonb.
+
+        Fetches the existing metadata, merges the patch on top, writes back.
+        Idempotent and race-tolerant for our single-writer engine. Never
+        deletes existing keys; callers should send only the keys they want
+        added or overwritten.
+        """
+        if not self.is_connected or not patch:
+            return
+        loop = asyncio.get_running_loop()
+
+        def _do_merge() -> Any:
+            sel = (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("metadata")
+                .eq("id", trade_id)
+                .limit(1)
+                .execute()
+            )
+            existing: dict[str, Any] = {}
+            if sel.data:
+                raw = sel.data[0].get("metadata")
+                if isinstance(raw, dict):
+                    existing = raw
+            merged = {**existing, **patch}
+            return (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .update({"metadata": merged})
+                .eq("id", trade_id)
+                .execute()
+            )
+
+        try:
+            await loop.run_in_executor(None, _do_merge)
+        except Exception as exc:
+            logger.warning(
+                "update_trade_metadata id=%s patch=%s failed: %s",
+                trade_id, patch, exc,
+            )
+
     async def _fetch_existing_peak_pnl(self, trade_id: int) -> float | None:
         """Return the current peak_pnl for a trade row, or None if unavailable.
 
