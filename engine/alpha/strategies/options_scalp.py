@@ -262,6 +262,9 @@ class OptionsScalpStrategy(BaseStrategy):
         self._candle_alloc_pct: float = 35.0  # dynamic — set by signal strength
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
+        # GPFC #71: ratcheted absolute floor (only goes UP). Set on every TRAIL
+        # tick to max(prev_locked, tier_floor_for_current_peak). Reset on entry.
+        self._locked_trail_floor_pct: float = 0.0
         # Pending-tick counter for OPT_PEAK_TRAIL confirmation. Incremented on
         # each tick where the pullback condition is met, reset when it isn't.
         # Exit only fires once this reaches PULLBACK_CONFIRMATION_TICKS AND the
@@ -2655,6 +2658,10 @@ class OptionsScalpStrategy(BaseStrategy):
         # SET POSITION STATE
         self._position_premium_history.clear()
         self._last_30s_premium = None
+        # GPFC #71: reset the ratcheted trail floor for the new position.
+        self._locked_trail_floor_pct = 0.0
+        self._trailing_active = False
+        self._peak_trail_pending_ticks = 0
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -3353,19 +3360,20 @@ class OptionsScalpStrategy(BaseStrategy):
         return regime
 
     def _opt_trail_floor_pct(self, peak_pnl_pct: float) -> float:
-        """GPFC #62: tier-driven absolute floor as %-of-entry, not give-back %.
+        """GPFC #62 / #71: tier-driven absolute floor as %-of-entry.
 
-        The second element of each (peak_threshold, floor) tuple is the
-        absolute %-from-entry floor — e.g. tier (12, 7) means: once peak hits
-        +12%, exit if current pnl drops below +7% from entry. Returns the
-        floor pct or 0.0 if no tier has activated yet (caller gates on
-        peak >= first_activation before reading this).
+        Ladder form: walks the (sorted-ascending) tier list, returns the
+        highest applicable tier's floor. Tier (12, 7) means once peak hits
+        +12%, the absolute exit floor is +7% from entry. Returns 0.0 if
+        no tier has activated (caller gates on peak >= first_activation).
         """
-        floor = self.OPT_TRAIL_TIERS[0][1]
-        for activation, floor_pct in self.OPT_TRAIL_TIERS:
+        floor_pct = 0.0
+        for activation, lock in self.OPT_TRAIL_TIERS:
             if peak_pnl_pct >= activation:
-                floor = floor_pct
-        return floor
+                floor_pct = lock
+            else:
+                break
+        return floor_pct
 
     def _flat_sl_pct(self) -> float:
         """GPFC #60 round 2: flat stop-loss; previous age-based tightening removed.
@@ -3605,11 +3613,15 @@ class OptionsScalpStrategy(BaseStrategy):
             and self.entry_premium > 0
             and self.highest_premium > 0
         ):
-            # GPFC #62: tiered absolute floor as %-from-entry. e.g. tier (12, 7)
-            # means once peak hit +12%, exit if premium drops below the +7%
-            # mark. Decoupled from peak so a sharp giveback doesn't have to
-            # cross a moving "% below peak" line.
-            trail_floor_pct = self._opt_trail_floor_pct(peak_pnl_pct)
+            # GPFC #62/#71: tiered absolute floor as %-from-entry, ratcheted.
+            # _locked_trail_floor_pct only goes UP — once peak triggers a
+            # higher tier, the floor stays elevated even if peak drifts back.
+            # This prevents a momentary peak-then-fade from reverting the floor.
+            tier_floor_pct = self._opt_trail_floor_pct(peak_pnl_pct)
+            self._locked_trail_floor_pct = max(
+                self._locked_trail_floor_pct, tier_floor_pct
+            )
+            trail_floor_pct = self._locked_trail_floor_pct
             trail_floor = self.entry_premium * (1.0 + trail_floor_pct / 100.0)
             if current_premium < trail_floor:
                 # GPFC #64: spot-direction veto — if underlying is still
@@ -3641,8 +3653,14 @@ class OptionsScalpStrategy(BaseStrategy):
                         premium_change_pct,
                         aligned_mom,
                     )
-                    return await self._do_option_exit(
-                        current_premium, premium_change_pct, "TRAIL"
+                    # GPFC #71: try a limit fill at the floor first; the
+                    # executor's limit-then-market path will fall back to
+                    # market after 3s if unfilled.
+                    return await self._do_option_exit_limit(
+                        limit_price=trail_floor,
+                        fallback_price=current_premium,
+                        fallback_after_sec=5.0,
+                        reason="TRAIL",
                     )
 
             peak_gain = self.highest_premium - self.entry_premium
@@ -3699,8 +3717,12 @@ class OptionsScalpStrategy(BaseStrategy):
                             aligned_mom,
                         )
                         self._peak_trail_pending_ticks = 0
-                        return await self._do_option_exit(
-                            current_premium, premium_change_pct, "PEAK"
+                        # GPFC #71: limit-at-floor exit path (same fallback as TRAIL).
+                        return await self._do_option_exit_limit(
+                            limit_price=trail_floor,
+                            fallback_price=current_premium,
+                            fallback_after_sec=5.0,
+                            reason="PEAK",
                         )
                 else:
                     self.logger.info(
@@ -4182,13 +4204,46 @@ class OptionsScalpStrategy(BaseStrategy):
     # EXIT SIGNAL BUILDER
     # ==================================================================
 
+    async def _do_option_exit_limit(
+        self,
+        limit_price: float,
+        fallback_price: float,
+        fallback_after_sec: float,
+        reason: str,
+    ) -> list[Signal]:
+        """GPFC #71: try a limit fill at ``limit_price`` first; market fallback.
+
+        Thin wrapper delegating to :meth:`_do_option_exit`. The actual
+        limit-then-market mechanic lives in trade_executor.py (~L1078) for
+        non-urgent Delta exits and uses a 3s wait. ``fallback_after_sec`` is
+        accepted for caller-side documentation; the executor's value applies.
+        """
+        if self.entry_premium > 0:
+            recomputed_pnl = (fallback_price - self.entry_premium) / self.entry_premium * 100
+        else:
+            recomputed_pnl = 0.0
+        return await self._do_option_exit(
+            current_premium=fallback_price,
+            pnl_pct=recomputed_pnl,
+            exit_type=reason,
+            limit_price=limit_price,
+        )
+
     async def _do_option_exit(
         self,
         current_premium: float,
         pnl_pct: float,
         exit_type: str,
+        limit_price: float | None = None,
     ) -> list[Signal]:
-        """Build exit signal for option position."""
+        """Build exit signal for option position.
+
+        GPFC #71: when ``limit_price`` is provided, the executor's built-in
+        limit-then-market mechanism (trade_executor.py ~L1078) will post a
+        limit at that price and fall back to market after 3s if unfilled.
+        For non-urgent Delta exits (TRAIL/PEAK/BREAKEVEN/DEAD) this lets us
+        try to lock the tier floor before settling for the market bid.
+        """
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             # GPFC #47: for SELL placement we need a real executable price.
@@ -4260,10 +4315,20 @@ class OptionsScalpStrategy(BaseStrategy):
             else 0
         )
 
+        # GPFC #71: if a limit_price is provided, the executor's limit-then-market
+        # path (non-urgent Delta exits) will use this as the limit. Otherwise
+        # market sells at current_premium as before.
+        signal_price = limit_price if (limit_price is not None and limit_price > 0) else current_premium
+        if limit_price is not None and limit_price > 0:
+            self.logger.info(
+                "[%s] EXIT_LIMIT_TARGET — %s requesting limit @ $%.4f "
+                "(market_fallback @ $%.4f after 3s)",
+                self.option_symbol, exit_type, signal_price, current_premium,
+            )
         return [
             Signal(
                 side="sell",
-                price=current_premium,
+                price=signal_price,
                 amount=float(self._contracts),
                 order_type="market",
                 reason=reason,
@@ -4279,6 +4344,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     "db_already_closed": False,
                     "exit_retry_attempts": 5,
                     "exit_retry_delay_sec": 1.0,
+                    "limit_price": signal_price if limit_price else None,
+                    "market_fallback_price": current_premium if limit_price else None,
                 },
             )
         ]
@@ -4565,6 +4632,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_known_premium = 0.0
         self._trailing_active = False
         self._peak_trail_pending_ticks = 0
+        self._locked_trail_floor_pct = 0.0
         self._position_opened_at = None
         self.strike_price = 0.0
         self.expiry_dt = None
