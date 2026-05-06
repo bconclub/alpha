@@ -201,7 +201,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # Catches trades that NEVER moved up AND underlying turned against us.
     # Fires before STOP so we cut at ~ -8% rather than letting it bleed to
     # the -15% flat SL. All three conditions required, no time gates.
-    DEAD_PEAK_MAX_PCT = 0.5         # peak ≤ 0.5% means trade essentially never moved up
+    DEAD_PEAK_MAX_PCT = 3.0         # GPFC #72: 0.5 → 3.0; catches the sub-3% peak trades that bled to -16% SL
     DEAD_PREMIUM_DROP_PCT = -8.0    # premium dropped ≥ 8% from entry
     DEAD_UNDERLYING_AGAINST_PCT = 0.05  # underlying moved > 0.05% against us in 60s
 
@@ -212,6 +212,10 @@ class OptionsScalpStrategy(BaseStrategy):
     ENTRY_DELTA_MIN_ABS = 0.40
     ENTRY_DELTA_MAX_ABS = 0.65
     ENTRY_MIN_IV = 0.40
+    # GPFC #72: confidence floor — sub-60 zone was 0/3 in last 20 trades, with
+    # two -16% catastrophic stops. Block entries below this score; no behavior
+    # change above 60.
+    CONFIDENCE_MIN_ENTRY = 60.0
 
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
@@ -2001,6 +2005,23 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
+        # GPFC #72: confidence gate (≥ 60). Sub-60 zone was a death zone
+        # in live data — block before order placement.
+        try:
+            conf_score, _ = self._calculate_confidence(spread_ticker, option_type)
+            if conf_score < self.CONFIDENCE_MIN_ENTRY:
+                self.logger.info(
+                    "[%s] ENTRY_BLOCKED confidence=%.0f below floor %.0f "
+                    "(MOM_BURST %s)",
+                    self.pair, conf_score, self.CONFIDENCE_MIN_ENTRY, selected_symbol,
+                )
+                return []
+        except Exception:
+            self.logger.debug(
+                "[%s] confidence gate failed pre-order (MB), proceeding",
+                selected_symbol,
+            )
+
         opt_contracts = self._calculate_option_contracts(entry_ask, confidence=0.7)
         if opt_contracts < 1:
             return []
@@ -2199,6 +2220,24 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.pair, skip_reason, selected_symbol,
             )
             return
+
+        # GPFC #72: confidence gate (≥ 60). Sub-60 zone was a death zone
+        # in live data — block before setting up the breakout-pending state
+        # (which would otherwise fire an order in _execute_breakout_entry).
+        try:
+            conf_score, _ = self._calculate_confidence(selected_ticker, option_type)
+            if conf_score < self.CONFIDENCE_MIN_ENTRY:
+                self.logger.info(
+                    "[%s] ENTRY_BLOCKED confidence=%.0f below floor %.0f "
+                    "(SQUEEZE %s)",
+                    self.pair, conf_score, self.CONFIDENCE_MIN_ENTRY, selected_symbol,
+                )
+                return
+        except Exception:
+            self.logger.debug(
+                "[%s] confidence gate failed pre-order (SQUEEZE), proceeding",
+                selected_symbol,
+            )
 
         # Build confidence using squeeze tightness + premium history at breakout
         now_mono = time.monotonic()
