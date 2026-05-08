@@ -63,6 +63,12 @@ def _strat_label(name: str | None) -> str:
 class AlertManager:
     """Sends Telegram messages for all bot events."""
 
+    # ── User preference (Z, set in chat): wins + restart only ──
+    # When True, every Telegram send is dropped at the gateway except those
+    # explicitly tagged via _send(..., allow_in_quiet=True). Currently only
+    # the startup message and the winning-trade close message bypass.
+    WINS_AND_RESTART_ONLY: bool = True
+
     def __init__(self) -> None:
         self._bot: Bot | None = None
         self._chat_id: str = config.telegram.chat_id
@@ -82,8 +88,8 @@ class AlertManager:
     # ── 1. STARTUP MESSAGE ───────────────────────────────────────────────────
 
     async def send_startup(self, message: str) -> None:
-        """Send pre-built startup status report."""
-        await self._send(message)
+        """Send pre-built startup status report. Bypasses the quiet-mode gate."""
+        await self._send(message, allow_in_quiet=True)
 
     # ── 2. MARKET UPDATE (all pairs, grouped by exchange) ──────────────────
 
@@ -348,6 +354,14 @@ class AlertManager:
         P&L: -829.8% | $-0.50
         Hold: 5m | OPT_DEAD_MOMENTUM | 50x Options
         """
+        # ── User preference: wins-only in quiet mode ──
+        if self.WINS_AND_RESTART_ONLY and pnl <= 0:
+            logger.debug(
+                "Trade-close alert suppressed (loss in quiet mode): %s pnl=%.4f",
+                pair, pnl,
+            )
+            return
+
         # ── Options close format ──
         if option_meta:
             await self._send_option_closed(
@@ -383,7 +397,8 @@ class AlertManager:
         msg = f"{line1}\n{line2}\n{line3}"
         if line4:
             msg += f"\n{line4}"
-        await self._send(msg)
+        # Bypass quiet gate: this path only runs for pnl > 0 (win).
+        await self._send(msg, allow_in_quiet=True)
 
     async def _send_option_closed(
         self,
@@ -399,6 +414,14 @@ class AlertManager:
         meta: dict[str, Any],
     ) -> None:
         """Options-specific close notification with strike/expiry."""
+        # Win-only gate (mirrors send_trade_closed); guards direct callers
+        # that bypass send_trade_closed.
+        if self.WINS_AND_RESTART_ONLY and pnl <= 0:
+            logger.debug(
+                "Option-close alert suppressed (loss in quiet mode): %s pnl=%.4f",
+                pair, pnl,
+            )
+            return
         opt_type = (meta.get("option_type") or "OPT").upper()
         strike = meta.get("strike")
         expiry = meta.get("expiry", "")
@@ -446,7 +469,8 @@ class AlertManager:
         msg = f"{line1}\n{line2}\n{line3}\n{line4}"
         if line5:
             msg += f"\n{line5}"
-        await self._send(msg)
+        # Bypass quiet gate: this path only runs for pnl > 0 (win).
+        await self._send(msg, allow_in_quiet=True)
 
     # backward compat -- old call signature routes to send_trade_opened
     async def send_trade_alert(
@@ -857,7 +881,12 @@ class AlertManager:
                 logger.exception("Telegram reconnect failed")
                 return False
 
-    async def _send(self, text: str) -> None:
+    async def _send(self, text: str, *, allow_in_quiet: bool = False) -> None:
+        # Quiet mode (wins + restart only): drop everything except
+        # explicitly-allowed sends. Logs at debug for traceability.
+        if self.WINS_AND_RESTART_ONLY and not allow_in_quiet:
+            logger.debug("Alert (suppressed by WINS_AND_RESTART_ONLY): %s", text[:100])
+            return
         if not self._chat_id:
             logger.debug("Alert (Telegram disabled): %s", text[:100])
             return
@@ -888,6 +917,10 @@ class AlertManager:
 
     async def send_photo(self, photo_url: str, caption: str = "") -> None:
         """Send a photo/image to Telegram."""
+        # Quiet mode: photos are not in the wins/restart allowlist.
+        if self.WINS_AND_RESTART_ONLY:
+            logger.debug("Photo alert suppressed (quiet mode): %s", photo_url[:100])
+            return
         if not self._chat_id or not self._bot:
             await self.connect()
         if not self._bot:
