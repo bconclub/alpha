@@ -2542,6 +2542,33 @@ class OptionsScalpStrategy(BaseStrategy):
             exchange_capital,
         )
 
+        # GPFC #74: build metadata BEFORE placing the order so the gate is
+        # pre-execution. A confidence failure aborts the entry cleanly.
+        _pre_ticker: dict[str, Any] | None = None
+        try:
+            _pre_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+        except Exception as _te:
+            self.logger.debug(
+                "[%s] pre-entry ticker fetch failed: %s", self.pair, _te
+            )
+        try:
+            _regime = await self._classify_regime()
+        except Exception:
+            _regime = "UNKNOWN"
+        _entry_path = "squeeze_confirmed" if setup_type == "SQUEEZE" else "mom_burst"
+        try:
+            self._pending_entry_signals = self._build_entry_metadata(
+                _pre_ticker, option_type, confirmed_ask,
+                entry_path=_entry_path, regime=_regime,
+            )
+        except Exception as _me:
+            self.logger.warning(
+                "[%s] %s entry SKIPPED — metadata build failed: %s",
+                self.pair, setup_type, _me,
+            )
+            self._reset_breakout_state()
+            return []
+
         self._cached_bot_state = "breakout:placing_order"
         limit_order_id: str | None = None
         try:
@@ -2756,40 +2783,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
             )
 
-        # GPFC #60 round 2: capture entry-signal snapshot for trades.metadata.
-        # Fetch a fresh ticker for IV / OI / greeks; classify regime; build
-        # dict and stash on `_pending_entry_signals` so `_write_entry_to_db`
-        # picks it up.
-        try:
-            entry_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
-        except Exception as e:
-            self.logger.debug(
-                "[%s] entry signal ticker fetch failed: %s — proceeding without IV/OI",
-                selected_symbol, e,
+        # GPFC #74: metadata was already built before order placement and stored in
+        # _pending_entry_signals. Patch sl_price now that we have the real fill price
+        # (confirmed_ask was used as the proxy; actual fill may differ slightly).
+        if self._pending_entry_signals and fill_price > 0:
+            _sl_pct = float(self._pending_entry_signals.get("sl_pct", -self.SL_PREMIUM_LOSS_PCT))
+            self._pending_entry_signals["sl_price"] = round(
+                fill_price * (1.0 + _sl_pct / 100.0), 4
             )
-            entry_ticker = None
-        try:
-            regime_at_entry = await self._classify_regime()
-        except Exception:
-            regime_at_entry = "UNKNOWN"
-        try:
-            self._pending_entry_signals = self._capture_entry_signals(
-                entry_ticker, regime_at_entry
-            )
-            self.logger.info(
-                "[%s] ENTRY_SIGNALS captured: regime=%s iv=%s delta=%s oi=%s",
-                self.option_symbol,
-                regime_at_entry,
-                self._pending_entry_signals.get("iv"),
-                self._pending_entry_signals.get("delta"),
-                self._pending_entry_signals.get("oi"),
-            )
-        except Exception:
-            self.logger.exception(
-                "[%s] _capture_entry_signals failed — proceeding without metadata",
-                selected_symbol,
-            )
-            self._pending_entry_signals = None
 
         # Write DB row NOW — synchronously — so the 60s reconciler sweep
         # can't see an exchange position without a matching DB row and
@@ -3374,15 +3375,20 @@ class OptionsScalpStrategy(BaseStrategy):
         breakdown = {k: round(v, 1) for k, v in breakdown.items()}
         return score, breakdown
 
-    def _capture_entry_signals(
+    def _build_entry_metadata(
         self,
         ticker: dict[str, Any] | None,
-        regime: str,
+        option_type: str | None,
+        entry_premium: float,
+        *,
+        entry_path: str = "unknown",
+        regime: str = "UNKNOWN",
     ) -> dict[str, Any]:
-        """GPFC #60 round 2: snapshot raw signals at entry for post-trade analysis.
+        """GPFC #74: single source of truth for entry metadata.
 
-        Written to the trades.metadata jsonb column. Pure data capture — no
-        gating or branching uses these values yet.
+        Returns a dict containing the raw signal snapshot plus confidence,
+        SL, and trail fields. Raises if confidence cannot be computed — the
+        caller must gate entry on success; no silent fallback is permitted.
         """
         info = (ticker or {}).get("info") or {}
         greeks = info.get("greeks") or {}
@@ -3421,46 +3427,36 @@ class OptionsScalpStrategy(BaseStrategy):
             "spot_at_entry": (
                 round(self._last_spot_price, 4) if self._last_spot_price else None
             ),
+            "entry_path": entry_path,
         }
 
-        # GPFC #71: confidence + SL + trail fields for the dashboard. SL fields
-        # use the entry premium so the dashboard can show the absolute SL price
-        # without recomputing from pnl_pct columns.
-        try:
-            score, breakdown = self._calculate_confidence(
-                ticker, self._breakout_option_type
-            )
-            entry_prem = float(self.entry_premium or 0.0)
-            sl_pct = -float(self.SL_PREMIUM_LOSS_PCT)  # e.g. -15.0
-            sl_price = (
-                round(entry_prem * (1.0 + sl_pct / 100.0), 4)
-                if entry_prem > 0 else None
-            )
-            snapshot.update({
-                "confidence": score,
-                "confidence_breakdown": breakdown,
-                "sl_pct": sl_pct,
-                "sl_price": sl_price,
-                "trail_armed": False,    # updated when first tier escalates
-                "trail_floor_pct": 0.0,  # updated when tier escalates
-            })
-            self.logger.info(
-                "[%s] CONFIDENCE=%.0f bb=%.0f bb_kc=%.0f mom=%.0f fresh=%.0f "
-                "liq=%.0f money=%.0f",
-                self.pair, score,
-                breakdown.get("bb_tightness", 0),
-                breakdown.get("bb_kc_quality", 0),
-                breakdown.get("aligned_mom", 0),
-                breakdown.get("freshness", 0),
-                breakdown.get("liquidity", 0),
-                breakdown.get("moneyness", 0),
-            )
-        except Exception:
-            self.logger.exception(
-                "[%s] _calculate_confidence failed — capturing without it",
-                self.pair,
-            )
-
+        # Confidence + SL + trail — raises on failure; caller decides whether to block.
+        score, breakdown = self._calculate_confidence(ticker, option_type)
+        sl_pct = -float(self.SL_PREMIUM_LOSS_PCT)
+        sl_price = (
+            round(entry_premium * (1.0 + sl_pct / 100.0), 4)
+            if entry_premium > 0 else None
+        )
+        snapshot.update({
+            "confidence": score,
+            "confidence_breakdown": breakdown,
+            "sl_pct": sl_pct,
+            "sl_price": sl_price,
+            "trail_armed": False,
+            "trail_floor_pct": 0.0,
+        })
+        self.logger.info(
+            "[%s] CONFIDENCE=%.0f bb=%.0f bb_kc=%.0f mom=%.0f fresh=%.0f "
+            "liq=%.0f money=%.0f entry_path=%s",
+            self.pair, score,
+            breakdown.get("bb_tightness", 0),
+            breakdown.get("bb_kc_quality", 0),
+            breakdown.get("aligned_mom", 0),
+            breakdown.get("freshness", 0),
+            breakdown.get("liquidity", 0),
+            breakdown.get("moneyness", 0),
+            entry_path,
+        )
         return snapshot
 
     async def _classify_regime(self) -> str:
@@ -5115,6 +5111,31 @@ class OptionsScalpStrategy(BaseStrategy):
                     self._db_trade_id,
                 )
             else:
+                # GPFC #74: if the signal path already built metadata, use it.
+                # If not (e.g. on_fill fired before _execute_breakout_entry ran),
+                # attempt to build metadata now so the DB row gets confidence.
+                if not self._pending_entry_signals:
+                    _of_ticker: dict[str, Any] | None = None
+                    try:
+                        if self.options_exchange and self.option_symbol:
+                            _of_ticker = await self.options_exchange.fetch_ticker(
+                                self.option_symbol
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        self._pending_entry_signals = self._build_entry_metadata(
+                            _of_ticker,
+                            self.option_side,
+                            fill_price,
+                            entry_path="on_fill_fallback",
+                        )
+                    except Exception as _me:
+                        self.logger.warning(
+                            "[%s] on_fill: metadata build failed — writing DB without confidence: %s",
+                            self.option_symbol, _me,
+                        )
+
                 import asyncio as _aio_entry
 
                 _aio_entry.get_event_loop().create_task(
