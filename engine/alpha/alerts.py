@@ -67,7 +67,7 @@ class AlertManager:
     # When True, every Telegram send is dropped at the gateway except those
     # explicitly tagged via _send(..., allow_in_quiet=True). Currently only
     # the startup message and the winning-trade close message bypass.
-    WINS_AND_RESTART_ONLY: bool = True
+    WINS_AND_RESTART_ONLY: bool = False
 
     def __init__(self) -> None:
         self._bot: Bot | None = None

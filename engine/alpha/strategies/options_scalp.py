@@ -315,7 +315,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Cooldowns
         self._position_gone_cooldown_until: float = 0.0
-        self._POSITION_GONE_COOLDOWN_SEC = 0
+        self._POSITION_GONE_COOLDOWN_SEC = 300
         self._no_fill_cooldown_until: float = 0.0
 
         # DB trade ID
