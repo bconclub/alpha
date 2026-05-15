@@ -312,6 +312,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #47: monotonic timestamp of last non-absurd ticker fetch — used
         # to gate the last_known fallback so one bad tick doesn't freeze writes.
         self._last_good_ticker_at: float = 0.0
+        # GPFC #74 FIX: cached ticker for on_fill_fallback (sync context).
+        self._last_option_ticker: dict | None = None
 
         # Cooldowns
         self._position_gone_cooldown_until: float = 0.0
@@ -2547,6 +2549,7 @@ class OptionsScalpStrategy(BaseStrategy):
         _pre_ticker: dict[str, Any] | None = None
         try:
             _pre_ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+            self._last_option_ticker = _pre_ticker  # GPFC #74 FIX: cache for on_fill_fallback
         except Exception as _te:
             self.logger.debug(
                 "[%s] pre-entry ticker fetch failed: %s", self.pair, _te
@@ -3608,6 +3611,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         return []
                 else:
                     self._last_good_ticker_at = time.monotonic()
+                    self._last_option_ticker = ticker  # GPFC #74 FIX: keep cache fresh
             self._consecutive_ticker_failures = 0
             if current_premium > 0:
                 self._last_known_premium = current_premium
@@ -5115,26 +5119,29 @@ class OptionsScalpStrategy(BaseStrategy):
                 # If not (e.g. on_fill fired before _execute_breakout_entry ran),
                 # attempt to build metadata now so the DB row gets confidence.
                 if not self._pending_entry_signals:
-                    _of_ticker: dict[str, Any] | None = None
-                    try:
-                        if self.options_exchange and self.option_symbol:
-                            _of_ticker = await self.options_exchange.fetch_ticker(
-                                self.option_symbol
-                            )
-                    except Exception:
-                        pass
-                    try:
-                        self._pending_entry_signals = self._build_entry_metadata(
-                            _of_ticker,
-                            self.option_side,
-                            fill_price,
-                            entry_path="on_fill_fallback",
-                        )
-                    except Exception as _me:
+                    # GPFC #74 FIX: on_fill is sync — cannot await. Use the ticker
+                    # cached by the most recent async tick (pre-entry fetch or
+                    # _check_option_exit). If cache is cold, skip metadata rather
+                    # than crashing.
+                    _of_ticker: dict[str, Any] | None = self._last_option_ticker
+                    if _of_ticker is None:
                         self.logger.warning(
-                            "[%s] on_fill: metadata build failed — writing DB without confidence: %s",
-                            self.option_symbol, _me,
+                            "[%s] on_fill_fallback: no cached ticker — writing trade without metadata",
+                            self.pair,
                         )
+                    else:
+                        try:
+                            self._pending_entry_signals = self._build_entry_metadata(
+                                _of_ticker,
+                                self.option_side,
+                                fill_price,
+                                entry_path="on_fill_fallback",
+                            )
+                        except Exception as _me:
+                            self.logger.warning(
+                                "[%s] on_fill: metadata build failed — writing DB without confidence: %s",
+                                self.option_symbol, _me,
+                            )
 
                 import asyncio as _aio_entry
 
