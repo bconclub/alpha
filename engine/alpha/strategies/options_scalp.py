@@ -165,20 +165,19 @@ class OptionsScalpStrategy(BaseStrategy):
     # Format: (peak_threshold_pct, exit_floor_pct). When peak hits threshold,
     # exit if premium drops below floor (absolute %-from-entry).
     OPT_TRAIL_TIERS: list[tuple[float, float]] = [
-        (4.0, 1.0),     # peak +4%   → lock ~1%
-        (8.0, 4.0),     # peak +8%   → lock ~4% (covers fees + small profit)
-        (12.0, 7.0),    # peak +12%  → lock ~7%
-        (18.0, 12.0),   # peak +18%  → lock ~12%
-        (25.0, 18.0),   # peak +25%  → lock ~18%
-        (40.0, 30.0),   # peak +40%  → lock ~30%
-        (60.0, 48.0),   # peak +60%  → lock ~48%
+        (10.0, 5.0),    # peak +10%  → lock ~5%
+        (15.0, 10.0),   # peak +15%  → lock ~10%
+        (22.0, 16.0),   # peak +22%  → lock ~16%
+        (30.0, 23.0),   # peak +30%  → lock ~23%
+        (45.0, 36.0),   # peak +45%  → lock ~36%
+        (60.0, 50.0),   # peak +60%  → lock ~50%
         (100.0, 85.0),  # peak +100% → lock ~85%
     ]
-    # GPFC #63: PEAK pullback now mirrors the new trail-tier-0 activation (4%).
+    # GPFC #75: PEAK pullback mirrors trail-tier-0 activation (10%).
     # Backup behind tiered TRAIL — trail should fire first because it's
     # tier-aware; PEAK pullback catches if trail misses.
     PULLBACK_EXIT_PCT = 30.0  # Exit when 30% of peak gain given back
-    PULLBACK_ACTIVATE_PCT = 4.0  # Arm at peak ≥ 4% (was 8% — matches new trail tier 0)
+    PULLBACK_ACTIVATE_PCT = 10.0  # Arm at peak ≥ 10% (GPFC #75 breathing room)
     # Confirmation before firing OPT_PEAK_TRAIL — absorbs single-tick illiquidity
     # wicks in the option premium. Require the pullback condition to persist for
     # N consecutive ticks (ticks are ~10s apart).
@@ -3856,6 +3855,10 @@ class OptionsScalpStrategy(BaseStrategy):
                         fallback_after_sec=5.0,
                         reason="TRAIL",
                     )
+
+            # GPFC #75: no PEAK/BREAKEVEN exit below peak 10% — breathing room.
+            if peak_pnl_pct < 10.0:
+                return []
 
             peak_gain = self.highest_premium - self.entry_premium
             pullback_condition_met = (

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-05-15 · GPFC #75: breathing room — trust conf gate, exit only on real signals
+
+- `options_scalp.py` (`OPT_TRAIL_TIERS`): Widened all trail tiers; first tier 4%→10% activation, 1%→5% lock. Removed lowest two micro-tiers, now 7 tiers total
+- `options_scalp.py` (`PULLBACK_ACTIVATE_PCT`): Raised 4.0 → 10.0; PEAK exit now arms only at peak ≥ 10%
+- `options_scalp.py` (`_check_option_exit`): Added explicit guard `if peak_pnl_pct < 10.0: return []` before PEAK/BREAKEVEN block — no soft exits below 10% peak (SL and DEAD still fire normally)
+- User-facing: trades now have breathing room up to 10% peak before any pullback/trail/breakeven exit can fire; reduces premature chops on conf-gated entries
+
 ## 2026-05-15 · GPFC #74 FIX: remove await from sync on_fill_fallback, use cached ticker
 
 - `options_scalp.py`: Added `self._last_option_ticker` attribute in `__init__` (initialized to `None`)
