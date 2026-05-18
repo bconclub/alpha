@@ -508,8 +508,8 @@ class TradeExecutor:
                         "closed_at": iso_now(),
                         "pnl": round(pnl, 8),
                         "pnl_pct": round(pnl_pct, 4),
-                        "reason": "position_gone",
-                        "exit_reason": "POSITION_GONE",
+                        "reason": "reconcile_gone",
+                        "exit_reason": "RECONCILE_GONE",  # GPFC #76: specific label
                     })
                     logger.info(
                         "[%s] Trade %s marked closed (position_gone) "

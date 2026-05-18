@@ -106,6 +106,17 @@ function normalizeTrade(raw: any): Trade {
   };
 }
 
+/** GPFC #76: hide ghost rows — $0 POSITION_GONE and auto-closed stale trades.
+ *  Rows still exist in Supabase for audit; they just won't appear in the UI. */
+function isGhostTrade(t: Trade): boolean {
+  if (
+    (t.exit_reason === 'POSITION_GONE' || t.exit_reason === 'GONE' || t.exit_reason === 'RECONCILE_GONE') &&
+    (t.pnl === 0 || t.pnl == null)
+  ) return true;
+  if (t.metadata?.auto_closed_stale === true) return true;
+  return false;
+}
+
 interface SupabaseContextValue {
   trades: Trade[];
   recentTrades: Trade[];
@@ -370,8 +381,8 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         if (optionsStateRes.error) console.warn('[Alpha] options_state query error:', optionsStateRes.error.message);
 
         // Normalize all data (map DB column names → app types)
-        const tradeData = (allTradesData ?? []).map(normalizeTrade);
-        console.log(`[Alpha] Loaded ${tradeData.length} trades (paginated)`);
+        const tradeData = (allTradesData ?? []).map(normalizeTrade).filter(t => !isGhostTrade(t));
+        console.log(`[Alpha] Loaded ${tradeData.length} trades (paginated, ghosts filtered)`);
         const logData = (strategyLogRes.data ?? []).map(normalizeStrategyLog);
 
         // Merge: prepend latest-per-pair rows so MarketOverview always sees all pairs
@@ -446,7 +457,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         }
 
         if (statusRes.data && statusRes.data.length > 0) setBotStatus(normalizeBotStatus(statusRes.data[0]));
-        if (allTradeRows) setTrades(allTradeRows.map(normalizeTrade));
+        if (allTradeRows) setTrades(allTradeRows.map(normalizeTrade).filter(t => !isGhostTrade(t)));
       } catch (e) { console.warn('[Alpha] resyncAll failed', e); }
 
       fetchViews();
@@ -482,6 +493,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, (payload) => {
         const t = normalizeTrade(payload.new);
         if (t.status === 'cancelled') return; // ghost/voided trade — skip
+        if (isGhostTrade(t)) return; // GPFC #76: hide $0 POSITION_GONE and stale rows
         setTrades((prev) => [t, ...prev]);
         fetchViews();
 
@@ -598,7 +610,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
                   if (data.length < PAGE) break;
                   from += PAGE;
                 }
-                setTrades(allRows.map(normalizeTrade));
+                setTrades(allRows.map(normalizeTrade).filter(t => !isGhostTrade(t)));
               } catch { /* silent */ }
               fetchViews();
             })();

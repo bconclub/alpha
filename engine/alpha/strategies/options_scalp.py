@@ -1478,6 +1478,28 @@ class OptionsScalpStrategy(BaseStrategy):
         if self.in_position:
             self._cached_bot_state = "in_position"
 
+            # GPFC #76 Part 4: force-close 5 minutes before contract expiry.
+            # This eliminates the largest source of POSITION_GONE ghosts — holding
+            # options to expiry where Delta settles silently and the bot has no fill.
+            if self.expiry_dt:
+                _secs_to_expiry = (
+                    self.expiry_dt - datetime.now(timezone.utc)
+                ).total_seconds()
+                if 0 < _secs_to_expiry <= 300:
+                    self.logger.info(
+                        "[%s] PRE_EXPIRY_FORCE — %ds to expiry, closing at market now",
+                        self.pair,
+                        int(_secs_to_expiry),
+                    )
+                    _pre_exp_premium = self._last_known_premium or self.entry_premium or 0.0
+                    _pre_exp_pnl_pct = (
+                        (_pre_exp_premium - self.entry_premium) / self.entry_premium * 100
+                        if self.entry_premium > 0 else 0.0
+                    )
+                    return await self._do_option_exit(
+                        _pre_exp_premium, _pre_exp_pnl_pct, "PRE_EXPIRY_FORCE"
+                    )
+
             return await self._check_option_exit()
 
         # Not in position: look for squeeze entry
@@ -3977,6 +3999,25 @@ class OptionsScalpStrategy(BaseStrategy):
     ):
         """Insert a new options trade row into the DB."""
         try:
+            # GPFC #76: strict fill-confirmation gate — refuse to INSERT if any
+            # of the four conditions fails. Kills optimistic-insert ghosts.
+            _guard_order_id = str(order.get("id") or "").strip() if order else ""
+            _guard_entry_path = (
+                (self._pending_entry_signals or {}).get("entry_path")
+                if self._pending_entry_signals else None
+            )
+            if not (_guard_order_id and fill_price > 0 and contracts > 0 and _guard_entry_path):
+                self.logger.warning(
+                    "[%s] trade insert ABORTED — incomplete fill confirmation: "
+                    "order_id=%s entry_price=%s contracts=%s entry_path=%s",
+                    option_symbol,
+                    _guard_order_id or "<missing>",
+                    fill_price,
+                    contracts,
+                    _guard_entry_path or "<missing>",
+                )
+                return
+
             # GPFC #48: DUPLICATE_INSERT_BLOCKED — the signal path and the
             # on_fill callback can race and insert two rows for the same fill
             # (#3082/#3083). Before inserting, check if an open row already
@@ -4671,15 +4712,24 @@ class OptionsScalpStrategy(BaseStrategy):
             ).total_seconds()
             is_expiry = time_past_expiry >= 0
 
-        exit_reason = "EXPIRY" if is_expiry else "GONE"
-        exit_reason_detail = f"{exit_reason}_{reason}" if reason else exit_reason
-
+        # Compute exit premium FIRST so the label can use it for ITM/OTM split.
         exit_premium = self._last_known_premium
         if exit_premium <= 0:
             exit_premium = self.entry_premium * 0.5 if self.entry_premium > 0 else 0.0
 
         if is_expiry and reason == "EXPIRED_TICKER_FAIL":
-            exit_premium = 0.0
+            exit_premium = 0.0  # ticker failed at expiry → assume worthless
+
+        # GPFC #76: specific labels instead of catch-all GONE/EXPIRY.
+        if reason == "TICKER_FAIL_REPEATED":
+            exit_reason = "TICKER_DROPOUT"
+        elif is_expiry:
+            # ITM: settled with value. OTM: expired worthless.
+            exit_reason = "EXPIRED_ITM" if exit_premium > 0 else "EXPIRED_OTM"
+        else:
+            # Position disappeared from exchange outside of expiry context.
+            exit_reason = "RECONCILE_GONE"
+        exit_reason_detail = f"{exit_reason}_{reason}" if reason else exit_reason
 
         self.logger.info(
             "[%s] %s (%s) — exit_premium=$%.4f (last_known=$%.4f entry=$%.4f)",
