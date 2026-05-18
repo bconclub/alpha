@@ -333,7 +333,9 @@ class AlphaBot:
         self._scheduler.add_job(self._reconcile_exchange_positions, "interval", seconds=60)
         self._scheduler.add_job(self._telegram_health_check, "interval", minutes=5)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=5)
-        self._scheduler.add_job(self._run_reconciliation, "interval", minutes=60)
+        # GPFC #77: reconciler disabled in the live loop — was creating phantom ghost rows.
+        # Still invokable manually via CLI ("reconcile" / "smart_reconcile" commands).
+        # self._scheduler.add_job(self._run_reconciliation, "interval", minutes=60)
         self._scheduler.add_job(self._watchdog_ping, "interval", seconds=60)
         self._scheduler.start()
 

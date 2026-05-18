@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-19 · GPFC #77: kill ghost-insert feature in reconciler — root cause of phantom rows
+
+- `smart_reconcile.py` (`_insert_ghost_trade`): gutted body, now logs warning only — no INSERT
+- `reconcile.py` (line ~497): replaced try-insert block with warning log only — no INSERT
+- `main.py` (scheduler): commented out hourly `_run_reconciliation` job. Reconciler still callable manually via "reconcile" / "smart_reconcile" CLI commands
+- `trade_executor.py` (`_open_trade_in_db`): defense-in-depth — refuses INSERT when `order.id` is null
+- `trade_executor.py` (`_close_trade_in_db` fallback): same guard on the legacy "standalone closed row" insert path
+- User-facing: phantom rows can no longer be created by the auto-reconciler; even bypass paths get rejected at the executor
+
 ## 2026-05-15 · GPFC #76: ghost-proof trade lifecycle — strict write/update, real exit labels, pre-expiry close
 
 - `options_scalp.py` (`_write_entry_to_db`): Added GPFC #76 fill-confirmation gate — trade INSERT now aborted if any of: order_id missing, fill_price=0, contracts=0, entry_path unset

@@ -1490,6 +1490,15 @@ class TradeExecutor:
         """INSERT a new trade row for an entry/open position."""
         if self.db is None:
             return
+        # GPFC #77: defense-in-depth — refuse insert if there's no exchange order id.
+        # Ghost rows historically came from inserts with order_id=NULL.
+        order_id = (order or {}).get("id")
+        if not order_id:
+            logger.error(
+                "[%s] REFUSING insert: order_id is null. pair=%s side=%s reason=%s",
+                signal.pair, signal.pair, signal.side, signal.reason,
+            )
+            return None
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = (
@@ -1648,6 +1657,18 @@ class TradeExecutor:
             )
 
             if not open_trade:
+                # GPFC #77: refuse to fabricate a "standalone closed row" without
+                # a real exchange order id — that's the legacy ghost path.
+                _close_order_id = (order or {}).get("id")
+                if not _close_order_id:
+                    logger.error(
+                        "[%s] REFUSING fallback closed-row insert: order_id is null. "
+                        "exchange=%s strategy=%s",
+                        signal.pair, signal.exchange_id, signal.strategy.value,
+                    )
+                    if self.risk_manager is not None:
+                        self.risk_manager.record_close(signal.pair, 0.0)
+                    return None
                 logger.warning(
                     "No open trade found in DB for %s/%s/%s — inserting as closed row",
                     signal.pair, signal.exchange_id, signal.strategy.value,
@@ -1664,7 +1685,7 @@ class TradeExecutor:
                     "exchange": signal.exchange_id,
                     "status": "closed",
                     "reason": signal.reason,
-                    "order_id": order.get("id"),
+                    "order_id": _close_order_id,
                     "leverage": signal.leverage,
                     "position_type": signal.position_type,
                 })

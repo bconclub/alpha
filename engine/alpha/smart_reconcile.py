@@ -747,37 +747,17 @@ class SmartDeltaReconciler:
         }).eq("id", trade_id).execute()
 
     def _insert_ghost_trade(self, rt: dict) -> None:
-        """Insert a closed trade row for a Delta round-trip missing in DB."""
-        buy_time = rt.get("buy_time") or datetime.now(timezone.utc).isoformat()
-        sell_time = rt.get("sell_time") or datetime.now(timezone.utc).isoformat()
-        pct = float(rt.get("pct", 0) or 0)
-        peak_pnl = round(pct, 4) if pct > 0 else 0
+        """GPFC #77: Ghost-insert PERMANENTLY DISABLED — was the root cause of phantom rows.
 
-        row = {
-            "pair": rt["pair"],
-            "exchange": "delta",
-            "strategy": "options_scalp",
-            "side": "buy",
-            "entry_price": float(rt["entry"]),
-            "exit_price": float(rt["exit"]),
-            "contracts": float(rt["qty"]),
-            "leverage": 50,
-            "gross_pnl": float(rt["gross"]),
-            "net_pnl": float(rt["net"]),
-            "pnl": float(rt["net"]),
-            "pnl_pct": pct,
-            "peak_pnl": peak_pnl,
-            "entry_fee": float(rt["efee"]),
-            "exit_fee": float(rt["xfee"]),
-            "status": "closed",
-            "exit_reason": "GONE",
-            "reason": "smart_reconcile_insert_missing",
-            "setup_type": "MOM_BURST",
-            "opened_at": buy_time,
-            "closed_at": sell_time,
-            "metadata": {
-                "reconciled_at": datetime.now(timezone.utc).isoformat(),
-                "ghost_inserted": True,
-            },
-        }
-        self.db.table("trades").insert(row).execute()
+        This function used to INSERT a closed trade row for a Delta round-trip
+        missing in DB. That behavior created ghosts and is now a no-op.
+        """
+        self.log.warning(
+            "[%s] smart_reconcile would insert ghost row "
+            "(entry=%.2f exit=%.2f net=%.4f) — INSERT DISABLED",
+            rt.get("pair"),
+            float(rt.get("entry", 0) or 0),
+            float(rt.get("exit", 0) or 0),
+            float(rt.get("net", 0) or 0),
+        )
+        # NO INSERT. Ghost-insert feature is permanently disabled.

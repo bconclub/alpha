@@ -492,19 +492,13 @@ class DeltaReconciler:
             if self._is_duplicate(rt):
                 continue
 
-            row = self._build_insert_row(rt)
-            try:
-                self.db.table("trades").insert(row).execute()
-                inserted += 1
-                self.log.info(
-                    "RECONCILE INSERT: %s $%.2f→$%.2f net=$%.6f (%s)",
-                    rt["pair"], rt["entry"], rt["exit"], rt["net"], rt["option_type"],
-                )
-            except Exception:
-                self.log.exception(
-                    "RECONCILE INSERT FAILED: %s $%.2f→$%.2f",
-                    rt["pair"], rt["entry"], rt["exit"],
-                )
+            # GPFC #77: Ghost-insert PERMANENTLY DISABLED — was root cause of
+            # phantom rows. Reconciler now logs unmatched round-trips only.
+            self.log.warning(
+                "RECONCILE would insert ghost row: %s $%.2f→$%.2f net=$%.6f (%s) — INSERT DISABLED",
+                rt["pair"], rt["entry"], rt["exit"], rt["net"], rt["option_type"],
+            )
+            # NO INSERT.
 
         diff = abs(delta_net - db_net)
         return {
