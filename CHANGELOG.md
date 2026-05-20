@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-05-21 · GPFC #78: regime-switching exit by peak (phases A-E)
+
+- `options_scalp.py`: added phase constants (PHASE_A through PHASE_E) for peak-based exit regimes
+- `options_scalp.py`: added 3 helper methods — `_current_phase`, `_phase_trail_floor`, `_underlying_turned_against`
+- `options_scalp.py`: added `_peak_pnl_pct` / `_current_pnl_pct` instance attrs (live-set each exit tick)
+- `options_scalp.py` (`_check_option_exit`): replaced OPT_HARD_SL + OPT_TRAIL (tier ladder) + OPT_PEAK_TRAIL pullback + OPT_BREAKEVEN_STOP with a single phase-based ladder. DEAD detector preserved (peak ≤ 3% + premium ≤ -8% + underlying turned against)
+- Phase ladder:
+  - A (peak < 3%): -3% SL only
+  - B (peak 3-9%): breakeven exit when retrace to ≤ +0.5% AND peak ≥ 3%; -8% SL backstop
+  - C (peak 9-15%): trail at 45% of peak; -15% catastrophic SL
+  - D (peak 15-50%): trail at 60% of peak
+  - E (peak ≥ 50%): trail at 75% of peak (moonshots)
+- User-facing: exit reasons now include STOP_PHASE_A, STOP_PHASE_B, BREAKEVEN, TRAIL_PHASE_C/D/E, STOP_PHASE_C/D/E. Old TRAIL / OPT_PEAK / OPT_BREAKEVEN_STOP exits gone
+
 ## 2026-05-19 · GPFC #77: kill ghost-insert feature in reconciler — root cause of phantom rows
 
 - `smart_reconcile.py` (`_insert_ghost_trade`): gutted body, now logs warning only — no INSERT

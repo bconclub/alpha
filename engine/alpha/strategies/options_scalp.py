@@ -204,6 +204,26 @@ class OptionsScalpStrategy(BaseStrategy):
     DEAD_PREMIUM_DROP_PCT = -8.0    # premium dropped ≥ 8% from entry
     DEAD_UNDERLYING_AGAINST_PCT = 0.05  # underlying moved > 0.05% against us in 60s
 
+    # ── GPFC #78: phase-based exits (regime-switching by peak P&L) ─────
+    # Replaces the OPT_TRAIL_TIERS ladder + PULLBACK_ACTIVATE / BREAKEVEN logic.
+    # Five phases keyed off peak P&L:
+    #   A: peak <  3%  → tight -3% SL
+    #   B: peak 3-9%   → breakeven exit at +0.5% retrace OR -8% SL backstop
+    #   C: peak 9-15%  → trail at 45% of peak OR -15% SL backstop
+    #   D: peak 15-50% → trail at 60% of peak
+    #   E: peak ≥ 50%  → trail at 75% of peak (moonshots)
+    PHASE_A_PEAK_MAX_PCT = 3.0
+    PHASE_A_SL_PCT = -3.0
+    PHASE_B_PEAK_MAX_PCT = 9.0
+    PHASE_B_SL_PCT = -8.0
+    PHASE_B_BREAKEVEN_EXIT_PCT = 0.5
+    PHASE_C_PEAK_MAX_PCT = 15.0
+    PHASE_C_TRAIL_FRAC = 0.45
+    PHASE_C_SL_PCT = -15.0
+    PHASE_D_PEAK_MAX_PCT = 50.0
+    PHASE_D_TRAIL_FRAC = 0.60
+    PHASE_E_TRAIL_FRAC = 0.75
+
     # ── GPFC #67: entry-quality filters (winner-pattern analysis) ─────
     # Winners cluster at |delta| 0.42-0.61, IV 0.41-0.54, turnover $2.84M-$13.68M.
     # Block entries outside these bands.
@@ -278,6 +298,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # Exit only fires once this reaches PULLBACK_CONFIRMATION_TICKS AND the
         # spot-momentum veto doesn't hold.
         self._peak_trail_pending_ticks: int = 0
+        # GPFC #78: live tracking for phase-based exit (set each exit tick).
+        self._peak_pnl_pct: float = 0.0
+        self._current_pnl_pct: float = 0.0
         self.strike_price: float = 0.0
         self.expiry_dt: datetime | None = None
 
@@ -3574,6 +3597,42 @@ class OptionsScalpStrategy(BaseStrategy):
         """
         return -float(self.SL_PREMIUM_LOSS_PCT)
 
+    # ── GPFC #78: phase-based exit helpers ─────────────────────────────
+    def _current_phase(self) -> str:
+        """Return current exit phase A-E keyed off peak P&L."""
+        peak = self._peak_pnl_pct or 0.0
+        if peak < self.PHASE_A_PEAK_MAX_PCT:
+            return "A"
+        if peak < self.PHASE_B_PEAK_MAX_PCT:
+            return "B"
+        if peak < self.PHASE_C_PEAK_MAX_PCT:
+            return "C"
+        if peak < self.PHASE_D_PEAK_MAX_PCT:
+            return "D"
+        return "E"
+
+    def _phase_trail_floor(self, phase: str) -> float:
+        """Trail-floor (as % of entry) for trailing phases C/D/E.
+
+        Returns -999.0 for phases A and B which have no trail floor.
+        """
+        peak = self._peak_pnl_pct or 0.0
+        if phase == "C":
+            return peak * self.PHASE_C_TRAIL_FRAC
+        if phase == "D":
+            return peak * self.PHASE_D_TRAIL_FRAC
+        if phase == "E":
+            return peak * self.PHASE_E_TRAIL_FRAC
+        return -999.0
+
+    def _underlying_turned_against(self, threshold: float) -> bool:
+        """True if spot is moving against our option direction by >threshold% in 60s."""
+        if not self.option_side:
+            return False
+        our_dir = 1.0 if self.option_side == "call" else -1.0
+        aligned_mom = our_dir * self._underlying_momentum_pct()
+        return aligned_mom < -threshold
+
     # ==================================================================
     # EXIT LOGIC
     # ==================================================================
@@ -3736,249 +3795,112 @@ class OptionsScalpStrategy(BaseStrategy):
                 expiry_tag,
             )
 
-        # ── GPFC #67: OPT_DEAD — dead-on-arrival cutter ────────────────
-        # Fires before STOP. All three required: trade never moved up
-        # (peak ≤ 0.5%) AND premium has dropped ≥ 8% AND underlying is moving
-        # against us > 0.05% in 60s. Saves ~$0.20/trade vs letting STOP bleed
-        # to -15%. No time gate — purely state-based.
+        # ══ GPFC #78: phase-based exit evaluation ═════════════════════════════════════════
+        # Five phases keyed off peak P&L (A through E). Replaces the
+        # OPT_TRAIL_TIERS ladder + OPT_PEAK_TRAIL pullback + OPT_BREAKEVEN_STOP.
+        # DEAD detector (peak ≤ 3% AND premium ≤ -8% AND underlying turned
+        # against) still fires first as a phase-A early-exit special case.
+        self._peak_pnl_pct = peak_pnl_pct
+        self._current_pnl_pct = premium_change_pct
+        phase = self._current_phase()
+
+        # Heartbeat the phase debug line at the same cadence as the existing
+        # heartbeat above (~60s) so logs stay readable.
+        if self._tick_count % 6 == 0:
+            self.logger.debug(
+                "[%s] phase=%s peak=%.1f%% current=%.1f%% trail_floor=%.2f%%",
+                self.pair, phase, peak_pnl_pct, premium_change_pct,
+                self._phase_trail_floor(phase),
+            )
+
+        # ── DEAD (unchanged semantics, helper-based) ──
         if (
             peak_pnl_pct <= self.DEAD_PEAK_MAX_PCT
             and premium_change_pct <= self.DEAD_PREMIUM_DROP_PCT
-            and self.option_side
+            and self._underlying_turned_against(self.DEAD_UNDERLYING_AGAINST_PCT)
         ):
-            our_dir = 1.0 if self.option_side == "call" else -1.0
-            underlying_mom = self._underlying_momentum_pct()
-            aligned_mom = our_dir * underlying_mom
-            if aligned_mom < -self.DEAD_UNDERLYING_AGAINST_PCT:
+            self.logger.info(
+                "[%s] OPT_DEAD — peak %+.2f%% never moved, premium %+.2f%%, "
+                "underlying against us (>%.2f%% in 60s)",
+                self.option_symbol,
+                peak_pnl_pct,
+                premium_change_pct,
+                self.DEAD_UNDERLYING_AGAINST_PCT,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "DEAD"
+            )
+
+        # ── PHASE A: tight SL (-3%) ──
+        if phase == "A" and premium_change_pct <= self.PHASE_A_SL_PCT:
+            self.logger.info(
+                "[%s] STOP_PHASE_A — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
+                self.option_symbol,
+                premium_change_pct,
+                self.PHASE_A_SL_PCT,
+                peak_pnl_pct,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "STOP_PHASE_A"
+            )
+
+        # ── PHASE B: breakeven on retrace OR -8% SL backstop ──
+        if phase == "B":
+            if (
+                premium_change_pct <= self.PHASE_B_BREAKEVEN_EXIT_PCT
+                and peak_pnl_pct >= self.PHASE_A_PEAK_MAX_PCT
+            ):
                 self.logger.info(
-                    "[%s] OPT_DEAD — peak %+.2f%% never moved, premium %+.2f%%, "
-                    "underlying %+.3f%% against us",
+                    "[%s] BREAKEVEN — peak %+.1f%% reverted to %+.1f%% "
+                    "(exit≤%.1f%%)",
                     self.option_symbol,
                     peak_pnl_pct,
                     premium_change_pct,
-                    aligned_mom,
+                    self.PHASE_B_BREAKEVEN_EXIT_PCT,
                 )
                 return await self._do_option_exit(
-                    current_premium, premium_change_pct, "DEAD"
+                    current_premium, premium_change_pct, "BREAKEVEN"
                 )
-
-        # ── 1. OPT_HARD_SL — flat stop-loss (no age tightening) ─────────
-        sl_pct = self._flat_sl_pct()
-        if premium_change_pct <= sl_pct:
-            self.logger.info(
-                "[%s] OPT_HARD_SL — premium %+.1f%% <= %.1f%% (peak=%+.1f%%)",
-                self.option_symbol,
-                premium_change_pct,
-                sl_pct,
-                peak_pnl_pct,
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "STOP"
-            )
-
-        # ══════════════════════════════════════════════════════════════════
-        # GPFC #67: EXIT ORDER PRIORITY
-        #   0. EXPIRED_WORTHLESS  (premium == 0, handled above)
-        #   1. DEAD               (peak ≤ 0.5% AND premium ≤ -8% AND underlying against, handled above)
-        #   2. STOP               (premium dropped past flat SL, handled above)
-        #   3. TRAIL              (premium < tier floor, peak ≥ 4%)
-        #   4. PEAK               (confirmed pullback ≥ 30% from peak ≥ 4%)
-        #   5. BREAKEVEN          (peak ≥ 8% reverted to ≤ +0.5%)
-        # ══════════════════════════════════════════════════════════════════
-
-        # ── 2. OPT_TRAIL — tiered absolute floor ──
-        first_trail_activation = self.OPT_TRAIL_TIERS[0][0]
-        if peak_pnl_pct >= first_trail_activation:
-            if not self._trailing_active:
+            if premium_change_pct <= self.PHASE_B_SL_PCT:
                 self.logger.info(
-                    "[%s] TRAIL ARMED — peak +%.1f%% ≥ activation %.1f%% | "
-                    "floor locks at +%.1f%% from entry",
+                    "[%s] STOP_PHASE_B — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
                     self.option_symbol,
+                    premium_change_pct,
+                    self.PHASE_B_SL_PCT,
                     peak_pnl_pct,
-                    first_trail_activation,
-                    self._opt_trail_floor_pct(peak_pnl_pct),
                 )
-            self._trailing_active = True
-
-        if (
-            self._trailing_active
-            and self.entry_premium > 0
-            and self.highest_premium > 0
-        ):
-            # GPFC #62/#71: tiered absolute floor as %-from-entry, ratcheted.
-            # _locked_trail_floor_pct only goes UP — once peak triggers a
-            # higher tier, the floor stays elevated even if peak drifts back.
-            # This prevents a momentary peak-then-fade from reverting the floor.
-            tier_floor_pct = self._opt_trail_floor_pct(peak_pnl_pct)
-            self._locked_trail_floor_pct = max(
-                self._locked_trail_floor_pct, tier_floor_pct
-            )
-            trail_floor_pct = self._locked_trail_floor_pct
-            trail_floor = self.entry_premium * (1.0 + trail_floor_pct / 100.0)
-
-            # GPFC #71: persist trail_armed + trail_floor_pct to trades.metadata
-            # whenever the locked floor escalates. Avoid spamming — only write
-            # when the value changes.
-            if (
-                self._db
-                and self._db_trade_id
-                and trail_floor_pct > self._last_trail_floor_pct_written
-            ):
-                self._last_trail_floor_pct_written = trail_floor_pct
-                try:
-                    await self._db.update_trade_metadata(
-                        self._db_trade_id,
-                        {
-                            "trail_armed": True,
-                            "trail_floor_pct": round(trail_floor_pct, 2),
-                        },
-                    )
-                except Exception:
-                    self.logger.debug(
-                        "[%s] trail metadata update failed (non-critical)",
-                        self.option_symbol,
-                    )
-            if current_premium < trail_floor:
-                # GPFC #64: spot-direction veto — if underlying is still
-                # trending our way, premium decay is likely IV/spread noise
-                # rather than thesis failure. Defer the trail exit and let
-                # the move keep developing.
-                spot_supports, aligned_mom = self._underlying_still_supports_position()
-                if spot_supports:
-                    self.logger.info(
-                        "[%s] OPT_TRAIL_VETO — premium $%.4f < floor $%.4f "
-                        "BUT spot still %+.2f%% our way (>%.2f%%) — deferring",
-                        self.option_symbol,
-                        current_premium,
-                        trail_floor,
-                        aligned_mom,
-                        self.PULLBACK_SPOT_VETO_PCT,
-                    )
-                else:
-                    self.logger.info(
-                        "[%s] OPT_TRAIL — premium $%.4f < trail_floor $%.4f "
-                        "(floor=+%.1f%% peak=$%.4f peak_pnl=%+.1f%% pnl=%+.1f%% "
-                        "aligned_mom=%+.2f%%)",
-                        self.option_symbol,
-                        current_premium,
-                        trail_floor,
-                        trail_floor_pct,
-                        self.highest_premium,
-                        peak_pnl_pct,
-                        premium_change_pct,
-                        aligned_mom,
-                    )
-                    # GPFC #71: try a limit fill at the floor first; the
-                    # executor's limit-then-market path will fall back to
-                    # market after 3s if unfilled.
-                    return await self._do_option_exit_limit(
-                        limit_price=trail_floor,
-                        fallback_price=current_premium,
-                        fallback_after_sec=5.0,
-                        reason="TRAIL",
-                    )
-
-            # GPFC #75: no PEAK/BREAKEVEN exit below peak 10% — breathing room.
-            if peak_pnl_pct < 10.0:
-                return []
-
-            peak_gain = self.highest_premium - self.entry_premium
-            pullback_condition_met = (
-                peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT
-                and peak_gain > 0
-                and self.highest_premium > current_premium
-                and (self.highest_premium - current_premium) / peak_gain
-                    >= (self.PULLBACK_EXIT_PCT / 100.0)
-            )
-
-            if pullback_condition_met:
-                self._peak_trail_pending_ticks += 1
-                gave_back = self.highest_premium - current_premium
-
-                # GPFC #49: at peaks >= 10%, protect locked-in profit with a
-                # 1-tick trigger. #3078 peaked +12.61% and gave back to -2.33%
-                # because the 2-tick wait let the premium gap through the floor.
-                required_ticks = (
-                    1
-                    if peak_pnl_pct >= 10.0
-                    else self.PULLBACK_CONFIRMATION_TICKS
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "STOP_PHASE_B"
                 )
-                confirmed = self._peak_trail_pending_ticks >= required_ticks
 
-                if confirmed:
-                    # GPFC #64: spot-direction veto — if underlying is still
-                    # trending our way, the giveback is noise/IV crush rather
-                    # than thesis failure. Defer the PEAK exit and reset the
-                    # confirmation counter so we re-confirm on next pullback.
-                    spot_supports, aligned_mom = self._underlying_still_supports_position()
-                    if spot_supports:
-                        self.logger.info(
-                            "[%s] OPT_PEAK_VETO — gave back %.1f%% of peak BUT "
-                            "spot still %+.2f%% our way (>%.2f%%) — deferring",
-                            self.option_symbol,
-                            100.0 * gave_back / peak_gain,
-                            aligned_mom,
-                            self.PULLBACK_SPOT_VETO_PCT,
-                        )
-                        self._peak_trail_pending_ticks = 0
-                    else:
-                        self.logger.info(
-                            "[%s] OPT_PEAK_TRAIL — gave back %.1f%% of peak gain "
-                            "(peak=$%.4f now=$%.4f pnl=%+.1f%% ticks=%d/%d "
-                            "aligned_mom=%+.2f%%)",
-                            self.option_symbol,
-                            100.0 * gave_back / peak_gain,
-                            self.highest_premium,
-                            current_premium,
-                            premium_change_pct,
-                            self._peak_trail_pending_ticks,
-                            required_ticks,
-                            aligned_mom,
-                        )
-                        self._peak_trail_pending_ticks = 0
-                        # GPFC #71: limit-at-floor exit path (same fallback as TRAIL).
-                        return await self._do_option_exit_limit(
-                            limit_price=trail_floor,
-                            fallback_price=current_premium,
-                            fallback_after_sec=5.0,
-                            reason="PEAK",
-                        )
-                else:
-                    self.logger.info(
-                        "[%s] OPT_PEAK_TRAIL_DEFER (awaiting_tick_%d/%d) — gave back %.1f%% "
-                        "(peak=$%.4f now=$%.4f pnl=%+.1f%%)",
-                        self.option_symbol,
-                        self._peak_trail_pending_ticks,
-                        required_ticks,
-                        100.0 * gave_back / peak_gain,
-                        self.highest_premium,
-                        current_premium,
-                        premium_change_pct,
-                    )
-            else:
-                # Pullback condition not met this tick — reset confirmation.
-                self._peak_trail_pending_ticks = 0
-
-        # ── 5. Breakeven stop — once we've been meaningfully green, don't go red ──
-        # Fires only when a real peak existed AND the trade has retraced to
-        # roughly entry, converting would-be losers (peak +10% → -12%) into
-        # scratches (peak +10% → ~0%).
-        if (
-            peak_pnl_pct >= self.BREAKEVEN_STOP_ACTIVATE_PCT
-            and premium_change_pct <= self.BREAKEVEN_STOP_EXIT_PCT
-        ):
-            self.logger.info(
-                "[%s] OPT_BREAKEVEN_STOP — peak=%+.1f%% reverted to %+.1f%% "
-                "(activate≥%.1f%% exit≤%.1f%%)",
-                self.option_symbol,
-                peak_pnl_pct,
-                premium_change_pct,
-                self.BREAKEVEN_STOP_ACTIVATE_PCT,
-                self.BREAKEVEN_STOP_EXIT_PCT,
-            )
-            return await self._do_option_exit(
-                current_premium, premium_change_pct, "BREAKEVEN"
-            )
+        # ── PHASE C/D/E: trail floor OR catastrophic SL (-15%) ──
+        if phase in ("C", "D", "E"):
+            floor = self._phase_trail_floor(phase)
+            if premium_change_pct <= floor:
+                self.logger.info(
+                    "[%s] TRAIL_PHASE_%s — current %+.1f%% ≤ floor %+.2f%% "
+                    "(peak=%+.1f%%)",
+                    self.option_symbol,
+                    phase,
+                    premium_change_pct,
+                    floor,
+                    peak_pnl_pct,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, f"TRAIL_PHASE_{phase}"
+                )
+            if premium_change_pct <= self.PHASE_C_SL_PCT:
+                self.logger.info(
+                    "[%s] STOP_PHASE_%s — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
+                    self.option_symbol,
+                    phase,
+                    premium_change_pct,
+                    self.PHASE_C_SL_PCT,
+                    peak_pnl_pct,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, f"STOP_PHASE_{phase}"
+                )
 
         return []
 
