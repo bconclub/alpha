@@ -273,7 +273,15 @@ class OptionsScalpStrategy(BaseStrategy):
     # GPFC #72: confidence floor — sub-60 zone was 0/3 in last 20 trades, with
     # two -16% catastrophic stops. Block entries below this score; no behavior
     # change above 60.
+    # GPFC #81: confidence model collapsed to aligned_mom only — gate at 60
+    # now means aligned_mom >= 0.60% (after the /0.20 cap scale, the top
+    # tercile of historical 60s underlying moves).
     CONFIDENCE_MIN_ENTRY = 60.0
+
+    # GPFC #81: only MOM_BURST is enabled. SQUEEZE entries were 0/many wins
+    # in the last analysis window; the squeeze-detection signal lost edge.
+    # Adding SQUEEZE back requires a re-validation run.
+    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST"})
 
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
@@ -549,6 +557,12 @@ class OptionsScalpStrategy(BaseStrategy):
 
     async def on_start(self) -> None:
         """Load option markets on startup + restore position state from DB."""
+        self.logger.info(
+            "[CONFIDENCE] GPFC #81 model: conf = aligned_mom (top component). "
+            "Gate ≥ %.0f. Setups enabled: %s.",
+            self.CONFIDENCE_MIN_ENTRY,
+            ",".join(sorted(self.ENABLED_SETUPS)),
+        )
         if self.options_exchange:
             try:
                 await self.options_exchange.load_markets()
@@ -2157,6 +2171,16 @@ class OptionsScalpStrategy(BaseStrategy):
         avg_vol_ratio: float,
     ) -> None:
         """Called when squeeze ends — determine breakout direction, calc velocity, start dynamic confirmation (GPFC #21)."""
+        # GPFC #81: SQUEEZE setup disabled — short-circuit here so no SQUEEZE
+        # entry is ever queued. The momentum_burst path remains primary.
+        if "SQUEEZE" not in self.ENABLED_SETUPS:
+            if self._tick_count % 30 == 0:
+                self.logger.info(
+                    "[%s] SQUEEZE entry blocked by config (GPFC #81 — MOM_BURST only)",
+                    self.pair,
+                )
+            return
+
         # Determine direction from which band exited KC
         if bb_upper > kc_upper and bb_lower < kc_lower:
             # Both bands outside — pick the side with larger exceedance
@@ -2587,6 +2611,18 @@ class OptionsScalpStrategy(BaseStrategy):
             self._is_squeeze_entry
             or self._pending_entry_setup in ("SQUEEZE", "SQUEEZE")
         ) else "MOM_BURST"
+
+        # GPFC #81: belt-and-suspenders — refuse to fire if the resolved
+        # setup_type is disabled (e.g. SQUEEZE). _handle_squeeze_breakout
+        # already short-circuits, but a stale pending state could still
+        # route through here.
+        if setup_type not in self.ENABLED_SETUPS:
+            self.logger.info(
+                "[%s] setup %s disabled by ENABLED_SETUPS — aborting entry",
+                self.pair, setup_type,
+            )
+            self._reset_breakout_state()
+            return []
 
         # Recalculate contracts at confirmed ask price
         opt_contracts = self._calculate_option_contracts(
@@ -3451,19 +3487,20 @@ class OptionsScalpStrategy(BaseStrategy):
         ticker: dict[str, Any] | None,
         option_type: str | None,
     ) -> tuple[float, dict[str, float]]:
-        """GPFC #71: 0–100 confidence score with 6-component breakdown.
+        """GPFC #81: confidence collapsed to aligned_mom only.
 
-        Returns (score, breakdown). Pure scoring — no gating uses this yet;
-        the value is captured into trades.metadata so we can drive a
-        threshold from real data after 30+ tagged trades.
+        Historical analysis showed the other 5 components were noise or
+        counter-predictive vs win rate / right-tail. The 6-component breakdown
+        is still computed and returned so we can observe the components in
+        trades.metadata, but the SCORE is now `aligned_mom` alone.
 
-        Components (each scored 0–100, then averaged):
-          1. bb_tightness  — BB width relative to threshold (tighter = higher)
-          2. bb_kc_quality — bb_kc_ratio quality (≤1 = perfect, ≥2 = 0)
-          3. aligned_mom   — signed underlying 60s momentum vs option side
-          4. freshness     — 20s/60s acceleration ratio (≥0.7 = perfect)
-          5. liquidity     — turnover_usd, capped at $10M = perfect
-          6. moneyness     — |delta| proximity to 0.50 sweet spot
+        Components (each scored 0–100, but only aligned_mom counts):
+          1. bb_tightness  — observed only
+          2. bb_kc_quality — observed only
+          3. aligned_mom   — signed underlying 60s momentum vs option side  ★ score
+          4. freshness     — observed only
+          5. liquidity     — observed only
+          6. moneyness     — observed only
         """
         breakdown: dict[str, float] = {}
 
@@ -3527,8 +3564,9 @@ class OptionsScalpStrategy(BaseStrategy):
             money = max(0.0, 100.0 - (edge_dist / 0.20) * 100.0)
         breakdown["moneyness"] = money
 
-        # Average → 0–100 score.
-        score = round(sum(breakdown.values()) / len(breakdown), 1)
+        # GPFC #81: score = aligned_mom only (other components observed-only).
+        score = round(float(breakdown.get("aligned_mom", 0.0)), 1)
+        score = max(0.0, min(100.0, score))
         # Round each component for clean storage.
         breakdown = {k: round(v, 1) for k, v in breakdown.items()}
         return score, breakdown

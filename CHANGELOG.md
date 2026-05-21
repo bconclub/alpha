@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-21 · GPFC #81: MOM_BURST only, conf=aligned_mom (drop SQUEEZE + 5 noisy components)
+
+- `options_scalp.py`: added `ENABLED_SETUPS: frozenset = frozenset({"MOM_BURST"})` class constant — SQUEEZE entries now disabled at config level
+- `options_scalp.py` (`_handle_squeeze_breakout`): short-circuit at the top of the function when SQUEEZE is not in ENABLED_SETUPS (throttled log every 30 ticks); no SQUEEZE entry can ever queue
+- `options_scalp.py` (`_execute_breakout_entry`): belt-and-suspenders gate — refuses to fire if resolved `setup_type not in ENABLED_SETUPS`, resets breakout state
+- `options_scalp.py` (`_calculate_confidence`): score collapsed to `aligned_mom` only. The 6-component breakdown is still computed and stored in `trades.metadata.confidence_breakdown` for observation, but only aligned_mom drives the gate
+- `options_scalp.py` (`on_start`): emit `[CONFIDENCE] GPFC #81 model:` banner at startup with active setups
+- User-facing: zero new SQUEEZE rows going forward; confidence threshold of 60 now maps to ~0.60% aligned 60s underlying momentum (top tercile historically). Expect right-tail rate 17-22%
+
 ## 2026-05-21 · GPFC #80: Phase A/B SL requires underlying momentum confirmation
 
 - `options_scalp.py`: added constants `PHASE_A_SPOT_FAVORABLE_BPS = 0.05` (%, not bps) and `PHASE_A_SPOT_LOOKBACK_SEC = 30`
