@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-05-21 · GPFC #79.2: dashboard two-pill exit display
+
+- `dashboard/lib/exitReason.ts` (new): added `parseExitReason()` parser that splits `stop_phase_a` / `trail_phase_c` into `{primary: "STOP"|"TRAIL", phase: "A"-"E"}` and `exitReasonColor()` color keyword helper
+- `dashboard/components/ui/ExitChip.tsx`: refactored to render two pills for phased exits (primary action + neutral mono phase letter), single pill for breakeven/dead/pre-expiry/expired_itm/expired_otm/etc., backward-compat for legacy uppercase rows (TRAIL/PEAK/GONE/EXPIRY/…)
+- User-facing: trade rows in `/trades` and any other ExitChip site now show e.g. `[STOP] [A]` two-pill instead of literal `STOP_PHASE_A`; legacy trades still render normally
+
 ## 2026-05-21 · GPFC #79: tighten backstops, kill old STOP, gate third SQUEEZE entry, proper exit names
 
 - `options_scalp.py`: tightened phase-B SL (-8→-5), phase-C SL (-15→-8); added explicit `PHASE_D_SL_PCT` / `PHASE_E_SL_PCT` (-8 each)
