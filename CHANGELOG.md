@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-05-21 · GPFC #80: Phase A/B SL requires underlying momentum confirmation
+
+- `options_scalp.py`: added constants `PHASE_A_SPOT_FAVORABLE_BPS = 0.05` (%, not bps) and `PHASE_A_SPOT_LOOKBACK_SEC = 30`
+- `options_scalp.py`: added 3 helpers — `_get_spot_price_at(seconds_ago)` (uses existing `_momentum_price_history`), `_underlying_still_favorable(lookback, threshold)` returning True if spot has moved in our trade direction by ≥threshold over the lookback window, and `_persist_sl_defer_count()` async writer to `trades.metadata.sl_deferred_count`
+- `options_scalp.py`: added `_sl_defer_count` instance attr (reset on entry, incremented each defer)
+- `options_scalp.py` (exit ladder): Phase A SL now defers when spot is still favorable (logs `stop_phase_a DEFERRED`); fires only when spot turns or goes flat. Phase B -5% SL backstop gets the same momentum-confirmation rule. Phase C/D/E SL backstops unchanged (catastrophic gap, immediate exit)
+- User-facing: bot no longer cuts on noise-level premium dips when underlying is still pushing in our favor; defers per trade are persisted to metadata for analysis
+
 ## 2026-05-21 · GPFC #79.2: dashboard two-pill exit display
 
 - `dashboard/lib/exitReason.ts` (new): added `parseExitReason()` parser that splits `stop_phase_a` / `trail_phase_c` into `{primary: "STOP"|"TRAIL", phase: "A"-"E"}` and `exitReasonColor()` color keyword helper

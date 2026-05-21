@@ -256,6 +256,13 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_E_TRAIL_FRAC = 0.75
     PHASE_E_SL_PCT = -8.0          # GPFC #79: explicit per-phase
 
+    # ── GPFC #80: momentum confirmation on Phase A/B SL ───────────────────
+    # Defer the SL trigger when spot is still moving in our trade direction —
+    # premium dip is likely IV / spread / tick lag, not thesis failure. This
+    # is a MOMENTUM check, not a clock gate. Hold ticks until spot turns.
+    PHASE_A_SPOT_FAVORABLE_BPS = 0.05   # % move in our favor over lookback (NOT basis points)
+    PHASE_A_SPOT_LOOKBACK_SEC = 30      # rolling window for spot movement
+
     # ── GPFC #67: entry-quality filters (winner-pattern analysis) ─────
     # Winners cluster at |delta| 0.42-0.61, IV 0.41-0.54, turnover $2.84M-$13.68M.
     # Block entries outside these bands.
@@ -333,6 +340,9 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #78: live tracking for phase-based exit (set each exit tick).
         self._peak_pnl_pct: float = 0.0
         self._current_pnl_pct: float = 0.0
+        # GPFC #80: count Phase A/B SL deferrals while spot remains favorable.
+        # Resets on entry; persisted to trades.metadata each defer.
+        self._sl_defer_count: int = 0
         self.strike_price: float = 0.0
         self.expiry_dt: datetime | None = None
 
@@ -2827,6 +2837,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_trail_floor_pct_written = -1.0
         self._trailing_active = False
         self._peak_trail_pending_ticks = 0
+        self._sl_defer_count = 0  # GPFC #80: reset on entry
         self.in_position = True
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -3195,6 +3206,60 @@ class OptionsScalpStrategy(BaseStrategy):
             return 0.0
         current_price = self._momentum_price_history[-1][1]
         return (current_price - old_price) / old_price * 100
+
+    # ── GPFC #80: spot snapshot + favorability helpers ──────────────────
+    def _get_spot_price_at(self, seconds_ago: float) -> float | None:
+        """Return the underlying spot price ~`seconds_ago` seconds ago.
+
+        Uses the existing _momentum_price_history deque (which the strategy
+        already feeds on every tick). Returns the oldest sample at or beyond
+        the requested age, or None if the buffer doesn't reach that far back.
+        """
+        if len(self._momentum_price_history) < 2:
+            return None
+        cutoff = time.monotonic() - seconds_ago
+        # iterate newest → oldest, pick first sample older than cutoff
+        for t, price in reversed(self._momentum_price_history):
+            if t <= cutoff and price > 0:
+                return float(price)
+        return None
+
+    def _underlying_still_favorable(
+        self, lookback_sec: float, threshold_pct: float
+    ) -> bool:
+        """True if spot has moved in our trade direction by ≥ threshold_pct % over
+        the lookback window. False = spot flat or turned against us.
+
+        Note: `threshold_pct` is expressed as a percentage (e.g. 0.05 = 0.05%),
+        matching the convention of DEAD_UNDERLYING_AGAINST_PCT elsewhere in
+        this file. Despite the GPFC #80 constant name suffix `_BPS`, the value
+        is a percent, not basis points.
+        """
+        now_spot = self._last_spot_price
+        past_spot = self._get_spot_price_at(seconds_ago=lookback_sec)
+        if not now_spot or not past_spot:
+            return False  # no data → treat as not favorable
+        change_pct = (now_spot - past_spot) / past_spot * 100.0
+        if self.option_side == "call":
+            return change_pct >= threshold_pct
+        if self.option_side == "put":
+            return change_pct <= -threshold_pct
+        return False
+
+    async def _persist_sl_defer_count(self) -> None:
+        """Write current _sl_defer_count to trades.metadata.sl_deferred_count."""
+        if not (self._db and self._db_trade_id):
+            return
+        try:
+            await self._db.update_trade_metadata(
+                self._db_trade_id,
+                {"sl_deferred_count": int(self._sl_defer_count)},
+            )
+        except Exception:
+            self.logger.debug(
+                "[%s] sl_deferred_count metadata update failed (non-critical)",
+                self.option_symbol or self.pair,
+            )
 
     def _underlying_short_momentum_pct(self, window_secs: float = 20.0) -> float:
         """Spot momentum % over a short window (default 20s).
@@ -3877,15 +3942,33 @@ class OptionsScalpStrategy(BaseStrategy):
                 current_premium, premium_change_pct, "dead"
             )
 
-        # ── PHASE A: tight SL (-3%) ──
+        # ── PHASE A: tight SL (-3%) with GPFC #80 momentum confirmation ──
         if phase == "A" and premium_change_pct <= self.PHASE_A_SL_PCT:
+            if self._underlying_still_favorable(
+                self.PHASE_A_SPOT_LOOKBACK_SEC,
+                self.PHASE_A_SPOT_FAVORABLE_BPS,
+            ):
+                self._sl_defer_count += 1
+                self.logger.info(
+                    "[%s] stop_phase_a DEFERRED — spot still favorable, "
+                    "current=%+.1f%% peak=%+.1f%% defer_count=%d",
+                    self.option_symbol,
+                    premium_change_pct,
+                    peak_pnl_pct,
+                    self._sl_defer_count,
+                )
+                await self._persist_sl_defer_count()
+                return []
             self.logger.info(
-                "[%s] stop_phase_a — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
+                "[%s] stop_phase_a — current %+.1f%% ≤ %.1f%% "
+                "(peak=%+.1f%% defers=%d)",
                 self.option_symbol,
                 premium_change_pct,
                 self.PHASE_A_SL_PCT,
                 peak_pnl_pct,
+                self._sl_defer_count,
             )
+            await self._persist_sl_defer_count()
             return await self._do_option_exit(
                 current_premium, premium_change_pct, "stop_phase_a"
             )
@@ -3908,13 +3991,32 @@ class OptionsScalpStrategy(BaseStrategy):
                     current_premium, premium_change_pct, "breakeven"
                 )
             if premium_change_pct <= self.PHASE_B_SL_PCT:
+                # GPFC #80: same momentum-confirmation rule as Phase A.
+                if self._underlying_still_favorable(
+                    self.PHASE_A_SPOT_LOOKBACK_SEC,
+                    self.PHASE_A_SPOT_FAVORABLE_BPS,
+                ):
+                    self._sl_defer_count += 1
+                    self.logger.info(
+                        "[%s] stop_phase_b DEFERRED — spot still favorable, "
+                        "current=%+.1f%% peak=%+.1f%% defer_count=%d",
+                        self.option_symbol,
+                        premium_change_pct,
+                        peak_pnl_pct,
+                        self._sl_defer_count,
+                    )
+                    await self._persist_sl_defer_count()
+                    return []
                 self.logger.info(
-                    "[%s] stop_phase_b — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
+                    "[%s] stop_phase_b — current %+.1f%% ≤ %.1f%% "
+                    "(peak=%+.1f%% defers=%d)",
                     self.option_symbol,
                     premium_change_pct,
                     self.PHASE_B_SL_PCT,
                     peak_pnl_pct,
+                    self._sl_defer_count,
                 )
+                await self._persist_sl_defer_count()
                 return await self._do_option_exit(
                     current_premium, premium_change_pct, "stop_phase_b"
                 )
