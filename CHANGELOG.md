@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-21 · GPFC #79: tighten backstops, kill old STOP, gate third SQUEEZE entry, proper exit names
+
+- `options_scalp.py`: tightened phase-B SL (-8→-5), phase-C SL (-15→-8); added explicit `PHASE_D_SL_PCT` / `PHASE_E_SL_PCT` (-8 each)
+- `options_scalp.py` (exit ladder): per-phase SL via dict (`{C/D/E: ...}`) instead of using `PHASE_C_SL_PCT` for all C/D/E
+- `options_scalp.py`: all exit_reason strings migrated to lowercase snake_case (`stop_phase_a`, `trail_phase_c`, `breakeven`, `dead`, `pre_expiry`, `expired_itm`, `expired_otm`, `expired_worthless`, `ticker_dropout`, `reconcile_gone`)
+- `options_scalp.py`: added module-level `EXIT_REASON_DISPLAY` map + `format_exit_reason()` helper for human-readable rendering
+- `options_scalp.py` (`_execute_breakout_entry`): added 3rd-path confidence gate immediately after `_build_entry_metadata`, before order placement — closes the SQUEEZE-execution bypass (detection-time gate could pass on stale conditions)
+- User-facing: every order placement now re-checks `confidence >= 60`; ugly raw exit reasons (`STOP_PHASE_A`) now stored as `stop_phase_a` and displayed as "Stop Phase A"
+
 ## 2026-05-21 · GPFC #78: regime-switching exit by peak (phases A-E)
 
 - `options_scalp.py`: added phase constants (PHASE_A through PHASE_E) for peak-based exit regimes

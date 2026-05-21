@@ -86,6 +86,36 @@ logger = setup_logger("options_scalp")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+# ── GPFC #79: exit-reason display map ──────────────────────────────────────
+# DB stores snake_case keys. Dashboard / logs format via format_exit_reason().
+EXIT_REASON_DISPLAY: dict[str, str] = {
+    "stop_phase_a": "Stop Phase A",
+    "stop_phase_b": "Stop Phase B",
+    "stop_phase_c": "Stop Phase C",
+    "stop_phase_d": "Stop Phase D",
+    "stop_phase_e": "Stop Phase E",
+    "trail_phase_c": "Trail Phase C",
+    "trail_phase_d": "Trail Phase D",
+    "trail_phase_e": "Trail Phase E",
+    "breakeven": "Breakeven",
+    "dead": "Dead",
+    "pre_expiry": "Pre-Expiry",
+    "expired_itm": "Expired ITM",
+    "expired_otm": "Expired OTM",
+    "expired_worthless": "Expired Worthless",
+    "ticker_dropout": "Ticker Dropout",
+    "reconcile_gone": "Reconcile Gone",
+    "peak": "Peak",  # legacy
+}
+
+
+def format_exit_reason(raw: str) -> str:
+    """Render a stored snake_case exit_reason as a human-readable label."""
+    if not raw:
+        return ""
+    return EXIT_REASON_DISPLAY.get(raw, raw.replace("_", " ").title())
+
+
 class OptionsScalpStrategy(BaseStrategy):
     """Buy CALLs/PUTs during BB squeeze — buy cheap premium, hold through breakout."""
 
@@ -204,25 +234,27 @@ class OptionsScalpStrategy(BaseStrategy):
     DEAD_PREMIUM_DROP_PCT = -8.0    # premium dropped ≥ 8% from entry
     DEAD_UNDERLYING_AGAINST_PCT = 0.05  # underlying moved > 0.05% against us in 60s
 
-    # ── GPFC #78: phase-based exits (regime-switching by peak P&L) ─────
-    # Replaces the OPT_TRAIL_TIERS ladder + PULLBACK_ACTIVATE / BREAKEVEN logic.
-    # Five phases keyed off peak P&L:
+    # ── GPFC #78 / #79: phase-based exits (regime-switching by peak P&L) ─
+    # GPFC #79 tightens phase-B/C/D/E backstops since trail is the primary
+    # exit in C/D/E. Phases keyed off peak P&L:
     #   A: peak <  3%  → tight -3% SL
-    #   B: peak 3-9%   → breakeven exit at +0.5% retrace OR -8% SL backstop
-    #   C: peak 9-15%  → trail at 45% of peak OR -15% SL backstop
-    #   D: peak 15-50% → trail at 60% of peak
-    #   E: peak ≥ 50%  → trail at 75% of peak (moonshots)
+    #   B: peak 3-9%   → breakeven exit at +0.5% retrace OR -5% SL backstop
+    #   C: peak 9-15%  → trail at 45% of peak OR -8% SL backstop
+    #   D: peak 15-50% → trail at 60% of peak OR -8% SL backstop
+    #   E: peak ≥ 50%  → trail at 75% of peak OR -8% SL backstop (moonshots)
     PHASE_A_PEAK_MAX_PCT = 3.0
     PHASE_A_SL_PCT = -3.0
     PHASE_B_PEAK_MAX_PCT = 9.0
-    PHASE_B_SL_PCT = -8.0
+    PHASE_B_SL_PCT = -5.0          # GPFC #79: was -8
     PHASE_B_BREAKEVEN_EXIT_PCT = 0.5
     PHASE_C_PEAK_MAX_PCT = 15.0
     PHASE_C_TRAIL_FRAC = 0.45
-    PHASE_C_SL_PCT = -15.0
+    PHASE_C_SL_PCT = -8.0          # GPFC #79: was -15 (trail is primary)
     PHASE_D_PEAK_MAX_PCT = 50.0
     PHASE_D_TRAIL_FRAC = 0.60
+    PHASE_D_SL_PCT = -8.0          # GPFC #79: explicit per-phase
     PHASE_E_TRAIL_FRAC = 0.75
+    PHASE_E_SL_PCT = -8.0          # GPFC #79: explicit per-phase
 
     # ── GPFC #67: entry-quality filters (winner-pattern analysis) ─────
     # Winners cluster at |delta| 0.42-0.61, IV 0.41-0.54, turnover $2.84M-$13.68M.
@@ -1510,7 +1542,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 ).total_seconds()
                 if 0 < _secs_to_expiry <= 300:
                     self.logger.info(
-                        "[%s] PRE_EXPIRY_FORCE — %ds to expiry, closing at market now",
+                        "[%s] pre_expiry — %ds to expiry, closing at market now",
                         self.pair,
                         int(_secs_to_expiry),
                     )
@@ -1520,7 +1552,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         if self.entry_premium > 0 else 0.0
                     )
                     return await self._do_option_exit(
-                        _pre_exp_premium, _pre_exp_pnl_pct, "PRE_EXPIRY_FORCE"
+                        _pre_exp_premium, _pre_exp_pnl_pct, "pre_expiry"
                     )
 
             return await self._check_option_exit()
@@ -2613,6 +2645,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 "[%s] %s entry SKIPPED — metadata build failed: %s",
                 self.pair, setup_type, _me,
             )
+            self._reset_breakout_state()
+            return []
+
+        # GPFC #79: confidence gate at the EXECUTION layer — the detection-time
+        # gate at _check_breakout_confirmation can pass on stale conditions by
+        # the time we actually fire. Re-evaluate freshly-built metadata here so
+        # no order goes through with conf < CONFIDENCE_MIN_ENTRY.
+        _exec_conf = (self._pending_entry_signals or {}).get("confidence")
+        if _exec_conf is None or _exec_conf < self.CONFIDENCE_MIN_ENTRY:
+            self.logger.warning(
+                "[%s] ENTRY_BLOCKED conf=%s below floor %.0f (path=execute_breakout_entry, setup=%s)",
+                self.pair, _exec_conf, self.CONFIDENCE_MIN_ENTRY, setup_type,
+            )
+            self._pending_entry_signals = None
             self._reset_breakout_state()
             return []
 
@@ -3728,7 +3774,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         if current_premium <= 0:
             if self.expiry_dt and datetime.now(timezone.utc) >= self.expiry_dt:
-                return await self._do_option_exit(0, -100.0, "EXPIRED_WORTHLESS")
+                return await self._do_option_exit(0, -100.0, "expired_worthless")
             return []
 
         # GPFC #22 Part 2: Update momentum history with spot price
@@ -3820,7 +3866,7 @@ class OptionsScalpStrategy(BaseStrategy):
             and self._underlying_turned_against(self.DEAD_UNDERLYING_AGAINST_PCT)
         ):
             self.logger.info(
-                "[%s] OPT_DEAD — peak %+.2f%% never moved, premium %+.2f%%, "
+                "[%s] dead — peak %+.2f%% never moved, premium %+.2f%%, "
                 "underlying against us (>%.2f%% in 60s)",
                 self.option_symbol,
                 peak_pnl_pct,
@@ -3828,30 +3874,30 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.DEAD_UNDERLYING_AGAINST_PCT,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "DEAD"
+                current_premium, premium_change_pct, "dead"
             )
 
         # ── PHASE A: tight SL (-3%) ──
         if phase == "A" and premium_change_pct <= self.PHASE_A_SL_PCT:
             self.logger.info(
-                "[%s] STOP_PHASE_A — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
+                "[%s] stop_phase_a — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
                 self.option_symbol,
                 premium_change_pct,
                 self.PHASE_A_SL_PCT,
                 peak_pnl_pct,
             )
             return await self._do_option_exit(
-                current_premium, premium_change_pct, "STOP_PHASE_A"
+                current_premium, premium_change_pct, "stop_phase_a"
             )
 
-        # ── PHASE B: breakeven on retrace OR -8% SL backstop ──
+        # ── PHASE B: breakeven on retrace OR -5% SL backstop ──
         if phase == "B":
             if (
                 premium_change_pct <= self.PHASE_B_BREAKEVEN_EXIT_PCT
                 and peak_pnl_pct >= self.PHASE_A_PEAK_MAX_PCT
             ):
                 self.logger.info(
-                    "[%s] BREAKEVEN — peak %+.1f%% reverted to %+.1f%% "
+                    "[%s] breakeven — peak %+.1f%% reverted to %+.1f%% "
                     "(exit≤%.1f%%)",
                     self.option_symbol,
                     peak_pnl_pct,
@@ -3859,47 +3905,53 @@ class OptionsScalpStrategy(BaseStrategy):
                     self.PHASE_B_BREAKEVEN_EXIT_PCT,
                 )
                 return await self._do_option_exit(
-                    current_premium, premium_change_pct, "BREAKEVEN"
+                    current_premium, premium_change_pct, "breakeven"
                 )
             if premium_change_pct <= self.PHASE_B_SL_PCT:
                 self.logger.info(
-                    "[%s] STOP_PHASE_B — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
+                    "[%s] stop_phase_b — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
                     self.option_symbol,
                     premium_change_pct,
                     self.PHASE_B_SL_PCT,
                     peak_pnl_pct,
                 )
                 return await self._do_option_exit(
-                    current_premium, premium_change_pct, "STOP_PHASE_B"
+                    current_premium, premium_change_pct, "stop_phase_b"
                 )
 
-        # ── PHASE C/D/E: trail floor OR catastrophic SL (-15%) ──
+        # ── PHASE C/D/E: trail is primary, per-phase SL is gap backstop ──
         if phase in ("C", "D", "E"):
             floor = self._phase_trail_floor(phase)
+            sl_floor = {
+                "C": self.PHASE_C_SL_PCT,
+                "D": self.PHASE_D_SL_PCT,
+                "E": self.PHASE_E_SL_PCT,
+            }[phase]
+            tag = phase.lower()
             if premium_change_pct <= floor:
                 self.logger.info(
-                    "[%s] TRAIL_PHASE_%s — current %+.1f%% ≤ floor %+.2f%% "
+                    "[%s] trail_phase_%s — current %+.1f%% ≤ floor %+.2f%% "
                     "(peak=%+.1f%%)",
                     self.option_symbol,
-                    phase,
+                    tag,
                     premium_change_pct,
                     floor,
                     peak_pnl_pct,
                 )
                 return await self._do_option_exit(
-                    current_premium, premium_change_pct, f"TRAIL_PHASE_{phase}"
+                    current_premium, premium_change_pct, f"trail_phase_{tag}"
                 )
-            if premium_change_pct <= self.PHASE_C_SL_PCT:
+            if premium_change_pct <= sl_floor:
                 self.logger.info(
-                    "[%s] STOP_PHASE_%s — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
+                    "[%s] stop_phase_%s — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
                     self.option_symbol,
-                    phase,
+                    tag,
                     premium_change_pct,
-                    self.PHASE_C_SL_PCT,
+                    sl_floor,
                     peak_pnl_pct,
                 )
                 return await self._do_option_exit(
-                    current_premium, premium_change_pct, f"STOP_PHASE_{phase}"
+                    current_premium, premium_change_pct, f"stop_phase_{tag}"
                 )
 
         return []
@@ -4642,15 +4694,15 @@ class OptionsScalpStrategy(BaseStrategy):
         if is_expiry and reason == "EXPIRED_TICKER_FAIL":
             exit_premium = 0.0  # ticker failed at expiry → assume worthless
 
-        # GPFC #76: specific labels instead of catch-all GONE/EXPIRY.
+        # GPFC #76/#79: specific lowercase labels instead of catch-all GONE/EXPIRY.
         if reason == "TICKER_FAIL_REPEATED":
-            exit_reason = "TICKER_DROPOUT"
+            exit_reason = "ticker_dropout"
         elif is_expiry:
             # ITM: settled with value. OTM: expired worthless.
-            exit_reason = "EXPIRED_ITM" if exit_premium > 0 else "EXPIRED_OTM"
+            exit_reason = "expired_itm" if exit_premium > 0 else "expired_otm"
         else:
             # Position disappeared from exchange outside of expiry context.
-            exit_reason = "RECONCILE_GONE"
+            exit_reason = "reconcile_gone"
         exit_reason_detail = f"{exit_reason}_{reason}" if reason else exit_reason
 
         self.logger.info(
