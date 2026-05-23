@@ -278,10 +278,18 @@ class OptionsScalpStrategy(BaseStrategy):
     # tercile of historical 60s underlying moves).
     CONFIDENCE_MIN_ENTRY = 60.0
 
-    # GPFC #81: only MOM_BURST is enabled. SQUEEZE entries were 0/many wins
-    # in the last analysis window; the squeeze-detection signal lost edge.
-    # Adding SQUEEZE back requires a re-validation run.
-    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST"})
+    # GPFC #82: SQUEEZE re-enabled, gated by IV regime. SQUEEZE only fires
+    # in low-vol regimes (IV < SQUEEZE_MAX_IV_FOR_ENTRY); MOM_BURST only
+    # fires when vol is at least MOM_BURST_MIN_IV_FOR_ENTRY. The two paths
+    # are mutually-exclusive by IV, so the bot picks the right setup for
+    # the regime instead of forcing one strategy onto every market.
+    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE"})
+
+    # GPFC #82: IV-regime gates per setup. mark_vol is read from
+    # ticker.info.mark_vol (Delta returns it as a decimal: 0.30 = 30%).
+    SQUEEZE_REQUIRES_LOW_VOL = True
+    SQUEEZE_MAX_IV_FOR_ENTRY = 0.35   # block SQUEEZE above this IV
+    MOM_BURST_MIN_IV_FOR_ENTRY = 0.25  # block MOM_BURST below this IV
 
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
@@ -2107,6 +2115,17 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
+        # GPFC #82: IV-regime gate — MOM_BURST needs at least some vol.
+        # If IV is below floor, this is a SQUEEZE regime; let SQUEEZE handle it.
+        _iv_mb = self._extract_iv(spread_ticker)
+        if _iv_mb is not None and _iv_mb < self.MOM_BURST_MIN_IV_FOR_ENTRY:
+            if self._tick_count % 5 == 0:
+                self.logger.info(
+                    "[%s] MOM_BURST blocked — IV %.3f < %.3f, SQUEEZE regime (%s)",
+                    self.pair, _iv_mb, self.MOM_BURST_MIN_IV_FOR_ENTRY, selected_symbol,
+                )
+            return []
+
         # GPFC #72: confidence gate (≥ 60). Sub-60 zone was a death zone
         # in live data — block before order placement.
         try:
@@ -2171,12 +2190,13 @@ class OptionsScalpStrategy(BaseStrategy):
         avg_vol_ratio: float,
     ) -> None:
         """Called when squeeze ends — determine breakout direction, calc velocity, start dynamic confirmation (GPFC #21)."""
-        # GPFC #81: SQUEEZE setup disabled — short-circuit here so no SQUEEZE
-        # entry is ever queued. The momentum_burst path remains primary.
+        # GPFC #82: ENABLED_SETUPS check kept as a kill-switch. IV-regime
+        # gating (SQUEEZE only fires below SQUEEZE_MAX_IV_FOR_ENTRY) is
+        # enforced later, right after the entry-quality filter.
         if "SQUEEZE" not in self.ENABLED_SETUPS:
             if self._tick_count % 30 == 0:
                 self.logger.info(
-                    "[%s] SQUEEZE entry blocked by config (GPFC #81 — MOM_BURST only)",
+                    "[%s] SQUEEZE entry blocked by config (ENABLED_SETUPS)",
                     self.pair,
                 )
             return
@@ -2332,6 +2352,18 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.pair, skip_reason, selected_symbol,
             )
             return
+
+        # GPFC #82: IV-regime gate — SQUEEZE only fires when vol is low.
+        # High IV means the breakout is likely already priced in; let MOM_BURST
+        # handle that regime instead.
+        if self.SQUEEZE_REQUIRES_LOW_VOL:
+            _iv_sq = self._extract_iv(selected_ticker)
+            if _iv_sq is not None and _iv_sq > self.SQUEEZE_MAX_IV_FOR_ENTRY:
+                self.logger.info(
+                    "[%s] SQUEEZE blocked — IV %.3f > %.3f, MOM_BURST regime (%s)",
+                    self.pair, _iv_sq, self.SQUEEZE_MAX_IV_FOR_ENTRY, selected_symbol,
+                )
+                return
 
         # GPFC #72: confidence gate (≥ 60). Sub-60 zone was a death zone
         # in live data — block before setting up the breakout-pending state
@@ -3440,6 +3472,23 @@ class OptionsScalpStrategy(BaseStrategy):
         our_dir = 1.0 if self.option_side == "call" else -1.0
         aligned_move = our_dir * mom_pct
         return aligned_move > self.PULLBACK_SPOT_VETO_PCT, aligned_move
+
+    def _extract_iv(self, ticker: dict[str, Any] | None) -> float | None:
+        """GPFC #82: pull mark_vol (IV as decimal, e.g. 0.30 = 30%) from ticker.
+
+        Returns None if ticker missing or mark_vol unparseable, so callers can
+        treat missing IV as "regime unknown" rather than as a hard zero.
+        """
+        if not ticker:
+            return None
+        info = ticker.get("info") or {}
+        raw = info.get("mark_vol")
+        if raw in (None, ""):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
 
     def _passes_entry_quality(
         self,

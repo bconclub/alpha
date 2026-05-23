@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-05-21 · GPFC #82: re-enable SQUEEZE for low-vol regimes (regime-aware)
+
+- `options_scalp.py`: `ENABLED_SETUPS = {"MOM_BURST", "SQUEEZE"}` — SQUEEZE re-enabled
+- `options_scalp.py`: added IV-regime constants — `SQUEEZE_MAX_IV_FOR_ENTRY = 0.35`, `MOM_BURST_MIN_IV_FOR_ENTRY = 0.25`, `SQUEEZE_REQUIRES_LOW_VOL = True`
+- `options_scalp.py`: added `_extract_iv(ticker)` helper — reads `info.mark_vol` as decimal, returns `None` on missing/unparseable
+- `options_scalp.py` (`_check_momentum_burst_entry`): blocks MOM_BURST when IV < 0.25 (SQUEEZE regime — let SQUEEZE handle it)
+- `options_scalp.py` (`_handle_squeeze_breakout`): blocks SQUEEZE when IV > 0.35 (MOM_BURST regime — breakout already priced in)
+- Kept GPFC #81's conf=aligned_mom score and all #78/#79/#80 phase exits untouched
+- User-facing: SQUEEZE entries can start firing again, but only in low-vol windows; MOM_BURST only fires when vol is meaningful. Two setups become mutually-exclusive by regime
+
 ## 2026-05-21 · GPFC #81: MOM_BURST only, conf=aligned_mom (drop SQUEEZE + 5 noisy components)
 
 - `options_scalp.py`: added `ENABLED_SETUPS: frozenset = frozenset({"MOM_BURST"})` class constant — SQUEEZE entries now disabled at config level
