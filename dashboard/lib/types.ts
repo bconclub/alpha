@@ -383,6 +383,7 @@ export interface OptionsState {
   pnl_usd: number | null;
   trailing_active: boolean;
   highest_premium: number | null;
+  position_opened_at?: string | null;
   // Last exit summary (written on close for dashboard)
   last_exit_type?: string | null;
   last_exit_pnl_pct?: number | null;
@@ -404,6 +405,10 @@ export interface OptionsState {
   balance?: number | null;
   // BB Squeeze signals panel (new)
   signals_panel?: SignalsPanel | null;
+  exit_config?: Record<string, unknown> | null;
+  entry_config?: Record<string, unknown> | null;
+  peak_trail_pending_ticks?: number | null;
+  spot_momentum_20s_pct?: number | null;
   // Top-level BB Squeeze fields (wired directly for dashboard panel)
   bb_width_pct?: number | null;
   bb_width_threshold?: number | null;
@@ -429,8 +434,7 @@ export interface OptionsState {
   breakout_detected_at?: string | null;
   /** Premium price at the moment breakout was detected */
   breakout_premium_at_detection?: number | null;
-  /** ISO timestamp when the current option position was opened */
-  position_opened_at?: string | null;
+  breakeven_stop_armed?: boolean | null;
   updated_at: string;
 }
 

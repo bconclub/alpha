@@ -40,6 +40,7 @@ CREATE TABLE options_state (
     pnl_usd NUMERIC,
     trailing_active BOOLEAN DEFAULT FALSE,
     highest_premium NUMERIC,
+    position_opened_at TIMESTAMPTZ,
     
     -- Chain data (JSON arrays)
     chain_calls JSONB,
@@ -55,6 +56,10 @@ CREATE TABLE options_state (
     
     -- Signals panel (JSON object with nested fields)
     signals_panel JSONB,
+    exit_config JSONB,
+    entry_config JSONB,
+    peak_trail_pending_ticks INTEGER DEFAULT 0,
+    spot_momentum_20s_pct NUMERIC,
     
     -- Top-level BB Squeeze fields (read directly by dashboard)
     bb_width_pct NUMERIC,
@@ -74,7 +79,10 @@ CREATE TABLE options_state (
     breakout_direction TEXT,
     breakout_confirmation_secs_remaining INTEGER,
     breakout_detected_at TIMESTAMPTZ,
-    breakout_premium_at_detection NUMERIC
+    breakout_premium_at_detection NUMERIC,
+    breakout_velocity_pct NUMERIC,
+    momentum_60s_pct NUMERIC,
+    breakeven_stop_armed BOOLEAN DEFAULT FALSE
 );
 
 -- Create indexes
