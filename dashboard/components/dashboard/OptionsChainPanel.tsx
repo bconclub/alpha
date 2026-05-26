@@ -90,6 +90,24 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
+function asNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function fmtPct(value: number | null | undefined, digits = 2): string {
+  if (value == null || !Number.isFinite(value)) return '--';
+  return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}%`;
+}
+
+function configNumber(
+  config: Record<string, unknown> | null | undefined,
+  key: string,
+  fallback: number,
+): number {
+  const value = config?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
 // ---------------------------------------------------------------------------
 // Dual signal gauge
 // ---------------------------------------------------------------------------
@@ -98,12 +116,14 @@ function DualSignalBar({
   bb_width_pct, 
   bb_width_threshold, 
   momentum_60s_pct,
+  momentumThresholdPct,
   squeeze_active,
   signal_strength 
 }: {
   bb_width_pct: number | null | undefined;
   bb_width_threshold: number | null | undefined;
   momentum_60s_pct: number | null | undefined;
+  momentumThresholdPct: number;
   squeeze_active: boolean | null | undefined;
   signal_strength?: number | null;
 }) {
@@ -116,7 +136,7 @@ function DualSignalBar({
     signal_strength,
   );
   const momentumConfidence =
-    momentum_60s_pct != null ? clamp01(Math.abs(momentum_60s_pct) / 0.15) : 0;
+    momentum_60s_pct != null ? clamp01(Math.abs(momentum_60s_pct) / Math.max(momentumThresholdPct, 0.01)) : 0;
   const squeezePctRaw = Math.round(squeezeConfidence * 100);
   const squeezePct = squeeze_active ? squeezePctRaw : Math.min(99, squeezePctRaw);
   const momentumPct = Math.round(momentumConfidence * 100);
@@ -211,7 +231,7 @@ function DualSignalBar({
           </span>
         </div>
         <div className="mb-1 text-[8px] font-mono text-right" style={{ color: hasMomentumData ? '#93c5fd' : '#71717a' }}>
-          {hasMomentumData ? `${momentum_60s_pct! >= 0 ? '+' : ''}${momentum_60s_pct!.toFixed(2)}%` : 'NO DATA'}
+          {hasMomentumData ? `${fmtPct(momentum_60s_pct)} / ${momentumThresholdPct.toFixed(2)}% trigger` : 'NO DATA'}
         </div>
         <div className="flex items-center gap-2">
           <div className="flex-1 flex items-center gap-1">
@@ -347,6 +367,104 @@ function SignalDetails({ state, inPosition }: { state: OptionsState; inPosition:
             </span>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+type TradeReadiness = 'active' | 'ready' | 'waiting' | 'blocked';
+
+function TradeIntentPanel({
+  state,
+  entrySide,
+  inPosition,
+  momentumThresholdPct,
+}: {
+  state: OptionsState;
+  entrySide: 'call' | 'put' | null;
+  inPosition: boolean;
+  momentumThresholdPct: number;
+}) {
+  const sp = state.signals_panel ?? null;
+  const momentum = state.momentum_60s_pct ?? sp?.momentum_60s_pct ?? asNumber((state as any).momentum_60s);
+  const freshness = sp?.momentum_freshness_ratio ?? sp?.momentum_acceleration_ratio ?? null;
+  const bbWidth = state.bb_width_pct ?? sp?.bb_width_pct ?? null;
+  const bbThreshold = state.bb_width_threshold ?? sp?.bb_width_threshold ?? null;
+  const kcWidth = sp?.kc_width_pct ?? null;
+  const ratio = sp?.bb_kc_width_ratio ?? (bbWidth != null && kcWidth && kcWidth > 0 ? bbWidth / kcWidth : null);
+  const breakoutState = state.breakout_state ?? 'NONE';
+  const squeezeActive = state.squeeze_active === true;
+  const momentumReady = momentum != null && Math.abs(momentum) >= momentumThresholdPct;
+  const freshnessReady = freshness == null || freshness >= 0.5;
+  const ratioReady = ratio != null && ratio <= 1.0;
+  const targetSide =
+    entrySide ??
+    (momentum != null && Math.abs(momentum) >= momentumThresholdPct
+      ? (momentum >= 0 ? 'call' : 'put')
+      : null);
+
+  const blockers: string[] = [];
+  if (!inPosition) {
+    if (!squeezeActive && !ratioReady) blockers.push('BB is not inside KC yet');
+    if (!momentumReady) blockers.push(`Momentum ${fmtPct(momentum)} is below ${momentumThresholdPct.toFixed(2)}%`);
+    if (!freshnessReady) blockers.push(`Momentum freshness ${freshness?.toFixed(2)} is stale`);
+    if (breakoutState === 'NONE' || breakoutState == null) blockers.push('No confirmed breakout');
+  }
+
+  let readiness: TradeReadiness = 'waiting';
+  let title = 'Watching for setup';
+  let subtitle = 'No trade yet';
+  if (inPosition) {
+    readiness = 'active';
+    title = `Managing ${state.position_side?.toUpperCase() ?? 'OPTION'} position`;
+    subtitle = `${fmtPct(state.pnl_pct)} now, premium ${fmtPrem(state.current_premium)}`;
+  } else if (squeezeActive || (momentumReady && freshnessReady && blockers.length <= 1)) {
+    readiness = 'ready';
+    title = targetSide ? `${targetSide.toUpperCase()} candidate forming` : 'Candidate forming';
+    subtitle = squeezeActive ? 'Squeeze is armed; waiting for breakout confirmation' : 'Momentum is strong enough; checking quality gates';
+  } else if (blockers.length > 0) {
+    readiness = 'blocked';
+    title = 'No trade';
+    subtitle = blockers[0];
+  }
+
+  const tone = {
+    active: 'border-violet-500/35 bg-violet-500/10 text-violet-200',
+    ready: 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200',
+    waiting: 'border-zinc-700/70 bg-zinc-900/50 text-zinc-300',
+    blocked: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+  }[readiness];
+
+  const facts = [
+    { label: 'Target', value: targetSide ? targetSide.toUpperCase() : 'NONE' },
+    { label: 'Setup', value: squeezeActive ? 'SQUEEZE' : momentumReady ? 'MOM BURST' : 'WAIT' },
+    { label: 'Mom', value: fmtPct(momentum) },
+    { label: 'Fresh', value: freshness != null ? freshness.toFixed(2) : '--' },
+  ];
+
+  return (
+    <div className={cn('mb-2 rounded border p-2.5', tone)}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-wide">{title}</div>
+          <div className="mt-0.5 text-[10px] text-zinc-300">{subtitle}</div>
+        </div>
+        <span className="shrink-0 rounded bg-black/20 px-2 py-1 text-[9px] font-mono font-bold uppercase">
+          {readiness}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-4 gap-1.5">
+        {facts.map((fact) => (
+          <div key={fact.label} className="rounded bg-black/20 px-1.5 py-1">
+            <div className="text-[7px] uppercase tracking-wide text-zinc-500">{fact.label}</div>
+            <div className="text-[10px] font-mono font-semibold text-zinc-100">{fact.value}</div>
+          </div>
+        ))}
+      </div>
+      {!inPosition && blockers.length > 1 && (
+        <div className="mt-2 text-[9px] text-zinc-400">
+          Next: {blockers.slice(1, 3).join(' + ')}
+        </div>
       )}
     </div>
   );
@@ -558,6 +676,7 @@ function ChainCard({
   const inPosition     = !!state.position_side;
   const balance        = state.balance ?? null;
   const strikeWatching = state.atm_strike ?? state.target_strike ?? null;
+  const momentumThresholdPct = configNumber(state.entry_config, 'mb_threshold_pct', 0.06);
   const confidence = getSignalConfidence(state);
   const lowSignal = confidence < 0.2;
   const isReady = confidence > 0.15;
@@ -632,6 +751,13 @@ function ChainCard({
         </div>
       </div>
 
+      <TradeIntentPanel
+        state={state}
+        entrySide={entrySide}
+        inPosition={inPosition}
+        momentumThresholdPct={momentumThresholdPct}
+      />
+
       {/* 1. Dual signal bar */}
       <DualSignalBar
         bb_width_pct={state.bb_width_pct}
@@ -643,6 +769,7 @@ function ChainCard({
           ?? (state.signals_panel as any)?.momentum_60s
           ?? null
         }
+        momentumThresholdPct={momentumThresholdPct}
         squeeze_active={state.squeeze_active}
         signal_strength={(state as any).signal_strength}
       />
