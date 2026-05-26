@@ -175,6 +175,14 @@ class OptionsScalpStrategy(BaseStrategy):
     # #3279 slipped through with und_mom -0.008 ≈ zero).
     MOMENTUM_BURST_THRESHOLD_PCT = 0.06  # was 0.05 (#66), 0.10 (#65), 0.20 (pre-#65)
     MOMENTUM_BURST_MIN_ASK_RISE_PCT = 1.5  # cumulative % rise across 3 ATM ticks
+    # GPFC #83: anti-chase entry guard. The losing 100-confidence trades were
+    # buying after option ask spikes had already expanded 15-17% over 3 ticks.
+    # Keep momentum entries, but reject entries where the option premium has
+    # already repriced too far before our limit order lands.
+    MOM_BURST_MAX_LAST_ASK_RISE_PCT = 9.5
+    MOM_BURST_MAX_CUM_ASK_RISE_PCT = 14.0
+    ENTRY_MAX_SPREAD_PCT = 7.0
+    ENTRY_MAX_MARK_GAP_PCT = 4.0
     # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
     # than fading. This rejects "tail-end" moves (premium already priced the move)
     # without forcing us to wait for a bigger move to develop.
@@ -246,6 +254,7 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_A_SL_PCT = -3.0
     PHASE_B_PEAK_MAX_PCT = 9.0
     PHASE_B_SL_PCT = -5.0          # GPFC #79: was -8
+    PHASE_B_BREAKEVEN_ARM_PCT = 8.0
     PHASE_B_BREAKEVEN_EXIT_PCT = 0.5
     PHASE_C_PEAK_MAX_PCT = 15.0
     PHASE_C_TRAIL_FRAC = 0.45
@@ -2092,18 +2101,56 @@ class OptionsScalpStrategy(BaseStrategy):
             _ask = float(spread_ticker.get("ask") or 0)
             if _ask > 0 and _bid > 0:
                 spread_pct = (_ask - _bid) / _ask
-                if spread_pct > 0.08:
+                if spread_pct > self.ENTRY_MAX_SPREAD_PCT / 100.0:
                     if self._tick_count % 5 == 0:
                         self.logger.info(
                             "[%s] MB_SPREAD_WIDE: %s bid=$%.4f ask=$%.4f "
-                            "spread=%.1f%% > 8%% — skipping",
+                            "spread=%.1f%% > %.1f%% - skipping",
                             self.pair, selected_symbol, _bid, _ask,
-                            spread_pct * 100,
+                            spread_pct * 100, self.ENTRY_MAX_SPREAD_PCT,
                         )
                     return []
         except Exception:
             # If spread fetch fails, fall through; don't penalize for tick glitches.
             pass
+
+        exec_snapshot = self._entry_execution_snapshot(
+            spread_ticker,
+            entry_ask,
+            option_type,
+        )
+        mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
+        if mark_gap_pct is not None and mark_gap_pct > self.ENTRY_MAX_MARK_GAP_PCT:
+            self.logger.info(
+                "[%s] MB_EXEC_SKIP: %s ask too far above mark "
+                "(gap=%.2f%% > %.2f%%) - skipping",
+                self.pair, selected_symbol, mark_gap_pct, self.ENTRY_MAX_MARK_GAP_PCT,
+            )
+            return []
+
+        last_rise_pct = exec_snapshot.get("premium_last_rise_pct")
+        cum_rise_pct = exec_snapshot.get("premium_cum_rise_pct")
+        if (
+            last_rise_pct is not None
+            and last_rise_pct > self.MOM_BURST_MAX_LAST_ASK_RISE_PCT
+        ) or (
+            cum_rise_pct is not None
+            and cum_rise_pct > self.MOM_BURST_MAX_CUM_ASK_RISE_PCT
+        ):
+            self.logger.info(
+                "[%s] MOM_BURST_CHASE_SKIP: %s premium path %.2f->%.2f->%.2f "
+                "last=%.2f%%/%.2f%% cum=%.2f%%/%.2f%% - skipping",
+                self.pair,
+                selected_symbol,
+                (self._prev2_call_ask if option_type == "call" else self._prev2_put_ask),
+                prev_ask,
+                entry_ask,
+                last_rise_pct or 0.0,
+                self.MOM_BURST_MAX_LAST_ASK_RISE_PCT,
+                cum_rise_pct or 0.0,
+                self.MOM_BURST_MAX_CUM_ASK_RISE_PCT,
+            )
+            return []
 
         # GPFC #67: entry-quality filter (turnover/delta/IV) reusing spread_ticker.
         passes_quality, skip_reason = self._passes_entry_quality(spread_ticker)
@@ -3490,6 +3537,76 @@ class OptionsScalpStrategy(BaseStrategy):
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _extract_mark_price(ticker: dict[str, Any] | None) -> float | None:
+        """Pull Delta's raw mark price from ticker info without bid/mid fallback."""
+        if not ticker:
+            return None
+        info = ticker.get("info") or {}
+        raw = info.get("mark_price")
+        if raw in (None, ""):
+            raw = ticker.get("mark")
+        try:
+            mark = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return mark if mark > 0 else None
+
+    def _entry_execution_snapshot(
+        self,
+        ticker: dict[str, Any] | None,
+        entry_ask: float,
+        option_type: str | None,
+    ) -> dict[str, float]:
+        """Execution-quality snapshot for entry gating and trade metadata."""
+        snapshot: dict[str, float] = {}
+        if not ticker:
+            return snapshot
+
+        try:
+            bid = float(ticker.get("bid") or 0)
+        except (TypeError, ValueError):
+            bid = 0.0
+        try:
+            ask = float(ticker.get("ask") or entry_ask or 0)
+        except (TypeError, ValueError):
+            ask = 0.0
+        mark = self._extract_mark_price(ticker)
+
+        if bid > 0:
+            snapshot["entry_bid"] = round(bid, 4)
+        if ask > 0:
+            snapshot["entry_ask"] = round(ask, 4)
+        if mark is not None:
+            snapshot["entry_mark"] = round(mark, 4)
+        if ask > 0 and bid > 0:
+            snapshot["entry_spread_pct"] = round((ask - bid) / ask * 100.0, 4)
+            snapshot["entry_bid_gap_pct"] = snapshot["entry_spread_pct"]
+        if ask > 0 and mark is not None:
+            snapshot["entry_mark_gap_pct"] = round((ask - mark) / ask * 100.0, 4)
+
+        if option_type == "call":
+            prev2_ask = self._prev2_call_ask
+            prev_ask = self._prev_call_ask
+        elif option_type == "put":
+            prev2_ask = self._prev2_put_ask
+            prev_ask = self._prev_put_ask
+        else:
+            prev2_ask = 0.0
+            prev_ask = 0.0
+
+        if entry_ask > 0 and prev_ask > 0:
+            snapshot["premium_last_rise_pct"] = round(
+                (entry_ask - prev_ask) / prev_ask * 100.0,
+                4,
+            )
+        if entry_ask > 0 and prev2_ask > 0:
+            snapshot["premium_cum_rise_pct"] = round(
+                (entry_ask - prev2_ask) / prev2_ask * 100.0,
+                4,
+            )
+        return snapshot
+
     def _passes_entry_quality(
         self,
         ticker: dict[str, Any] | None,
@@ -3673,6 +3790,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 round(self._last_spot_price, 4) if self._last_spot_price else None
             ),
             "entry_path": entry_path,
+            **self._entry_execution_snapshot(ticker, entry_premium, option_type),
         }
 
         # Confidence + SL + trail — raises on failure; caller decides whether to block.
@@ -4064,7 +4182,7 @@ class OptionsScalpStrategy(BaseStrategy):
         if phase == "B":
             if (
                 premium_change_pct <= self.PHASE_B_BREAKEVEN_EXIT_PCT
-                and peak_pnl_pct >= self.PHASE_A_PEAK_MAX_PCT
+                and peak_pnl_pct >= self.PHASE_B_BREAKEVEN_ARM_PCT
             ):
                 self.logger.info(
                     "[%s] breakeven — peak %+.1f%% reverted to %+.1f%% "
