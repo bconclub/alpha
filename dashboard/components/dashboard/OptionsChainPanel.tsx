@@ -416,6 +416,15 @@ function TradeIntentPanel({
   const freshnessReady = freshness == null || freshness >= 0.5;
   const ratioReady = ratio != null && ratio <= 1.0;
   const momentumCandidate = momentumReady && freshnessReady && confidenceReady;
+  const absMomentum = momentum != null ? Math.abs(momentum) : null;
+  const freshnessLabel = freshness == null
+    ? 'freshness unknown'
+    : freshnessReady
+      ? `freshness ${freshness.toFixed(2)} OK`
+      : `freshness ${freshness.toFixed(2)} is stale`;
+  const momentumLabel = momentum == null
+    ? 'momentum unavailable'
+    : `${fmtPct(momentum)} momentum`;
   const targetSide =
     entrySide ??
     (momentum != null && Math.abs(momentum) >= momentumThresholdPct
@@ -424,27 +433,37 @@ function TradeIntentPanel({
 
   const blockers: string[] = [];
   if (!inPosition) {
-    if (!squeezeActive && !momentumReady && !ratioReady) blockers.push('BB is not inside KC yet');
-    if (!momentumReady) blockers.push(`Momentum ${fmtPct(momentum)} is below ${momentumThresholdPct.toFixed(2)}%`);
-    if (momentumReady && !confidenceReady) {
-      blockers.push(`Momentum score ${momentumEntryScore?.toFixed(0)} is below ${confidenceMinEntry.toFixed(0)}`);
+    if (!squeezeActive && !momentumReady && !ratioReady) blockers.push('Bands are not compressed enough yet');
+    if (!momentumReady) {
+      blockers.push(
+        absMomentum == null
+          ? 'Waiting for momentum data'
+          : `Momentum is ${absMomentum.toFixed(2)}%; needs ${momentumThresholdPct.toFixed(2)}%`,
+      );
     }
-    if (!freshnessReady) blockers.push(`Momentum freshness ${freshness?.toFixed(2)} is stale`);
-    if (squeezeActive && (breakoutState === 'NONE' || breakoutState == null)) blockers.push('No confirmed breakout');
-    if (momentumCandidate && !squeezeActive) blockers.push('Waiting for option premium and liquidity checks');
+    if (momentumReady && !confidenceReady) {
+      blockers.push(`Momentum score is ${momentumEntryScore?.toFixed(0)}; needs ${confidenceMinEntry.toFixed(0)}`);
+    }
+    if (!freshnessReady) blockers.push('Move is stale; waiting for a fresh push');
+    if (squeezeActive && (breakoutState === 'NONE' || breakoutState == null)) blockers.push('Squeeze is ready, waiting for breakout');
+    if (momentumCandidate && !squeezeActive) blockers.push('Momentum passed; checking option premium, spread and turnover');
   }
 
   let readiness: TradeReadiness = 'waiting';
   let title = 'Watching for setup';
   let subtitle = 'No trade yet';
+  let detail = `${momentumLabel} · ${freshnessLabel}`;
   if (inPosition) {
     readiness = 'active';
-    title = `Managing ${state.position_side?.toUpperCase() ?? 'OPTION'} position`;
+    title = `Managing ${state.position_side?.toUpperCase() ?? 'option'} position`;
     subtitle = `${fmtPct(state.pnl_pct)} now, premium ${fmtPrem(state.current_premium)}`;
+    detail = state.highest_premium
+      ? `Peak premium ${fmtPrem(state.highest_premium)}`
+      : 'Exit rules are watching premium and peak';
   } else if (squeezeActive || momentumCandidate) {
     readiness = 'ready';
-    title = targetSide ? `${targetSide.toUpperCase()} candidate forming` : 'Candidate forming';
-    subtitle = squeezeActive ? 'Squeeze is armed; waiting for breakout confirmation' : 'Momentum passed; waiting for option premium and liquidity';
+    title = targetSide ? `${targetSide.toUpperCase()} setup forming` : 'Setup forming';
+    subtitle = squeezeActive ? 'Squeeze is ready, waiting for breakout' : 'Momentum passed; checking option quality';
   } else if (blockers.length > 0) {
     readiness = 'blocked';
     title = 'No trade';
@@ -458,35 +477,21 @@ function TradeIntentPanel({
     blocked: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
   }[readiness];
 
-  const facts = [
-    { label: 'Target', value: targetSide ? targetSide.toUpperCase() : 'NONE' },
-    { label: 'Setup', value: squeezeActive ? 'SQUEEZE' : momentumReady ? 'MOM BURST' : 'WAIT' },
-    { label: 'Mom', value: fmtPct(momentum) },
-    { label: 'Score', value: momentumEntryScore != null ? `${momentumEntryScore.toFixed(0)}/${confidenceMinEntry.toFixed(0)}` : '--' },
-  ];
-
   return (
     <div className={cn('mb-2 rounded border p-2.5', tone)}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-wide">{title}</div>
           <div className="mt-0.5 text-[10px] text-zinc-300">{subtitle}</div>
+          <div className="mt-1 text-[9px] text-zinc-500">{detail}</div>
         </div>
         <span className="shrink-0 rounded bg-black/20 px-2 py-1 text-[9px] font-mono font-bold uppercase">
           {readiness}
         </span>
       </div>
-      <div className="mt-2 grid grid-cols-4 gap-1.5">
-        {facts.map((fact) => (
-          <div key={fact.label} className="rounded bg-black/20 px-1.5 py-1">
-            <div className="text-[7px] uppercase tracking-wide text-zinc-500">{fact.label}</div>
-            <div className="text-[10px] font-mono font-semibold text-zinc-100">{fact.value}</div>
-          </div>
-        ))}
-      </div>
       {!inPosition && blockers.length > 1 && (
-        <div className="mt-2 text-[9px] text-zinc-400">
-          Next: {blockers.slice(1, 3).join(' + ')}
+        <div className="mt-2 rounded bg-black/15 px-2 py-1.5 text-[9px] text-zinc-400">
+          Next: {blockers.slice(1, 3).join('. ')}
         </div>
       )}
     </div>
