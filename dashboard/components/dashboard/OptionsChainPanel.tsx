@@ -117,6 +117,7 @@ function DualSignalBar({
   bb_width_threshold, 
   momentum_60s_pct,
   momentumThresholdPct,
+  confidenceMinEntry,
   squeeze_active,
   signal_strength 
 }: {
@@ -124,6 +125,7 @@ function DualSignalBar({
   bb_width_threshold: number | null | undefined;
   momentum_60s_pct: number | null | undefined;
   momentumThresholdPct: number;
+  confidenceMinEntry: number;
   squeeze_active: boolean | null | undefined;
   signal_strength?: number | null;
 }) {
@@ -137,12 +139,16 @@ function DualSignalBar({
   );
   const momentumConfidence =
     momentum_60s_pct != null ? clamp01(Math.abs(momentum_60s_pct) / Math.max(momentumThresholdPct, 0.01)) : 0;
+  const momentumEntryScore =
+    momentum_60s_pct != null ? clamp01(Math.abs(momentum_60s_pct) / 0.20) * 100 : 0;
   const squeezePctRaw = Math.round(squeezeConfidence * 100);
   const squeezePct = squeeze_active ? squeezePctRaw : Math.min(99, squeezePctRaw);
-  const momentumPct = Math.round(momentumConfidence * 100);
+  const momentumPct = Math.round(momentumEntryScore);
   const hasMomentumData = momentum_60s_pct != null && Number.isFinite(momentum_60s_pct);
   const momentumLabel = `MOMENTUM ${(momentum_60s_pct ?? 0) >= 0 ? '↑' : '↓'}`;
   const squeezeIsActive = squeeze_active === true;
+  const momentumScanReady = hasMomentumData && momentumConfidence >= 1;
+  const momentumEntryReady = momentumEntryScore >= confidenceMinEntry;
   
   useEffect(() => {
     setDisplaySqueezePct(squeezePct);
@@ -154,11 +160,11 @@ function DualSignalBar({
     return squeezeConfidence >= boundary;
   });
   const momentumFill = Array.from({ length: 5 }).map((_, i) => {
-    const boundary = (i + 1) / 5;
-    return momentumConfidence >= boundary;
+    const boundary = (i + 1) * 20;
+    return momentumEntryScore >= boundary;
   });
   const lowSignal = squeezeConfidence < 0.2;
-  const lowMomentum = momentumConfidence < 0.2;
+  const lowMomentum = !momentumScanReady;
 
   return (
     <div className="bg-zinc-800/40 border border-zinc-800/60 rounded p-2.5 mb-2">
@@ -227,11 +233,13 @@ function DualSignalBar({
             className="text-[10px] font-mono font-bold min-w-[28px] text-right transition-colors duration-300"
             style={{ color: lowMomentum ? '#71717a' : '#2196f3' }}
           >
-            {hasMomentumData ? `${displayMomentumPct}%` : '--'}
+            {hasMomentumData ? `${displayMomentumPct}` : '--'}
           </span>
         </div>
         <div className="mb-1 text-[8px] font-mono text-right" style={{ color: hasMomentumData ? '#93c5fd' : '#71717a' }}>
-          {hasMomentumData ? `${fmtPct(momentum_60s_pct)} / ${momentumThresholdPct.toFixed(2)}% trigger` : 'NO DATA'}
+          {hasMomentumData
+            ? `${fmtPct(momentum_60s_pct)} · score ${displayMomentumPct}/${confidenceMinEntry.toFixed(0)}`
+            : 'NO DATA'}
         </div>
         <div className="flex items-center gap-2">
           <div className="flex-1 flex items-center gap-1">
@@ -250,7 +258,12 @@ function DualSignalBar({
       </div>
       {lowMomentum && (
         <div className="mt-1 text-[8px] font-mono text-zinc-500 uppercase tracking-wide">
-          Momentum below trigger
+          Momentum below scan floor
+        </div>
+      )}
+      {momentumScanReady && !momentumEntryReady && (
+        <div className="mt-1 text-[8px] font-mono text-amber-300 uppercase tracking-wide">
+          Momentum score below entry floor
         </div>
       )}
       {lowSignal && (
@@ -379,14 +392,18 @@ function TradeIntentPanel({
   entrySide,
   inPosition,
   momentumThresholdPct,
+  confidenceMinEntry,
 }: {
   state: OptionsState;
   entrySide: 'call' | 'put' | null;
   inPosition: boolean;
   momentumThresholdPct: number;
+  confidenceMinEntry: number;
 }) {
   const sp = state.signals_panel ?? null;
   const momentum = state.momentum_60s_pct ?? sp?.momentum_60s_pct ?? asNumber((state as any).momentum_60s);
+  const momentumEntryScore = asNumber((sp as any)?.momentum_entry_score)
+    ?? (momentum != null ? Math.max(0, Math.min(100, Math.abs(momentum) / 0.20 * 100)) : null);
   const freshness = sp?.momentum_freshness_ratio ?? sp?.momentum_acceleration_ratio ?? null;
   const bbWidth = state.bb_width_pct ?? sp?.bb_width_pct ?? null;
   const bbThreshold = state.bb_width_threshold ?? sp?.bb_width_threshold ?? null;
@@ -395,8 +412,10 @@ function TradeIntentPanel({
   const breakoutState = state.breakout_state ?? 'NONE';
   const squeezeActive = state.squeeze_active === true;
   const momentumReady = momentum != null && Math.abs(momentum) >= momentumThresholdPct;
+  const confidenceReady = momentumEntryScore == null || momentumEntryScore >= confidenceMinEntry;
   const freshnessReady = freshness == null || freshness >= 0.5;
   const ratioReady = ratio != null && ratio <= 1.0;
+  const momentumCandidate = momentumReady && freshnessReady && confidenceReady;
   const targetSide =
     entrySide ??
     (momentum != null && Math.abs(momentum) >= momentumThresholdPct
@@ -405,10 +424,14 @@ function TradeIntentPanel({
 
   const blockers: string[] = [];
   if (!inPosition) {
-    if (!squeezeActive && !ratioReady) blockers.push('BB is not inside KC yet');
+    if (!squeezeActive && !momentumReady && !ratioReady) blockers.push('BB is not inside KC yet');
     if (!momentumReady) blockers.push(`Momentum ${fmtPct(momentum)} is below ${momentumThresholdPct.toFixed(2)}%`);
+    if (momentumReady && !confidenceReady) {
+      blockers.push(`Momentum score ${momentumEntryScore?.toFixed(0)} is below ${confidenceMinEntry.toFixed(0)}`);
+    }
     if (!freshnessReady) blockers.push(`Momentum freshness ${freshness?.toFixed(2)} is stale`);
-    if (breakoutState === 'NONE' || breakoutState == null) blockers.push('No confirmed breakout');
+    if (squeezeActive && (breakoutState === 'NONE' || breakoutState == null)) blockers.push('No confirmed breakout');
+    if (momentumCandidate && !squeezeActive) blockers.push('Waiting for option premium and liquidity checks');
   }
 
   let readiness: TradeReadiness = 'waiting';
@@ -418,10 +441,10 @@ function TradeIntentPanel({
     readiness = 'active';
     title = `Managing ${state.position_side?.toUpperCase() ?? 'OPTION'} position`;
     subtitle = `${fmtPct(state.pnl_pct)} now, premium ${fmtPrem(state.current_premium)}`;
-  } else if (squeezeActive || (momentumReady && freshnessReady && blockers.length <= 1)) {
+  } else if (squeezeActive || momentumCandidate) {
     readiness = 'ready';
     title = targetSide ? `${targetSide.toUpperCase()} candidate forming` : 'Candidate forming';
-    subtitle = squeezeActive ? 'Squeeze is armed; waiting for breakout confirmation' : 'Momentum is strong enough; checking quality gates';
+    subtitle = squeezeActive ? 'Squeeze is armed; waiting for breakout confirmation' : 'Momentum passed; waiting for option premium and liquidity';
   } else if (blockers.length > 0) {
     readiness = 'blocked';
     title = 'No trade';
@@ -439,7 +462,7 @@ function TradeIntentPanel({
     { label: 'Target', value: targetSide ? targetSide.toUpperCase() : 'NONE' },
     { label: 'Setup', value: squeezeActive ? 'SQUEEZE' : momentumReady ? 'MOM BURST' : 'WAIT' },
     { label: 'Mom', value: fmtPct(momentum) },
-    { label: 'Fresh', value: freshness != null ? freshness.toFixed(2) : '--' },
+    { label: 'Score', value: momentumEntryScore != null ? `${momentumEntryScore.toFixed(0)}/${confidenceMinEntry.toFixed(0)}` : '--' },
   ];
 
   return (
@@ -677,9 +700,10 @@ function ChainCard({
   const balance        = state.balance ?? null;
   const strikeWatching = state.atm_strike ?? state.target_strike ?? null;
   const momentumThresholdPct = configNumber(state.entry_config, 'mb_threshold_pct', 0.06);
+  const confidenceMinEntry = configNumber(state.entry_config, 'confidence_min_entry', 60);
   const confidence = getSignalConfidence(state);
   const lowSignal = confidence < 0.2;
-  const isReady = confidence > 0.15;
+  const isReady = inPosition || confidence > 0.15;
   // Low-signal amber border is for idle monitoring only; an active position
   // is already called out by the purple bar — avoid stacking amber on that card.
   const useLowSignalBorder = lowSignal && !inPosition;
@@ -741,7 +765,7 @@ function ChainCard({
               ? 'bg-[#22c55e]/15 text-[#22c55e] border-[#22c55e]/30'
               : 'bg-zinc-800 text-zinc-500 border-zinc-700',
           )}>
-            {isReady ? 'READY' : 'MONITORING'}
+            {inPosition ? 'IN TRADE' : 'SCANNING'}
           </span>
           {hoursRemaining && (
             <span className="text-[9px] font-mono text-zinc-400">
@@ -756,6 +780,7 @@ function ChainCard({
         entrySide={entrySide}
         inPosition={inPosition}
         momentumThresholdPct={momentumThresholdPct}
+        confidenceMinEntry={confidenceMinEntry}
       />
 
       {/* 1. Dual signal bar */}
@@ -770,6 +795,7 @@ function ChainCard({
           ?? null
         }
         momentumThresholdPct={momentumThresholdPct}
+        confidenceMinEntry={confidenceMinEntry}
         squeeze_active={state.squeeze_active}
         signal_strength={(state as any).signal_strength}
       />

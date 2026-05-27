@@ -1380,6 +1380,14 @@ class OptionsScalpStrategy(BaseStrategy):
             # GPFC #60r2: regime classifier (log-only gating, dashboard display)
             "regime": self._cached_regime,
             "momentum_60s_pct": round(self._underlying_momentum_pct(), 3),
+            "momentum_entry_score": round(
+                max(
+                    0.0,
+                    min(100.0, abs(self._underlying_momentum_pct()) / 0.20 * 100.0),
+                ),
+                1,
+            ),
+            "confidence_min_entry": self.CONFIDENCE_MIN_ENTRY,
             # GPFC #62: spot freshness — mom_20s / mom_60s. Same field as
             # momentum_acceleration_ratio; aliased here for clarity in the UI.
             "momentum_freshness_ratio": mb_acceleration,
@@ -1452,6 +1460,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "mb_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
                 "mb_min_ask_rise_pct": self.MOMENTUM_BURST_MIN_ASK_RISE_PCT,
                 "mb_min_turnover_usd": self.MOM_BURST_MIN_TURNOVER_USD,
+                "confidence_min_entry": self.CONFIDENCE_MIN_ENTRY,
                 "entry_min_turnover_usd": self.ENTRY_MIN_TURNOVER_USD,
                 "phase_b_protect_arm_pct": self.PHASE_B_BREAKEVEN_ARM_PCT,
                 "phase_b_protect_arm_buffer_pct": self.PHASE_B_BREAKEVEN_ARM_BUFFER_PCT,
