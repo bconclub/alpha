@@ -181,6 +181,11 @@ class OptionsScalpStrategy(BaseStrategy):
     # already repriced too far before our limit order lands.
     MOM_BURST_MAX_LAST_ASK_RISE_PCT = 9.5
     MOM_BURST_MAX_CUM_ASK_RISE_PCT = 14.0
+    # GPFC #85: MOM_BURST needs deeper books than SQUEEZE. Recent ETH entries
+    # barely clearing the generic $2M floor could peak green but could not exit
+    # near breakeven because the bid vanished. Keep the generic floor for
+    # SQUEEZE, but require stronger turnover before momentum entries.
+    MOM_BURST_MIN_TURNOVER_USD = 5_000_000
     ENTRY_MAX_SPREAD_PCT = 7.0
     ENTRY_MAX_MARK_GAP_PCT = 4.0
     # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
@@ -255,7 +260,11 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_B_PEAK_MAX_PCT = 9.0
     PHASE_B_SL_PCT = -5.0          # GPFC #79: was -8
     PHASE_B_BREAKEVEN_ARM_PCT = 8.0
-    PHASE_B_BREAKEVEN_EXIT_PCT = 0.5
+    # GPFC #85: treat dashboard-rounded +8% peaks as armed, then protect while
+    # the option is still green. Waiting until +0.5%/red was too late in thin
+    # ETH books; the limit often missed and market fallback filled much lower.
+    PHASE_B_BREAKEVEN_ARM_BUFFER_PCT = 0.15
+    PHASE_B_BREAKEVEN_EXIT_PCT = 4.0
     PHASE_C_PEAK_MAX_PCT = 15.0
     PHASE_C_TRAIL_FRAC = 0.45
     PHASE_C_SL_PCT = -8.0          # GPFC #79: was -15 (trail is primary)
@@ -1433,23 +1442,34 @@ class OptionsScalpStrategy(BaseStrategy):
                 "pullback_spot_veto_pct": self.PULLBACK_SPOT_VETO_PCT,
                 "breakeven_stop_activate_pct": self.BREAKEVEN_STOP_ACTIVATE_PCT,
                 "breakeven_stop_exit_pct": self.BREAKEVEN_STOP_EXIT_PCT,
+                "phase_b_protect_arm_pct": self.PHASE_B_BREAKEVEN_ARM_PCT,
+                "phase_b_protect_arm_buffer_pct": self.PHASE_B_BREAKEVEN_ARM_BUFFER_PCT,
+                "phase_b_protect_exit_pct": self.PHASE_B_BREAKEVEN_EXIT_PCT,
             },
             "peak_trail_pending_ticks": self._peak_trail_pending_ticks,
             "spot_momentum_20s_pct": round(self._underlying_short_momentum_pct(20.0), 3),
             "entry_config": {
                 "mb_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
                 "mb_min_ask_rise_pct": self.MOMENTUM_BURST_MIN_ASK_RISE_PCT,
+                "mb_min_turnover_usd": self.MOM_BURST_MIN_TURNOVER_USD,
+                "entry_min_turnover_usd": self.ENTRY_MIN_TURNOVER_USD,
+                "phase_b_protect_arm_pct": self.PHASE_B_BREAKEVEN_ARM_PCT,
+                "phase_b_protect_arm_buffer_pct": self.PHASE_B_BREAKEVEN_ARM_BUFFER_PCT,
+                "phase_b_protect_exit_pct": self.PHASE_B_BREAKEVEN_EXIT_PCT,
             },
-            # Breakeven-stop arm state for the current position. True when the
-            # trade's peak has crossed the arm threshold, so one more adverse
-            # tick to <= +0.5% will flatten it.
+            # Phase-B protection arm state for the current position. True when
+            # the trade's peak is close enough to the 8% arm threshold that a
+            # retrace to the protected green floor will flatten it.
             "breakeven_stop_armed": (
                 self.in_position
                 and self.highest_premium > 0
                 and self.entry_premium > 0
                 and (
                     (self.highest_premium - self.entry_premium) / self.entry_premium * 100
-                ) >= self.BREAKEVEN_STOP_ACTIVATE_PCT
+                ) >= (
+                    self.PHASE_B_BREAKEVEN_ARM_PCT
+                    - self.PHASE_B_BREAKEVEN_ARM_BUFFER_PCT
+                )
             ),
             # Top-level squeeze fields (read directly by dashboard)
             "bb_width_pct": round(self._bb_width_pct, 3),
@@ -2160,6 +2180,22 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] ENTRY_QUALITY_SKIP — %s (MOM_BURST %s)",
                     self.pair, skip_reason, selected_symbol,
                 )
+            return []
+
+        info = (spread_ticker or {}).get("info") or {}
+        try:
+            turnover_usd = float(info.get("turnover_usd", 0) or 0)
+        except (TypeError, ValueError):
+            turnover_usd = 0.0
+        if turnover_usd < self.MOM_BURST_MIN_TURNOVER_USD:
+            self.logger.info(
+                "[%s] MOM_BURST_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM "
+                "- skipping thin book",
+                self.pair,
+                selected_symbol,
+                turnover_usd / 1_000_000,
+                self.MOM_BURST_MIN_TURNOVER_USD / 1_000_000,
+            )
             return []
 
         # GPFC #82: IV-regime gate — MOM_BURST needs at least some vol.
@@ -4180,16 +4216,23 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── PHASE B: breakeven on retrace OR -5% SL backstop ──
         if phase == "B":
+            phase_b_armed = (
+                peak_pnl_pct
+                >= self.PHASE_B_BREAKEVEN_ARM_PCT
+                - self.PHASE_B_BREAKEVEN_ARM_BUFFER_PCT
+            )
             if (
                 premium_change_pct <= self.PHASE_B_BREAKEVEN_EXIT_PCT
-                and peak_pnl_pct >= self.PHASE_B_BREAKEVEN_ARM_PCT
+                and phase_b_armed
             ):
                 self.logger.info(
-                    "[%s] breakeven — peak %+.1f%% reverted to %+.1f%% "
-                    "(exit≤%.1f%%)",
+                    "[%s] breakeven — peak %+.1f%% protected at %+.1f%% "
+                    "(arm=%.1f%% buffer=%.2f%% exit≤%.1f%%)",
                     self.option_symbol,
                     peak_pnl_pct,
                     premium_change_pct,
+                    self.PHASE_B_BREAKEVEN_ARM_PCT,
+                    self.PHASE_B_BREAKEVEN_ARM_BUFFER_PCT,
                     self.PHASE_B_BREAKEVEN_EXIT_PCT,
                 )
                 return await self._do_option_exit(
