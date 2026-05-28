@@ -23,6 +23,7 @@ import aiohttp
 from alpha.utils import setup_logger
 
 if TYPE_CHECKING:
+    from alpha.strategies.options_scalp import OptionsScalpStrategy
     from alpha.strategies.scalp import ScalpStrategy
 
 logger = setup_logger("price_feed")
@@ -72,11 +73,13 @@ class PriceFeed:
     def __init__(
         self,
         strategies: dict[str, ScalpStrategy],
+        option_strategies: dict[str, OptionsScalpStrategy] | None = None,
         delta_pairs: list[str] | None = None,
         delta_testnet: bool = False,
         **_kwargs: object,  # accept and ignore legacy params
     ) -> None:
         self._strategies = strategies
+        self._option_strategies = option_strategies or {}
         self._delta_pairs = delta_pairs or []
         self._delta_testnet = delta_testnet
 
@@ -91,6 +94,7 @@ class PriceFeed:
         # Stats
         self._delta_updates = 0
         self._exit_checks = 0
+        self._option_wakes = 0
         self._delta_messages_total = 0
         self._delta_messages_parsed = 0
         self._last_stats_log = 0.0
@@ -148,6 +152,14 @@ class PriceFeed:
                 strategy.check_exits_immediate(price)
             except Exception:
                 logger.exception("[%s] Error in check_exits_immediate", pair)
+
+        option_strategy = self._option_strategies.get(pair)
+        if option_strategy:
+            try:
+                if option_strategy.on_underlying_ws_tick(price):
+                    self._option_wakes += 1
+            except Exception:
+                logger.exception("[%s] Error in options websocket tick", pair)
 
     # ══════════════════════════════════════════════════════════════════
     # DELTA INDIA — Raw WebSocket via aiohttp
@@ -302,13 +314,19 @@ class PriceFeed:
                     parse_tag = f" delta_parse={self._delta_messages_parsed}/{self._delta_messages_total}({parse_pct:.0f}%)"
 
                 logger.info(
-                    "PriceFeed stats — Delta: %d updates, exit_checks: %d, cached: %d pairs%s%s",
-                    self._delta_updates, self._exit_checks, cached, parse_tag, stale_tag,
+                    "PriceFeed stats — Delta: %d updates, exit_checks: %d, option_wakes: %d, cached: %d pairs%s%s",
+                    self._delta_updates,
+                    self._exit_checks,
+                    self._option_wakes,
+                    cached,
+                    parse_tag,
+                    stale_tag,
                 )
 
                 # Reset counters
                 self._delta_updates = 0
                 self._exit_checks = 0
+                self._option_wakes = 0
                 self._delta_messages_total = 0
                 self._delta_messages_parsed = 0
 

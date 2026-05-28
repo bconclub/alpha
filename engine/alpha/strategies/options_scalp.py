@@ -301,13 +301,30 @@ class OptionsScalpStrategy(BaseStrategy):
     # fires when vol is at least MOM_BURST_MIN_IV_FOR_ENTRY. The two paths
     # are mutually-exclusive by IV, so the bot picks the right setup for
     # the regime instead of forcing one strategy onto every market.
-    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE"})
+    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK"})
 
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
     # ticker.info.mark_vol (Delta returns it as a decimal: 0.30 = 30%).
     SQUEEZE_REQUIRES_LOW_VOL = True
     SQUEEZE_MAX_IV_FOR_ENTRY = 0.35   # block SQUEEZE above this IV
     MOM_BURST_MIN_IV_FOR_ENTRY = 0.25  # block MOM_BURST below this IV
+
+    # GPFC #86: websocket-driven move/pullback entry.
+    # MOM_BURST was often skipping the best move as "chase", then buying the
+    # stale tail. This setup detects the impulse from the underlying WS, waits
+    # for a controlled retrace, and enters on re-confirmation instead of buying
+    # the first premium spike.
+    MOVE_PULLBACK_MOM_60S_PCT = 0.25
+    MOVE_PULLBACK_MOM_20S_PCT = 0.08
+    MOVE_PULLBACK_MIN_IMPULSE_PCT = 0.30
+    MOVE_PULLBACK_MIN_RETRACE_FRAC = 0.20
+    MOVE_PULLBACK_MAX_RETRACE_FRAC = 0.55
+    MOVE_PULLBACK_RECONFIRM_20S_PCT = 0.04
+    MOVE_PULLBACK_MAX_AGE_SEC = 360.0
+    MOVE_PULLBACK_WAKE_COOLDOWN_SEC = 2.0
+    MOVE_PULLBACK_MIN_TURNOVER_USD = 5_000_000
+    MOVE_PULLBACK_MAX_SPREAD_PCT = 8.0
+    MOVE_PULLBACK_MAX_MARK_GAP_PCT = 5.0
 
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
@@ -539,6 +556,10 @@ class OptionsScalpStrategy(BaseStrategy):
         # Captured entry signal snapshot — built at entry, written to DB metadata.
         self._pending_entry_signals: dict[str, Any] | None = None
 
+        # GPFC #86: websocket impulse/pullback state.
+        self._move_pullback_state: dict[str, Any] | None = None
+        self._last_ws_wake_at: float = 0.0
+
 
     # ==================================================================
     # ACTIVITY LOGGING
@@ -576,6 +597,121 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_skip_reason = reason
         self._last_skip_time = now
         await self._log_activity("options_skip", reason, metadata)
+
+    def on_underlying_ws_tick(self, price: float) -> bool:
+        """Consume Delta underlying WS ticks and wake the option loop on a setup.
+
+        The WS handler stays synchronous and cheap: it updates spot momentum,
+        maintains the MOVE_PULLBACK state machine, and wakes the normal async
+        check loop only when a pullback has re-confirmed.
+        """
+        if price <= 0:
+            return False
+
+        self._last_spot_price = float(price)
+        self._update_momentum_history(float(price))
+
+        if self.in_position or OptionsScalpStrategy._global_in_position:
+            return False
+        if "MOVE_PULLBACK" not in self.ENABLED_SETUPS:
+            return False
+
+        now = time.monotonic()
+        momentum_60s = self._underlying_momentum_pct()
+        momentum_20s = self._underlying_short_momentum_pct(20.0)
+        direction: str | None = None
+        if (
+            momentum_60s >= self.MOVE_PULLBACK_MOM_60S_PCT
+            and momentum_20s >= self.MOVE_PULLBACK_MOM_20S_PCT
+        ):
+            direction = "UP"
+        elif (
+            momentum_60s <= -self.MOVE_PULLBACK_MOM_60S_PCT
+            and momentum_20s <= -self.MOVE_PULLBACK_MOM_20S_PCT
+        ):
+            direction = "DOWN"
+
+        state = self._move_pullback_state
+        if direction:
+            if not state or state.get("direction") != direction:
+                impulse_start = self._get_spot_price_at(self._MOMENTUM_CHECK_WINDOW_SEC) or price
+                state = {
+                    "direction": direction,
+                    "start_price": impulse_start,
+                    "extreme_price": price,
+                    "detected_at": now,
+                    "ready": False,
+                    "retraced": False,
+                    "retrace_frac": 0.0,
+                    "reconfirm_pct": 0.0,
+                }
+                self._move_pullback_state = state
+                self.logger.info(
+                    "[%s] MOVE_PULLBACK_DETECTED dir=%s ws60=%+.2f%% ws20=%+.2f%% spot=%.2f",
+                    self.pair,
+                    direction,
+                    momentum_60s,
+                    momentum_20s,
+                    price,
+                )
+            else:
+                if direction == "UP":
+                    state["extreme_price"] = max(float(state["extreme_price"]), price)
+                else:
+                    state["extreme_price"] = min(float(state["extreme_price"]), price)
+
+        state = self._move_pullback_state
+        if not state:
+            return False
+
+        age = now - float(state.get("detected_at", now))
+        if age > self.MOVE_PULLBACK_MAX_AGE_SEC:
+            self._move_pullback_state = None
+            return False
+
+        direction = str(state.get("direction"))
+        start_price = float(state.get("start_price") or 0)
+        extreme_price = float(state.get("extreme_price") or 0)
+        if start_price <= 0 or extreme_price <= 0:
+            return False
+
+        if direction == "UP":
+            impulse_pct = (extreme_price - start_price) / start_price * 100.0
+            retrace_pct = (extreme_price - price) / start_price * 100.0
+            reconfirm_pct = momentum_20s
+        elif direction == "DOWN":
+            impulse_pct = (start_price - extreme_price) / start_price * 100.0
+            retrace_pct = (price - extreme_price) / start_price * 100.0
+            reconfirm_pct = -momentum_20s
+        else:
+            return False
+
+        if impulse_pct < self.MOVE_PULLBACK_MIN_IMPULSE_PCT:
+            return False
+
+        retrace_frac = retrace_pct / impulse_pct if impulse_pct > 0 else 0.0
+        if (
+            self.MOVE_PULLBACK_MIN_RETRACE_FRAC
+            <= retrace_frac
+            <= self.MOVE_PULLBACK_MAX_RETRACE_FRAC
+        ):
+            state["retraced"] = True
+            state["retrace_frac"] = retrace_frac
+
+        if not state.get("retraced"):
+            return False
+
+        if reconfirm_pct < self.MOVE_PULLBACK_RECONFIRM_20S_PCT:
+            return False
+
+        state["ready"] = True
+        state["reconfirm_pct"] = reconfirm_pct
+        if now - self._last_ws_wake_at < self.MOVE_PULLBACK_WAKE_COOLDOWN_SEC:
+            return False
+
+        self._last_ws_wake_at = now
+        self.wake()
+        return True
 
     # ==================================================================
     # LIFECYCLE
@@ -1886,6 +2022,10 @@ class OptionsScalpStrategy(BaseStrategy):
         if self._breakout_pending:
             return await self._check_breakout_confirmation()
 
+        move_pullback_signals = await self._check_move_pullback_entry()
+        if move_pullback_signals:
+            return move_pullback_signals
+
         # STEP 1: DETECT BB SQUEEZE
         squeeze_result = await self._detect_squeeze()
         if squeeze_result is None:
@@ -1977,6 +2117,196 @@ class OptionsScalpStrategy(BaseStrategy):
             )
         self._cached_bot_state = "squeeze:waiting_for_breakout"
         return []
+
+    async def _check_move_pullback_entry(self) -> list[Signal]:
+        """Enter after a websocket-detected impulse retraces and re-confirms."""
+        state = self._move_pullback_state
+        if not state or not state.get("ready"):
+            return []
+
+        if "MOVE_PULLBACK" not in self.ENABLED_SETUPS:
+            self._move_pullback_state = None
+            return []
+
+        age = time.monotonic() - float(state.get("detected_at", time.monotonic()))
+        if age > self.MOVE_PULLBACK_MAX_AGE_SEC:
+            self._move_pullback_state = None
+            return []
+
+        if not self._selected_expiry or not self.options_exchange:
+            return []
+
+        now_utc = datetime.now(timezone.utc)
+        hours_to_expiry = (self._selected_expiry - now_utc).total_seconds() / 3600
+        if hours_to_expiry < self.MIN_EXPIRY_HOURS:
+            return []
+
+        direction = str(state.get("direction") or "")
+        if direction not in ("UP", "DOWN"):
+            self._move_pullback_state = None
+            return []
+
+        option_type = "call" if direction == "UP" else "put"
+        spot = float(self._last_spot_price or 0)
+        if spot <= 0 and self.futures_exchange:
+            try:
+                ticker = await self.futures_exchange.fetch_ticker(self.pair)
+                spot = float(ticker.get("last") or ticker.get("bid") or 0)
+            except Exception:
+                spot = 0.0
+        if spot <= 0:
+            return []
+        self._last_spot_price = spot
+
+        atm_strike = self._get_atm_strike(spot)
+        if atm_strike is None:
+            return []
+        self._cached_target_strike = atm_strike
+
+        strikes_to_try = [atm_strike]
+        if self._base_asset == "BTC":
+            otm_candidates = self._get_otm_candidates(atm_strike, option_type)
+            if otm_candidates:
+                strikes_to_try = [otm_candidates[0], atm_strike]
+
+        selected_symbol: str | None = None
+        selected_strike: float | None = None
+        selected_ticker: dict[str, Any] | None = None
+        entry_ask = 0.0
+
+        for strike in strikes_to_try:
+            symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
+            if not symbol:
+                continue
+            try:
+                ticker = await self.options_exchange.fetch_ticker(symbol)
+                ask = float(ticker.get("ask") or ticker.get("bid") or 0)
+            except Exception as e:
+                self.logger.debug("[%s] MOVE_PULLBACK ticker failed for %s: %s", self.pair, symbol, e)
+                continue
+            if ask < self.MIN_PREMIUM_USD:
+                continue
+            contracts = self._calculate_option_contracts(ask, confidence=0.75)
+            if contracts >= 1:
+                selected_symbol = symbol
+                selected_strike = strike
+                selected_ticker = ticker
+                entry_ask = ask
+                break
+
+        if not selected_symbol or selected_strike is None or entry_ask <= 0:
+            self.logger.info(
+                "[%s] MOVE_PULLBACK_SKIP dir=%s: no affordable strike",
+                self.pair,
+                direction,
+            )
+            self._move_pullback_state = None
+            return []
+
+        bid = 0.0
+        try:
+            bid = float((selected_ticker or {}).get("bid") or 0)
+        except (TypeError, ValueError):
+            bid = 0.0
+        if bid > 0:
+            spread_pct = (entry_ask - bid) / entry_ask * 100.0
+            if spread_pct > self.MOVE_PULLBACK_MAX_SPREAD_PCT:
+                self.logger.info(
+                    "[%s] MOVE_PULLBACK_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
+                    self.pair,
+                    selected_symbol,
+                    spread_pct,
+                    self.MOVE_PULLBACK_MAX_SPREAD_PCT,
+                )
+                return []
+
+        exec_snapshot = self._entry_execution_snapshot(
+            selected_ticker,
+            entry_ask,
+            option_type,
+        )
+        mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
+        if mark_gap_pct is not None and mark_gap_pct > self.MOVE_PULLBACK_MAX_MARK_GAP_PCT:
+            self.logger.info(
+                "[%s] MOVE_PULLBACK_EXEC_SKIP: %s ask too far above mark "
+                "(gap=%.2f%% > %.2f%%)",
+                self.pair,
+                selected_symbol,
+                mark_gap_pct,
+                self.MOVE_PULLBACK_MAX_MARK_GAP_PCT,
+            )
+            return []
+
+        passes_quality, skip_reason = self._passes_entry_quality(selected_ticker)
+        if not passes_quality:
+            self.logger.info(
+                "[%s] ENTRY_QUALITY_SKIP — %s (MOVE_PULLBACK %s)",
+                self.pair,
+                skip_reason,
+                selected_symbol,
+            )
+            return []
+
+        info = (selected_ticker or {}).get("info") or {}
+        try:
+            turnover_usd = float(info.get("turnover_usd", 0) or 0)
+        except (TypeError, ValueError):
+            turnover_usd = 0.0
+        if turnover_usd < self.MOVE_PULLBACK_MIN_TURNOVER_USD:
+            self.logger.info(
+                "[%s] MOVE_PULLBACK_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM",
+                self.pair,
+                selected_symbol,
+                turnover_usd / 1_000_000,
+                self.MOVE_PULLBACK_MIN_TURNOVER_USD / 1_000_000,
+            )
+            return []
+
+        try:
+            conf_score, _ = self._calculate_confidence(selected_ticker, option_type)
+            if conf_score < self.CONFIDENCE_MIN_ENTRY:
+                self.logger.info(
+                    "[%s] ENTRY_BLOCKED confidence=%.0f below floor %.0f "
+                    "(MOVE_PULLBACK %s)",
+                    self.pair,
+                    conf_score,
+                    self.CONFIDENCE_MIN_ENTRY,
+                    selected_symbol,
+                )
+                return []
+        except Exception:
+            self.logger.debug("[%s] confidence gate failed pre-order (MOVE_PULLBACK)", selected_symbol)
+
+        contracts = self._calculate_option_contracts(entry_ask, confidence=0.75)
+        if contracts < 1:
+            return []
+
+        self._breakout_direction = direction
+        self._breakout_option_type = option_type
+        self._breakout_symbol = selected_symbol
+        self._breakout_strike = selected_strike
+        self._breakout_contracts = contracts
+        self._breakout_confidence = 0.75
+        self._breakout_bb_width = self._bb_width_pct
+        self._breakout_velocity_pct = abs(self._underlying_momentum_pct())
+        self._pending_entry_setup = "MOVE_PULLBACK"
+        self._cached_bot_state = f"move_pullback:entering:{direction}"
+
+        self.logger.info(
+            "[%s] MOVE_PULLBACK_ENTRY: dir=%s retrace=%.0f%% reconfirm=%+.2f%% "
+            "spot=%.2f %s $%.0f ask=$%.4f turnover=$%.2fM",
+            self.pair,
+            direction,
+            float(state.get("retrace_frac", 0.0)) * 100,
+            float(state.get("reconfirm_pct", 0.0)),
+            spot,
+            option_type.upper(),
+            selected_strike,
+            entry_ask,
+            turnover_usd / 1_000_000,
+        )
+        self._move_pullback_state = None
+        return await self._execute_breakout_entry(entry_ask)
 
     async def _check_momentum_burst_entry(self) -> list[Signal]:
         """Immediate entry when 60s momentum and ATM premium trend align (outside squeeze)."""
@@ -2731,10 +3061,12 @@ class OptionsScalpStrategy(BaseStrategy):
         opt_contracts = self._breakout_contracts
         entry_confidence = self._breakout_confidence
         bb_width_pct = self._breakout_bb_width
-        setup_type = "SQUEEZE" if (
-            self._is_squeeze_entry
-            or self._pending_entry_setup in ("SQUEEZE", "SQUEEZE")
-        ) else "MOM_BURST"
+        if self._pending_entry_setup in self.ENABLED_SETUPS:
+            setup_type = self._pending_entry_setup
+        elif self._is_squeeze_entry:
+            setup_type = "SQUEEZE"
+        else:
+            setup_type = "MOM_BURST"
 
         # GPFC #81: belt-and-suspenders — refuse to fire if the resolved
         # setup_type is disabled (e.g. SQUEEZE). _handle_squeeze_breakout
@@ -2804,7 +3136,10 @@ class OptionsScalpStrategy(BaseStrategy):
             _regime = await self._classify_regime()
         except Exception:
             _regime = "UNKNOWN"
-        _entry_path = "squeeze_confirmed" if setup_type == "SQUEEZE" else "mom_burst"
+        _entry_path = {
+            "SQUEEZE": "squeeze_confirmed",
+            "MOVE_PULLBACK": "move_pullback",
+        }.get(setup_type, "mom_burst")
         try:
             self._pending_entry_signals = self._build_entry_metadata(
                 _pre_ticker, option_type, confirmed_ask,
@@ -2977,9 +3312,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         premium = fill_price
         self._limit_entry_filled = True
-        self._last_action = (
-            "SQUEEZE_FILL" if setup_type == "SQUEEZE" else "MOMENTUM_BURST_FILL"
-        )
+        self._last_action = {
+            "SQUEEZE": "SQUEEZE_FILL",
+            "MOVE_PULLBACK": "MOVE_PULLBACK_FILL",
+        }.get(setup_type, "MOMENTUM_BURST_FILL")
         self._last_action_at = time.time()
 
         self.logger.info(
@@ -3032,6 +3368,18 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             self._entry_context = (
                 f"BB_SQUEEZE dir={self._breakout_direction} BB_width={bb_width_pct:.3f}% "
+                f"ask=${premium:.4f} conf={entry_confidence:.2f}"
+            )
+        elif setup_type == "MOVE_PULLBACK":
+            self.logger.info(
+                "[%s] POSITION LOCKED — %s x%d @ $%.4f (move pullback entry)",
+                self.pair,
+                option_type.upper(),
+                opt_contracts,
+                fill_price,
+            )
+            self._entry_context = (
+                f"MOVE_PULLBACK dir={self._breakout_direction} mom={self._underlying_momentum_pct():+.2f}% "
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
             )
         else:

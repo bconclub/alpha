@@ -294,6 +294,7 @@ class AlphaBot:
         try:
             self._price_feed = PriceFeed(
                 strategies=self._scalp_strategies,
+                option_strategies=self._options_strategies,
                 delta_pairs=self.delta_pairs if self.delta else [],
                 delta_testnet=config.delta.testnet,
             )
