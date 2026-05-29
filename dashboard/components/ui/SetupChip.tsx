@@ -1,9 +1,9 @@
-// GPFC #54: 2 canonical setup_types. SQUEEZE (BB squeeze breakout) and
-// MOM_BURST (momentum-burst entry). Engine emits these.
+// Canonical setup_types emitted by the options engine.
 
 const SETUP_STYLES: Record<string, { bg: string; text: string; ring: string }> = {
   MOM_BURST: { bg: "bg-orange-500/15", text: "text-orange-400", ring: "ring-orange-500/30" },
   SQUEEZE:   { bg: "bg-purple-500/15", text: "text-purple-400", ring: "ring-purple-500/30" },
+  PULLBACK:  { bg: "bg-cyan-500/15", text: "text-cyan-300", ring: "ring-cyan-500/30" },
 };
 
 const FALLBACK = {
@@ -21,6 +21,9 @@ function canonical(setup: string): string {
   if (u === "MOMENTUM_BURST" || u === "MOMENTUM_BURST_ENTRY") {
     return "MOM_BURST";
   }
+  if (u === "MOVE_PULLBACK" || u === "PULL_BACK" || u === "PULLBACK") {
+    return "PULLBACK";
+  }
   return u;
 }
 
@@ -28,7 +31,7 @@ export function SetupChip({ setup }: { setup: string | null | undefined }) {
   if (!setup) return <span className="text-zinc-600">—</span>;
   const key = canonical(setup);
   const style = SETUP_STYLES[key] || FALLBACK;
-  const label = key.replace("_", " ");
+  const label = key === "PULLBACK" ? "Pullback" : key.replace("_", " ");
   return (
     <span
       className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold tracking-wide ring-1 ring-inset ${style.bg} ${style.text} ${style.ring}`}

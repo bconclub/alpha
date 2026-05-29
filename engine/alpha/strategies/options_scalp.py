@@ -97,6 +97,7 @@ EXIT_REASON_DISPLAY: dict[str, str] = {
     "trail_phase_c": "Trail Phase C",
     "trail_phase_d": "Trail Phase D",
     "trail_phase_e": "Trail Phase E",
+    "profit_harvest": "Profit Harvest",
     "breakeven": "Breakeven",
     "dead": "Dead",
     "pre_expiry": "Pre-Expiry",
@@ -173,7 +174,7 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKOUT_OVERPRICED_RISE_PCT = 15.0  # Premium rise > 15% = overpriced, abort
     # GPFC #69: 0.05 → 0.06 (slight tighten — winners had ≥0.05 aligned mom;
     # #3279 slipped through with und_mom -0.008 ≈ zero).
-    MOMENTUM_BURST_THRESHOLD_PCT = 0.06  # was 0.05 (#66), 0.10 (#65), 0.20 (pre-#65)
+    MOMENTUM_BURST_THRESHOLD_PCT = 0.10  # GPFC #87: require fresher real movement; 0.06 bought stale tails.
     MOMENTUM_BURST_MIN_ASK_RISE_PCT = 1.5  # cumulative % rise across 3 ATM ticks
     # GPFC #83: anti-chase entry guard. The losing 100-confidence trades were
     # buying after option ask spikes had already expanded 15-17% over 3 ticks.
@@ -281,6 +282,12 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_A_SPOT_FAVORABLE_BPS = 0.05   # % move in our favor over lookback (NOT basis points)
     PHASE_A_SPOT_LOOKBACK_SEC = 30      # rolling window for spot movement
 
+    # GPFC #87: small-account options need profit capture before a thin book can
+    # give back the whole move between 5s polls. A +12% option peak is already
+    # meaningful at current size; harvest while at least +10% is still quoted.
+    PROFIT_HARVEST_ARM_PCT = 12.0
+    PROFIT_HARVEST_EXIT_PCT = 10.0
+
     # ── GPFC #67: entry-quality filters (winner-pattern analysis) ─────
     # Winners cluster at |delta| 0.42-0.61, IV 0.41-0.54, turnover $2.84M-$13.68M.
     # Block entries outside these bands.
@@ -320,6 +327,7 @@ class OptionsScalpStrategy(BaseStrategy):
     MOVE_PULLBACK_MIN_RETRACE_FRAC = 0.20
     MOVE_PULLBACK_MAX_RETRACE_FRAC = 0.55
     MOVE_PULLBACK_RECONFIRM_20S_PCT = 0.04
+    MOVE_PULLBACK_SECOND_LEG_PCT = 0.04
     MOVE_PULLBACK_MAX_AGE_SEC = 360.0
     MOVE_PULLBACK_WAKE_COOLDOWN_SEC = 2.0
     MOVE_PULLBACK_MIN_TURNOVER_USD = 5_000_000
@@ -694,11 +702,25 @@ class OptionsScalpStrategy(BaseStrategy):
             self.MOVE_PULLBACK_MIN_RETRACE_FRAC
             <= retrace_frac
             <= self.MOVE_PULLBACK_MAX_RETRACE_FRAC
+            and not state.get("retraced")
         ):
             state["retraced"] = True
             state["retrace_frac"] = retrace_frac
+            state["retraced_at"] = now
+            state["retrace_price"] = price
+            return False
 
         if not state.get("retraced"):
+            return False
+
+        retrace_price = float(state.get("retrace_price") or price)
+        if retrace_price <= 0:
+            return False
+        if direction == "UP":
+            second_leg_pct = (price - retrace_price) / retrace_price * 100.0
+        else:
+            second_leg_pct = (retrace_price - price) / retrace_price * 100.0
+        if second_leg_pct < self.MOVE_PULLBACK_SECOND_LEG_PCT:
             return False
 
         if reconfirm_pct < self.MOVE_PULLBACK_RECONFIRM_20S_PCT:
@@ -706,6 +728,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         state["ready"] = True
         state["reconfirm_pct"] = reconfirm_pct
+        state["second_leg_pct"] = second_leg_pct
         if now - self._last_ws_wake_at < self.MOVE_PULLBACK_WAKE_COOLDOWN_SEC:
             return False
 
@@ -2158,6 +2181,25 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
         self._last_spot_price = spot
 
+        retrace_price = float(state.get("retrace_price") or 0)
+        if retrace_price > 0:
+            if direction == "UP":
+                second_leg_pct = (spot - retrace_price) / retrace_price * 100.0
+            else:
+                second_leg_pct = (retrace_price - spot) / retrace_price * 100.0
+            if second_leg_pct < self.MOVE_PULLBACK_SECOND_LEG_PCT:
+                self.logger.info(
+                    "[%s] MOVE_PULLBACK_STALE_SKIP: dir=%s second_leg=%+.3f%% < %.3f%% "
+                    "(spot=%.2f retrace=%.2f)",
+                    self.pair,
+                    direction,
+                    second_leg_pct,
+                    self.MOVE_PULLBACK_SECOND_LEG_PCT,
+                    spot,
+                    retrace_price,
+                )
+                return []
+
         atm_strike = self._get_atm_strike(spot)
         if atm_strike is None:
             return []
@@ -2293,11 +2335,12 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_bot_state = f"move_pullback:entering:{direction}"
 
         self.logger.info(
-            "[%s] MOVE_PULLBACK_ENTRY: dir=%s retrace=%.0f%% reconfirm=%+.2f%% "
+            "[%s] MOVE_PULLBACK_ENTRY: dir=%s retrace=%.0f%% second_leg=%+.2f%% reconfirm=%+.2f%% "
             "spot=%.2f %s $%.0f ask=$%.4f turnover=$%.2fM",
             self.pair,
             direction,
             float(state.get("retrace_frac", 0.0)) * 100,
+            float(state.get("second_leg_pct", 0.0)),
             float(state.get("reconfirm_pct", 0.0)),
             spot,
             option_type.upper(),
@@ -2322,7 +2365,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # 60s move. Filters stale tail-end moves (where premium is already
         # priced and edge is gone) without forcing a bigger absolute move.
         accel = self._underlying_acceleration_ratio()
-        if accel > 0 and accel < 0.50:
+        if accel > 0 and accel < 0.70:
             if self._tick_count % 10 == 0:
                 self.logger.info(
                     "[%s] MB_STALE: 60s_mom=%+.2f%% but only %.0f%% in last 20s "
@@ -2335,6 +2378,15 @@ class OptionsScalpStrategy(BaseStrategy):
         # go the SAME direction as the net 60s. Catches the "move already over"
         # case where spot popped then reversed in the last 20s.
         mom_20s = self._underlying_short_momentum_pct(20.0)
+        if abs(mom_20s) < self.MOMENTUM_BURST_THRESHOLD_PCT:
+            if self._tick_count % 10 == 0:
+                self.logger.info(
+                    "[%s] MB_WEAK_RECENT: 20s=%+.2f%% below %.2f%% — skipping stale tail",
+                    self.pair,
+                    mom_20s,
+                    self.MOMENTUM_BURST_THRESHOLD_PCT,
+                )
+            return []
         same_dir = (
             (momentum_60s > 0 and mom_20s > 0)
             or (momentum_60s < 0 and mom_20s < 0)
@@ -3162,6 +3214,34 @@ class OptionsScalpStrategy(BaseStrategy):
             self.logger.warning(
                 "[%s] ENTRY_BLOCKED conf=%s below floor %.0f (path=execute_breakout_entry, setup=%s)",
                 self.pair, _exec_conf, self.CONFIDENCE_MIN_ENTRY, setup_type,
+            )
+            self._pending_entry_signals = None
+            self._reset_breakout_state()
+            return []
+
+        preflight_signal = Signal(
+            side="buy",
+            price=limit_price,
+            amount=float(opt_contracts),
+            order_type="market",
+            reason=f"preflight {setup_type} {option_type.upper()} {selected_symbol}",
+            strategy=self.name,
+            pair=selected_symbol,
+            leverage=self.OPTIONS_LEVERAGE,
+            position_type="long",
+            exchange_id="delta",
+            metadata={
+                "setup_type": setup_type,
+                "option_type": option_type,
+                "contracts": opt_contracts,
+                "preflight": True,
+            },
+        )
+        if not self.risk_manager.approve_signal(preflight_signal):
+            self.logger.info(
+                "[%s] %s entry blocked by risk preflight before order placement",
+                self.pair,
+                setup_type,
             )
             self._pending_entry_signals = None
             self._reset_breakout_state()
@@ -4572,6 +4652,23 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         # ── PHASE B: breakeven on retrace OR -5% SL backstop ──
+        if (
+            peak_pnl_pct >= self.PROFIT_HARVEST_ARM_PCT
+            and premium_change_pct >= self.PROFIT_HARVEST_EXIT_PCT
+        ):
+            self.logger.info(
+                "[%s] profit_harvest — current %+.1f%% with peak %+.1f%% "
+                "(arm=%.1f%% exit>=%.1f%%)",
+                self.option_symbol,
+                premium_change_pct,
+                peak_pnl_pct,
+                self.PROFIT_HARVEST_ARM_PCT,
+                self.PROFIT_HARVEST_EXIT_PCT,
+            )
+            return await self._do_option_exit(
+                current_premium, premium_change_pct, "profit_harvest"
+            )
+
         if phase == "B":
             phase_b_armed = (
                 peak_pnl_pct

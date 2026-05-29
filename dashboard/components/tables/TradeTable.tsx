@@ -17,8 +17,6 @@ import {
   getPositionTypeLabel,
   getPositionTypeColor,
   formatLeverage,
-  getStrategyLabel,
-  getStrategyBadgeVariant,
 } from '@/lib/utils';
 import { Badge } from '@/components/ui/Badge';
 import { ExitChip } from '@/components/ui/ExitChip';
@@ -131,7 +129,6 @@ const COLUMNS: ColumnDef[] = [
   { key: 'exchange', label: 'Exchange' },
   { key: 'exit_price', label: 'Exit', align: 'right' },
   { key: 'amount', label: 'Contracts', align: 'right' },
-  { key: 'strategy', label: 'Strategy' },
   { key: 'setup_type', label: 'Setup' },
   { key: 'gross_pnl', label: 'Gross P&L', align: 'right' },
   { key: 'fees', label: 'Fees', align: 'right' },
@@ -155,47 +152,6 @@ const STICKY_COLS: Record<string, string> = {
   price: 'left-[292px]',
 };
 const LAST_STICKY_COL = 'price';
-
-// Setup type badge colors
-const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
-  ACCEL_ENTRY:    { bg: 'bg-amber-500/10',   text: 'text-amber-400' },
-  ANTIC:          { bg: 'bg-violet-500/10',  text: 'text-violet-400' },
-  VWAP_RECLAIM:   { bg: 'bg-blue-500/10',   text: 'text-blue-400' },
-  RSI_OVERRIDE:   { bg: 'bg-purple-500/10',  text: 'text-purple-400' },
-  MOMENTUM_BURST: { bg: 'bg-orange-500/10',  text: 'text-orange-400' },
-  MOMENTUM_BURST_ENTRY: { bg: 'bg-orange-500/10', text: 'text-orange-400' },
-  MEAN_REVERT:    { bg: 'bg-cyan-500/10',    text: 'text-cyan-400' },
-  TREND_CONT:     { bg: 'bg-emerald-500/10', text: 'text-emerald-400' },
-  BB_SQUEEZE:     { bg: 'bg-red-500/10',     text: 'text-red-400' },
-  LIQ_SWEEP:      { bg: 'bg-pink-500/10',    text: 'text-pink-400' },
-  FVG_FILL:       { bg: 'bg-indigo-500/10',  text: 'text-indigo-400' },
-  BPRC_RELOAD:    { bg: 'bg-lime-500/10',    text: 'text-lime-400' },
-  VOL_DIVERGENCE: { bg: 'bg-teal-500/10',    text: 'text-teal-400' },
-  MULTI_SIGNAL:   { bg: 'bg-yellow-500/10',  text: 'text-yellow-400' },
-  MIXED:          { bg: 'bg-zinc-500/10',    text: 'text-zinc-400' },
-};
-
-function getSetupLabel(setup?: string): string {
-  if (!setup) return '—';
-  const labels: Record<string, string> = {
-    ACCEL_ENTRY: 'ACCEL',
-    ANTIC: 'ANTIC',
-    VWAP_RECLAIM: 'VWAP',
-    RSI_OVERRIDE: 'RSI OVR',
-    MOMENTUM_BURST: 'MOM BURST',
-    MOMENTUM_BURST_ENTRY: 'MOM BURST',
-    MEAN_REVERT: 'REVERT',
-    TREND_CONT: 'TREND',
-    BB_SQUEEZE: 'SQUEEZE',
-    LIQ_SWEEP: 'SWEEP',
-    FVG_FILL: 'FVG',
-    BPRC_RELOAD: 'BPRC',
-    VOL_DIVERGENCE: 'VOL DIV',
-    MULTI_SIGNAL: 'MULTI',
-    MIXED: 'MIXED',
-  };
-  return labels[setup] ?? setup;
-}
 
 function inferSetupType(trade: Trade): string | undefined {
   if (trade.setup_type && trade.setup_type.trim()) {
@@ -1060,9 +1016,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     {/* Details row */}
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
                       <span>{formatDate(trade.timestamp)}</span>
-                      <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
-                        {getStrategyLabel(trade.strategy)}
-                      </Badge>
                       {inferSetupType(trade) && (
                         <SetupChip setup={inferSetupType(trade)} />
                       )}
@@ -1375,13 +1328,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               maximumFractionDigits: 6,
                             })
                           )}
-                        </td>
-
-                        {/* Strategy */}
-                        <td className="whitespace-nowrap px-4 py-3">
-                          <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
-                            {getStrategyLabel(trade.strategy)}
-                          </Badge>
                         </td>
 
                         {/* Setup Type */}
