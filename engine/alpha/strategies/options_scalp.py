@@ -4316,6 +4316,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self,
         ticker: dict[str, Any] | None,
         option_type: str | None,
+        *,
+        entry_path: str = "unknown",
     ) -> tuple[float, dict[str, float]]:
         """GPFC #81: confidence collapsed to aligned_mom only.
 
@@ -4465,7 +4467,11 @@ class OptionsScalpStrategy(BaseStrategy):
         }
 
         # Confidence + SL + trail — raises on failure; caller decides whether to block.
-        score, breakdown = self._calculate_confidence(ticker, option_type)
+        score, breakdown = self._calculate_confidence(
+            ticker,
+            option_type,
+            entry_path=entry_path,
+        )
         sl_pct = -float(self.SL_PREMIUM_LOSS_PCT)
         sl_price = (
             round(entry_premium * (1.0 + sl_pct / 100.0), 4)
