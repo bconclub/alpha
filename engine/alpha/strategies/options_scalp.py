@@ -311,7 +311,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # fires when vol is at least MOM_BURST_MIN_IV_FOR_ENTRY. The two paths
     # are mutually-exclusive by IV, so the bot picks the right setup for
     # the regime instead of forcing one strategy onto every market.
-    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK", "TREND_FLOW"})
+    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK"})
 
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
     # ticker.info.mark_vol (Delta returns it as a decimal: 0.30 = 30%).
