@@ -311,7 +311,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # fires when vol is at least MOM_BURST_MIN_IV_FOR_ENTRY. The two paths
     # are mutually-exclusive by IV, so the bot picks the right setup for
     # the regime instead of forcing one strategy onto every market.
-    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK"})
+    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK", "TREND_FLOW"})
 
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
     # ticker.info.mark_vol (Delta returns it as a decimal: 0.30 = 30%).
@@ -339,14 +339,17 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # GPFC #88: directional staircase entry. This catches the market shape
     # where several 5m candles walk one way without a clean pullback trigger.
-    TREND_FLOW_15M_PCT = 0.35
-    TREND_FLOW_5M_PCT = 0.08
+    TREND_FLOW_15M_PCT = 0.75
+    TREND_FLOW_5M_PCT = 0.25
     TREND_FLOW_MAX_15M_PCT = 1.00
     TREND_FLOW_MAX_5M_PCT = 0.90
     TREND_FLOW_MIN_TURNOVER_USD = 4_000_000
     TREND_FLOW_MAX_SPREAD_PCT = 8.0
     TREND_FLOW_MAX_MARK_GAP_PCT = 6.0
-    TREND_FLOW_COOLDOWN_SEC = 180.0
+    TREND_FLOW_MIN_ALIGNED_60S_PCT = 0.18
+    TREND_FLOW_MIN_ALIGNED_20S_PCT = 0.07
+    TREND_FLOW_MIN_ACCEL_RATIO = 0.50
+    TREND_FLOW_COOLDOWN_SEC = 900.0
 
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
@@ -2405,6 +2408,29 @@ class OptionsScalpStrategy(BaseStrategy):
             direction = "UP"
         if not direction:
             return []
+        option_type = "call" if direction == "UP" else "put"
+        direction_sign = 1.0 if direction == "UP" else -1.0
+        aligned_60s = direction_sign * self._calc_underlying_mom(60.0)
+        aligned_20s = direction_sign * self._calc_underlying_mom(20.0)
+        accel = self._underlying_acceleration_ratio()
+        if (
+            aligned_60s < self.TREND_FLOW_MIN_ALIGNED_60S_PCT
+            or aligned_20s < self.TREND_FLOW_MIN_ALIGNED_20S_PCT
+            or accel < self.TREND_FLOW_MIN_ACCEL_RATIO
+        ):
+            self.logger.info(
+                "[%s] TREND_FLOW_FRESHNESS_SKIP: dir=%s 60s=%+.2f%%/%.2f%% "
+                "20s=%+.2f%%/%.2f%% accel=%.2f/%.2f",
+                self.pair,
+                direction,
+                aligned_60s,
+                self.TREND_FLOW_MIN_ALIGNED_60S_PCT,
+                aligned_20s,
+                self.TREND_FLOW_MIN_ALIGNED_20S_PCT,
+                accel,
+                self.TREND_FLOW_MIN_ACCEL_RATIO,
+            )
+            return []
         if (
             abs(move_15m) > self.TREND_FLOW_MAX_15M_PCT
             or abs(move_5m) > self.TREND_FLOW_MAX_5M_PCT
@@ -2421,7 +2447,6 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        option_type = "call" if direction == "UP" else "put"
         now_utc = datetime.now(timezone.utc)
         hours_to_expiry = (self._selected_expiry - now_utc).total_seconds() / 3600
         if hours_to_expiry < self.MIN_EXPIRY_HOURS:
