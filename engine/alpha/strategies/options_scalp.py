@@ -335,12 +335,14 @@ class OptionsScalpStrategy(BaseStrategy):
     MOVE_PULLBACK_WAKE_COOLDOWN_SEC = 2.0
     MOVE_PULLBACK_MIN_TURNOVER_USD = 5_000_000
     MOVE_PULLBACK_MAX_SPREAD_PCT = 8.0
-    MOVE_PULLBACK_MAX_MARK_GAP_PCT = 5.0
+    MOVE_PULLBACK_MAX_MARK_GAP_PCT = 7.0
 
     # GPFC #88: directional staircase entry. This catches the market shape
     # where several 5m candles walk one way without a clean pullback trigger.
     TREND_FLOW_15M_PCT = 0.35
     TREND_FLOW_5M_PCT = 0.08
+    TREND_FLOW_MAX_15M_PCT = 1.00
+    TREND_FLOW_MAX_5M_PCT = 0.90
     TREND_FLOW_MIN_TURNOVER_USD = 4_000_000
     TREND_FLOW_MAX_SPREAD_PCT = 8.0
     TREND_FLOW_MAX_MARK_GAP_PCT = 6.0
@@ -2402,6 +2404,21 @@ class OptionsScalpStrategy(BaseStrategy):
         elif move_15m >= self.TREND_FLOW_15M_PCT and move_5m >= self.TREND_FLOW_5M_PCT:
             direction = "UP"
         if not direction:
+            return []
+        if (
+            abs(move_15m) > self.TREND_FLOW_MAX_15M_PCT
+            or abs(move_5m) > self.TREND_FLOW_MAX_5M_PCT
+        ):
+            self.logger.info(
+                "[%s] TREND_FLOW_EXTENDED_SKIP: dir=%s 15m=%+.2f%%/%.2f%% "
+                "5m=%+.2f%%/%.2f%%",
+                self.pair,
+                direction,
+                move_15m,
+                self.TREND_FLOW_MAX_15M_PCT,
+                move_5m,
+                self.TREND_FLOW_MAX_5M_PCT,
+            )
             return []
 
         option_type = "call" if direction == "UP" else "put"
