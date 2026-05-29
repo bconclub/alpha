@@ -295,6 +295,9 @@ class OptionsScalpStrategy(BaseStrategy):
     ENTRY_DELTA_MIN_ABS = 0.40
     ENTRY_DELTA_MAX_ABS = 0.65
     ENTRY_MIN_IV = 0.40
+    SQUEEZE_MIN_IV = 0.20
+    MOVE_PULLBACK_MIN_IV = 0.35
+    TREND_FLOW_MIN_IV = 0.35
     # GPFC #72: confidence floor — sub-60 zone was 0/3 in last 20 trades, with
     # two -16% catastrophic stops. Block entries below this score; no behavior
     # change above 60.
@@ -313,7 +316,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
     # ticker.info.mark_vol (Delta returns it as a decimal: 0.30 = 30%).
     SQUEEZE_REQUIRES_LOW_VOL = True
-    SQUEEZE_MAX_IV_FOR_ENTRY = 0.35   # block SQUEEZE above this IV
+    SQUEEZE_MAX_IV_FOR_ENTRY = 0.40   # block SQUEEZE above this IV
     MOM_BURST_MIN_IV_FOR_ENTRY = 0.25  # block MOM_BURST below this IV
 
     # GPFC #86: websocket-driven move/pullback entry.
@@ -2293,7 +2296,10 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        passes_quality, skip_reason = self._passes_entry_quality(selected_ticker)
+        passes_quality, skip_reason = self._passes_entry_quality(
+            selected_ticker,
+            min_iv=self.MOVE_PULLBACK_MIN_IV,
+        )
         if not passes_quality:
             self.logger.info(
                 "[%s] ENTRY_QUALITY_SKIP — %s (MOVE_PULLBACK %s)",
@@ -2457,7 +2463,10 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        passes_quality, skip_reason = self._passes_entry_quality(ticker)
+        passes_quality, skip_reason = self._passes_entry_quality(
+            ticker,
+            min_iv=self.TREND_FLOW_MIN_IV,
+        )
         if not passes_quality:
             self.logger.info(
                 "[%s] ENTRY_QUALITY_SKIP — %s (TREND_FLOW %s)",
@@ -2981,7 +2990,10 @@ class OptionsScalpStrategy(BaseStrategy):
             return
 
         # GPFC #67: entry-quality filter on the chosen strike's ticker.
-        passes_quality, skip_reason = self._passes_entry_quality(selected_ticker)
+        passes_quality, skip_reason = self._passes_entry_quality(
+            selected_ticker,
+            min_iv=self.SQUEEZE_MIN_IV,
+        )
         if not passes_quality:
             self.logger.info(
                 "[%s] ENTRY_QUALITY_SKIP — %s (SQUEEZE %s)",
@@ -4259,6 +4271,8 @@ class OptionsScalpStrategy(BaseStrategy):
     def _passes_entry_quality(
         self,
         ticker: dict[str, Any] | None,
+        *,
+        min_iv: float | None = None,
     ) -> tuple[bool, str]:
         """GPFC #67: liquidity + moneyness + IV gate before any entry fires.
 
@@ -4290,8 +4304,9 @@ class OptionsScalpStrategy(BaseStrategy):
             skip_reasons.append(f"delta_too_low_{delta_abs:.2f}")
         if delta_abs > self.ENTRY_DELTA_MAX_ABS:
             skip_reasons.append(f"delta_too_high_{delta_abs:.2f}")
-        if iv < self.ENTRY_MIN_IV:
-            skip_reasons.append(f"iv_low_{iv:.2f}")
+        iv_floor = self.ENTRY_MIN_IV if min_iv is None else min_iv
+        if iv < iv_floor:
+            skip_reasons.append(f"iv_low_{iv:.2f}_min_{iv_floor:.2f}")
 
         if skip_reasons:
             return False, ", ".join(skip_reasons)
