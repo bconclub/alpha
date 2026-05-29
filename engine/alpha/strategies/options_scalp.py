@@ -753,7 +753,7 @@ class OptionsScalpStrategy(BaseStrategy):
     async def on_start(self) -> None:
         """Load option markets on startup + restore position state from DB."""
         self.logger.info(
-            "[CONFIDENCE] GPFC #81 model: conf = aligned_mom (top component). "
+            "[CONFIDENCE] GPFC #88 model: event entries use aligned_mom; "
             "Gate ≥ %.0f. Setups enabled: %s.",
             self.CONFIDENCE_MIN_ENTRY,
             ",".join(sorted(self.ENABLED_SETUPS)),
