@@ -162,6 +162,7 @@ function inferSetupType(trade: Trade): string | undefined {
   const haystack = `${trade.reason ?? ''} ${trade.order_id ?? ''}`.toUpperCase();
   if (haystack.includes('MOMENTUM_BURST_ENTRY')) return 'MOMENTUM_BURST_ENTRY';
   if (haystack.includes('MOMENTUM_BURST')) return 'MOMENTUM_BURST';
+  if (haystack.includes('TREND_FLOW')) return 'TREND_FLOW';
   if (haystack.includes('BB_SQUEEZE_BREAKOUT')) return 'BB_SQUEEZE';
   if (haystack.includes('BB_SQUEEZE')) return 'BB_SQUEEZE';
   return undefined;

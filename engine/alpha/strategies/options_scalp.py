@@ -308,7 +308,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # fires when vol is at least MOM_BURST_MIN_IV_FOR_ENTRY. The two paths
     # are mutually-exclusive by IV, so the bot picks the right setup for
     # the regime instead of forcing one strategy onto every market.
-    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK"})
+    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK", "TREND_FLOW"})
 
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
     # ticker.info.mark_vol (Delta returns it as a decimal: 0.30 = 30%).
@@ -333,6 +333,15 @@ class OptionsScalpStrategy(BaseStrategy):
     MOVE_PULLBACK_MIN_TURNOVER_USD = 5_000_000
     MOVE_PULLBACK_MAX_SPREAD_PCT = 8.0
     MOVE_PULLBACK_MAX_MARK_GAP_PCT = 5.0
+
+    # GPFC #88: directional staircase entry. This catches the market shape
+    # where several 5m candles walk one way without a clean pullback trigger.
+    TREND_FLOW_15M_PCT = 0.35
+    TREND_FLOW_5M_PCT = 0.08
+    TREND_FLOW_MIN_TURNOVER_USD = 4_000_000
+    TREND_FLOW_MAX_SPREAD_PCT = 8.0
+    TREND_FLOW_MAX_MARK_GAP_PCT = 6.0
+    TREND_FLOW_COOLDOWN_SEC = 180.0
 
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
@@ -567,6 +576,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #86: websocket impulse/pullback state.
         self._move_pullback_state: dict[str, Any] | None = None
         self._last_ws_wake_at: float = 0.0
+        self._last_trend_flow_entry_at: float = 0.0
 
 
     # ==================================================================
@@ -2049,6 +2059,10 @@ class OptionsScalpStrategy(BaseStrategy):
         if move_pullback_signals:
             return move_pullback_signals
 
+        trend_flow_signals = await self._check_trend_flow_entry()
+        if trend_flow_signals:
+            return trend_flow_signals
+
         # STEP 1: DETECT BB SQUEEZE
         squeeze_result = await self._detect_squeeze()
         if squeeze_result is None:
@@ -2349,6 +2363,154 @@ class OptionsScalpStrategy(BaseStrategy):
             turnover_usd / 1_000_000,
         )
         self._move_pullback_state = None
+        return await self._execute_breakout_entry(entry_ask)
+
+    async def _check_trend_flow_entry(self) -> list[Signal]:
+        """Enter on sustained 5m/15m directional flow without waiting for pullback."""
+        if "TREND_FLOW" not in self.ENABLED_SETUPS:
+            return []
+        now = time.monotonic()
+        if now - self._last_trend_flow_entry_at < self.TREND_FLOW_COOLDOWN_SEC:
+            return []
+        if not self._selected_expiry or not self.options_exchange:
+            return []
+
+        ohlcv = await self._get_ohlcv_for_squeeze()
+        if not ohlcv or len(ohlcv) < 20:
+            return []
+
+        try:
+            close_now = float(ohlcv[-1][4])
+            close_5m_ago = float(ohlcv[-6][4])
+            close_15m_ago = float(ohlcv[-16][4])
+        except (TypeError, ValueError, IndexError):
+            return []
+        if close_now <= 0 or close_5m_ago <= 0 or close_15m_ago <= 0:
+            return []
+
+        move_5m = (close_now - close_5m_ago) / close_5m_ago * 100.0
+        move_15m = (close_now - close_15m_ago) / close_15m_ago * 100.0
+        direction: str | None = None
+        if move_15m <= -self.TREND_FLOW_15M_PCT and move_5m <= -self.TREND_FLOW_5M_PCT:
+            direction = "DOWN"
+        elif move_15m >= self.TREND_FLOW_15M_PCT and move_5m >= self.TREND_FLOW_5M_PCT:
+            direction = "UP"
+        if not direction:
+            return []
+
+        option_type = "call" if direction == "UP" else "put"
+        now_utc = datetime.now(timezone.utc)
+        hours_to_expiry = (self._selected_expiry - now_utc).total_seconds() / 3600
+        if hours_to_expiry < self.MIN_EXPIRY_HOURS:
+            return []
+
+        spot = float(self._last_spot_price or close_now)
+        if spot <= 0:
+            return []
+        self._last_spot_price = spot
+
+        atm_strike = self._get_atm_strike(spot)
+        if atm_strike is None:
+            return []
+        self._cached_target_strike = atm_strike
+
+        selected_symbol = self._build_option_symbol(atm_strike, option_type, self._selected_expiry)
+        if not selected_symbol:
+            return []
+
+        try:
+            ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+            entry_ask = float(ticker.get("ask") or ticker.get("bid") or 0)
+        except Exception as e:
+            self.logger.debug("[%s] TREND_FLOW ticker failed for %s: %s", self.pair, selected_symbol, e)
+            return []
+        if entry_ask < self.MIN_PREMIUM_USD:
+            return []
+
+        bid = 0.0
+        try:
+            bid = float(ticker.get("bid") or 0)
+        except (TypeError, ValueError):
+            bid = 0.0
+        if bid > 0:
+            spread_pct = (entry_ask - bid) / entry_ask * 100.0
+            if spread_pct > self.TREND_FLOW_MAX_SPREAD_PCT:
+                self.logger.info(
+                    "[%s] TREND_FLOW_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
+                    self.pair,
+                    selected_symbol,
+                    spread_pct,
+                    self.TREND_FLOW_MAX_SPREAD_PCT,
+                )
+                return []
+
+        exec_snapshot = self._entry_execution_snapshot(ticker, entry_ask, option_type)
+        mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
+        if mark_gap_pct is not None and mark_gap_pct > self.TREND_FLOW_MAX_MARK_GAP_PCT:
+            self.logger.info(
+                "[%s] TREND_FLOW_EXEC_SKIP: %s ask too far above mark "
+                "(gap=%.2f%% > %.2f%%)",
+                self.pair,
+                selected_symbol,
+                mark_gap_pct,
+                self.TREND_FLOW_MAX_MARK_GAP_PCT,
+            )
+            return []
+
+        passes_quality, skip_reason = self._passes_entry_quality(ticker)
+        if not passes_quality:
+            self.logger.info(
+                "[%s] ENTRY_QUALITY_SKIP — %s (TREND_FLOW %s)",
+                self.pair,
+                skip_reason,
+                selected_symbol,
+            )
+            return []
+
+        info = ticker.get("info") or {}
+        try:
+            turnover_usd = float(info.get("turnover_usd", 0) or 0)
+        except (TypeError, ValueError):
+            turnover_usd = 0.0
+        if turnover_usd < self.TREND_FLOW_MIN_TURNOVER_USD:
+            self.logger.info(
+                "[%s] TREND_FLOW_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM",
+                self.pair,
+                selected_symbol,
+                turnover_usd / 1_000_000,
+                self.TREND_FLOW_MIN_TURNOVER_USD / 1_000_000,
+            )
+            return []
+
+        contracts = self._calculate_option_contracts(entry_ask, confidence=0.72)
+        if contracts < 1:
+            return []
+
+        self._breakout_direction = direction
+        self._breakout_option_type = option_type
+        self._breakout_symbol = selected_symbol
+        self._breakout_strike = atm_strike
+        self._breakout_contracts = contracts
+        self._breakout_confidence = 0.72
+        self._breakout_bb_width = self._bb_width_pct
+        self._breakout_velocity_pct = abs(move_15m)
+        self._pending_entry_setup = "TREND_FLOW"
+        self._cached_bot_state = f"trend_flow:entering:{direction}"
+        self._last_trend_flow_entry_at = now
+
+        self.logger.info(
+            "[%s] TREND_FLOW_ENTRY: dir=%s 15m=%+.2f%% 5m=%+.2f%% spot=%.2f "
+            "%s $%.0f ask=$%.4f turnover=$%.2fM",
+            self.pair,
+            direction,
+            move_15m,
+            move_5m,
+            spot,
+            option_type.upper(),
+            atm_strike,
+            entry_ask,
+            turnover_usd / 1_000_000,
+        )
         return await self._execute_breakout_entry(entry_ask)
 
     async def _check_momentum_burst_entry(self) -> list[Signal]:
@@ -3191,6 +3353,7 @@ class OptionsScalpStrategy(BaseStrategy):
         _entry_path = {
             "SQUEEZE": "squeeze_confirmed",
             "MOVE_PULLBACK": "move_pullback",
+            "TREND_FLOW": "trend_flow",
         }.get(setup_type, "mom_burst")
         try:
             self._pending_entry_signals = self._build_entry_metadata(
@@ -3395,6 +3558,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_action = {
             "SQUEEZE": "SQUEEZE_FILL",
             "MOVE_PULLBACK": "MOVE_PULLBACK_FILL",
+            "TREND_FLOW": "TREND_FLOW_FILL",
         }.get(setup_type, "MOMENTUM_BURST_FILL")
         self._last_action_at = time.time()
 
@@ -3460,6 +3624,18 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             self._entry_context = (
                 f"MOVE_PULLBACK dir={self._breakout_direction} mom={self._underlying_momentum_pct():+.2f}% "
+                f"ask=${premium:.4f} conf={entry_confidence:.2f}"
+            )
+        elif setup_type == "TREND_FLOW":
+            self.logger.info(
+                "[%s] POSITION LOCKED â€” %s x%d @ $%.4f (trend flow entry)",
+                self.pair,
+                option_type.upper(),
+                opt_contracts,
+                fill_price,
+            )
+            self._entry_context = (
+                f"TREND_FLOW dir={self._breakout_direction} flow={self._breakout_velocity_pct:.2f}% "
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
             )
         else:
@@ -4205,6 +4381,13 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # GPFC #81: score = aligned_mom only (other components observed-only).
         score = round(float(breakdown.get("aligned_mom", 0.0)), 1)
+        if entry_path == "trend_flow":
+            flow_pct = abs(float(getattr(self, "_breakout_velocity_pct", 0.0) or 0.0))
+            # GPFC #88: TREND_FLOW is deliberately a 15m staircase setup.
+            # Do not let a flat final 60s window block a valid sustained move.
+            flow_score = max(0.0, min(100.0, flow_pct / self.TREND_FLOW_15M_PCT * 60.0))
+            breakdown["trend_flow"] = round(flow_score, 1)
+            score = max(score, round(flow_score, 1))
         score = max(0.0, min(100.0, score))
         # Round each component for clean storage.
         breakdown = {k: round(v, 1) for k, v in breakdown.items()}
