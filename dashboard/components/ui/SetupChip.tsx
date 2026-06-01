@@ -5,6 +5,7 @@ const SETUP_STYLES: Record<string, { bg: string; text: string; ring: string }> =
   SQUEEZE:   { bg: "bg-purple-500/15", text: "text-purple-400", ring: "ring-purple-500/30" },
   PULLBACK:  { bg: "bg-cyan-500/15", text: "text-cyan-300", ring: "ring-cyan-500/30" },
   TREND_FLOW: { bg: "bg-emerald-500/15", text: "text-emerald-300", ring: "ring-emerald-500/30" },
+  FVG_CHOCH: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
 };
 
 const FALLBACK = {
@@ -28,6 +29,9 @@ function canonical(setup: string): string {
   if (u === "TREND_FLOW" || u === "TREND") {
     return "TREND_FLOW";
   }
+  if (u === "FVG_CHOCH" || u === "FVG_REVERSAL" || u === "FVG_REVERSE") {
+    return "FVG_CHOCH";
+  }
   return u;
 }
 
@@ -35,7 +39,13 @@ export function SetupChip({ setup }: { setup: string | null | undefined }) {
   if (!setup) return <span className="text-zinc-600">—</span>;
   const key = canonical(setup);
   const style = SETUP_STYLES[key] || FALLBACK;
-  const label = key === "PULLBACK" ? "Pullback" : key === "TREND_FLOW" ? "Trend Flow" : key.replace("_", " ");
+  const label = key === "PULLBACK"
+    ? "Pullback"
+    : key === "TREND_FLOW"
+      ? "Trend Flow"
+      : key === "FVG_CHOCH"
+        ? "FVG CHoCH"
+        : key.replace("_", " ");
   return (
     <span
       className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold tracking-wide ring-1 ring-inset ${style.bg} ${style.text} ${style.ring}`}

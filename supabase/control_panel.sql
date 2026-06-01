@@ -36,6 +36,7 @@ INSERT INTO setup_config (setup_type, enabled) VALUES
   ('VWAP_RECLAIM', true),
   ('TREND_CONT', true),
   ('MOMENTUM_BURST', true),
+  ('FVG_CHOCH', true),
   ('MEAN_REVERT', true),
   ('MULTI_SIGNAL', true),
   ('MIXED', true)

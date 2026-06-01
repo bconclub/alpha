@@ -311,7 +311,13 @@ class OptionsScalpStrategy(BaseStrategy):
     # fires when vol is at least MOM_BURST_MIN_IV_FOR_ENTRY. The two paths
     # are mutually-exclusive by IV, so the bot picks the right setup for
     # the regime instead of forcing one strategy onto every market.
-    ENABLED_SETUPS: frozenset[str] = frozenset({"MOM_BURST", "SQUEEZE", "MOVE_PULLBACK", "TREND_FLOW"})
+    ENABLED_SETUPS: frozenset[str] = frozenset({
+        "MOM_BURST",
+        "SQUEEZE",
+        "MOVE_PULLBACK",
+        "TREND_FLOW",
+        "FVG_CHOCH",
+    })
 
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
     # ticker.info.mark_vol (Delta returns it as a decimal: 0.30 = 30%).
@@ -350,6 +356,22 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_FLOW_MIN_ALIGNED_20S_PCT = 0.07
     TREND_FLOW_MIN_ACCEL_RATIO = 0.50
     TREND_FLOW_COOLDOWN_SEC = 900.0
+
+    # GPFC #91: ICT-style location + structure setup.
+    # The bot may only enter after price reacts at a 15m fair-value-gap midpoint,
+    # prints a 1m change of character, then retests the 1m FVG that caused it.
+    FVG_CHOCH_MIN_15M_GAP_PCT = 0.06
+    FVG_CHOCH_MIN_1M_GAP_PCT = 0.015
+    FVG_CHOCH_ZONE_LOOKBACK_15M = 72
+    FVG_CHOCH_CHOCH_LOOKBACK_1M = 12
+    FVG_CHOCH_RETEST_TOLERANCE_PCT = 0.04
+    FVG_CHOCH_MAX_ZONE_AGE_15M = 48
+    FVG_CHOCH_MIN_TURNOVER_USD = 4_000_000
+    FVG_CHOCH_MIN_IV = 0.25
+    FVG_CHOCH_MAX_SPREAD_PCT = 8.0
+    FVG_CHOCH_MAX_MARK_GAP_PCT = 6.0
+    FVG_CHOCH_COOLDOWN_SEC = 900.0
+    FVG_CHOCH_ZONE_COOLDOWN_SEC = 3600.0
 
     # GPFC #60 (round 2): time-gate constants removed.
     # OPT_HARD_MAX_HOLD_HOURS, PHASE_BREATHING_SEC, EXPIRY_GUARD_HOURS,
@@ -585,6 +607,16 @@ class OptionsScalpStrategy(BaseStrategy):
         self._move_pullback_state: dict[str, Any] | None = None
         self._last_ws_wake_at: float = 0.0
         self._last_trend_flow_entry_at: float = 0.0
+        self._last_fvg_choch_entry_at: float = 0.0
+        self._fvg_choch_zone_cooldowns: dict[str, float] = {}
+        self._last_fvg_choch_signal: dict[str, Any] | None = None
+        self._last_fvg_choch_state: dict[str, Any] = {
+            "status": "WAITING",
+            "reason": "waiting_for_15m_fvg_response",
+        }
+        self._fvg_choch_pending: dict[str, Any] | None = None
+        self._cached_ohlcv_15m: list[list[float]] | None = None
+        self._cached_ohlcv_15m_time: float = 0.0
 
 
     # ==================================================================
@@ -1586,6 +1618,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "underlying_vs_position_pct": underlying_vs_position,
             "trail_armed": trail_armed,
             "trail_first_activation_pct": self.OPT_TRAIL_TIERS[0][0],
+            "fvg_choch": self._last_fvg_choch_state,
         }
 
         state = {
@@ -1639,6 +1672,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 "mb_min_turnover_usd": self.MOM_BURST_MIN_TURNOVER_USD,
                 "confidence_min_entry": self.CONFIDENCE_MIN_ENTRY,
                 "entry_min_turnover_usd": self.ENTRY_MIN_TURNOVER_USD,
+                "fvg_choch_min_turnover_usd": self.FVG_CHOCH_MIN_TURNOVER_USD,
+                "fvg_choch_min_iv": self.FVG_CHOCH_MIN_IV,
                 "phase_b_protect_arm_pct": self.PHASE_B_BREAKEVEN_ARM_PCT,
                 "phase_b_protect_arm_buffer_pct": self.PHASE_B_BREAKEVEN_ARM_BUFFER_PCT,
                 "phase_b_protect_exit_pct": self.PHASE_B_BREAKEVEN_EXIT_PCT,
@@ -2063,6 +2098,10 @@ class OptionsScalpStrategy(BaseStrategy):
         if self._breakout_pending:
             return await self._check_breakout_confirmation()
 
+        fvg_choch_signals = await self._check_fvg_choch_entry()
+        if fvg_choch_signals:
+            return fvg_choch_signals
+
         move_pullback_signals = await self._check_move_pullback_entry()
         if move_pullback_signals:
             return move_pullback_signals
@@ -2162,6 +2201,415 @@ class OptionsScalpStrategy(BaseStrategy):
             )
         self._cached_bot_state = "squeeze:waiting_for_breakout"
         return []
+
+    async def _get_ohlcv_15m_for_fvg(self) -> list[list[float]] | None:
+        """Fetch 15m candles for FVG/CHoCH location detection."""
+        now = time.monotonic()
+        if (
+            self._cached_ohlcv_15m
+            and (now - self._cached_ohlcv_15m_time) < self._OHLCV_CACHE_SEC
+        ):
+            return self._cached_ohlcv_15m
+        if not self.futures_exchange:
+            return None
+        try:
+            ohlcv = await self.futures_exchange.fetch_ohlcv(
+                self.pair, "15m", limit=self.FVG_CHOCH_ZONE_LOOKBACK_15M
+            )
+            if not ohlcv or len(ohlcv) < 20:
+                return None
+            self._cached_ohlcv_15m = ohlcv
+            self._cached_ohlcv_15m_time = now
+            return ohlcv
+        except Exception as e:
+            self.logger.debug("[%s] fetch_ohlcv 15m failed: %s", self.pair, e)
+            return None
+
+    def _find_fvg_zones(
+        self,
+        candles: list[list[float]],
+        *,
+        min_gap_pct: float,
+        max_age: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return bullish/bearish fair-value gaps from OHLCV candles."""
+        zones: list[dict[str, Any]] = []
+        if len(candles) < 3:
+            return zones
+        last_idx = len(candles) - 1
+        for i in range(2, len(candles)):
+            c1 = candles[i - 2]
+            c3 = candles[i]
+            if max_age is not None and last_idx - i > max_age:
+                continue
+            c1_high = float(c1[2])
+            c1_low = float(c1[3])
+            c3_high = float(c3[2])
+            c3_low = float(c3[3])
+            if c1_high <= 0 or c1_low <= 0 or c3_high <= 0 or c3_low <= 0:
+                continue
+
+            if c1_high < c3_low:
+                gap_low = c1_high
+                gap_high = c3_low
+                mid = (gap_low + gap_high) / 2.0
+                gap_pct = (gap_high - gap_low) / mid * 100.0 if mid > 0 else 0.0
+                if gap_pct >= min_gap_pct:
+                    zones.append({
+                        "type": "bullish",
+                        "direction": "UP",
+                        "low": gap_low,
+                        "high": gap_high,
+                        "mid": mid,
+                        "gap_pct": gap_pct,
+                        "index": i,
+                        "age": last_idx - i,
+                        "ts": c3[0],
+                    })
+            if c1_low > c3_high:
+                gap_low = c3_high
+                gap_high = c1_low
+                mid = (gap_low + gap_high) / 2.0
+                gap_pct = (gap_high - gap_low) / mid * 100.0 if mid > 0 else 0.0
+                if gap_pct >= min_gap_pct:
+                    zones.append({
+                        "type": "bearish",
+                        "direction": "DOWN",
+                        "low": gap_low,
+                        "high": gap_high,
+                        "mid": mid,
+                        "gap_pct": gap_pct,
+                        "index": i,
+                        "age": last_idx - i,
+                        "ts": c3[0],
+                    })
+        return zones
+
+    def _active_15m_fvg_response(
+        self,
+        zones: list[dict[str, Any]],
+        candles_1m: list[list[float]],
+    ) -> dict[str, Any] | None:
+        """Find a recent 15m FVG midpoint response aligned with current price."""
+        if not zones or len(candles_1m) < 3:
+            return None
+        last = candles_1m[-1]
+        recent = candles_1m[-3:]
+        close = float(last[4])
+        best: dict[str, Any] | None = None
+        for zone in reversed(zones):
+            low = float(zone["low"])
+            high = float(zone["high"])
+            mid = float(zone["mid"])
+            direction = str(zone["direction"])
+            touched = any(float(c[2]) >= low and float(c[3]) <= high for c in recent)
+            if not touched:
+                continue
+            if direction == "DOWN":
+                rejected = any(float(c[2]) >= mid for c in recent) and close <= mid
+            else:
+                rejected = any(float(c[3]) <= mid for c in recent) and close >= mid
+            if not rejected:
+                continue
+            zone_id = (
+                f"{self._base_asset}:{zone['type']}:{int(zone['ts'])}:"
+                f"{low:.2f}:{high:.2f}"
+            )
+            if self._fvg_choch_zone_cooldowns.get(zone_id, 0.0) > time.monotonic():
+                self._last_fvg_choch_state = {
+                    "status": "COOLDOWN",
+                    "reason": "zone_cooldown",
+                    "direction": direction,
+                    "zone_mid": round(mid, 4),
+                }
+                continue
+            candidate = dict(zone)
+            candidate["zone_id"] = zone_id
+            best = candidate
+            break
+        return best
+
+    def _detect_1m_choch_retest(
+        self,
+        candles: list[list[float]],
+        direction: str,
+    ) -> dict[str, Any] | None:
+        """Detect 1m CHoCH and a retest into the FVG that produced the break."""
+        lookback = max(self.FVG_CHOCH_CHOCH_LOOKBACK_1M, 6)
+        if len(candles) < lookback + 4:
+            return None
+
+        recent = candles[-(lookback + 4):]
+        last = recent[-1]
+        prev = recent[:-1]
+        close = float(last[4])
+
+        pending = self._fvg_choch_pending
+        if pending and pending.get("direction") == direction:
+            age = int((float(last[0]) - float(pending.get("created_ts", last[0]))) / 60_000)
+            if age > 10:
+                self._fvg_choch_pending = None
+            else:
+                low = float(pending["fvg_low"])
+                high = float(pending["fvg_high"])
+                mid = float(pending["fvg_mid"])
+                if direction == "UP":
+                    retested = float(last[3]) <= high and close >= mid
+                else:
+                    retested = float(last[2]) >= low and close <= mid
+                if retested:
+                    result = dict(pending)
+                    result["retest_age_bars"] = age
+                    self._fvg_choch_pending = None
+                    return result
+
+        if direction == "UP":
+            structure_level = max(float(c[2]) for c in prev[-lookback:])
+            if close <= structure_level:
+                return None
+            option_type = "call"
+        elif direction == "DOWN":
+            structure_level = min(float(c[3]) for c in prev[-lookback:])
+            if close >= structure_level:
+                return None
+            option_type = "put"
+        else:
+            return None
+
+        zones = self._find_fvg_zones(
+            recent,
+            min_gap_pct=self.FVG_CHOCH_MIN_1M_GAP_PCT,
+            max_age=8,
+        )
+        zones = [z for z in zones if z["direction"] == direction]
+        if not zones:
+            return None
+        zone = zones[-1]
+        low = float(zone["low"])
+        high = float(zone["high"])
+        mid = float(zone["mid"])
+
+        impulse_low = min(float(c[3]) for c in recent[-lookback:])
+        impulse_high = max(float(c[2]) for c in recent[-lookback:])
+        if impulse_high <= impulse_low:
+            return None
+        if direction == "UP":
+            fib_618 = impulse_high - 0.618 * (impulse_high - impulse_low)
+        else:
+            fib_618 = impulse_low + 0.618 * (impulse_high - impulse_low)
+        tolerance = close * self.FVG_CHOCH_RETEST_TOLERANCE_PCT / 100.0
+        fib_aligned = (low - tolerance) <= fib_618 <= (high + tolerance)
+        if not fib_aligned:
+            return None
+
+        self._fvg_choch_pending = {
+            "direction": direction,
+            "option_type": option_type,
+            "structure_level": structure_level,
+            "fvg_low": low,
+            "fvg_high": high,
+            "fvg_mid": mid,
+            "fvg_gap_pct": float(zone["gap_pct"]),
+            "fib_618": fib_618,
+            "impulse_low": impulse_low,
+            "impulse_high": impulse_high,
+            "created_ts": last[0],
+        }
+        return None
+
+    async def _check_fvg_choch_entry(self) -> list[Signal]:
+        """Enter only after 15m FVG response + 1m CHoCH + 1m FVG retest."""
+        if "FVG_CHOCH" not in self.ENABLED_SETUPS:
+            return []
+        now = time.monotonic()
+        if now - self._last_fvg_choch_entry_at < self.FVG_CHOCH_COOLDOWN_SEC:
+            self._last_fvg_choch_state = {
+                "status": "COOLDOWN",
+                "reason": "setup_cooldown",
+            }
+            return []
+        if not self._selected_expiry or not self.options_exchange:
+            return []
+
+        candles_15m = await self._get_ohlcv_15m_for_fvg()
+        candles_1m = await self._get_ohlcv_for_squeeze()
+        if not candles_15m or not candles_1m:
+            return []
+
+        zones_15m = self._find_fvg_zones(
+            candles_15m,
+            min_gap_pct=self.FVG_CHOCH_MIN_15M_GAP_PCT,
+            max_age=self.FVG_CHOCH_MAX_ZONE_AGE_15M,
+        )
+        active_zone = self._active_15m_fvg_response(zones_15m, candles_1m)
+        if not active_zone:
+            self._last_fvg_choch_state = {
+                "status": "WAITING",
+                "reason": "waiting_for_15m_fvg_response",
+                "zones_15m": len(zones_15m),
+            }
+            return []
+
+        choch = self._detect_1m_choch_retest(candles_1m, str(active_zone["direction"]))
+        if not choch:
+            pending = self._fvg_choch_pending or {}
+            self._last_fvg_choch_state = {
+                "status": "ARMED",
+                "reason": (
+                    "waiting_for_1m_fvg_retest"
+                    if pending else "waiting_for_1m_choch"
+                ),
+                "direction": active_zone["direction"],
+                "zone_mid": round(float(active_zone["mid"]), 4),
+                "fvg_1m_mid": (
+                    round(float(pending["fvg_mid"]), 4)
+                    if pending.get("fvg_mid") is not None else None
+                ),
+            }
+            return []
+
+        option_type = str(choch["option_type"])
+        direction = str(choch["direction"])
+        spot = float(self._last_spot_price or candles_1m[-1][4])
+        if spot <= 0:
+            return []
+        self._last_spot_price = spot
+        atm_strike = self._get_atm_strike(spot)
+        if atm_strike is None:
+            return []
+        self._cached_target_strike = atm_strike
+        selected_symbol = self._build_option_symbol(
+            atm_strike, option_type, self._selected_expiry
+        )
+        if not selected_symbol:
+            return []
+
+        try:
+            ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+            entry_ask = float(ticker.get("ask") or ticker.get("bid") or 0)
+        except Exception as e:
+            self.logger.debug("[%s] FVG_CHOCH ticker failed for %s: %s", self.pair, selected_symbol, e)
+            return []
+        if entry_ask < self.MIN_PREMIUM_USD:
+            return []
+
+        bid = 0.0
+        try:
+            bid = float(ticker.get("bid") or 0)
+        except (TypeError, ValueError):
+            bid = 0.0
+        if bid > 0:
+            spread_pct = (entry_ask - bid) / entry_ask * 100.0
+            if spread_pct > self.FVG_CHOCH_MAX_SPREAD_PCT:
+                self.logger.info(
+                    "[%s] FVG_CHOCH_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
+                    self.pair, selected_symbol, spread_pct, self.FVG_CHOCH_MAX_SPREAD_PCT,
+                )
+                return []
+
+        exec_snapshot = self._entry_execution_snapshot(ticker, entry_ask, option_type)
+        mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
+        if mark_gap_pct is not None and mark_gap_pct > self.FVG_CHOCH_MAX_MARK_GAP_PCT:
+            self.logger.info(
+                "[%s] FVG_CHOCH_EXEC_SKIP: %s ask too far above mark "
+                "(gap=%.2f%% > %.2f%%)",
+                self.pair, selected_symbol, mark_gap_pct, self.FVG_CHOCH_MAX_MARK_GAP_PCT,
+            )
+            return []
+
+        passes_quality, skip_reason = self._passes_entry_quality(
+            ticker,
+            min_iv=self.FVG_CHOCH_MIN_IV,
+        )
+        if not passes_quality:
+            self.logger.info(
+                "[%s] ENTRY_QUALITY_SKIP — %s (FVG_CHOCH %s)",
+                self.pair, skip_reason, selected_symbol,
+            )
+            return []
+
+        info = ticker.get("info") or {}
+        try:
+            turnover_usd = float(info.get("turnover_usd", 0) or 0)
+        except (TypeError, ValueError):
+            turnover_usd = 0.0
+        if turnover_usd < self.FVG_CHOCH_MIN_TURNOVER_USD:
+            self.logger.info(
+                "[%s] FVG_CHOCH_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM",
+                self.pair, selected_symbol, turnover_usd / 1_000_000,
+                self.FVG_CHOCH_MIN_TURNOVER_USD / 1_000_000,
+            )
+            return []
+
+        contracts = self._calculate_option_contracts(entry_ask, confidence=0.72)
+        if contracts < 1:
+            return []
+
+        confidence = 72.0
+        zone_gap = float(active_zone.get("gap_pct", 0.0) or 0.0)
+        one_min_gap = float(choch.get("fvg_gap_pct", 0.0) or 0.0)
+        if zone_gap >= self.FVG_CHOCH_MIN_15M_GAP_PCT * 2:
+            confidence += 8.0
+        if one_min_gap >= self.FVG_CHOCH_MIN_1M_GAP_PCT * 2:
+            confidence += 5.0
+        confidence = min(confidence, 88.0)
+
+        self._last_fvg_choch_signal = {
+            "confidence": confidence,
+            "direction": direction,
+            "option_type": option_type,
+            "zone_id": active_zone["zone_id"],
+            "zone_type": active_zone["type"],
+            "zone_low": round(float(active_zone["low"]), 4),
+            "zone_high": round(float(active_zone["high"]), 4),
+            "zone_mid": round(float(active_zone["mid"]), 4),
+            "zone_gap_pct": round(zone_gap, 4),
+            "choch_level": round(float(choch["structure_level"]), 4),
+            "fvg_1m_low": round(float(choch["fvg_low"]), 4),
+            "fvg_1m_high": round(float(choch["fvg_high"]), 4),
+            "fvg_1m_mid": round(float(choch["fvg_mid"]), 4),
+            "fib_618": round(float(choch["fib_618"]), 4),
+        }
+
+        self._breakout_direction = direction
+        self._breakout_option_type = option_type
+        self._breakout_symbol = selected_symbol
+        self._breakout_strike = atm_strike
+        self._breakout_contracts = contracts
+        self._breakout_confidence = confidence / 100.0
+        self._breakout_bb_width = self._bb_width_pct
+        self._breakout_velocity_pct = abs(self._calc_underlying_mom(60.0))
+        self._pending_entry_setup = "FVG_CHOCH"
+        self._cached_bot_state = f"fvg_choch:entering:{direction}"
+        self._last_fvg_choch_entry_at = now
+        self._fvg_choch_zone_cooldowns[str(active_zone["zone_id"])] = (
+            now + self.FVG_CHOCH_ZONE_COOLDOWN_SEC
+        )
+        self._last_fvg_choch_state = {
+            "status": "ENTRY",
+            "reason": "15m_fvg_1m_choch_retest",
+            **self._last_fvg_choch_signal,
+        }
+
+        self.logger.info(
+            "[%s] FVG_CHOCH_ENTRY: dir=%s zone=%s %.2f-%.2f mid=%.2f "
+            "1m_fvg=%.2f-%.2f fib618=%.2f %s $%.0f ask=$%.4f turnover=$%.2fM conf=%.0f",
+            self.pair,
+            direction,
+            active_zone["type"],
+            float(active_zone["low"]),
+            float(active_zone["high"]),
+            float(active_zone["mid"]),
+            float(choch["fvg_low"]),
+            float(choch["fvg_high"]),
+            float(choch["fib_618"]),
+            option_type.upper(),
+            atm_strike,
+            entry_ask,
+            turnover_usd / 1_000_000,
+            confidence,
+        )
+        return await self._execute_breakout_entry(entry_ask)
 
     async def _check_move_pullback_entry(self) -> list[Signal]:
         """Enter after a websocket-detected impulse retraces and re-confirms."""
@@ -3408,6 +3856,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "SQUEEZE": "squeeze_confirmed",
             "MOVE_PULLBACK": "move_pullback",
             "TREND_FLOW": "trend_flow",
+            "FVG_CHOCH": "fvg_choch",
         }.get(setup_type, "mom_burst")
         try:
             self._pending_entry_signals = self._build_entry_metadata(
@@ -3613,6 +4062,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "SQUEEZE": "SQUEEZE_FILL",
             "MOVE_PULLBACK": "MOVE_PULLBACK_FILL",
             "TREND_FLOW": "TREND_FLOW_FILL",
+            "FVG_CHOCH": "FVG_CHOCH_FILL",
         }.get(setup_type, "MOMENTUM_BURST_FILL")
         self._last_action_at = time.time()
 
@@ -3691,6 +4141,20 @@ class OptionsScalpStrategy(BaseStrategy):
             self._entry_context = (
                 f"TREND_FLOW dir={self._breakout_direction} flow={self._breakout_velocity_pct:.2f}% "
                 f"ask=${premium:.4f} conf={entry_confidence:.2f}"
+            )
+        elif setup_type == "FVG_CHOCH":
+            fvg = self._last_fvg_choch_signal or {}
+            self.logger.info(
+                "[%s] POSITION LOCKED — %s x%d @ $%.4f (FVG CHoCH entry)",
+                self.pair,
+                option_type.upper(),
+                opt_contracts,
+                fill_price,
+            )
+            self._entry_context = (
+                f"FVG_CHOCH dir={self._breakout_direction} "
+                f"zone_mid={fvg.get('zone_mid')} fvg_mid={fvg.get('fvg_1m_mid')} "
+                f"ask=${premium:.4f} conf={float(fvg.get('confidence') or entry_confidence):.2f}"
             )
         else:
             self.logger.info(
@@ -4447,6 +4911,13 @@ class OptionsScalpStrategy(BaseStrategy):
             flow_score = max(0.0, min(100.0, flow_pct / self.TREND_FLOW_15M_PCT * 60.0))
             breakdown["trend_flow"] = round(flow_score, 1)
             score = max(score, round(flow_score, 1))
+        if entry_path == "fvg_choch":
+            fvg = self._last_fvg_choch_signal or {}
+            fvg_score = float(fvg.get("confidence") or 0.0)
+            breakdown["fvg_zone"] = 100.0 if fvg.get("zone_mid") is not None else 0.0
+            breakdown["choch"] = 100.0 if fvg.get("choch_level") is not None else 0.0
+            breakdown["fvg_retest"] = 100.0 if fvg.get("fvg_1m_mid") is not None else 0.0
+            score = max(score, fvg_score)
         score = max(0.0, min(100.0, score))
         # Round each component for clean storage.
         breakdown = {k: round(v, 1) for k, v in breakdown.items()}
@@ -4507,6 +4978,8 @@ class OptionsScalpStrategy(BaseStrategy):
             "entry_path": entry_path,
             **self._entry_execution_snapshot(ticker, entry_premium, option_type),
         }
+        if entry_path == "fvg_choch" and self._last_fvg_choch_signal:
+            snapshot["fvg_choch"] = self._last_fvg_choch_signal
 
         # Confidence + SL + trail — raises on failure; caller decides whether to block.
         score, breakdown = self._calculate_confidence(
@@ -4529,7 +5002,7 @@ class OptionsScalpStrategy(BaseStrategy):
         })
         self.logger.info(
             "[%s] CONFIDENCE=%.0f bb=%.0f bb_kc=%.0f mom=%.0f fresh=%.0f "
-            "liq=%.0f money=%.0f entry_path=%s",
+            "liq=%.0f money=%.0f fvg=%.0f choch=%.0f retest=%.0f entry_path=%s",
             self.pair, score,
             breakdown.get("bb_tightness", 0),
             breakdown.get("bb_kc_quality", 0),
@@ -4537,6 +5010,9 @@ class OptionsScalpStrategy(BaseStrategy):
             breakdown.get("freshness", 0),
             breakdown.get("liquidity", 0),
             breakdown.get("moneyness", 0),
+            breakdown.get("fvg_zone", 0),
+            breakdown.get("choch", 0),
+            breakdown.get("fvg_retest", 0),
             entry_path,
         )
         return snapshot
