@@ -3293,6 +3293,82 @@ class AlphaBot:
 
             if adopted_db_id is None:
                 try:
+                    cutoff = (
+                        _dt.datetime.now(_dt.timezone.utc)
+                        - _dt.timedelta(minutes=20)
+                    ).isoformat()
+                    _recent_rows = (
+                        self.db.client.table("trades")
+                        .select("id,entry_price,contracts,amount,opened_at,metadata")
+                        .eq("pair", symbol)
+                        .eq("strategy", "options_scalp")
+                        .eq("exchange", "delta")
+                        .eq("status", "closed")
+                        .eq("exit_reason", "RECONCILE_GONE")
+                        .gte("opened_at", cutoff)
+                        .order("opened_at", desc=True)
+                        .limit(10)
+                        .execute()
+                    )
+                    for _row in _recent_rows.data or []:
+                        row_entry = float(_row.get("entry_price") or 0)
+                        row_contracts = float(
+                            _row.get("contracts") or _row.get("amount") or 0
+                        )
+                        entry_close = (
+                            row_entry <= 0
+                            or pos["entry_price"] <= 0
+                            or abs(row_entry - pos["entry_price"])
+                            <= max(0.05, pos["entry_price"] * 0.03)
+                        )
+                        contracts_close = (
+                            row_contracts <= 0
+                            or abs(row_contracts - pos["contracts"]) <= 1
+                        )
+                        if not (entry_close and contracts_close):
+                            continue
+
+                        existing_metadata = _row.get("metadata") or {}
+                        if not isinstance(existing_metadata, dict):
+                            existing_metadata = {}
+                        existing_metadata.update({
+                            "reopened_from_reconcile_gone": True,
+                            "reopened_at": iso_now(),
+                            "reopen_mark_price": pos.get("mark_price") or 0,
+                            "reopen_entry_price": pos["entry_price"],
+                            "reopen_contracts": pos["contracts"],
+                        })
+
+                        await self.db.update_trade(int(_row["id"]), {
+                            "status": "open",
+                            "exit_price": None,
+                            "closed_at": None,
+                            "pnl": None,
+                            "net_pnl": None,
+                            "pnl_pct": None,
+                            "gross_pnl": None,
+                            "exit_fee": None,
+                            "reason": "reopened_after_false_reconcile_gone",
+                            "exit_reason": None,
+                            "position_state": "open",
+                            "metadata": existing_metadata,
+                        })
+                        adopted_db_id = int(_row["id"])
+                        has_stale_db_row = True
+                        logger.warning(
+                            "ORPHAN_ADOPT: reopened recent RECONCILE_GONE row %s "
+                            "for %s x%.0f @ $%.4f instead of creating duplicate",
+                            adopted_db_id, symbol, pos["contracts"], pos["entry_price"],
+                        )
+                        break
+                except Exception as e:
+                    logger.error(
+                        "ORPHAN_ADOPT: failed to look up recent RECONCILE_GONE row "
+                        "for %s: %s - will create a new one", symbol, e,
+                    )
+
+            if adopted_db_id is None:
+                try:
                     _new_row = await self.db.log_trade({
                         "pair": symbol,
                         "exchange": "delta",

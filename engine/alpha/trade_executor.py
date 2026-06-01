@@ -1141,6 +1141,16 @@ class TradeExecutor:
                                 signal.pair, status, filled,
                             )
                             order = updated
+                        elif is_options:
+                            logger.warning(
+                                "[%s] Options position not visible after unfilled limit exit; "
+                                "retrying market reduce-only instead of marking RECONCILE_GONE",
+                                signal.pair,
+                            )
+                            try:
+                                await exchange.cancel_order(limit_order_id, signal.pair)
+                            except Exception:
+                                pass
                         else:
                             # Position gone but order shows unfilled — closed externally
                             # (liquidation, manual close, etc.). Mark position_gone.
@@ -1375,6 +1385,14 @@ class TradeExecutor:
                                 pass  # fall through to _mark_position_gone
                         # If we couldn't recover the fill, mark as position_gone
                         if order is None:
+                            if is_options:
+                                logger.error(
+                                    "[%s] Options reduce-only exit says no position, but no exit fill was found; "
+                                    "leaving DB row open for reconcile instead of marking RECONCILE_GONE",
+                                    signal.pair,
+                                )
+                                await self._notify_exit_failure(signal, e)
+                                return None
                             await self._mark_position_gone(signal)
                             return None
                     elif is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
@@ -1426,6 +1444,14 @@ class TradeExecutor:
                             except Exception:
                                 pass
                         if order is None:
+                            if is_options:
+                                logger.error(
+                                    "[%s] Options reduce-only exit says no position, but no exit fill was found; "
+                                    "leaving DB row open for reconcile instead of marking RECONCILE_GONE",
+                                    signal.pair,
+                                )
+                                await self._notify_exit_failure(signal, e)
+                                return None
                             await self._mark_position_gone(signal)
                             return None
                     if is_exit:
