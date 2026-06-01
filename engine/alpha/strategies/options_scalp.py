@@ -6776,24 +6776,12 @@ class OptionsScalpStrategy(BaseStrategy):
             )
         elif signal.reduce_only and self.in_position:
             self.logger.warning(
-                "[%s] Option EXIT rejected — clearing in_position (position likely closed externally)",
+                "[%s] Option EXIT rejected - keeping position state for next exit/reconcile cycle",
                 self.option_symbol or signal.pair,
             )
-            self.in_position = False
-            OptionsScalpStrategy._global_in_position = False
-            OptionsScalpStrategy._global_position_asset = None
-            self.option_side = None
-            self.option_symbol = None
-            self.entry_premium = 0.0
-            self.highest_premium = 0.0
-            self._trailing_active = False
-            self._peak_trail_pending_ticks = 0
-            self._position_opened_at = None
-            self.strike_price = 0.0
-            self.expiry_dt = None
-            self._last_state_write = 0.0
-            self._is_squeeze_entry = False
-            self._squeeze_breakout_time = None
+            self._consecutive_ticker_failures = 0
+            self._position_verify_failures = 0
+            return
 
     # ==================================================================
     # STATS
