@@ -287,6 +287,9 @@ class OptionsScalpStrategy(BaseStrategy):
     # yet, but it is enough edge to stop round-tripping to a red phase-B stop.
     PHASE_B_MICRO_PROTECT_ARM_PCT = 5.0
     PHASE_B_MICRO_PROTECT_EXIT_PCT = 0.0
+    PHASE_B_DEVELOPMENT_ARM_PCT = 5.0
+    PHASE_B_DEVELOPMENT_MAX_SEC = 900.0
+    PHASE_B_DEVELOPMENT_SL_PCT = -8.0
     PHASE_C_PEAK_MAX_PCT = 15.0
     PHASE_C_TRAIL_FRAC = 0.45
     PHASE_C_SL_PCT = -8.0          # GPFC #79: was -15 (trail is primary)
@@ -5687,6 +5690,23 @@ class OptionsScalpStrategy(BaseStrategy):
         aligned_mom = our_dir * self._underlying_momentum_pct()
         return aligned_mom < -threshold
 
+    def _phase_b_should_develop(
+        self,
+        peak_pnl_pct: float,
+        premium_change_pct: float,
+        now: float,
+    ) -> tuple[bool, float, bool]:
+        """Let early winners breathe before treating a quote dip as failure."""
+        if peak_pnl_pct < self.PHASE_B_DEVELOPMENT_ARM_PCT:
+            return False, 0.0, False
+        if premium_change_pct <= self.PHASE_B_DEVELOPMENT_SL_PCT:
+            return False, 0.0, False
+        position_age_sec = now - self.entry_time if self.entry_time else 0.0
+        if position_age_sec > self.PHASE_B_DEVELOPMENT_MAX_SEC:
+            return False, position_age_sec, False
+        supports, _aligned = self._underlying_still_supports_position()
+        return True, position_age_sec, supports
+
     # ==================================================================
     # EXIT LOGIC
     # ==================================================================
@@ -5955,6 +5975,9 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         if phase == "B":
+            phase_b_develop, phase_b_age_sec, phase_b_spot_supports = (
+                self._phase_b_should_develop(peak_pnl_pct, premium_change_pct, now)
+            )
             phase_b_armed = (
                 peak_pnl_pct
                 >= self.PHASE_B_BREAKEVEN_ARM_PCT
@@ -5964,6 +5987,17 @@ class OptionsScalpStrategy(BaseStrategy):
                 premium_change_pct <= self.PHASE_B_BREAKEVEN_EXIT_PCT
                 and phase_b_armed
             ):
+                if phase_b_develop and premium_change_pct > 0:
+                    self.logger.info(
+                        "[%s] breakeven DEFERRED - Phase B winner still developing "
+                        "(age=%.0fs current=%+.1f%% peak=%+.1f%% spot_support=%s)",
+                        self.option_symbol,
+                        phase_b_age_sec,
+                        premium_change_pct,
+                        peak_pnl_pct,
+                        phase_b_spot_supports,
+                    )
+                    return []
                 self.logger.info(
                     "[%s] breakeven — peak %+.1f%% protected at %+.1f%% "
                     "(arm=%.1f%% buffer=%.2f%% exit≤%.1f%%)",
@@ -5982,6 +6016,17 @@ class OptionsScalpStrategy(BaseStrategy):
                 micro_protect_armed
                 and premium_change_pct <= self.PHASE_B_MICRO_PROTECT_EXIT_PCT
             ):
+                if phase_b_develop and premium_change_pct > self.PHASE_B_SL_PCT:
+                    self.logger.info(
+                        "[%s] micro_protect DEFERRED - Phase B winner still developing "
+                        "(age=%.0fs current=%+.1f%% peak=%+.1f%% spot_support=%s)",
+                        self.option_symbol,
+                        phase_b_age_sec,
+                        premium_change_pct,
+                        peak_pnl_pct,
+                        phase_b_spot_supports,
+                    )
+                    return []
                 self.logger.info(
                     "[%s] micro_protect — peak %+.1f%% protected before red "
                     "(current=%+.1f%% arm=%.1f%% exit<=%.1f%%)",
@@ -6007,6 +6052,22 @@ class OptionsScalpStrategy(BaseStrategy):
                         self.option_symbol,
                         premium_change_pct,
                         peak_pnl_pct,
+                        self._sl_defer_count,
+                    )
+                    await self._persist_sl_defer_count()
+                    return []
+                if phase_b_develop:
+                    self._sl_defer_count += 1
+                    self.logger.info(
+                        "[%s] stop_phase_b DEFERRED - Phase B winner still developing "
+                        "(age=%.0fs current=%+.1f%% peak=%+.1f%% hard=%.1f%% "
+                        "spot_support=%s defer_count=%d)",
+                        self.option_symbol,
+                        phase_b_age_sec,
+                        premium_change_pct,
+                        peak_pnl_pct,
+                        self.PHASE_B_DEVELOPMENT_SL_PCT,
+                        phase_b_spot_supports,
                         self._sl_defer_count,
                     )
                     await self._persist_sl_defer_count()
