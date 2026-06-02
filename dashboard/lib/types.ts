@@ -52,6 +52,10 @@ export interface Trade {
   metadata?: {
     confidence?: number;
     confidence_breakdown?: Record<string, number>;
+    entry_path?: string;
+    entry_sequence?: string;
+    is_second_entry?: boolean;
+    risk_reward_ratio?: string;
     sl_pct?: number;
     sl_price?: number;
     trail_armed?: boolean;

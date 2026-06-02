@@ -35,7 +35,13 @@ function canonical(setup: string): string {
   return u;
 }
 
-export function SetupChip({ setup }: { setup: string | null | undefined }) {
+export function SetupChip({
+  setup,
+  secondEntry = false,
+}: {
+  setup: string | null | undefined;
+  secondEntry?: boolean;
+}) {
   if (!setup) return <span className="text-zinc-600">—</span>;
   const key = canonical(setup);
   const style = SETUP_STYLES[key] || FALLBACK;
@@ -48,9 +54,14 @@ export function SetupChip({ setup }: { setup: string | null | undefined }) {
         : key.replace("_", " ");
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold tracking-wide ring-1 ring-inset ${style.bg} ${style.text} ${style.ring}`}
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold tracking-wide ring-1 ring-inset ${style.bg} ${style.text} ${style.ring}`}
     >
       {label}
+      {secondEntry && (
+        <span className="rounded bg-amber-400/15 px-1 py-px text-[9px] font-bold uppercase tracking-normal text-amber-300 ring-1 ring-amber-400/30">
+          2nd
+        </span>
+      )}
     </span>
   );
 }

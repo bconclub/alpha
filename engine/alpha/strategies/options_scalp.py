@@ -5355,6 +5355,19 @@ class OptionsScalpStrategy(BaseStrategy):
         breakdown = {k: round(v, 1) for k, v in breakdown.items()}
         return score, breakdown
 
+    def _entry_risk_reward_ratio(self, entry_path: str) -> str:
+        """Planned risk:reward bucket used for dashboard review."""
+        path = (entry_path or "").lower()
+        if path == "mom_reentry":
+            return "1:3"
+        if path == "fvg_choch":
+            return "1:3"
+        if path in {"mom_burst", "move_pullback", "trend_flow"}:
+            return "1:2"
+        if path == "squeeze_confirmed":
+            return "1:1"
+        return "1:1"
+
     def _build_entry_metadata(
         self,
         ticker: dict[str, Any] | None,
@@ -5408,6 +5421,9 @@ class OptionsScalpStrategy(BaseStrategy):
                 round(self._last_spot_price, 4) if self._last_spot_price else None
             ),
             "entry_path": entry_path,
+            "entry_sequence": "second" if entry_path == "mom_reentry" else "first",
+            "is_second_entry": entry_path == "mom_reentry",
+            "risk_reward_ratio": self._entry_risk_reward_ratio(entry_path),
             **self._entry_execution_snapshot(ticker, entry_premium, option_type),
         }
         if (

@@ -137,6 +137,7 @@ const COLUMNS: ColumnDef[] = [
   { key: 'hold_time', label: 'Hold Time', align: 'right' },
   { key: 'peak_info', label: 'Peak', align: 'right' },
   { key: 'confidence', label: 'Conf', align: 'right' },
+  { key: 'risk_reward_ratio', label: 'R:R', align: 'right' },
   { key: 'exit_reason', label: 'Exit' },
   { key: 'status', label: 'Status' },
 ];
@@ -164,6 +165,33 @@ function inferSetupType(trade: Trade): string | undefined {
   if (haystack.includes('BB_SQUEEZE_BREAKOUT')) return 'BB_SQUEEZE';
   if (haystack.includes('BB_SQUEEZE')) return 'BB_SQUEEZE';
   return undefined;
+}
+
+function isSecondEntryTrade(trade: Trade): boolean {
+  const meta = trade.metadata || {};
+  const entryPath = String(meta.entry_path || '').toLowerCase();
+  const entrySequence = String(meta.entry_sequence || '').toLowerCase();
+  return meta.is_second_entry === true || entryPath === 'mom_reentry' || entrySequence === 'second';
+}
+
+function getRiskRewardRatio(trade: Trade): string {
+  const meta = trade.metadata || {};
+  const raw = meta.risk_reward_ratio;
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  if (isSecondEntryTrade(trade)) return '1:3';
+  const setup = (inferSetupType(trade) || '').toUpperCase();
+  if (setup.includes('FVG')) return '1:3';
+  if (setup.includes('MOM') || setup.includes('PULLBACK') || setup.includes('TREND')) return '1:2';
+  if (setup.includes('SQUEEZE')) return '1:1';
+  return '—';
+}
+
+function getRiskRewardColor(ratio: string): string {
+  if (ratio === '1:3') return 'text-emerald-300';
+  if (ratio === '1:2') return 'text-lime-300';
+  if (ratio === '1:1') return 'text-yellow-300';
+  if (ratio === '2:1' || ratio === '3:1') return 'text-orange-300';
+  return 'text-zinc-600';
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +676,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'peak_info' || key === 'confidence') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'peak_info' || key === 'confidence' || key === 'risk_reward_ratio') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -1016,7 +1044,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
                       <span>{formatDate(trade.timestamp)}</span>
                       {inferSetupType(trade) && (
-                        <SetupChip setup={inferSetupType(trade)} />
+                        <SetupChip setup={inferSetupType(trade)} secondEntry={isSecondEntryTrade(trade)} />
                       )}
                       {trade.leverage > 1 && (
                         <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
@@ -1029,6 +1057,9 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           {display.isUnrealized ? ' (unr)' : ''}
                         </span>
                       )}
+                      <span className={cn('font-mono font-semibold', getRiskRewardColor(getRiskRewardRatio(trade)))}>
+                        R:R {getRiskRewardRatio(trade)}
+                      </span>
                       {trade.peak_pnl != null && trade.status === 'closed' && (() => {
                         const taken = display.pnlPct ?? 0;
                         const peak = trade.peak_pnl;
@@ -1331,7 +1362,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* Setup Type */}
                         <td className="whitespace-nowrap px-4 py-3">
-                          <SetupChip setup={inferSetupType(trade)} />
+                          <SetupChip setup={inferSetupType(trade)} secondEntry={isSecondEntryTrade(trade)} />
                         </td>
 
                         {/* Gross P&L */}
@@ -1532,6 +1563,16 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               </span>
                             );
                           })()}
+                        </td>
+
+                        {/* Planned Risk:Reward */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
+                          <span
+                            className={cn('font-bold', getRiskRewardColor(getRiskRewardRatio(trade)))}
+                            title={isSecondEntryTrade(trade) ? 'Second entry re-load profile' : 'Planned entry risk:reward profile'}
+                          >
+                            {getRiskRewardRatio(trade)}
+                          </span>
                         </td>
 
                         {/* Exit Reason */}
