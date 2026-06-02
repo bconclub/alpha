@@ -295,6 +295,8 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_D_SL_PCT = -8.0          # GPFC #79: explicit per-phase
     PHASE_E_TRAIL_FRAC = 0.75
     PHASE_E_SL_PCT = -8.0          # GPFC #79: explicit per-phase
+    PHASE_TRAIL_SPOT_VETO_PCT = 0.08
+    PHASE_TRAIL_MAX_DEFER_TICKS = 2
 
     # ── GPFC #80: momentum confirmation on Phase A/B SL ───────────────────
     # Defer the SL trigger when spot is still moving in our trade direction —
@@ -485,6 +487,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #80: count Phase A/B SL deferrals while spot remains favorable.
         # Resets on entry; persisted to trades.metadata each defer.
         self._sl_defer_count: int = 0
+        self._phase_trail_defer_count: int = 0
         self.strike_price: float = 0.0
         self.expiry_dt: datetime | None = None
 
@@ -921,12 +924,17 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.option_symbol = trade_pair
                 self.entry_premium = trade.get("entry_price", 0)
                 self.entry_time = time.monotonic()
-                # GPFC #52: we can't recover pre-restart spot_at_entry; best-effort
-                # use current spot so direction comparisons don't run wild.
-                self._spot_at_entry = float(self._last_spot_price or 0)
+                metadata = trade.get("metadata") or {}
+                try:
+                    self._spot_at_entry = float(
+                        metadata.get("spot_at_entry") or self._last_spot_price or 0
+                    )
+                except (TypeError, ValueError):
+                    self._spot_at_entry = float(self._last_spot_price or 0)
                 self._entry_underlying_move = 0.15  # conservative mid-band tolerance
                 self._peak_timestamp = self.entry_time
                 self._prev_highest_premium = self.entry_premium
+                self._phase_trail_defer_count = 0
                 self._position_opened_at = (
                     trade.get("opened_at") or datetime.now(timezone.utc).isoformat()
                 )
@@ -4442,6 +4450,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._trailing_active = False
         self._peak_trail_pending_ticks = 0
         self._sl_defer_count = 0  # GPFC #80: reset on entry
+        self._phase_trail_defer_count = 0
         self.in_position = True
         self._reentry_watch = None
         self._position_setup_type = setup_type
@@ -5047,7 +5056,25 @@ class OptionsScalpStrategy(BaseStrategy):
         mom_pct = self._underlying_momentum_pct()  # signed % over 60s
         our_dir = 1.0 if self.option_side == "call" else -1.0
         aligned_move = our_dir * mom_pct
-        return aligned_move > self.PULLBACK_SPOT_VETO_PCT, aligned_move
+        if aligned_move > self.PHASE_TRAIL_SPOT_VETO_PCT:
+            return True, aligned_move
+
+        # After restart the 60s websocket buffer is cold, so use spot-vs-entry
+        # as a fallback. This keeps restored winners from exiting just because
+        # momentum history has not had a full minute to rebuild.
+        if aligned_move == 0.0 and self._spot_at_entry > 0 and self._last_spot_price:
+            entry_change = (
+                (float(self._last_spot_price) - self._spot_at_entry)
+                / self._spot_at_entry
+                * 100.0
+            )
+            aligned_from_entry = our_dir * entry_change
+            return (
+                aligned_from_entry > self.PHASE_TRAIL_SPOT_VETO_PCT,
+                aligned_from_entry,
+            )
+
+        return False, aligned_move
 
     def _extract_iv(self, ticker: dict[str, Any] | None) -> float | None:
         """GPFC #82: pull mark_vol (IV as decimal, e.g. 0.30 = 30%) from ticker.
@@ -6008,6 +6035,27 @@ class OptionsScalpStrategy(BaseStrategy):
             }[phase]
             tag = phase.lower()
             if premium_change_pct <= floor:
+                supports, aligned_move = self._underlying_still_supports_position()
+                if (
+                    supports
+                    and premium_change_pct > sl_floor
+                    and self._phase_trail_defer_count < self.PHASE_TRAIL_MAX_DEFER_TICKS
+                ):
+                    self._phase_trail_defer_count += 1
+                    self.logger.info(
+                        "[%s] trail_phase_%s DEFERRED - spot still supports position "
+                        "(aligned=%+.3f%% current=%+.1f%% floor=%+.2f%% peak=%+.1f%% "
+                        "defer=%d/%d)",
+                        self.option_symbol,
+                        tag,
+                        aligned_move,
+                        premium_change_pct,
+                        floor,
+                        peak_pnl_pct,
+                        self._phase_trail_defer_count,
+                        self.PHASE_TRAIL_MAX_DEFER_TICKS,
+                    )
+                    return []
                 self.logger.info(
                     "[%s] trail_phase_%s — current %+.1f%% ≤ floor %+.2f%% "
                     "(peak=%+.1f%%)",
@@ -6020,6 +6068,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 return await self._do_option_exit(
                     current_premium, premium_change_pct, f"trail_phase_{tag}"
                 )
+            else:
+                self._phase_trail_defer_count = 0
             if premium_change_pct <= sl_floor:
                 self.logger.info(
                     "[%s] stop_phase_%s — current %+.1f%% ≤ %.1f%% (peak=%+.1f%%)",
