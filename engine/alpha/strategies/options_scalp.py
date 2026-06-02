@@ -192,6 +192,15 @@ class OptionsScalpStrategy(BaseStrategy):
     # guard so we do not buy options that immediately stop on bid/ask alone.
     ENTRY_MAX_SPREAD_PCT = 2.5
     ENTRY_MAX_MARK_GAP_PCT = 4.0
+    # GPFC #92: option-quality brain. Momentum entries must have enough
+    # expected option movement to pay for spread, mark gap, fees, and normal
+    # quote noise. This prevents buying contracts whose first expected peak is
+    # smaller than the microstructure cost of getting in/out.
+    ENTRY_MIN_CONTRACT_SCORE = 70.0
+    ENTRY_MIN_EXPECTED_EDGE_PCT = 9.0
+    ENTRY_EDGE_SPREAD_MULT = 2.5
+    ENTRY_EDGE_MARK_GAP_MULT = 1.0
+    ENTRY_NOISE_BUFFER_PCT = 3.0
     # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
     # than fading. This rejects "tail-end" moves (premium already priced the move)
     # without forcing us to wait for a bigger move to develop.
@@ -337,8 +346,8 @@ class OptionsScalpStrategy(BaseStrategy):
     MOVE_PULLBACK_MIN_IMPULSE_PCT = 0.30
     MOVE_PULLBACK_MIN_RETRACE_FRAC = 0.20
     MOVE_PULLBACK_MAX_RETRACE_FRAC = 0.55
-    MOVE_PULLBACK_RECONFIRM_20S_PCT = 0.04
-    MOVE_PULLBACK_SECOND_LEG_PCT = 0.04
+    MOVE_PULLBACK_RECONFIRM_20S_PCT = 0.08
+    MOVE_PULLBACK_SECOND_LEG_PCT = 0.10
     MOVE_PULLBACK_MAX_AGE_SEC = 360.0
     MOVE_PULLBACK_WAKE_COOLDOWN_SEC = 2.0
     MOVE_PULLBACK_MIN_TURNOVER_USD = 5_000_000
@@ -351,6 +360,8 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_FLOW_5M_PCT = 0.25
     TREND_FLOW_MAX_15M_PCT = 1.00
     TREND_FLOW_MAX_5M_PCT = 0.90
+    TREND_FLOW_CONTINUATION_60S_PCT = 0.30
+    TREND_FLOW_CONTINUATION_20S_PCT = 0.12
     TREND_FLOW_MIN_TURNOVER_USD = 4_000_000
     TREND_FLOW_MAX_SPREAD_PCT = 2.5
     TREND_FLOW_MAX_MARK_GAP_PCT = 6.0
@@ -604,6 +615,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._regime_cache_at: float = 0.0
         # Captured entry signal snapshot — built at entry, written to DB metadata.
         self._pending_entry_signals: dict[str, Any] | None = None
+        self._last_entry_quality: dict[str, Any] | None = None
 
         # GPFC #86: websocket impulse/pullback state.
         self._move_pullback_state: dict[str, Any] | None = None
@@ -2779,6 +2791,24 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
+        quality_ok, quality_reason, quality_snapshot = self._score_option_entry(
+            selected_ticker,
+            entry_ask,
+            option_type,
+            "MOVE_PULLBACK",
+        )
+        if not quality_ok:
+            self.logger.info(
+                "[%s] MOVE_PULLBACK_QUALITY_SKIP: %s %s edge=%.1f%% cost=%.1f%% score=%.1f",
+                self.pair,
+                selected_symbol,
+                quality_reason,
+                quality_snapshot.get("entry_expected_edge_pct", 0.0),
+                quality_snapshot.get("entry_cost_floor_pct", 0.0),
+                quality_snapshot.get("entry_quality_score", 0.0),
+            )
+            return []
+
         try:
             conf_score, _ = self._calculate_confidence(selected_ticker, option_type)
             if conf_score < self.CONFIDENCE_MIN_ENTRY:
@@ -2807,11 +2837,12 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_bb_width = self._bb_width_pct
         self._breakout_velocity_pct = abs(self._underlying_momentum_pct())
         self._pending_entry_setup = "MOVE_PULLBACK"
+        self._last_entry_quality = quality_snapshot
         self._cached_bot_state = f"move_pullback:entering:{direction}"
 
         self.logger.info(
             "[%s] MOVE_PULLBACK_ENTRY: dir=%s retrace=%.0f%% second_leg=%+.2f%% reconfirm=%+.2f%% "
-            "spot=%.2f %s $%.0f ask=$%.4f turnover=$%.2fM",
+            "spot=%.2f %s $%.0f ask=$%.4f turnover=$%.2fM quality=%.1f edge=%.1f%% cost=%.1f%%",
             self.pair,
             direction,
             float(state.get("retrace_frac", 0.0)) * 100,
@@ -2822,6 +2853,9 @@ class OptionsScalpStrategy(BaseStrategy):
             selected_strike,
             entry_ask,
             turnover_usd / 1_000_000,
+            quality_snapshot.get("entry_quality_score", 0.0),
+            quality_snapshot.get("entry_expected_edge_pct", 0.0),
+            quality_snapshot.get("entry_cost_floor_pct", 0.0),
         )
         self._move_pullback_state = None
         return await self._execute_breakout_entry(entry_ask)
@@ -2881,21 +2915,41 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.TREND_FLOW_MIN_ACCEL_RATIO,
             )
             return []
-        if (
+        extended = (
             abs(move_15m) > self.TREND_FLOW_MAX_15M_PCT
             or abs(move_5m) > self.TREND_FLOW_MAX_5M_PCT
+        )
+        if extended and (
+            aligned_60s < self.TREND_FLOW_CONTINUATION_60S_PCT
+            or aligned_20s < self.TREND_FLOW_CONTINUATION_20S_PCT
         ):
             self.logger.info(
                 "[%s] TREND_FLOW_EXTENDED_SKIP: dir=%s 15m=%+.2f%%/%.2f%% "
-                "5m=%+.2f%%/%.2f%%",
+                "5m=%+.2f%%/%.2f%% continuation 60s=%+.2f%%/%.2f%% "
+                "20s=%+.2f%%/%.2f%%",
                 self.pair,
                 direction,
                 move_15m,
                 self.TREND_FLOW_MAX_15M_PCT,
                 move_5m,
                 self.TREND_FLOW_MAX_5M_PCT,
+                aligned_60s,
+                self.TREND_FLOW_CONTINUATION_60S_PCT,
+                aligned_20s,
+                self.TREND_FLOW_CONTINUATION_20S_PCT,
             )
             return []
+        if extended:
+            self.logger.info(
+                "[%s] TREND_FLOW_CONTINUATION_OK: dir=%s extended 15m=%+.2f%% "
+                "5m=%+.2f%% but fresh 60s=%+.2f%% 20s=%+.2f%%",
+                self.pair,
+                direction,
+                move_15m,
+                move_5m,
+                aligned_60s,
+                aligned_20s,
+            )
 
         now_utc = datetime.now(timezone.utc)
         hours_to_expiry = (self._selected_expiry - now_utc).total_seconds() / 3600
@@ -2912,17 +2966,55 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
         self._cached_target_strike = atm_strike
 
-        selected_symbol = self._build_option_symbol(atm_strike, option_type, self._selected_expiry)
-        if not selected_symbol:
-            return []
+        candidate_strikes = [atm_strike]
+        for strike in self._get_otm_candidates(atm_strike, option_type)[:2]:
+            if strike not in candidate_strikes:
+                candidate_strikes.append(strike)
 
-        try:
-            ticker = await self.options_exchange.fetch_ticker(selected_symbol)
-            entry_ask = float(ticker.get("ask") or ticker.get("bid") or 0)
-        except Exception as e:
-            self.logger.debug("[%s] TREND_FLOW ticker failed for %s: %s", self.pair, selected_symbol, e)
-            return []
-        if entry_ask < self.MIN_PREMIUM_USD:
+        selected_symbol: str | None = None
+        selected_strike: float | None = None
+        ticker: dict[str, Any] | None = None
+        entry_ask = 0.0
+        best_quality: dict[str, Any] | None = None
+        best_score = -1.0
+
+        for strike in candidate_strikes:
+            symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
+            if not symbol:
+                continue
+            try:
+                candidate_ticker = await self.options_exchange.fetch_ticker(symbol)
+                candidate_ask = float(candidate_ticker.get("ask") or candidate_ticker.get("bid") or 0)
+            except Exception as e:
+                self.logger.debug("[%s] TREND_FLOW ticker failed for %s: %s", self.pair, symbol, e)
+                continue
+            if candidate_ask < self.MIN_PREMIUM_USD:
+                continue
+
+            quality_ok, _quality_reason, quality_snapshot = self._score_option_entry(
+                candidate_ticker,
+                candidate_ask,
+                option_type,
+                "TREND_FLOW",
+                min_expected_edge_pct=10.0 if extended else None,
+            )
+            candidate_score = float(quality_snapshot.get("entry_quality_score", 0.0))
+            if quality_ok and candidate_score > best_score:
+                selected_symbol = symbol
+                selected_strike = strike
+                ticker = candidate_ticker
+                entry_ask = candidate_ask
+                best_quality = quality_snapshot
+                best_score = candidate_score
+
+        if not selected_symbol or selected_strike is None or not ticker or entry_ask <= 0:
+            self.logger.info(
+                "[%s] TREND_FLOW_QUALITY_SKIP: no candidate passed option-quality gate "
+                "(dir=%s candidates=%s)",
+                self.pair,
+                direction,
+                ",".join(str(int(s)) for s in candidate_strikes),
+            )
             return []
 
         bid = 0.0
@@ -2990,27 +3082,31 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_direction = direction
         self._breakout_option_type = option_type
         self._breakout_symbol = selected_symbol
-        self._breakout_strike = atm_strike
+        self._breakout_strike = selected_strike
         self._breakout_contracts = contracts
         self._breakout_confidence = 0.72
         self._breakout_bb_width = self._bb_width_pct
         self._breakout_velocity_pct = abs(move_15m)
         self._pending_entry_setup = "TREND_FLOW"
+        self._last_entry_quality = best_quality
         self._cached_bot_state = f"trend_flow:entering:{direction}"
         self._last_trend_flow_entry_at = now
 
         self.logger.info(
             "[%s] TREND_FLOW_ENTRY: dir=%s 15m=%+.2f%% 5m=%+.2f%% spot=%.2f "
-            "%s $%.0f ask=$%.4f turnover=$%.2fM",
+            "%s $%.0f ask=$%.4f turnover=$%.2fM quality=%.1f edge=%.1f%% cost=%.1f%%",
             self.pair,
             direction,
             move_15m,
             move_5m,
             spot,
             option_type.upper(),
-            atm_strike,
+            selected_strike,
             entry_ask,
             turnover_usd / 1_000_000,
+            (best_quality or {}).get("entry_quality_score", 0.0),
+            (best_quality or {}).get("entry_expected_edge_pct", 0.0),
+            (best_quality or {}).get("entry_cost_floor_pct", 0.0),
         )
         return await self._execute_breakout_entry(entry_ask)
 
@@ -4820,6 +4916,105 @@ class OptionsScalpStrategy(BaseStrategy):
             return False, ", ".join(skip_reasons)
         return True, ""
 
+    def _score_option_entry(
+        self,
+        ticker: dict[str, Any] | None,
+        entry_ask: float,
+        option_type: str,
+        setup_type: str,
+        *,
+        min_score: float | None = None,
+        min_expected_edge_pct: float | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Score an options entry against microstructure cost and expected edge.
+
+        The underlying can move and still be a bad option trade if the selected
+        contract's spread/mark gap/noise is larger than the expected first move.
+        This gate keeps momentum setups from buying contracts with no room to
+        breathe after fees and quote noise.
+        """
+        snapshot = self._entry_execution_snapshot(ticker, entry_ask, option_type)
+        info = (ticker or {}).get("info") or {}
+        greeks = info.get("greeks") or {}
+
+        try:
+            bid = float((ticker or {}).get("bid") or 0)
+        except (TypeError, ValueError):
+            bid = 0.0
+        try:
+            turnover_usd = float(info.get("turnover_usd", 0) or 0)
+        except (TypeError, ValueError):
+            turnover_usd = 0.0
+        try:
+            delta_abs = abs(float(greeks.get("delta", 0) or 0))
+        except (TypeError, ValueError):
+            delta_abs = 0.0
+        iv = self._extract_iv(ticker) or 0.0
+
+        our_dir = 1.0 if option_type == "call" else -1.0
+        aligned_60s = our_dir * self._calc_underlying_mom(60.0)
+        aligned_20s = our_dir * self._calc_underlying_mom(20.0)
+        spread_pct = float(snapshot.get("entry_spread_pct") or 0.0)
+        mark_gap_pct = max(0.0, float(snapshot.get("entry_mark_gap_pct") or 0.0))
+
+        expected_edge_pct = max(0.0, aligned_60s * 42.0 + aligned_20s * 35.0)
+        cost_floor_pct = (
+            spread_pct * self.ENTRY_EDGE_SPREAD_MULT
+            + mark_gap_pct * self.ENTRY_EDGE_MARK_GAP_MULT
+            + self.ENTRY_NOISE_BUFFER_PCT
+        )
+
+        spread_score = max(0.0, min(100.0, (self.ENTRY_MAX_SPREAD_PCT - spread_pct) / self.ENTRY_MAX_SPREAD_PCT * 100.0))
+        mark_score = max(0.0, min(100.0, (self.ENTRY_MAX_MARK_GAP_PCT - mark_gap_pct) / self.ENTRY_MAX_MARK_GAP_PCT * 100.0))
+        liquidity_score = max(0.0, min(100.0, turnover_usd / 10_000_000.0 * 100.0))
+        if 0.40 <= delta_abs <= 0.65:
+            delta_score = 100.0
+        elif delta_abs > 0:
+            delta_score = max(0.0, 100.0 - abs(delta_abs - 0.52) / 0.25 * 100.0)
+        else:
+            delta_score = 0.0
+        iv_score = max(0.0, min(100.0, iv / 0.45 * 100.0))
+        momentum_score = max(0.0, min(100.0, expected_edge_pct / 18.0 * 100.0))
+
+        score = (
+            spread_score * 0.25
+            + mark_score * 0.15
+            + liquidity_score * 0.20
+            + delta_score * 0.15
+            + iv_score * 0.10
+            + momentum_score * 0.15
+        )
+        score_floor = self.ENTRY_MIN_CONTRACT_SCORE if min_score is None else min_score
+        edge_floor = (
+            self.ENTRY_MIN_EXPECTED_EDGE_PCT
+            if min_expected_edge_pct is None
+            else min_expected_edge_pct
+        )
+
+        quality = {
+            "entry_quality_score": round(score, 1),
+            "entry_expected_edge_pct": round(expected_edge_pct, 2),
+            "entry_cost_floor_pct": round(cost_floor_pct, 2),
+            "entry_aligned_60s_pct": round(aligned_60s, 4),
+            "entry_aligned_20s_pct": round(aligned_20s, 4),
+            "entry_spread_pct": round(spread_pct, 4),
+            "entry_mark_gap_pct": round(mark_gap_pct, 4),
+            "entry_bid": round(bid, 4) if bid > 0 else None,
+            "entry_ask": round(entry_ask, 4),
+            "entry_turnover_usd": round(turnover_usd, 2),
+            "entry_delta_abs": round(delta_abs, 4),
+            "entry_iv": round(iv, 4),
+            "entry_setup_type": setup_type,
+        }
+
+        if score < score_floor:
+            return False, f"score {score:.1f} < {score_floor:.1f}", quality
+        if expected_edge_pct < edge_floor:
+            return False, f"expected_edge {expected_edge_pct:.1f}% < {edge_floor:.1f}%", quality
+        if expected_edge_pct < cost_floor_pct:
+            return False, f"expected_edge {expected_edge_pct:.1f}% < cost_floor {cost_floor_pct:.1f}%", quality
+        return True, "", quality
+
     def _calculate_confidence(
         self,
         ticker: dict[str, Any] | None,
@@ -4980,6 +5175,12 @@ class OptionsScalpStrategy(BaseStrategy):
             "entry_path": entry_path,
             **self._entry_execution_snapshot(ticker, entry_premium, option_type),
         }
+        if (
+            self._last_entry_quality
+            and str(self._last_entry_quality.get("entry_setup_type", "")).lower()
+            == entry_path.upper().lower()
+        ):
+            snapshot.update(self._last_entry_quality)
         if entry_path == "fvg_choch" and self._last_fvg_choch_signal:
             snapshot["fvg_choch"] = self._last_fvg_choch_signal
 
