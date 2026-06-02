@@ -289,7 +289,7 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_B_MICRO_PROTECT_EXIT_PCT = 0.0
     PHASE_B_DEVELOPMENT_ARM_PCT = 5.0
     PHASE_B_DEVELOPMENT_MAX_SEC = 900.0
-    PHASE_B_DEVELOPMENT_SL_PCT = -8.0
+    PHASE_B_DEVELOPMENT_SL_PCT = -12.0
     PHASE_C_PEAK_MAX_PCT = 15.0
     PHASE_C_TRAIL_FRAC = 0.45
     PHASE_C_SL_PCT = -8.0          # GPFC #79: was -15 (trail is primary)
