@@ -187,7 +187,10 @@ class OptionsScalpStrategy(BaseStrategy):
     # near breakeven because the bid vanished. Keep the generic floor for
     # SQUEEZE, but require stronger turnover before momentum entries.
     MOM_BURST_MIN_TURNOVER_USD = 5_000_000
-    ENTRY_MAX_SPREAD_PCT = 7.0
+    # If spread is wider than the phase-A stop, the trade is born near/under
+    # stop before thesis can play out. Keep entries tighter than the -3% phase-A
+    # guard so we do not buy options that immediately stop on bid/ask alone.
+    ENTRY_MAX_SPREAD_PCT = 2.5
     ENTRY_MAX_MARK_GAP_PCT = 4.0
     # Freshness gate — the 60s move must be CONCENTRATED in the last 20s rather
     # than fading. This rejects "tail-end" moves (premium already priced the move)
@@ -340,7 +343,7 @@ class OptionsScalpStrategy(BaseStrategy):
     MOVE_PULLBACK_MAX_AGE_SEC = 360.0
     MOVE_PULLBACK_WAKE_COOLDOWN_SEC = 2.0
     MOVE_PULLBACK_MIN_TURNOVER_USD = 5_000_000
-    MOVE_PULLBACK_MAX_SPREAD_PCT = 8.0
+    MOVE_PULLBACK_MAX_SPREAD_PCT = 2.5
     MOVE_PULLBACK_MAX_MARK_GAP_PCT = 7.0
 
     # GPFC #88: directional staircase entry. This catches the market shape
@@ -350,7 +353,7 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_FLOW_MAX_15M_PCT = 1.00
     TREND_FLOW_MAX_5M_PCT = 0.90
     TREND_FLOW_MIN_TURNOVER_USD = 4_000_000
-    TREND_FLOW_MAX_SPREAD_PCT = 8.0
+    TREND_FLOW_MAX_SPREAD_PCT = 2.5
     TREND_FLOW_MAX_MARK_GAP_PCT = 6.0
     TREND_FLOW_MIN_ALIGNED_60S_PCT = 0.18
     TREND_FLOW_MIN_ALIGNED_20S_PCT = 0.07
@@ -368,7 +371,7 @@ class OptionsScalpStrategy(BaseStrategy):
     FVG_CHOCH_MAX_ZONE_AGE_15M = 48
     FVG_CHOCH_MIN_TURNOVER_USD = 4_000_000
     FVG_CHOCH_MIN_IV = 0.25
-    FVG_CHOCH_MAX_SPREAD_PCT = 8.0
+    FVG_CHOCH_MAX_SPREAD_PCT = 2.5
     FVG_CHOCH_MAX_MARK_GAP_PCT = 6.0
     FVG_CHOCH_COOLDOWN_SEC = 900.0
     FVG_CHOCH_ZONE_COOLDOWN_SEC = 3600.0
