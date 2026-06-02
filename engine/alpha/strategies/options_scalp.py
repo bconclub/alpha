@@ -319,7 +319,6 @@ class OptionsScalpStrategy(BaseStrategy):
         "SQUEEZE",
         "MOVE_PULLBACK",
         "TREND_FLOW",
-        "FVG_CHOCH",
     })
 
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
