@@ -135,8 +135,6 @@ const COLUMNS: ColumnDef[] = [
   { key: 'pnl', label: 'Net P&L', align: 'right' },
   { key: 'pnl_pct', label: 'P&L %', align: 'right' },
   { key: 'hold_time', label: 'Hold Time', align: 'right' },
-  { key: 'sl_price', label: 'SL', align: 'right' },
-  { key: 'trail_info', label: 'Trail' },
   { key: 'peak_info', label: 'Peak', align: 'right' },
   { key: 'confidence', label: 'Conf', align: 'right' },
   { key: 'exit_reason', label: 'Exit' },
@@ -650,7 +648,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'sl_price' || key === 'trail_info' || key === 'peak_info' || key === 'confidence') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'peak_info' || key === 'confidence') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -1433,7 +1431,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* SL — GPFC #71: prefer metadata.sl_pct (always present
                             after #71); fall back to live trade.stop_loss for older rows. */}
-                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
+                        <td className="hidden">
                           {(() => {
                             const meta = (trade as any).metadata || {};
                             const slPct = meta.sl_pct;
@@ -1456,7 +1454,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         </td>
 
                         {/* Trail Info — Range bar for open, exit label for closed */}
-                        <td className="px-4 py-3 text-xs">
+                        <td className="hidden">
                           {trade.status === 'open' ? (() => {
                             const asset = extractBaseAsset(trade.pair);
                             // Priority: live API (3s) → bot DB price (~10s) → strategy_log (~5min)

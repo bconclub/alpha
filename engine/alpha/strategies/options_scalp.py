@@ -278,6 +278,10 @@ class OptionsScalpStrategy(BaseStrategy):
     # ETH books; the limit often missed and market fallback filled much lower.
     PHASE_B_BREAKEVEN_ARM_BUFFER_PCT = 0.15
     PHASE_B_BREAKEVEN_EXIT_PCT = 4.0
+    # GPFC #93: small-peak protection. A +5-8% option peak is not a real runner
+    # yet, but it is enough edge to stop round-tripping to a red phase-B stop.
+    PHASE_B_MICRO_PROTECT_ARM_PCT = 5.0
+    PHASE_B_MICRO_PROTECT_EXIT_PCT = 0.0
     PHASE_C_PEAK_MAX_PCT = 15.0
     PHASE_C_TRAIL_FRAC = 0.45
     PHASE_C_SL_PCT = -8.0          # GPFC #79: was -15 (trail is primary)
@@ -451,6 +455,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # GPFC #78: live tracking for phase-based exit (set each exit tick).
         self._peak_pnl_pct: float = 0.0
         self._current_pnl_pct: float = 0.0
+        self._exit_in_progress: bool = False
         # GPFC #80: count Phase A/B SL deferrals while spot remains favorable.
         # Resets on entry; persisted to trades.metadata each defer.
         self._sl_defer_count: int = 0
@@ -3361,6 +3366,25 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # GPFC #72: confidence gate (≥ 60). Sub-60 zone was a death zone
         # in live data — block before order placement.
+        quality_ok, quality_reason, quality_snapshot = self._score_option_entry(
+            spread_ticker,
+            entry_ask,
+            option_type,
+            "MOM_BURST",
+            min_expected_edge_pct=10.0,
+        )
+        if not quality_ok:
+            self.logger.info(
+                "[%s] MOM_BURST_QUALITY_SKIP: %s %s edge=%.1f%% cost=%.1f%% score=%.1f",
+                self.pair,
+                selected_symbol,
+                quality_reason,
+                quality_snapshot.get("entry_expected_edge_pct", 0.0),
+                quality_snapshot.get("entry_cost_floor_pct", 0.0),
+                quality_snapshot.get("entry_quality_score", 0.0),
+            )
+            return []
+
         try:
             conf_score, _ = self._calculate_confidence(spread_ticker, option_type)
             if conf_score < self.CONFIDENCE_MIN_ENTRY:
@@ -3411,6 +3435,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_confidence = 0.7
         self._breakout_bb_width = self._bb_width_pct
         self._pending_entry_setup = "MOM_BURST"
+        self._last_entry_quality = quality_snapshot
         return await self._execute_breakout_entry(entry_ask)
 
     async def _handle_squeeze_breakout(
@@ -5617,6 +5642,23 @@ class OptionsScalpStrategy(BaseStrategy):
                 return await self._do_option_exit(
                     current_premium, premium_change_pct, "breakeven"
                 )
+            micro_protect_armed = peak_pnl_pct >= self.PHASE_B_MICRO_PROTECT_ARM_PCT
+            if (
+                micro_protect_armed
+                and premium_change_pct <= self.PHASE_B_MICRO_PROTECT_EXIT_PCT
+            ):
+                self.logger.info(
+                    "[%s] micro_protect — peak %+.1f%% protected before red "
+                    "(current=%+.1f%% arm=%.1f%% exit<=%.1f%%)",
+                    self.option_symbol,
+                    peak_pnl_pct,
+                    premium_change_pct,
+                    self.PHASE_B_MICRO_PROTECT_ARM_PCT,
+                    self.PHASE_B_MICRO_PROTECT_EXIT_PCT,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "micro_protect"
+                )
             if premium_change_pct <= self.PHASE_B_SL_PCT:
                 # GPFC #80: same momentum-confirmation rule as Phase A.
                 if self._underlying_still_favorable(
@@ -6227,6 +6269,14 @@ class OptionsScalpStrategy(BaseStrategy):
         For non-urgent Delta exits (TRAIL/PEAK/BREAKEVEN/DEAD) this lets us
         try to lock the tier floor before settling for the market bid.
         """
+        if self._exit_in_progress:
+            self.logger.info(
+                "[%s] EXIT_ALREADY_IN_PROGRESS — suppressing duplicate %s",
+                self.option_symbol or self.pair,
+                exit_type,
+            )
+            return []
+        self._exit_in_progress = True
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             # GPFC #47: for SELL placement we need a real executable price.
@@ -6798,6 +6848,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 return
             self._position_premium_history.clear()
             self._last_30s_premium = None
+            self._exit_in_progress = False
             self.in_position = True
             OptionsScalpStrategy._global_in_position = True
             OptionsScalpStrategy._global_position_asset = self._base_asset
@@ -6968,6 +7019,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._squeeze_breakout_time = None
             self._position_premium_history.clear()
             self._last_30s_premium = None
+            self._exit_in_progress = False
 
     def on_rejected(self, signal: Signal) -> None:
         """Handle rejected option orders."""
@@ -6982,6 +7034,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "[%s] Option EXIT rejected - keeping position state for next exit/reconcile cycle",
                 self.option_symbol or signal.pair,
             )
+            self._exit_in_progress = False
             self._consecutive_ticker_failures = 0
             self._position_verify_failures = 0
             return
