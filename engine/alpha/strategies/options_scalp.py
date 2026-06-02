@@ -374,6 +374,20 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_FLOW_MIN_ACCEL_RATIO = 0.50
     TREND_FLOW_COOLDOWN_SEC = 900.0
 
+    # GPFC #94: second-chance reload after a good momentum idea stops out.
+    # If the same contract gets materially cheaper, re-enter only after the
+    # underlying and option quote both turn back in our direction. This catches
+    # the "right idea, early/mistimed entry" case without blind revenge buys.
+    REENTRY_WATCH_SEC = 600.0
+    REENTRY_MIN_ORIGINAL_PEAK_PCT = 3.0
+    REENTRY_MIN_DISCOUNT_PCT = 20.0
+    REENTRY_MIN_OPTION_REBOUND_PCT = 4.0
+    REENTRY_MIN_ALIGNED_60S_PCT = 0.10
+    REENTRY_MIN_ALIGNED_20S_PCT = 0.06
+    REENTRY_MIN_ACCEL_RATIO = 0.45
+    REENTRY_MIN_EXPECTED_EDGE_PCT = 8.0
+    REENTRY_ALLOWED_SETUPS = frozenset({"MOM_BURST", "TREND_FLOW", "MOVE_PULLBACK"})
+
     # GPFC #91: ICT-style location + structure setup.
     # The bot may only enter after price reacts at a 15m fair-value-gap midpoint,
     # prints a 1m change of character, then retests the 1m FVG that caused it.
@@ -621,11 +635,14 @@ class OptionsScalpStrategy(BaseStrategy):
         # Captured entry signal snapshot — built at entry, written to DB metadata.
         self._pending_entry_signals: dict[str, Any] | None = None
         self._last_entry_quality: dict[str, Any] | None = None
+        self._pending_entry_path_override: str | None = None
+        self._position_setup_type: str | None = None
 
         # GPFC #86: websocket impulse/pullback state.
         self._move_pullback_state: dict[str, Any] | None = None
         self._last_ws_wake_at: float = 0.0
         self._last_trend_flow_entry_at: float = 0.0
+        self._reentry_watch: dict[str, Any] | None = None
         self._last_fvg_choch_entry_at: float = 0.0
         self._fvg_choch_zone_cooldowns: dict[str, float] = {}
         self._last_fvg_choch_signal: dict[str, Any] | None = None
@@ -2101,6 +2118,10 @@ class OptionsScalpStrategy(BaseStrategy):
             self._cached_bot_state = "blocked:other_asset_in_position"
             return []
 
+        reentry_signals = await self._check_second_chance_reentry()
+        if reentry_signals:
+            return reentry_signals
+
         # POSITION_GONE cooldown
         if time.monotonic() < self._position_gone_cooldown_until:
             remaining = self._position_gone_cooldown_until - time.monotonic()
@@ -2220,6 +2241,190 @@ class OptionsScalpStrategy(BaseStrategy):
             )
         self._cached_bot_state = "squeeze:waiting_for_breakout"
         return []
+
+    async def _check_second_chance_reentry(self) -> list[Signal]:
+        """Reload a recently stopped momentum contract only after reconfirmation."""
+        watch = self._reentry_watch
+        if not watch or self.in_position:
+            return []
+
+        now = time.monotonic()
+        expires_at = float(watch.get("expires_at") or 0.0)
+        symbol = str(watch.get("symbol") or "")
+        option_type = str(watch.get("option_type") or "")
+        setup_type = str(watch.get("setup_type") or "MOM_BURST")
+        direction = str(watch.get("direction") or "")
+        if not symbol or option_type not in {"call", "put"} or now > expires_at:
+            self._reentry_watch = None
+            return []
+        if setup_type not in self.REENTRY_ALLOWED_SETUPS or setup_type not in self.ENABLED_SETUPS:
+            self._reentry_watch = None
+            return []
+        if int(watch.get("attempts") or 0) >= 1:
+            self._reentry_watch = None
+            return []
+        if not self.options_exchange:
+            return []
+
+        try:
+            ticker = await self.options_exchange.fetch_ticker(symbol)
+        except Exception as e:
+            self.logger.debug("[%s] REENTRY ticker failed for %s: %s", self.pair, symbol, e)
+            return []
+
+        try:
+            ask = float(ticker.get("ask") or 0)
+            bid = float(ticker.get("bid") or 0)
+        except (TypeError, ValueError):
+            return []
+        if ask < self.MIN_PREMIUM_USD:
+            return []
+
+        original_entry = float(watch.get("original_entry") or 0.0)
+        lowest_ask = float(watch.get("lowest_ask") or ask)
+        if ask > 0 and (lowest_ask <= 0 or ask < lowest_ask):
+            watch["lowest_ask"] = ask
+            watch["lowest_at"] = now
+            lowest_ask = ask
+
+        if original_entry <= 0 or lowest_ask <= 0:
+            return []
+
+        discount_pct = (original_entry - ask) / original_entry * 100.0
+        rebound_pct = (ask - lowest_ask) / lowest_ask * 100.0
+        if discount_pct < self.REENTRY_MIN_DISCOUNT_PCT:
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] REENTRY_WAIT: %s discount %.1f%% < %.1f%%",
+                    self.pair,
+                    symbol,
+                    discount_pct,
+                    self.REENTRY_MIN_DISCOUNT_PCT,
+                )
+            return []
+        if rebound_pct < self.REENTRY_MIN_OPTION_REBOUND_PCT:
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] REENTRY_WAIT: %s cheap but not lifting yet "
+                    "(ask=$%.4f low=$%.4f rebound=%.1f%%/%.1f%%)",
+                    self.pair,
+                    symbol,
+                    ask,
+                    lowest_ask,
+                    rebound_pct,
+                    self.REENTRY_MIN_OPTION_REBOUND_PCT,
+                )
+            return []
+
+        dir_sign = 1.0 if option_type == "call" else -1.0
+        aligned_60s = dir_sign * self._calc_underlying_mom(60.0)
+        aligned_20s = dir_sign * self._calc_underlying_mom(20.0)
+        accel = self._underlying_acceleration_ratio()
+        if (
+            aligned_60s < self.REENTRY_MIN_ALIGNED_60S_PCT
+            or aligned_20s < self.REENTRY_MIN_ALIGNED_20S_PCT
+            or accel < self.REENTRY_MIN_ACCEL_RATIO
+        ):
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] REENTRY_WAIT: %s discount %.1f%% rebound %.1f%% "
+                    "but thesis not back (60s=%+.2f%%/%.2f%% 20s=%+.2f%%/%.2f%% accel=%.2f/%.2f)",
+                    self.pair,
+                    symbol,
+                    discount_pct,
+                    rebound_pct,
+                    aligned_60s,
+                    self.REENTRY_MIN_ALIGNED_60S_PCT,
+                    aligned_20s,
+                    self.REENTRY_MIN_ALIGNED_20S_PCT,
+                    accel,
+                    self.REENTRY_MIN_ACCEL_RATIO,
+                )
+            return []
+
+        if bid > 0:
+            spread_pct = (ask - bid) / ask * 100.0
+            if spread_pct > self.ENTRY_MAX_SPREAD_PCT:
+                self.logger.info(
+                    "[%s] REENTRY_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
+                    self.pair,
+                    symbol,
+                    spread_pct,
+                    self.ENTRY_MAX_SPREAD_PCT,
+                )
+                return []
+
+        passes_quality, skip_reason = self._passes_entry_quality(
+            ticker,
+            min_iv=self.MOM_BURST_MIN_IV_FOR_ENTRY,
+        )
+        if not passes_quality:
+            self.logger.info(
+                "[%s] REENTRY_QUALITY_SKIP: %s (%s)",
+                self.pair,
+                skip_reason,
+                symbol,
+            )
+            return []
+
+        quality_ok, quality_reason, quality_snapshot = self._score_option_entry(
+            ticker,
+            ask,
+            option_type,
+            setup_type,
+            min_expected_edge_pct=self.REENTRY_MIN_EXPECTED_EDGE_PCT,
+        )
+        if not quality_ok:
+            self.logger.info(
+                "[%s] REENTRY_SCORE_SKIP: %s %s edge=%.1f%% cost=%.1f%% score=%.1f",
+                self.pair,
+                symbol,
+                quality_reason,
+                quality_snapshot.get("entry_expected_edge_pct", 0.0),
+                quality_snapshot.get("entry_cost_floor_pct", 0.0),
+                quality_snapshot.get("entry_quality_score", 0.0),
+            )
+            return []
+
+        contracts = self._calculate_option_contracts(ask, confidence=0.78)
+        if contracts < 1:
+            return []
+
+        self._breakout_direction = direction or ("UP" if option_type == "call" else "DOWN")
+        self._breakout_option_type = option_type
+        self._breakout_symbol = symbol
+        self._breakout_strike = float(watch.get("strike") or 0.0)
+        self._breakout_contracts = contracts
+        self._breakout_confidence = 0.78
+        self._breakout_bb_width = self._bb_width_pct
+        self._breakout_velocity_pct = abs(aligned_60s)
+        self._pending_entry_setup = setup_type
+        self._pending_entry_path_override = "mom_reentry"
+        self._last_entry_quality = {
+            **quality_snapshot,
+            "reentry_original_entry": round(original_entry, 4),
+            "reentry_lowest_ask": round(lowest_ask, 4),
+            "reentry_discount_pct": round(discount_pct, 2),
+            "reentry_rebound_pct": round(rebound_pct, 2),
+            "reentry_after_exit_type": watch.get("exit_type"),
+        }
+        watch["attempts"] = int(watch.get("attempts") or 0) + 1
+
+        self.logger.info(
+            "[%s] SECOND_CHANCE_REENTRY: %s %s original=$%.4f ask=$%.4f "
+            "discount=%.1f%% low=$%.4f rebound=%.1f%% 60s=%+.2f%% 20s=%+.2f%%",
+            self.pair,
+            setup_type,
+            symbol,
+            original_entry,
+            ask,
+            discount_pct,
+            lowest_ask,
+            rebound_pct,
+            aligned_60s,
+            aligned_20s,
+        )
+        return await self._execute_breakout_entry(ask)
 
     async def _get_ohlcv_15m_for_fvg(self) -> list[list[float]] | None:
         """Fetch 15m candles for FVG/CHoCH location detection."""
@@ -3889,6 +4094,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._breakout_confirmation_secs = 60
         self._breakout_spot_price = 0.0
         self._pending_entry_setup = "SQUEEZE"
+        self._pending_entry_path_override = None
         self._direction_bias = "NEUTRAL"
         # Note: _breakout_state is preserved until next detection for dashboard visibility
 
@@ -3981,6 +4187,8 @@ class OptionsScalpStrategy(BaseStrategy):
             "TREND_FLOW": "trend_flow",
             "FVG_CHOCH": "fvg_choch",
         }.get(setup_type, "mom_burst")
+        if self._pending_entry_path_override:
+            _entry_path = self._pending_entry_path_override
         try:
             self._pending_entry_signals = self._build_entry_metadata(
                 _pre_ticker, option_type, confirmed_ask,
@@ -4206,6 +4414,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._peak_trail_pending_ticks = 0
         self._sl_defer_count = 0  # GPFC #80: reset on entry
         self.in_position = True
+        self._reentry_watch = None
+        self._position_setup_type = setup_type
         OptionsScalpStrategy._global_in_position = True
         OptionsScalpStrategy._global_position_asset = self._base_asset
         self.entry_premium = fill_price
@@ -5202,8 +5412,11 @@ class OptionsScalpStrategy(BaseStrategy):
         }
         if (
             self._last_entry_quality
-            and str(self._last_entry_quality.get("entry_setup_type", "")).lower()
-            == entry_path.upper().lower()
+            and (
+                str(self._last_entry_quality.get("entry_setup_type", "")).lower()
+                == entry_path.upper().lower()
+                or entry_path == "mom_reentry"
+            )
         ):
             snapshot.update(self._last_entry_quality)
         if entry_path == "fvg_choch" and self._last_fvg_choch_signal:
@@ -6254,6 +6467,62 @@ class OptionsScalpStrategy(BaseStrategy):
             limit_price=limit_price,
         )
 
+    def _remember_second_chance_reentry(
+        self,
+        *,
+        exit_type: str,
+        exit_premium: float,
+        pnl_pct: float,
+        peak_pnl_pct: float,
+    ) -> None:
+        """Create a short-lived watch for a better re-entry in the same option."""
+        setup_type = str(self._position_setup_type or self._pending_entry_setup or "MOM_BURST")
+        if setup_type not in self.REENTRY_ALLOWED_SETUPS:
+            return
+        if not self.option_symbol or self.entry_premium <= 0 or exit_premium <= 0:
+            return
+        if peak_pnl_pct < self.REENTRY_MIN_ORIGINAL_PEAK_PCT:
+            return
+        exit_key = exit_type.lower()
+        if not (
+            exit_key.startswith("stop_phase")
+            or exit_key in {"dead", "micro_protect", "breakeven"}
+        ):
+            return
+        if pnl_pct > 0 and exit_key not in {"micro_protect", "breakeven"}:
+            return
+
+        direction = "UP" if self.option_side == "call" else "DOWN"
+        now = time.monotonic()
+        self._reentry_watch = {
+            "symbol": self.option_symbol,
+            "option_type": self.option_side,
+            "setup_type": setup_type,
+            "direction": direction,
+            "strike": self.strike_price,
+            "expiry": self.expiry_dt.isoformat() if self.expiry_dt else None,
+            "original_entry": self.entry_premium,
+            "exit_premium": exit_premium,
+            "lowest_ask": exit_premium,
+            "peak_pnl_pct": peak_pnl_pct,
+            "exit_type": exit_type,
+            "created_at": now,
+            "expires_at": now + self.REENTRY_WATCH_SEC,
+            "attempts": 0,
+        }
+        self.logger.info(
+            "[%s] SECOND_CHANCE_WATCH: %s %s entry=$%.4f exit=$%.4f "
+            "peak=%+.1f%% watch=%ds discount_needed=%.1f%%",
+            self.pair,
+            setup_type,
+            self.option_symbol,
+            self.entry_premium,
+            exit_premium,
+            peak_pnl_pct,
+            int(self.REENTRY_WATCH_SEC),
+            self.REENTRY_MIN_DISCOUNT_PCT,
+        )
+
     async def _do_option_exit(
         self,
         current_premium: float,
@@ -6346,6 +6615,12 @@ class OptionsScalpStrategy(BaseStrategy):
             ((self.highest_premium - self.entry_premium) / self.entry_premium * 100)
             if self.entry_premium > 0
             else 0
+        )
+        self._remember_second_chance_reentry(
+            exit_type=exit_type,
+            exit_premium=current_premium,
+            pnl_pct=pnl_pct,
+            peak_pnl_pct=peak_pnl_pct,
         )
 
         # GPFC #71: if a limit_price is provided, the executor's limit-then-market
@@ -6685,6 +6960,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_state_write = 0.0
         self._is_squeeze_entry = False
         self._squeeze_breakout_time = None
+        self._position_setup_type = None
 
         # Return Signal with exit_type so executor knows why we exited
         return [
@@ -6850,6 +7126,8 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_30s_premium = None
             self._exit_in_progress = False
             self.in_position = True
+            self._reentry_watch = None
+            self._position_setup_type = signal.metadata.get("setup_type") or self._pending_entry_setup
             OptionsScalpStrategy._global_in_position = True
             OptionsScalpStrategy._global_position_asset = self._base_asset
             self.option_side = pending_side
@@ -7017,6 +7295,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
             self._is_squeeze_entry = False
             self._squeeze_breakout_time = None
+            self._position_setup_type = None
             self._position_premium_history.clear()
             self._last_30s_premium = None
             self._exit_in_progress = False
