@@ -527,9 +527,25 @@ class AlphaBot:
             for opts in self._options_strategies.values():
                 if opts.in_position:
                     try:
-                        await opts._check_option_exit()
+                        signals = await opts._check_option_exit()
+                        for signal in signals:
+                            if self.risk_manager.approve_signal(signal):
+                                order = await self.executor.execute(signal)
+                                if order is not None:
+                                    opts.on_fill(signal, order)
+                                else:
+                                    opts.on_rejected(signal)
+                            else:
+                                logger.info(
+                                    "Risk manager rejected fast options exit: %s",
+                                    signal.reason,
+                                )
+                                opts.on_rejected(signal)
                     except Exception:
-                        pass
+                        logger.exception(
+                            "Fast options exit loop failed for %s",
+                            getattr(opts, "option_symbol", None) or opts.pair,
+                        )
 
     async def _analysis_cycle(self) -> None:
         """Analyze all pairs (both exchanges) concurrently, switch strategies by signal strength."""
