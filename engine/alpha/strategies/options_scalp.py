@@ -250,7 +250,12 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKEVEN_STOP_ACTIVATE_PCT = 8.0  # arm once peak hits +8%
     BREAKEVEN_STOP_EXIT_PCT = 0.5      # exit if pnl drops to +0.5% or lower
 
-    PHASE1_HANDS_OFF_SEC = 30  # Only SL fires in first 30s after fill (instance-level, no time gating)
+    PHASE1_HANDS_OFF_SEC = 30
+    # GPFC #95: do not let ordinary bid/ask noise kill a fresh options entry
+    # within seconds. Phase A only becomes active after this warmup unless the
+    # premium loss is already emergency-sized.
+    PHASE_A_THESIS_WARMUP_SEC = 30.0
+    PHASE_A_EMERGENCY_SL_PCT = -8.0
 
     # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
     # Catches trades that NEVER moved up AND underlying turned against us.
@@ -5801,6 +5806,26 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── PHASE A: tight SL (-3%) with GPFC #80 momentum confirmation ──
         if phase == "A" and premium_change_pct <= self.PHASE_A_SL_PCT:
+            position_age_sec = (
+                now - self.entry_time
+                if self.entry_time
+                else self.PHASE_A_THESIS_WARMUP_SEC
+            )
+            if (
+                position_age_sec < self.PHASE_A_THESIS_WARMUP_SEC
+                and premium_change_pct > self.PHASE_A_EMERGENCY_SL_PCT
+            ):
+                self.logger.info(
+                    "[%s] stop_phase_a WARMUP_DEFERRED — age=%.0fs<%.0fs "
+                    "current=%+.1f%% peak=%+.1f%% emergency=%.1f%%",
+                    self.option_symbol,
+                    position_age_sec,
+                    self.PHASE_A_THESIS_WARMUP_SEC,
+                    premium_change_pct,
+                    peak_pnl_pct,
+                    self.PHASE_A_EMERGENCY_SL_PCT,
+                )
+                return []
             if self._underlying_still_favorable(
                 self.PHASE_A_SPOT_LOOKBACK_SEC,
                 self.PHASE_A_SPOT_FAVORABLE_BPS,
