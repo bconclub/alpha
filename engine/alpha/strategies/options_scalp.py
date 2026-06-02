@@ -361,6 +361,7 @@ class OptionsScalpStrategy(BaseStrategy):
     MOVE_PULLBACK_WAKE_COOLDOWN_SEC = 2.0
     MOVE_PULLBACK_MIN_TURNOVER_USD = 5_000_000
     MOVE_PULLBACK_MAX_SPREAD_PCT = 2.5
+    MOVE_PULLBACK_FAST_MOVE_MAX_SPREAD_PCT = 6.5
     MOVE_PULLBACK_MAX_MARK_GAP_PCT = 7.0
 
     # GPFC #88: directional staircase entry. This catches the market shape
@@ -373,11 +374,17 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_FLOW_CONTINUATION_20S_PCT = 0.12
     TREND_FLOW_MIN_TURNOVER_USD = 4_000_000
     TREND_FLOW_MAX_SPREAD_PCT = 2.5
+    TREND_FLOW_FAST_MOVE_MAX_SPREAD_PCT = 6.5
     TREND_FLOW_MAX_MARK_GAP_PCT = 6.0
     TREND_FLOW_MIN_ALIGNED_60S_PCT = 0.18
     TREND_FLOW_MIN_ALIGNED_20S_PCT = 0.07
     TREND_FLOW_MIN_ACCEL_RATIO = 0.50
     TREND_FLOW_COOLDOWN_SEC = 900.0
+    FAST_MOVE_SPREAD_60S_PCT = 0.45
+    FAST_MOVE_SPREAD_20S_PCT = 0.20
+    ACTIVE_MOVE_SPREAD_60S_PCT = 0.30
+    ACTIVE_MOVE_SPREAD_20S_PCT = 0.12
+    ACTIVE_MOVE_MAX_SPREAD_PCT = 4.5
 
     # GPFC #94: second-chance reload after a good momentum idea stops out.
     # If the same contract gets materially cheaper, re-enter only after the
@@ -2945,19 +2952,24 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         bid = 0.0
+        max_spread_pct = self._adaptive_entry_max_spread_pct(
+            option_type,
+            base_max_spread_pct=self.MOVE_PULLBACK_MAX_SPREAD_PCT,
+            fast_move_max_spread_pct=self.MOVE_PULLBACK_FAST_MOVE_MAX_SPREAD_PCT,
+        )
         try:
             bid = float((selected_ticker or {}).get("bid") or 0)
         except (TypeError, ValueError):
             bid = 0.0
         if bid > 0:
             spread_pct = (entry_ask - bid) / entry_ask * 100.0
-            if spread_pct > self.MOVE_PULLBACK_MAX_SPREAD_PCT:
+            if spread_pct > max_spread_pct:
                 self.logger.info(
                     "[%s] MOVE_PULLBACK_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
                     self.pair,
                     selected_symbol,
                     spread_pct,
-                    self.MOVE_PULLBACK_MAX_SPREAD_PCT,
+                    max_spread_pct,
                 )
                 return []
 
@@ -3011,6 +3023,7 @@ class OptionsScalpStrategy(BaseStrategy):
             entry_ask,
             option_type,
             "MOVE_PULLBACK",
+            max_spread_pct=max_spread_pct,
         )
         if not quality_ok:
             self.logger.info(
@@ -3206,12 +3219,18 @@ class OptionsScalpStrategy(BaseStrategy):
             if candidate_ask < self.MIN_PREMIUM_USD:
                 continue
 
+            max_spread_pct = self._adaptive_entry_max_spread_pct(
+                option_type,
+                base_max_spread_pct=self.TREND_FLOW_MAX_SPREAD_PCT,
+                fast_move_max_spread_pct=self.TREND_FLOW_FAST_MOVE_MAX_SPREAD_PCT,
+            )
             quality_ok, _quality_reason, quality_snapshot = self._score_option_entry(
                 candidate_ticker,
                 candidate_ask,
                 option_type,
                 "TREND_FLOW",
                 min_expected_edge_pct=10.0 if extended else None,
+                max_spread_pct=max_spread_pct,
             )
             candidate_score = float(quality_snapshot.get("entry_quality_score", 0.0))
             if quality_ok and candidate_score > best_score:
@@ -3233,19 +3252,24 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
 
         bid = 0.0
+        max_spread_pct = self._adaptive_entry_max_spread_pct(
+            option_type,
+            base_max_spread_pct=self.TREND_FLOW_MAX_SPREAD_PCT,
+            fast_move_max_spread_pct=self.TREND_FLOW_FAST_MOVE_MAX_SPREAD_PCT,
+        )
         try:
             bid = float(ticker.get("bid") or 0)
         except (TypeError, ValueError):
             bid = 0.0
         if bid > 0:
             spread_pct = (entry_ask - bid) / entry_ask * 100.0
-            if spread_pct > self.TREND_FLOW_MAX_SPREAD_PCT:
+            if spread_pct > max_spread_pct:
                 self.logger.info(
                     "[%s] TREND_FLOW_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
                     self.pair,
                     selected_symbol,
                     spread_pct,
-                    self.TREND_FLOW_MAX_SPREAD_PCT,
+                    max_spread_pct,
                 )
                 return []
 
@@ -5165,6 +5189,7 @@ class OptionsScalpStrategy(BaseStrategy):
         *,
         min_score: float | None = None,
         min_expected_edge_pct: float | None = None,
+        max_spread_pct: float | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
         """Score an options entry against microstructure cost and expected edge.
 
@@ -5196,6 +5221,11 @@ class OptionsScalpStrategy(BaseStrategy):
         aligned_20s = our_dir * self._calc_underlying_mom(20.0)
         spread_pct = float(snapshot.get("entry_spread_pct") or 0.0)
         mark_gap_pct = max(0.0, float(snapshot.get("entry_mark_gap_pct") or 0.0))
+        spread_ceiling_pct = (
+            self.ENTRY_MAX_SPREAD_PCT
+            if max_spread_pct is None
+            else max(0.1, float(max_spread_pct))
+        )
 
         expected_edge_pct = max(0.0, aligned_60s * 42.0 + aligned_20s * 35.0)
         cost_floor_pct = (
@@ -5204,7 +5234,7 @@ class OptionsScalpStrategy(BaseStrategy):
             + self.ENTRY_NOISE_BUFFER_PCT
         )
 
-        spread_score = max(0.0, min(100.0, (self.ENTRY_MAX_SPREAD_PCT - spread_pct) / self.ENTRY_MAX_SPREAD_PCT * 100.0))
+        spread_score = max(0.0, min(100.0, (spread_ceiling_pct - spread_pct) / spread_ceiling_pct * 100.0))
         mark_score = max(0.0, min(100.0, (self.ENTRY_MAX_MARK_GAP_PCT - mark_gap_pct) / self.ENTRY_MAX_MARK_GAP_PCT * 100.0))
         liquidity_score = max(0.0, min(100.0, turnover_usd / 10_000_000.0 * 100.0))
         if 0.40 <= delta_abs <= 0.65:
@@ -5238,6 +5268,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "entry_aligned_60s_pct": round(aligned_60s, 4),
             "entry_aligned_20s_pct": round(aligned_20s, 4),
             "entry_spread_pct": round(spread_pct, 4),
+            "entry_max_spread_pct": round(spread_ceiling_pct, 4),
             "entry_mark_gap_pct": round(mark_gap_pct, 4),
             "entry_bid": round(bid, 4) if bid > 0 else None,
             "entry_ask": round(entry_ask, 4),
@@ -5254,6 +5285,29 @@ class OptionsScalpStrategy(BaseStrategy):
         if expected_edge_pct < cost_floor_pct:
             return False, f"expected_edge {expected_edge_pct:.1f}% < cost_floor {cost_floor_pct:.1f}%", quality
         return True, "", quality
+
+    def _adaptive_entry_max_spread_pct(
+        self,
+        option_type: str,
+        *,
+        base_max_spread_pct: float,
+        fast_move_max_spread_pct: float,
+    ) -> float:
+        """Allow wider option spreads only while the underlying is actively moving."""
+        our_dir = 1.0 if option_type == "call" else -1.0
+        aligned_60s = our_dir * self._calc_underlying_mom(60.0)
+        aligned_20s = our_dir * self._calc_underlying_mom(20.0)
+        if (
+            aligned_60s >= self.FAST_MOVE_SPREAD_60S_PCT
+            and aligned_20s >= self.FAST_MOVE_SPREAD_20S_PCT
+        ):
+            return max(base_max_spread_pct, fast_move_max_spread_pct)
+        if (
+            aligned_60s >= self.ACTIVE_MOVE_SPREAD_60S_PCT
+            and aligned_20s >= self.ACTIVE_MOVE_SPREAD_20S_PCT
+        ):
+            return max(base_max_spread_pct, self.ACTIVE_MOVE_MAX_SPREAD_PCT)
+        return base_max_spread_pct
 
     def _calculate_confidence(
         self,
