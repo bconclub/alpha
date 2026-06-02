@@ -44,7 +44,7 @@ export function SetupChip({ setup }: { setup: string | null | undefined }) {
     : key === "TREND_FLOW"
       ? "Trend Flow"
       : key === "FVG_CHOCH"
-        ? "FVG CHoCH"
+        ? "Zone Pullback"
         : key.replace("_", " ");
   return (
     <span
