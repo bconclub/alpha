@@ -15,6 +15,7 @@ export type ParsedExitReason = {
 const SINGLE_PILL_MAP: Record<string, string> = {
   breakeven: "BREAKEVEN",
   dead: "DEAD",
+  profit_harvest: "PROFIT",
   pre_expiry: "PRE-EXPIRY",
   peak: "PEAK",
   expired_itm: "EXPIRED ITM",
@@ -62,6 +63,7 @@ export function exitReasonColor(primary: string): string {
     case "PRE-EXPIRY":
       return "yellow";
     case "PEAK":
+    case "PROFIT":
       return "green";
     case "EXPIRED ITM":
       return "green";

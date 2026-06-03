@@ -272,10 +272,22 @@ function parseExitReason(reason?: string | null): string | null {
   return null;
 }
 
-/** Get exit reason: prefer exit_reason column, fall back to parsing reason field */
+/** Get exit reason: prefer exit_reason column, but ignore legacy UNKNOWN values. */
 function getExitReason(trade: Trade): string | null {
-  if (trade.exit_reason) return trade.exit_reason;
-  return parseExitReason(trade.reason);
+  const explicit = trade.exit_reason?.trim();
+  if (explicit && explicit.toUpperCase() !== 'UNKNOWN') return explicit;
+
+  const parsed = parseExitReason(trade.reason);
+  if (parsed && parsed !== 'UNKNOWN') return parsed;
+
+  if (trade.status === 'closed') {
+    const pnlPct = Number(trade.pnl_pct ?? 0);
+    const netPnl = Number(trade.net_pnl ?? trade.pnl ?? 0);
+    if (pnlPct > 0 || netPnl > 0) return 'TP';
+    if (pnlPct < 0 || netPnl < 0) return 'STOP';
+  }
+
+  return explicit || null;
 }
 
 /** Calculate hold time in seconds for a trade */

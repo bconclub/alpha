@@ -117,6 +117,14 @@ def format_exit_reason(raw: str) -> str:
     return EXIT_REASON_DISPLAY.get(raw, raw.replace("_", " ").title())
 
 
+def canonical_option_exit_reason(exit_type: str | None) -> str:
+    """Return the strategy-native exit key that should be stored in DB."""
+    exit_key = (exit_type or "").strip().lower()
+    if not exit_key or exit_key == "unknown":
+        return "unknown"
+    return exit_key
+
+
 class OptionsScalpStrategy(BaseStrategy):
     """Buy CALLs/PUTs during BB squeeze — buy cheap premium, hold through breakout."""
 
@@ -6547,7 +6555,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
             peak_pnl_pct = (hp - ep) / ep * 100 if ep > 0 else 0
 
-            from alpha.trade_executor import _extract_exit_reason
+            exit_reason = canonical_option_exit_reason(exit_type)
 
             await self._db.update_trade(
                 open_trade["id"],
@@ -6562,7 +6570,8 @@ class OptionsScalpStrategy(BaseStrategy):
                     "entry_fee": round(entry_fee, 8),
                     "exit_fee": round(exit_fee, 8),
                     "peak_pnl": round(peak_pnl_pct, 4),
-                    "exit_reason": _extract_exit_reason(exit_type),
+                    "reason": exit_reason,
+                    "exit_reason": exit_reason,
                     "position_state": None,
                 },
             )
