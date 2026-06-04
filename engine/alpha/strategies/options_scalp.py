@@ -169,6 +169,10 @@ class OptionsScalpStrategy(BaseStrategy):
     SQUEEZE_BB_WIDTH_BTC = 0.7  # BTC: BB width must be < 0.7% (tighter price action)
     SQUEEZE_FILL_WAIT_SEC = 300  # Wait up to 5 min for fill
     SQUEEZE_FILL_POLL_SEC = 3  # Poll every 3s so highest_premium tracking starts fast after fill
+    FAST_ENTRY_FILL_WAIT_SEC = 5  # TREND/MOM/PULLBACK must fill now or cancel
+    FAST_ENTRY_FILL_POLL_SEC = 1
+    FAST_ENTRY_MAX_SPOT_AGAINST_PCT = 0.05
+    FAST_ENTRY_SETUPS = frozenset({"MOM_BURST", "MOVE_PULLBACK", "TREND_FLOW", "FVG_CHOCH"})
     SQUEEZE_CHEAP_PERCENTILE = 0.25  # Buy bottom 25% of 30-min premium range
     SQUEEZE_HISTORY_MIN = 30  # Track premium history for 30 min
     # Dynamic confirmation window thresholds (GPFC #21) — UPDATED
@@ -262,8 +266,8 @@ class OptionsScalpStrategy(BaseStrategy):
     # GPFC #95: do not let ordinary bid/ask noise kill a fresh options entry
     # within seconds. Phase A only becomes active after this warmup unless the
     # premium loss is already emergency-sized.
-    PHASE_A_THESIS_WARMUP_SEC = 30.0
-    PHASE_A_EMERGENCY_SL_PCT = -8.0
+    PHASE_A_THESIS_WARMUP_SEC = 90.0
+    PHASE_A_EMERGENCY_SL_PCT = -12.0
 
     # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
     # Catches trades that NEVER moved up AND underlying turned against us.
@@ -272,6 +276,7 @@ class OptionsScalpStrategy(BaseStrategy):
     DEAD_PEAK_MAX_PCT = 3.0         # GPFC #72: 0.5 → 3.0; catches the sub-3% peak trades that bled to -16% SL
     DEAD_PREMIUM_DROP_PCT = -8.0    # premium dropped ≥ 8% from entry
     DEAD_UNDERLYING_AGAINST_PCT = 0.05  # underlying moved > 0.05% against us in 60s
+    DEAD_MIN_HOLD_SEC = 90.0
 
     # ── GPFC #78 / #79: phase-based exits (regime-switching by peak P&L) ─
     # GPFC #79 tightens phase-B/C/D/E backstops since trail is the primary
@@ -4356,6 +4361,7 @@ class OptionsScalpStrategy(BaseStrategy):
         # Get current price for logging/metadata
         current_price = self._last_spot_price
         atm_strike = self._cached_target_strike or selected_strike
+        order_spot_price = float(current_price or 0.0)
 
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         allocation_pct = self.CAPITAL_PER_TRADE_MIN_PCT + (
@@ -4482,14 +4488,51 @@ class OptionsScalpStrategy(BaseStrategy):
             self._reset_breakout_state()
             return []
 
-        # Poll for fill up to 5 min, every 30s
+        # GPFC #96: trend/momentum entries are perishable. A TREND_FLOW limit
+        # that fills a minute later is no longer the same trade; it is a stale
+        # option quote after the move has already changed. SQUEEZE can wait for
+        # a planned limit fill, but fast setups must fill immediately or cancel.
         limit_filled = False
         fill_price = limit_price
         _filled_qty = 0.0
-        polls = self.SQUEEZE_FILL_WAIT_SEC // self.SQUEEZE_FILL_POLL_SEC
+        stale_fill = False
+
+        def _fast_entry_spot_against_pct() -> float:
+            if setup_type not in self.FAST_ENTRY_SETUPS or order_spot_price <= 0:
+                return 0.0
+            live_spot = float(self._last_spot_price or order_spot_price)
+            if self._breakout_direction == "DOWN":
+                return (live_spot - order_spot_price) / order_spot_price * 100.0
+            return (order_spot_price - live_spot) / order_spot_price * 100.0
+
+        if setup_type in self.FAST_ENTRY_SETUPS:
+            fill_wait_sec = self.FAST_ENTRY_FILL_WAIT_SEC
+            fill_poll_sec = self.FAST_ENTRY_FILL_POLL_SEC
+        else:
+            fill_wait_sec = self.SQUEEZE_FILL_WAIT_SEC
+            fill_poll_sec = self.SQUEEZE_FILL_POLL_SEC
+        polls = max(1, int(fill_wait_sec // fill_poll_sec))
 
         for _poll in range(polls):
-            await asyncio.sleep(self.SQUEEZE_FILL_POLL_SEC)
+            await asyncio.sleep(fill_poll_sec)
+            if setup_type in self.FAST_ENTRY_SETUPS and order_spot_price > 0:
+                live_spot = float(self._last_spot_price or order_spot_price)
+                if self._breakout_direction == "DOWN":
+                    spot_against_pct = (live_spot - order_spot_price) / order_spot_price * 100.0
+                else:
+                    spot_against_pct = (order_spot_price - live_spot) / order_spot_price * 100.0
+                if spot_against_pct > self.FAST_ENTRY_MAX_SPOT_AGAINST_PCT:
+                    self.logger.info(
+                        "[%s] %s_STALE_LIMIT_CANCEL: spot moved against before fill "
+                        "(%+.3f%% > %.3f%%) order_spot=%.2f live=%.2f",
+                        self.pair,
+                        setup_type,
+                        spot_against_pct,
+                        self.FAST_ENTRY_MAX_SPOT_AGAINST_PCT,
+                        order_spot_price,
+                        live_spot,
+                    )
+                    break
             try:
                 updated = await self.options_exchange.fetch_order(
                     limit_order_id, selected_symbol
@@ -4503,6 +4546,24 @@ class OptionsScalpStrategy(BaseStrategy):
                         or limit_price
                     )
                     limit_filled = True
+                    if setup_type in self.FAST_ENTRY_SETUPS and order_spot_price > 0:
+                        live_spot = float(self._last_spot_price or order_spot_price)
+                        if self._breakout_direction == "DOWN":
+                            spot_against_pct = (live_spot - order_spot_price) / order_spot_price * 100.0
+                        else:
+                            spot_against_pct = (order_spot_price - live_spot) / order_spot_price * 100.0
+                        if spot_against_pct > self.FAST_ENTRY_MAX_SPOT_AGAINST_PCT:
+                            stale_fill = True
+                            self.logger.warning(
+                                "[%s] %s_STALE_FILL: filled after spot moved against "
+                                "(%+.3f%% > %.3f%%) order_spot=%.2f live=%.2f",
+                                self.pair,
+                                setup_type,
+                                spot_against_pct,
+                                self.FAST_ENTRY_MAX_SPOT_AGAINST_PCT,
+                                order_spot_price,
+                                live_spot,
+                            )
                     self.logger.info(
                         "[%s] BREAKOUT: FILLED @ $%.4f (%d contracts) — poll %d/%d",
                         self.pair,
@@ -4560,6 +4621,17 @@ class OptionsScalpStrategy(BaseStrategy):
                         fill_price = float(
                             _fc.get("average", 0) or _fc.get("price", 0) or limit_price
                         )
+                        spot_against_pct = _fast_entry_spot_against_pct()
+                        if spot_against_pct > self.FAST_ENTRY_MAX_SPOT_AGAINST_PCT:
+                            stale_fill = True
+                            self.logger.warning(
+                                "[%s] %s_STALE_FILL_AFTER_CANCEL: exchange filled while canceling "
+                                "(%+.3f%% > %.3f%%)",
+                                self.pair,
+                                setup_type,
+                                spot_against_pct,
+                                self.FAST_ENTRY_MAX_SPOT_AGAINST_PCT,
+                            )
                         limit_filled = True
                 except Exception:
                     pass
@@ -4586,6 +4658,9 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_action_at = time.time()
             self._reset_breakout_state()
             return []
+
+        if stale_fill and self._pending_entry_signals is not None:
+            self._pending_entry_signals["stale_fill"] = True
 
         # Re-fetch for Delta's actual fill price
         try:
@@ -6068,8 +6143,15 @@ class OptionsScalpStrategy(BaseStrategy):
             )
 
         # ── DEAD (unchanged semantics, helper-based) ──
+        position_age_sec = (
+            now - self.entry_time
+            if self.entry_time
+            else self.DEAD_MIN_HOLD_SEC
+        )
+
         if (
-            peak_pnl_pct <= self.DEAD_PEAK_MAX_PCT
+            position_age_sec >= self.DEAD_MIN_HOLD_SEC
+            and peak_pnl_pct <= self.DEAD_PEAK_MAX_PCT
             and premium_change_pct <= self.DEAD_PREMIUM_DROP_PCT
             and self._underlying_turned_against(self.DEAD_UNDERLYING_AGAINST_PCT)
         ):
@@ -6087,11 +6169,6 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── PHASE A: tight SL (-3%) with GPFC #80 momentum confirmation ──
         if phase == "A" and premium_change_pct <= self.PHASE_A_SL_PCT:
-            position_age_sec = (
-                now - self.entry_time
-                if self.entry_time
-                else self.PHASE_A_THESIS_WARMUP_SEC
-            )
             if (
                 position_age_sec < self.PHASE_A_THESIS_WARMUP_SEC
                 and premium_change_pct > self.PHASE_A_EMERGENCY_SL_PCT
