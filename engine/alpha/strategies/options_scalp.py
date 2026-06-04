@@ -377,6 +377,14 @@ class OptionsScalpStrategy(BaseStrategy):
     MOVE_PULLBACK_FAST_MOVE_MAX_SPREAD_PCT = 6.5
     MOVE_PULLBACK_MAX_MARK_GAP_PCT = 7.0
 
+    # GPFC #95: trend-first regime guard. In a strong 15m/45m trend, stop
+    # taking tiny countertrend option scalps and only allow entries with the
+    # dominant tape unless the higher-timeframe trend actually flips.
+    TREND_REGIME_15M_PCT = 0.60
+    TREND_REGIME_45M_PCT = 1.00
+    TREND_REGIME_STRONG_15M_PCT = 0.85
+    TREND_COUNTER_BLOCK_ENABLED = True
+
     # GPFC #88: directional staircase entry. This catches the market shape
     # where several 5m candles walk one way without a clean pullback trigger.
     TREND_FLOW_15M_PCT = 0.75
@@ -392,6 +400,7 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_FLOW_MIN_ALIGNED_60S_PCT = 0.18
     TREND_FLOW_MIN_ALIGNED_20S_PCT = 0.07
     TREND_FLOW_MIN_ACCEL_RATIO = 0.50
+    TREND_FLOW_TREND_REVERSE_TOLERANCE_PCT = 0.08
     TREND_FLOW_COOLDOWN_SEC = 900.0
     FAST_MOVE_SPREAD_60S_PCT = 0.45
     FAST_MOVE_SPREAD_20S_PCT = 0.20
@@ -412,6 +421,17 @@ class OptionsScalpStrategy(BaseStrategy):
     REENTRY_MIN_ACCEL_RATIO = 0.45
     REENTRY_MIN_EXPECTED_EDGE_PCT = 8.0
     REENTRY_ALLOWED_SETUPS = frozenset({"MOM_BURST", "TREND_FLOW", "MOVE_PULLBACK"})
+
+    # GPFC #95: BTC options have much larger absolute premiums than ETH. With
+    # a ~$10 account, ATM/near-OTM BTC options frequently require $7-$12
+    # collateral for one contract, so the old 30% allocation meant "BTC can
+    # never trade" during the exact waterfall we wanted. Allow one BTC contract
+    # when collateral fits most of a tiny account, and scan further OTM strikes.
+    BTC_SMALL_ACCOUNT_MAX_ALLOC = 0.90
+    BTC_AFFORDABLE_OTM_SCAN = 6
+    BTC_SMALL_ACCOUNT_MIN_DELTA_ABS = 0.25
+    BTC_SMALL_ACCOUNT_MIN_SCORE = 62.0
+    BTC_SMALL_ACCOUNT_MIN_TURNOVER_USD = 2_000_000
 
     # GPFC #91: ICT-style location + structure setup.
     # The bot may only enter after price reacts at a 15m fair-value-gap midpoint,
@@ -1364,6 +1384,100 @@ class OptionsScalpStrategy(BaseStrategy):
             start = self.MAX_OTM_STRIKES
             return candidates[start : start + extra]
         return candidates[: self.MAX_OTM_STRIKES]
+
+    def _entry_candidate_strikes(self, atm_strike: float, option_type: str) -> list[float]:
+        """Return strikes to try for an entry, ordered by affordability."""
+        if self._base_asset == "BTC":
+            strikes = list(self._get_otm_candidates(
+                atm_strike,
+                option_type,
+                extra=self.BTC_AFFORDABLE_OTM_SCAN,
+            ))
+            strikes = list(self._get_otm_candidates(
+                atm_strike,
+                option_type,
+            )) + strikes
+            strikes.append(atm_strike)
+        else:
+            strikes = [atm_strike]
+            for strike in self._get_otm_candidates(atm_strike, option_type):
+                strikes.append(strike)
+
+        out: list[float] = []
+        for strike in strikes:
+            if strike not in out:
+                out.append(strike)
+        return out
+
+    def _is_btc_small_account_mode(self) -> bool:
+        capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+        return self._base_asset == "BTC" and 0 < capital < self.OPT_SURVIVAL_BALANCE
+
+    def _btc_small_account_score_floor(self) -> float | None:
+        return self.BTC_SMALL_ACCOUNT_MIN_SCORE if self._is_btc_small_account_mode() else None
+
+    def _setup_turnover_floor(self, setup_floor: float) -> float:
+        if self._is_btc_small_account_mode():
+            return min(setup_floor, self.BTC_SMALL_ACCOUNT_MIN_TURNOVER_USD)
+        return setup_floor
+
+    def _htf_trend_direction(self, ohlcv: list[list[float]] | None) -> tuple[str | None, float, float]:
+        """Return dominant 1m-derived 15m/45m direction for entry filtering."""
+        if not ohlcv or len(ohlcv) < 46:
+            return None, 0.0, 0.0
+        try:
+            close_now = float(ohlcv[-1][4])
+            close_15m_ago = float(ohlcv[-16][4])
+            close_45m_ago = float(ohlcv[-46][4])
+        except (TypeError, ValueError, IndexError):
+            return None, 0.0, 0.0
+        if close_now <= 0 or close_15m_ago <= 0 or close_45m_ago <= 0:
+            return None, 0.0, 0.0
+
+        move_15m = (close_now - close_15m_ago) / close_15m_ago * 100.0
+        move_45m = (close_now - close_45m_ago) / close_45m_ago * 100.0
+
+        if (
+            move_15m <= -self.TREND_REGIME_STRONG_15M_PCT
+            or (
+                move_15m <= -self.TREND_REGIME_15M_PCT
+                and move_45m <= -self.TREND_REGIME_45M_PCT
+            )
+        ):
+            return "DOWN", move_15m, move_45m
+        if (
+            move_15m >= self.TREND_REGIME_STRONG_15M_PCT
+            or (
+                move_15m >= self.TREND_REGIME_15M_PCT
+                and move_45m >= self.TREND_REGIME_45M_PCT
+            )
+        ):
+            return "UP", move_15m, move_45m
+        return None, move_15m, move_45m
+
+    def _direction_allowed_by_trend(
+        self,
+        direction: str,
+        ohlcv: list[list[float]] | None,
+        setup_type: str,
+    ) -> bool:
+        """Block countertrend entries while the higher-timeframe tape is clear."""
+        if not self.TREND_COUNTER_BLOCK_ENABLED:
+            return True
+        trend_dir, move_15m, move_45m = self._htf_trend_direction(ohlcv)
+        if not trend_dir or trend_dir == direction:
+            return True
+        self.logger.info(
+            "[%s] %s_COUNTERTREND_SKIP: dir=%s blocked by %s trend "
+            "(15m=%+.2f%% 45m=%+.2f%%)",
+            self.pair,
+            setup_type,
+            direction,
+            trend_dir,
+            move_15m,
+            move_45m,
+        )
+        return False
 
     def _build_option_symbol(
         self,
@@ -2906,6 +3020,11 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
         self._last_spot_price = spot
 
+        ohlcv = self._cached_ohlcv or await self._get_ohlcv_for_squeeze()
+        if not self._direction_allowed_by_trend(direction, ohlcv, "MOVE_PULLBACK"):
+            self._move_pullback_state = None
+            return []
+
         retrace_price = float(state.get("retrace_price") or 0)
         if retrace_price > 0:
             if direction == "UP":
@@ -2930,11 +3049,7 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
         self._cached_target_strike = atm_strike
 
-        strikes_to_try = [atm_strike]
-        if self._base_asset == "BTC":
-            otm_candidates = self._get_otm_candidates(atm_strike, option_type)
-            if otm_candidates:
-                strikes_to_try = [otm_candidates[0], atm_strike]
+        strikes_to_try = self._entry_candidate_strikes(atm_strike, option_type)
 
         selected_symbol: str | None = None
         selected_strike: float | None = None
@@ -3012,6 +3127,11 @@ class OptionsScalpStrategy(BaseStrategy):
         passes_quality, skip_reason = self._passes_entry_quality(
             selected_ticker,
             min_iv=self.MOVE_PULLBACK_MIN_IV,
+            min_delta_abs=(
+                self.BTC_SMALL_ACCOUNT_MIN_DELTA_ABS
+                if self._is_btc_small_account_mode()
+                else None
+            ),
         )
         if not passes_quality:
             self.logger.info(
@@ -3027,13 +3147,14 @@ class OptionsScalpStrategy(BaseStrategy):
             turnover_usd = float(info.get("turnover_usd", 0) or 0)
         except (TypeError, ValueError):
             turnover_usd = 0.0
-        if turnover_usd < self.MOVE_PULLBACK_MIN_TURNOVER_USD:
+        turnover_floor = self._setup_turnover_floor(self.MOVE_PULLBACK_MIN_TURNOVER_USD)
+        if turnover_usd < turnover_floor:
             self.logger.info(
                 "[%s] MOVE_PULLBACK_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM",
                 self.pair,
                 selected_symbol,
                 turnover_usd / 1_000_000,
-                self.MOVE_PULLBACK_MIN_TURNOVER_USD / 1_000_000,
+                turnover_floor / 1_000_000,
             )
             return []
 
@@ -3042,6 +3163,7 @@ class OptionsScalpStrategy(BaseStrategy):
             entry_ask,
             option_type,
             "MOVE_PULLBACK",
+            min_score=self._btc_small_account_score_floor(),
             max_spread_pct=max_spread_pct,
         )
         if not quality_ok:
@@ -3139,19 +3261,28 @@ class OptionsScalpStrategy(BaseStrategy):
             direction = "UP"
         if not direction:
             return []
+        trend_dir, trend_15m, trend_45m = self._htf_trend_direction(ohlcv)
+        if not self._direction_allowed_by_trend(direction, ohlcv, "TREND_FLOW"):
+            return []
+        trend_aligned = trend_dir == direction
         option_type = "call" if direction == "UP" else "put"
         direction_sign = 1.0 if direction == "UP" else -1.0
         aligned_60s = direction_sign * self._calc_underlying_mom(60.0)
         aligned_20s = direction_sign * self._calc_underlying_mom(20.0)
         accel = self._underlying_acceleration_ratio()
-        if (
+        freshness_failed = (
             aligned_60s < self.TREND_FLOW_MIN_ALIGNED_60S_PCT
             or aligned_20s < self.TREND_FLOW_MIN_ALIGNED_20S_PCT
             or accel < self.TREND_FLOW_MIN_ACCEL_RATIO
-        ):
+        )
+        reversing_now = (
+            aligned_60s < -self.TREND_FLOW_TREND_REVERSE_TOLERANCE_PCT
+            or aligned_20s < -self.TREND_FLOW_TREND_REVERSE_TOLERANCE_PCT
+        )
+        if freshness_failed and (not trend_aligned or reversing_now):
             self.logger.info(
                 "[%s] TREND_FLOW_FRESHNESS_SKIP: dir=%s 60s=%+.2f%%/%.2f%% "
-                "20s=%+.2f%%/%.2f%% accel=%.2f/%.2f",
+                "20s=%+.2f%%/%.2f%% accel=%.2f/%.2f trend=%s 15m=%+.2f%% 45m=%+.2f%%",
                 self.pair,
                 direction,
                 aligned_60s,
@@ -3160,8 +3291,24 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.TREND_FLOW_MIN_ALIGNED_20S_PCT,
                 accel,
                 self.TREND_FLOW_MIN_ACCEL_RATIO,
+                trend_dir or "NONE",
+                trend_15m,
+                trend_45m,
             )
             return []
+        if freshness_failed and trend_aligned:
+            self.logger.info(
+                "[%s] TREND_FLOW_TREND_CONTINUATION: dir=%s accepted despite "
+                "micro freshness 60s=%+.2f%% 20s=%+.2f%% accel=%.2f "
+                "(trend 15m=%+.2f%% 45m=%+.2f%%)",
+                self.pair,
+                direction,
+                aligned_60s,
+                aligned_20s,
+                accel,
+                trend_15m,
+                trend_45m,
+            )
         extended = (
             abs(move_15m) > self.TREND_FLOW_MAX_15M_PCT
             or abs(move_5m) > self.TREND_FLOW_MAX_5M_PCT
@@ -3169,11 +3316,11 @@ class OptionsScalpStrategy(BaseStrategy):
         if extended and (
             aligned_60s < self.TREND_FLOW_CONTINUATION_60S_PCT
             or aligned_20s < self.TREND_FLOW_CONTINUATION_20S_PCT
-        ):
+        ) and (not trend_aligned or reversing_now):
             self.logger.info(
                 "[%s] TREND_FLOW_EXTENDED_SKIP: dir=%s 15m=%+.2f%%/%.2f%% "
                 "5m=%+.2f%%/%.2f%% continuation 60s=%+.2f%%/%.2f%% "
-                "20s=%+.2f%%/%.2f%%",
+                "20s=%+.2f%%/%.2f%% trend=%s",
                 self.pair,
                 direction,
                 move_15m,
@@ -3184,6 +3331,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.TREND_FLOW_CONTINUATION_60S_PCT,
                 aligned_20s,
                 self.TREND_FLOW_CONTINUATION_20S_PCT,
+                trend_dir or "NONE",
             )
             return []
         if extended:
@@ -3213,10 +3361,7 @@ class OptionsScalpStrategy(BaseStrategy):
             return []
         self._cached_target_strike = atm_strike
 
-        candidate_strikes = [atm_strike]
-        for strike in self._get_otm_candidates(atm_strike, option_type)[:2]:
-            if strike not in candidate_strikes:
-                candidate_strikes.append(strike)
+        candidate_strikes = self._entry_candidate_strikes(atm_strike, option_type)
 
         selected_symbol: str | None = None
         selected_strike: float | None = None
@@ -3248,8 +3393,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 candidate_ask,
                 option_type,
                 "TREND_FLOW",
+                min_score=self._btc_small_account_score_floor(),
                 min_expected_edge_pct=10.0 if extended else None,
                 max_spread_pct=max_spread_pct,
+                trend_edge_pct=(
+                    abs(move_15m) * 12.0 + abs(move_5m) * 8.0
+                    if trend_aligned
+                    else None
+                ),
             )
             candidate_score = float(quality_snapshot.get("entry_quality_score", 0.0))
             if quality_ok and candidate_score > best_score:
@@ -3308,6 +3459,11 @@ class OptionsScalpStrategy(BaseStrategy):
         passes_quality, skip_reason = self._passes_entry_quality(
             ticker,
             min_iv=self.TREND_FLOW_MIN_IV,
+            min_delta_abs=(
+                self.BTC_SMALL_ACCOUNT_MIN_DELTA_ABS
+                if self._is_btc_small_account_mode()
+                else None
+            ),
         )
         if not passes_quality:
             self.logger.info(
@@ -3323,13 +3479,14 @@ class OptionsScalpStrategy(BaseStrategy):
             turnover_usd = float(info.get("turnover_usd", 0) or 0)
         except (TypeError, ValueError):
             turnover_usd = 0.0
-        if turnover_usd < self.TREND_FLOW_MIN_TURNOVER_USD:
+        turnover_floor = self._setup_turnover_floor(self.TREND_FLOW_MIN_TURNOVER_USD)
+        if turnover_usd < turnover_floor:
             self.logger.info(
                 "[%s] TREND_FLOW_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM",
                 self.pair,
                 selected_symbol,
                 turnover_usd / 1_000_000,
-                self.TREND_FLOW_MIN_TURNOVER_USD / 1_000_000,
+                turnover_floor / 1_000_000,
             )
             return []
 
@@ -3467,6 +3624,10 @@ class OptionsScalpStrategy(BaseStrategy):
             entry_ask = self._atm_put_ask
             prev_ask = self._prev_put_ask
         else:
+            return []
+
+        ohlcv = self._cached_ohlcv or await self._get_ohlcv_for_squeeze()
+        if not self._direction_allowed_by_trend(direction, ohlcv, "MOM_BURST"):
             return []
 
         # ═════════════════════════════════════════════════════════════════════
@@ -3777,6 +3938,10 @@ class OptionsScalpStrategy(BaseStrategy):
             except (ValueError, TypeError, IndexError):
                 pass
 
+        ohlcv = self._cached_ohlcv or await self._get_ohlcv_for_squeeze()
+        if not self._direction_allowed_by_trend(direction, ohlcv, "SQUEEZE"):
+            return
+
         # Need current price and exchange data to select strike
         current_price = 0.0
         try:
@@ -3812,12 +3977,7 @@ class OptionsScalpStrategy(BaseStrategy):
             return
         self._cached_target_strike = atm_strike
 
-        # Select strike
-        strikes_to_try = [atm_strike]
-        if self._base_asset == "BTC":
-            otm_candidates = self._get_otm_candidates(atm_strike, option_type)
-            if otm_candidates:
-                strikes_to_try = [otm_candidates[0], atm_strike]
+        strikes_to_try = self._entry_candidate_strikes(atm_strike, option_type)
 
         selected_strike: float | None = None
         selected_symbol: str | None = None
@@ -3859,6 +4019,11 @@ class OptionsScalpStrategy(BaseStrategy):
         passes_quality, skip_reason = self._passes_entry_quality(
             selected_ticker,
             min_iv=self.SQUEEZE_MIN_IV,
+            min_delta_abs=(
+                self.BTC_SMALL_ACCOUNT_MIN_DELTA_ABS
+                if self._is_btc_small_account_mode()
+                else None
+            ),
         )
         if not passes_quality:
             self.logger.info(
@@ -4738,6 +4903,8 @@ class OptionsScalpStrategy(BaseStrategy):
         # Survival mode: if balance is very low, cap allocation
         if exchange_capital < self.OPT_SURVIVAL_BALANCE:
             allocation_pct = min(allocation_pct, self.OPT_SURVIVAL_MAX_ALLOC / 100)
+            if self._base_asset == "BTC":
+                allocation_pct = max(allocation_pct, self.BTC_SMALL_ACCOUNT_MAX_ALLOC)
 
         # Calculate collateral to use (this is the premium we'll pay)
         collateral_usd = exchange_capital * allocation_pct
@@ -5179,6 +5346,7 @@ class OptionsScalpStrategy(BaseStrategy):
         ticker: dict[str, Any] | None,
         *,
         min_iv: float | None = None,
+        min_delta_abs: float | None = None,
     ) -> tuple[bool, str]:
         """GPFC #67: liquidity + moneyness + IV gate before any entry fires.
 
@@ -5206,8 +5374,9 @@ class OptionsScalpStrategy(BaseStrategy):
         skip_reasons: list[str] = []
         if turnover < self.ENTRY_MIN_TURNOVER_USD:
             skip_reasons.append(f"turnover_low_${turnover/1e6:.2f}M")
-        if delta_abs < self.ENTRY_DELTA_MIN_ABS:
-            skip_reasons.append(f"delta_too_low_{delta_abs:.2f}")
+        delta_floor = self.ENTRY_DELTA_MIN_ABS if min_delta_abs is None else min_delta_abs
+        if delta_abs < delta_floor:
+            skip_reasons.append(f"delta_too_low_{delta_abs:.2f}_min_{delta_floor:.2f}")
         if delta_abs > self.ENTRY_DELTA_MAX_ABS:
             skip_reasons.append(f"delta_too_high_{delta_abs:.2f}")
         iv_floor = self.ENTRY_MIN_IV if min_iv is None else min_iv
@@ -5228,6 +5397,7 @@ class OptionsScalpStrategy(BaseStrategy):
         min_score: float | None = None,
         min_expected_edge_pct: float | None = None,
         max_spread_pct: float | None = None,
+        trend_edge_pct: float | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
         """Score an options entry against microstructure cost and expected edge.
 
@@ -5266,6 +5436,8 @@ class OptionsScalpStrategy(BaseStrategy):
         )
 
         expected_edge_pct = max(0.0, aligned_60s * 42.0 + aligned_20s * 35.0)
+        if trend_edge_pct is not None:
+            expected_edge_pct = max(expected_edge_pct, max(0.0, trend_edge_pct))
         cost_floor_pct = (
             spread_pct * self.ENTRY_EDGE_SPREAD_MULT
             + mark_gap_pct * self.ENTRY_EDGE_MARK_GAP_MULT
