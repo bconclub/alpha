@@ -268,11 +268,12 @@ class OptionsScalpStrategy(BaseStrategy):
     BREAKEVEN_STOP_EXIT_PCT = 0.5      # exit if pnl drops to +0.5% or lower
 
     PHASE1_HANDS_OFF_SEC = 30
-    # GPFC #95: do not let ordinary bid/ask noise kill a fresh options entry
-    # within seconds. Phase A only becomes active after this warmup unless the
-    # premium loss is already emergency-sized.
+    # GPFC #95/#98: do not let ordinary bid/ask noise kill a fresh options
+    # entry within seconds. Phase A only becomes active after this warmup unless
+    # the premium loss is catastrophic; -8/-15% is normal options noise in fast
+    # Delta books and was cutting trades in 20-30s before the thesis developed.
     PHASE_A_THESIS_WARMUP_SEC = 180.0
-    PHASE_A_EMERGENCY_SL_PCT = -15.0
+    PHASE_A_EMERGENCY_SL_PCT = -30.0
 
     # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
     # Catches trades that NEVER moved up AND underlying turned against us.
