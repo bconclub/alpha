@@ -345,8 +345,8 @@ class OptionsScalpStrategy(BaseStrategy):
     # GPFC #87: small-account options need profit capture before a thin book can
     # give back the whole move between 5s polls. A +12% option peak is already
     # meaningful at current size; harvest while at least +10% is still quoted.
-    PROFIT_HARVEST_ARM_PCT = 12.0
-    PROFIT_HARVEST_EXIT_PCT = 10.0
+    PROFIT_HARVEST_ARM_PCT = 30.0
+    PROFIT_HARVEST_EXIT_PCT = 24.0
 
     # ── GPFC #67: entry-quality filters (winner-pattern analysis) ─────
     # Winners cluster at |delta| 0.42-0.61, IV 0.41-0.54, turnover $2.84M-$13.68M.

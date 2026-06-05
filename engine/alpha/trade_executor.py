@@ -1078,6 +1078,7 @@ class TradeExecutor:
         _use_limit_exit = (
             is_exit
             and signal.exchange_id in ("delta", "bybit")
+            and not is_options
             and _exit_reason not in _URGENT_EXITS
         )
         limit_order_id: str | None = None  # track limit order for recovery in market retry
