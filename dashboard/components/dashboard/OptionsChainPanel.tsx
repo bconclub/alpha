@@ -411,28 +411,50 @@ function TradeIntentPanel({
   const ratio = sp?.bb_kc_width_ratio ?? (bbWidth != null && kcWidth && kcWidth > 0 ? bbWidth / kcWidth : null);
   const breakoutState = state.breakout_state ?? 'NONE';
   const squeezeActive = state.squeeze_active === true;
+  const trendDirection = String(sp?.trend_direction ?? '').toUpperCase();
+  const trend15m = asNumber(sp?.trend_15m_pct);
+  const trend45m = asNumber(sp?.trend_45m_pct);
+  const strong15m = asNumber(sp?.trend_strong_15m_pct) ?? 0.85;
+  const regime15m = asNumber(sp?.trend_regime_15m_pct) ?? 0.6;
+  const regime45m = asNumber(sp?.trend_regime_45m_pct) ?? 1.0;
+  const trendSide = trendDirection === 'UP' ? 'call' : trendDirection === 'DOWN' ? 'put' : null;
+  const strongTrend =
+    trendSide != null &&
+    trend15m != null &&
+    (
+      Math.abs(trend15m) >= strong15m ||
+      (Math.abs(trend15m) >= regime15m && trend45m != null && Math.abs(trend45m) >= regime45m)
+    );
   const momentumReady = momentum != null && Math.abs(momentum) >= momentumThresholdPct;
   const confidenceReady = momentumEntryScore == null || momentumEntryScore >= confidenceMinEntry;
-  const freshnessReady = freshness == null || freshness >= 0.5;
   const ratioReady = ratio != null && ratio <= 1.0;
-  const momentumCandidate = momentumReady && freshnessReady && confidenceReady;
   const absMomentum = momentum != null ? Math.abs(momentum) : null;
+  const targetSide =
+    entrySide ??
+    (momentum != null && Math.abs(momentum) >= momentumThresholdPct
+      ? (momentum >= 0 ? 'call' : 'put')
+      : trendSide);
+  const trendContinuation = strongTrend && targetSide != null && trendSide === targetSide;
+  const freshnessReady = freshness == null || freshness >= 0.5 || trendContinuation;
+  const momentumCandidate = momentumReady && freshnessReady && confidenceReady;
   const freshnessLabel = freshness == null
     ? 'freshness unknown'
-    : freshnessReady
+    : trendContinuation && freshness < 0.5
+      ? `strong ${trendDirection.toLowerCase()} trend; continuation scan`
+      : freshnessReady
       ? `freshness ${freshness.toFixed(2)} OK`
       : `freshness ${freshness.toFixed(2)} is stale`;
   const momentumLabel = momentum == null
     ? 'momentum unavailable'
     : `${fmtPct(momentum)} momentum`;
-  const targetSide =
-    entrySide ??
-    (momentum != null && Math.abs(momentum) >= momentumThresholdPct
-      ? (momentum >= 0 ? 'call' : 'put')
-      : null);
+  const botState = state.bot_state ?? '';
+  const blockedState = botState.startsWith('blocked:')
+    ? botState.replace('blocked:', '').replace(/_/g, ' ').split(':').join(' ')
+    : null;
 
   const blockers: string[] = [];
   if (!inPosition) {
+    if (blockedState) blockers.push(blockedState);
     if (!squeezeActive && !momentumReady && !ratioReady) blockers.push('Bands are not compressed enough yet');
     if (!momentumReady) {
       blockers.push(
@@ -446,7 +468,7 @@ function TradeIntentPanel({
     }
     if (!freshnessReady) blockers.push('Move is stale; waiting for a fresh push');
     if (squeezeActive && (breakoutState === 'NONE' || breakoutState == null)) blockers.push('Squeeze is ready, waiting for breakout');
-    if (momentumCandidate && !squeezeActive) blockers.push('Momentum passed; checking option premium, spread and turnover');
+    if ((momentumCandidate || trendContinuation) && !squeezeActive) blockers.push('Momentum/trend passed; checking option premium, spread and turnover');
   }
 
   let readiness: TradeReadiness = 'waiting';
@@ -460,10 +482,18 @@ function TradeIntentPanel({
     detail = state.highest_premium
       ? `Peak premium ${fmtPrem(state.highest_premium)}`
       : 'Exit rules are watching premium and peak';
+  } else if (blockedState) {
+    readiness = 'blocked';
+    title = 'Option gate blocked';
+    subtitle = blockedState;
   } else if (squeezeActive || momentumCandidate) {
     readiness = 'ready';
     title = targetSide ? `${targetSide.toUpperCase()} setup forming` : 'Setup forming';
     subtitle = squeezeActive ? 'Squeeze is ready, waiting for breakout' : 'Momentum passed; checking option quality';
+  } else if (trendContinuation) {
+    readiness = 'ready';
+    title = `${targetSide?.toUpperCase() ?? 'Trend'} continuation`;
+    subtitle = 'Strong trend; scanning option quality and spread';
   } else if (blockers.length > 0) {
     readiness = 'blocked';
     title = 'No trade';

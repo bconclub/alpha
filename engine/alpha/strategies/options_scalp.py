@@ -273,7 +273,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # the premium loss is catastrophic; -8/-15% is normal options noise in fast
     # Delta books and was cutting trades in 20-30s before the thesis developed.
     PHASE_A_THESIS_WARMUP_SEC = 180.0
-    PHASE_A_EMERGENCY_SL_PCT = -30.0
+    PHASE_A_EMERGENCY_SL_PCT = -50.0
 
     # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
     # Catches trades that NEVER moved up AND underlying turned against us.
@@ -1745,6 +1745,10 @@ class OptionsScalpStrategy(BaseStrategy):
         # Acceleration ratio: |move_last_20s| / |move_last_60s|. Useful for
         # post-hoc review of why MB did or didn't fire.
         mb_acceleration = round(self._underlying_acceleration_ratio(), 3)
+        try:
+            htf_trend_dir, htf_trend_15m, htf_trend_45m = self._htf_trend_direction(ohlcv)
+        except Exception:
+            htf_trend_dir, htf_trend_15m, htf_trend_45m = None, 0.0, 0.0
 
         # ── GPFC #62/#63: post-#60 signals — regime, KC width, in-position telemetry ──
         kc_w = self._last_kc_width_pct
@@ -1798,6 +1802,12 @@ class OptionsScalpStrategy(BaseStrategy):
             "momentum_freshness_ratio": mb_acceleration,
             "momentum_acceleration_ratio": mb_acceleration,
             "momentum_burst_threshold_pct": self.MOMENTUM_BURST_THRESHOLD_PCT,
+            "trend_direction": htf_trend_dir,
+            "trend_15m_pct": round(htf_trend_15m, 3),
+            "trend_45m_pct": round(htf_trend_45m, 3),
+            "trend_strong_15m_pct": self.TREND_REGIME_STRONG_15M_PCT,
+            "trend_regime_15m_pct": self.TREND_REGIME_15M_PCT,
+            "trend_regime_45m_pct": self.TREND_REGIME_45M_PCT,
             "squeeze_status": self._squeeze_status,
             "bb_position": round(self._bb_position, 2),
             "direction_bias": self._direction_bias,
@@ -3113,6 +3123,9 @@ class OptionsScalpStrategy(BaseStrategy):
         if bid > 0:
             spread_pct = (entry_ask - bid) / entry_ask * 100.0
             if spread_pct > max_spread_pct:
+                self._cached_bot_state = (
+                    f"blocked:move_pullback_spread:{spread_pct:.1f}%>{max_spread_pct:.1f}%"
+                )
                 self.logger.info(
                     "[%s] MOVE_PULLBACK_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
                     self.pair,
@@ -3129,6 +3142,9 @@ class OptionsScalpStrategy(BaseStrategy):
         )
         mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
         if mark_gap_pct is not None and mark_gap_pct > self.MOVE_PULLBACK_MAX_MARK_GAP_PCT:
+            self._cached_bot_state = (
+                f"blocked:move_pullback_mark_gap:{mark_gap_pct:.1f}%>{self.MOVE_PULLBACK_MAX_MARK_GAP_PCT:.1f}%"
+            )
             self.logger.info(
                 "[%s] MOVE_PULLBACK_EXEC_SKIP: %s ask too far above mark "
                 "(gap=%.2f%% > %.2f%%)",
@@ -3149,6 +3165,7 @@ class OptionsScalpStrategy(BaseStrategy):
             ),
         )
         if not passes_quality:
+            self._cached_bot_state = "blocked:move_pullback_quality"
             self.logger.info(
                 "[%s] ENTRY_QUALITY_SKIP — %s (MOVE_PULLBACK %s)",
                 self.pair,
@@ -3164,6 +3181,9 @@ class OptionsScalpStrategy(BaseStrategy):
             turnover_usd = 0.0
         turnover_floor = self._setup_turnover_floor(self.MOVE_PULLBACK_MIN_TURNOVER_USD)
         if turnover_usd < turnover_floor:
+            self._cached_bot_state = (
+                f"blocked:move_pullback_liquidity:{turnover_usd / 1_000_000:.1f}M<{turnover_floor / 1_000_000:.1f}M"
+            )
             self.logger.info(
                 "[%s] MOVE_PULLBACK_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM",
                 self.pair,
@@ -3182,6 +3202,7 @@ class OptionsScalpStrategy(BaseStrategy):
             max_spread_pct=max_spread_pct,
         )
         if not quality_ok:
+            self._cached_bot_state = "blocked:move_pullback_quality_score"
             self.logger.info(
                 "[%s] MOVE_PULLBACK_QUALITY_SKIP: %s %s edge=%.1f%% cost=%.1f%% score=%.1f",
                 self.pair,
@@ -3427,6 +3448,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 best_score = candidate_score
 
         if not selected_symbol or selected_strike is None or not ticker or entry_ask <= 0:
+            self._cached_bot_state = "blocked:trend_flow_quality"
             self.logger.info(
                 "[%s] TREND_FLOW_QUALITY_SKIP: no candidate passed option-quality gate "
                 "(dir=%s candidates=%s)",
@@ -3449,6 +3471,9 @@ class OptionsScalpStrategy(BaseStrategy):
         if bid > 0:
             spread_pct = (entry_ask - bid) / entry_ask * 100.0
             if spread_pct > max_spread_pct:
+                self._cached_bot_state = (
+                    f"blocked:trend_flow_spread:{spread_pct:.1f}%>{max_spread_pct:.1f}%"
+                )
                 self.logger.info(
                     "[%s] TREND_FLOW_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
                     self.pair,
@@ -3461,6 +3486,9 @@ class OptionsScalpStrategy(BaseStrategy):
         exec_snapshot = self._entry_execution_snapshot(ticker, entry_ask, option_type)
         mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
         if mark_gap_pct is not None and mark_gap_pct > self.TREND_FLOW_MAX_MARK_GAP_PCT:
+            self._cached_bot_state = (
+                f"blocked:trend_flow_mark_gap:{mark_gap_pct:.1f}%>{self.TREND_FLOW_MAX_MARK_GAP_PCT:.1f}%"
+            )
             self.logger.info(
                 "[%s] TREND_FLOW_EXEC_SKIP: %s ask too far above mark "
                 "(gap=%.2f%% > %.2f%%)",
@@ -3481,6 +3509,7 @@ class OptionsScalpStrategy(BaseStrategy):
             ),
         )
         if not passes_quality:
+            self._cached_bot_state = "blocked:trend_flow_quality"
             self.logger.info(
                 "[%s] ENTRY_QUALITY_SKIP — %s (TREND_FLOW %s)",
                 self.pair,
@@ -3496,6 +3525,9 @@ class OptionsScalpStrategy(BaseStrategy):
             turnover_usd = 0.0
         turnover_floor = self._setup_turnover_floor(self.TREND_FLOW_MIN_TURNOVER_USD)
         if turnover_usd < turnover_floor:
+            self._cached_bot_state = (
+                f"blocked:trend_flow_liquidity:{turnover_usd / 1_000_000:.1f}M<{turnover_floor / 1_000_000:.1f}M"
+            )
             self.logger.info(
                 "[%s] TREND_FLOW_LIQUIDITY_SKIP: %s turnover=$%.2fM < $%.2fM",
                 self.pair,

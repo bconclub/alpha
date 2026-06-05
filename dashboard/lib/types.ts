@@ -388,6 +388,12 @@ export interface SignalsPanel {
   momentum_freshness_ratio?: number | null;
   momentum_acceleration_ratio?: number | null;
   momentum_burst_threshold_pct?: number | null;
+  trend_direction?: 'UP' | 'DOWN' | string | null;
+  trend_15m_pct?: number | null;
+  trend_45m_pct?: number | null;
+  trend_strong_15m_pct?: number | null;
+  trend_regime_15m_pct?: number | null;
+  trend_regime_45m_pct?: number | null;
   // In-position telemetry (null when flat)
   premium_velocity_pct?: number | null;
   underlying_vs_position_pct?: number | null;
