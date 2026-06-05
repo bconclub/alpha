@@ -172,6 +172,7 @@ class OptionsScalpStrategy(BaseStrategy):
     FAST_ENTRY_FILL_WAIT_SEC = 5  # TREND/MOM/PULLBACK must fill now or cancel
     FAST_ENTRY_FILL_POLL_SEC = 1
     FAST_ENTRY_MAX_SPOT_AGAINST_PCT = 0.05
+    FAST_ENTRY_LIMIT_CROSS_PCT = 3.0  # Cross the ask a little so fast option moves actually fill.
     FAST_ENTRY_SETUPS = frozenset({"MOM_BURST", "MOVE_PULLBACK", "TREND_FLOW", "FVG_CHOCH"})
     PAPER_FUTURES_ENABLED = True
     PAPER_FUTURES_ACCOUNT_USD = 100.0
@@ -4385,20 +4386,25 @@ class OptionsScalpStrategy(BaseStrategy):
             self._reset_breakout_state()
             return []
 
-        # Recalculate contracts at confirmed ask price
+        limit_price = confirmed_ask
+        if setup_type in self.FAST_ENTRY_SETUPS:
+            limit_price = round(
+                confirmed_ask * (1.0 + self.FAST_ENTRY_LIMIT_CROSS_PCT / 100.0),
+                4,
+            )
+
+        # Recalculate contracts at the actual order cap price.
         opt_contracts = self._calculate_option_contracts(
-            confirmed_ask, entry_confidence
+            limit_price, entry_confidence
         )
         if opt_contracts < 1:
             self.logger.info(
                 "[%s] BREAKOUT_CONFIRMED: no affordable contracts at $%.4f — abort",
                 self.pair,
-                confirmed_ask,
+                limit_price,
             )
             self._reset_breakout_state()
             return []
-
-        limit_price = confirmed_ask  # Enter at current market ask after confirmation
 
         # Get current price for logging/metadata
         current_price = self._last_spot_price
