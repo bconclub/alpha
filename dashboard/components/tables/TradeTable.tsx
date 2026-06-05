@@ -159,6 +159,7 @@ function inferSetupType(trade: Trade): string | undefined {
   if (haystack.includes('MOMENTUM_BURST_ENTRY')) return 'MOMENTUM_BURST_ENTRY';
   if (haystack.includes('MOMENTUM_BURST')) return 'MOMENTUM_BURST';
   if (haystack.includes('TREND_FLOW')) return 'TREND_FLOW';
+  if (haystack.includes('PREMIUM_WAVE')) return 'PREMIUM_WAVE';
   if (haystack.includes('BB_SQUEEZE_BREAKOUT')) return 'BB_SQUEEZE';
   if (haystack.includes('BB_SQUEEZE')) return 'BB_SQUEEZE';
   return undefined;
@@ -178,7 +179,7 @@ function getRiskRewardRatio(trade: Trade): string {
   if (isSecondEntryTrade(trade)) return '1:3';
   const setup = (inferSetupType(trade) || '').toUpperCase();
   if (setup.includes('FVG')) return '1:3';
-  if (setup.includes('MOM') || setup.includes('PULLBACK') || setup.includes('TREND')) return '1:2';
+  if (setup.includes('MOM') || setup.includes('PULLBACK') || setup.includes('TREND') || setup.includes('WAVE')) return '1:2';
   if (setup.includes('SQUEEZE')) return '1:1';
   return '—';
 }

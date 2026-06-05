@@ -173,7 +173,7 @@ class OptionsScalpStrategy(BaseStrategy):
     FAST_ENTRY_FILL_POLL_SEC = 1
     FAST_ENTRY_MAX_SPOT_AGAINST_PCT = 0.05
     FAST_ENTRY_LIMIT_CROSS_PCT = 8.0  # Cross the ask enough so fast option moves actually fill.
-    FAST_ENTRY_SETUPS = frozenset({"MOM_BURST", "MOVE_PULLBACK", "TREND_FLOW", "FVG_CHOCH"})
+    FAST_ENTRY_SETUPS = frozenset({"MOM_BURST", "MOVE_PULLBACK", "TREND_FLOW", "FVG_CHOCH", "PREMIUM_WAVE"})
     PAPER_FUTURES_ENABLED = True
     PAPER_FUTURES_ACCOUNT_USD = 100.0
     PAPER_FUTURES_ALLOC_PCT = 0.25
@@ -205,6 +205,20 @@ class OptionsScalpStrategy(BaseStrategy):
     # near breakeven because the bid vanished. Keep the generic floor for
     # SQUEEZE, but require stronger turnover before momentum entries.
     MOM_BURST_MIN_TURNOVER_USD = 5_000_000
+    # GPFC #99: premium-wave entry. When the higher-timeframe tape is already
+    # directional and the option premium itself starts lifting, enter the wave
+    # directly instead of waiting for squeeze/pullback/momentum gates to align
+    # perfectly. This is real-options only and uses only spot/options data.
+    PREMIUM_WAVE_MIN_5M_RISE_PCT = 12.0
+    PREMIUM_WAVE_MIN_15M_RISE_PCT = 18.0
+    PREMIUM_WAVE_MIN_UNDERLYING_5M_PCT = 0.25
+    PREMIUM_WAVE_MIN_UNDERLYING_15M_PCT = 0.45
+    PREMIUM_WAVE_MIN_TURNOVER_USD = 750_000
+    PREMIUM_WAVE_MAX_SPREAD_PCT = 8.0
+    PREMIUM_WAVE_MAX_MARK_GAP_PCT = 9.0
+    PREMIUM_WAVE_MIN_DELTA_ABS = 0.20
+    PREMIUM_WAVE_MIN_IV = 0.20
+    PREMIUM_WAVE_COOLDOWN_SEC = 300.0
     # If spread is wider than the phase-A stop, the trade is born near/under
     # stop before thesis can play out. Keep entries tighter than the -3% phase-A
     # guard so we do not buy options that immediately stop on bid/ask alone.
@@ -362,6 +376,7 @@ class OptionsScalpStrategy(BaseStrategy):
         "SQUEEZE",
         "MOVE_PULLBACK",
         "TREND_FLOW",
+        "PREMIUM_WAVE",
     })
 
     # GPFC #82: IV-regime gates per setup. mark_vol is read from
@@ -686,6 +701,8 @@ class OptionsScalpStrategy(BaseStrategy):
         self._prev_put_ask: float = 0.0
         self._prev2_call_ask: float = 0.0
         self._prev2_put_ask: float = 0.0
+        self._atm_call_history: deque[tuple[float, float, float]] = deque(maxlen=240)
+        self._atm_put_history: deque[tuple[float, float, float]] = deque(maxlen=240)
 
         # ── Caching for squeeze detection ─────────────────────────
         # Cache OHLCV data to avoid refetching within same scan tick
@@ -707,6 +724,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._move_pullback_state: dict[str, Any] | None = None
         self._last_ws_wake_at: float = 0.0
         self._last_trend_flow_entry_at: float = 0.0
+        self._last_premium_wave_entry_at: float = 0.0
         self._reentry_watch: dict[str, Any] | None = None
         self._last_fvg_choch_entry_at: float = 0.0
         self._fvg_choch_zone_cooldowns: dict[str, float] = {}
@@ -1440,6 +1458,75 @@ class OptionsScalpStrategy(BaseStrategy):
             return min(setup_floor, self.BTC_SMALL_ACCOUNT_MIN_TURNOVER_USD)
         return setup_floor
 
+    def _record_atm_premium_history(
+        self,
+        *,
+        call_ask: float,
+        put_ask: float,
+        spot_price: float,
+    ) -> None:
+        """Track real ATM option asks so entries can react to option premium waves."""
+        now = time.monotonic()
+        cutoff = now - 20 * 60
+        if call_ask > 0:
+            self._atm_call_history.append((now, call_ask, spot_price))
+        if put_ask > 0:
+            self._atm_put_history.append((now, put_ask, spot_price))
+        while self._atm_call_history and self._atm_call_history[0][0] < cutoff:
+            self._atm_call_history.popleft()
+        while self._atm_put_history and self._atm_put_history[0][0] < cutoff:
+            self._atm_put_history.popleft()
+
+    @staticmethod
+    def _history_value_at_least_seconds_ago(
+        history: deque[tuple[float, float, float]],
+        seconds: float,
+    ) -> tuple[float, float] | None:
+        if not history:
+            return None
+        now = time.monotonic()
+        target = now - seconds
+        candidate = None
+        for t, premium, spot in reversed(history):
+            if t <= target:
+                candidate = (premium, spot)
+                break
+        if candidate is None and history:
+            _, premium, spot = history[0]
+            candidate = (premium, spot)
+        return candidate
+
+    def _premium_wave_snapshot(self, option_type: str) -> dict[str, float] | None:
+        history = self._atm_call_history if option_type == "call" else self._atm_put_history
+        current = self._atm_call_ask if option_type == "call" else self._atm_put_ask
+        if current <= 0 or len(history) < 2:
+            return None
+
+        five = self._history_value_at_least_seconds_ago(history, 300.0)
+        fifteen = self._history_value_at_least_seconds_ago(history, 900.0)
+        if not five or not fifteen:
+            return None
+        prem_5m, spot_5m = five
+        prem_15m, spot_15m = fifteen
+        spot_now = self._last_spot_price
+        if prem_5m <= 0 or prem_15m <= 0 or spot_now <= 0 or spot_5m <= 0 or spot_15m <= 0:
+            return None
+
+        premium_5m = (current - prem_5m) / prem_5m * 100.0
+        premium_15m = (current - prem_15m) / prem_15m * 100.0
+        option_dir = 1.0 if option_type == "call" else -1.0
+        underlying_5m = option_dir * ((spot_now - spot_5m) / spot_5m * 100.0)
+        underlying_15m = option_dir * ((spot_now - spot_15m) / spot_15m * 100.0)
+        return {
+            "premium_5m_pct": premium_5m,
+            "premium_15m_pct": premium_15m,
+            "underlying_5m_pct": underlying_5m,
+            "underlying_15m_pct": underlying_15m,
+            "premium_now": current,
+            "premium_5m_ago": prem_5m,
+            "premium_15m_ago": prem_15m,
+        }
+
     def _htf_trend_direction(self, ohlcv: list[list[float]] | None) -> tuple[str | None, float, float]:
         """Return dominant 1m-derived 15m/45m direction for entry filtering."""
         if not ohlcv or len(ohlcv) < 46:
@@ -1635,6 +1722,11 @@ class OptionsScalpStrategy(BaseStrategy):
                         self._prev2_put_ask = self._prev_put_ask
                         self._prev_put_ask = self._atm_put_ask
                         self._atm_put_ask = raw_put_ask
+                    self._record_atm_premium_history(
+                        call_ask=raw_call_ask,
+                        put_ask=raw_put_ask,
+                        spot_price=float(spot_price or 0),
+                    )
                     self.logger.info(
                         "[%s] SQUEEZE_SCAN: %s ATM_call_ask=$%.2f ATM_put_ask=$%.2f strike=%s",
                         self.pair,
@@ -2311,6 +2403,10 @@ class OptionsScalpStrategy(BaseStrategy):
         # STEP 3: If breakout detected, run confirmation window check
         if self._breakout_pending:
             return await self._check_breakout_confirmation()
+
+        premium_wave_signals = await self._check_premium_wave_entry()
+        if premium_wave_signals:
+            return premium_wave_signals
 
         fvg_choch_signals = await self._check_fvg_choch_entry()
         if fvg_choch_signals:
@@ -3005,6 +3101,190 @@ class OptionsScalpStrategy(BaseStrategy):
             atm_strike,
             entry_ask,
             turnover_usd / 1_000_000,
+            confidence,
+        )
+        return await self._execute_breakout_entry(entry_ask)
+
+    async def _check_premium_wave_entry(self) -> list[Signal]:
+        """Enter when real option premium momentum confirms the HTF direction."""
+        if "PREMIUM_WAVE" not in self.ENABLED_SETUPS:
+            return []
+        now = time.monotonic()
+        if now - self._last_premium_wave_entry_at < self.PREMIUM_WAVE_COOLDOWN_SEC:
+            return []
+        if not self._selected_expiry or not self.options_exchange:
+            return []
+
+        now_utc = datetime.now(timezone.utc)
+        hours_to_expiry = (self._selected_expiry - now_utc).total_seconds() / 3600
+        if hours_to_expiry < self.MIN_EXPIRY_HOURS:
+            return []
+
+        ohlcv = self._cached_ohlcv or await self._get_ohlcv_for_squeeze()
+        trend_dir, trend_15m, trend_45m = self._htf_trend_direction(ohlcv)
+        if trend_dir not in {"UP", "DOWN"}:
+            return []
+
+        option_type = "call" if trend_dir == "UP" else "put"
+        snapshot = self._premium_wave_snapshot(option_type)
+        if not snapshot:
+            return []
+
+        premium_5m = float(snapshot.get("premium_5m_pct", 0.0))
+        premium_15m = float(snapshot.get("premium_15m_pct", 0.0))
+        underlying_5m = float(snapshot.get("underlying_5m_pct", 0.0))
+        underlying_15m = float(snapshot.get("underlying_15m_pct", 0.0))
+        premium_lifting = (
+            premium_5m >= self.PREMIUM_WAVE_MIN_5M_RISE_PCT
+            or premium_15m >= self.PREMIUM_WAVE_MIN_15M_RISE_PCT
+        )
+        underlying_aligned = (
+            underlying_5m >= self.PREMIUM_WAVE_MIN_UNDERLYING_5M_PCT
+            or underlying_15m >= self.PREMIUM_WAVE_MIN_UNDERLYING_15M_PCT
+        )
+        if not premium_lifting or not underlying_aligned:
+            return []
+
+        spot = float(self._last_spot_price or 0.0)
+        if spot <= 0 and self.futures_exchange:
+            try:
+                spot_ticker = await self.futures_exchange.fetch_ticker(self.pair)
+                spot = float(spot_ticker.get("last") or spot_ticker.get("bid") or 0)
+            except Exception:
+                spot = 0.0
+        if spot <= 0:
+            return []
+        self._last_spot_price = spot
+
+        atm_strike = self._get_atm_strike(spot)
+        if atm_strike is None:
+            return []
+        self._cached_target_strike = atm_strike
+
+        selected_symbol: str | None = None
+        selected_strike: float | None = None
+        selected_ticker: dict[str, Any] | None = None
+        entry_ask = 0.0
+        entry_quality: dict[str, Any] = dict(snapshot)
+        max_spread_pct = max(
+            self.PREMIUM_WAVE_MAX_SPREAD_PCT,
+            self._adaptive_entry_max_spread_pct(
+                option_type,
+                base_max_spread_pct=self.ENTRY_MAX_SPREAD_PCT,
+                fast_move_max_spread_pct=self.PREMIUM_WAVE_MAX_SPREAD_PCT,
+            ),
+        )
+
+        for strike in self._entry_candidate_strikes(atm_strike, option_type):
+            symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
+            if not symbol:
+                continue
+            try:
+                ticker = await self.options_exchange.fetch_ticker(symbol)
+                ask = float(ticker.get("ask") or ticker.get("bid") or 0)
+                bid = float(ticker.get("bid") or 0)
+            except Exception as e:
+                self.logger.debug("[%s] PREMIUM_WAVE ticker failed for %s: %s", self.pair, symbol, e)
+                continue
+            if ask < self.MIN_PREMIUM_USD:
+                continue
+            contracts = self._calculate_option_contracts(ask, confidence=0.76)
+            if contracts < 1:
+                continue
+            if bid > 0:
+                spread_pct = (ask - bid) / ask * 100.0
+                if spread_pct > max_spread_pct:
+                    self.logger.info(
+                        "[%s] PREMIUM_WAVE_SPREAD_SKIP: %s spread=%.1f%% > %.1f%%",
+                        self.pair,
+                        symbol,
+                        spread_pct,
+                        max_spread_pct,
+                    )
+                    continue
+
+            exec_snapshot = self._entry_execution_snapshot(ticker, ask, option_type)
+            mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
+            if mark_gap_pct is not None and mark_gap_pct > self.PREMIUM_WAVE_MAX_MARK_GAP_PCT:
+                self.logger.info(
+                    "[%s] PREMIUM_WAVE_EXEC_SKIP: %s ask too far above mark "
+                    "(gap=%.2f%% > %.2f%%)",
+                    self.pair,
+                    symbol,
+                    mark_gap_pct,
+                    self.PREMIUM_WAVE_MAX_MARK_GAP_PCT,
+                )
+                continue
+
+            passes_quality, skip_reason = self._passes_entry_quality(
+                ticker,
+                min_iv=self.PREMIUM_WAVE_MIN_IV,
+                min_delta_abs=self.PREMIUM_WAVE_MIN_DELTA_ABS,
+                min_turnover_usd=self.PREMIUM_WAVE_MIN_TURNOVER_USD,
+            )
+            if not passes_quality:
+                self.logger.info(
+                    "[%s] PREMIUM_WAVE_QUALITY_SKIP: %s (%s)",
+                    self.pair,
+                    skip_reason,
+                    symbol,
+                )
+                continue
+
+            selected_symbol = symbol
+            selected_strike = strike
+            selected_ticker = ticker
+            entry_ask = ask
+            entry_quality.update(exec_snapshot)
+            break
+
+        if not selected_symbol or selected_strike is None or not selected_ticker or entry_ask <= 0:
+            self._cached_bot_state = "blocked:premium_wave_quality"
+            self.logger.info(
+                "[%s] PREMIUM_WAVE_SKIP: dir=%s premium5=%+.1f%% premium15=%+.1f%% "
+                "underlying5=%+.2f%% underlying15=%+.2f%% no candidate passed",
+                self.pair,
+                trend_dir,
+                premium_5m,
+                premium_15m,
+                underlying_5m,
+                underlying_15m,
+            )
+            return []
+
+        confidence = 0.78 if premium_15m >= 30.0 or premium_5m >= 18.0 else 0.72
+        contracts = self._calculate_option_contracts(entry_ask, confidence=confidence)
+        if contracts < 1:
+            return []
+
+        self._breakout_direction = trend_dir
+        self._breakout_option_type = option_type
+        self._breakout_symbol = selected_symbol
+        self._breakout_strike = selected_strike
+        self._breakout_contracts = contracts
+        self._breakout_confidence = confidence
+        self._breakout_bb_width = self._bb_width_pct
+        self._breakout_velocity_pct = max(abs(trend_15m), abs(underlying_15m))
+        self._pending_entry_setup = "PREMIUM_WAVE"
+        self._last_entry_quality = entry_quality
+        self._cached_bot_state = f"premium_wave:entering:{trend_dir}"
+        self._last_premium_wave_entry_at = now
+
+        self.logger.info(
+            "[%s] PREMIUM_WAVE_ENTRY: dir=%s trend15=%+.2f%% trend45=%+.2f%% "
+            "premium5=%+.1f%% premium15=%+.1f%% underlying5=%+.2f%% underlying15=%+.2f%% "
+            "%s $%.0f ask=$%.4f conf=%.2f",
+            self.pair,
+            trend_dir,
+            trend_15m,
+            trend_45m,
+            premium_5m,
+            premium_15m,
+            underlying_5m,
+            underlying_15m,
+            option_type.upper(),
+            selected_strike,
+            entry_ask,
             confidence,
         )
         return await self._execute_breakout_entry(entry_ask)
@@ -5631,6 +5911,7 @@ class OptionsScalpStrategy(BaseStrategy):
         *,
         min_iv: float | None = None,
         min_delta_abs: float | None = None,
+        min_turnover_usd: float | None = None,
     ) -> tuple[bool, str]:
         """GPFC #67: liquidity + moneyness + IV gate before any entry fires.
 
@@ -5656,8 +5937,9 @@ class OptionsScalpStrategy(BaseStrategy):
             iv = 0.0
 
         skip_reasons: list[str] = []
-        if turnover < self.ENTRY_MIN_TURNOVER_USD:
-            skip_reasons.append(f"turnover_low_${turnover/1e6:.2f}M")
+        turnover_floor = self.ENTRY_MIN_TURNOVER_USD if min_turnover_usd is None else min_turnover_usd
+        if turnover < turnover_floor:
+            skip_reasons.append(f"turnover_low_${turnover/1e6:.2f}M_min_{turnover_floor/1e6:.2f}M")
         delta_floor = self.ENTRY_DELTA_MIN_ABS if min_delta_abs is None else min_delta_abs
         if delta_abs < delta_floor:
             skip_reasons.append(f"delta_too_low_{delta_abs:.2f}_min_{delta_floor:.2f}")

@@ -17,7 +17,7 @@ const TIME_WINDOWS: { key: TimeWindow; label: string }[] = [
   { key: '28d', label: '28 days' },
 ];
 
-const LIVE_SETUPS = ['SQUEEZE', 'MOM_BURST', 'PULLBACK', 'TREND_FLOW'] as const;
+const LIVE_SETUPS = ['SQUEEZE', 'MOM_BURST', 'PULLBACK', 'TREND_FLOW', 'PREMIUM_WAVE'] as const;
 const LIVE_SETUP_SET = new Set<string>(LIVE_SETUPS);
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
@@ -45,6 +45,7 @@ function canonicalSetup(setup: string | null | undefined): string {
   if (raw === 'BB_SQUEEZE' || raw === 'BB_SQUEEZE_BREAKOUT' || raw === 'SQUEEZE_BREAKOUT') return 'SQUEEZE';
   if (raw === 'MOMENTUM_BURST' || raw === 'MOMENTUM_BURST_ENTRY') return 'MOM_BURST';
   if (raw === 'MOVE_PULLBACK' || raw === 'PULL_BACK') return 'PULLBACK';
+  if (raw === 'PREMIUM_WAVE' || raw === 'WAVE') return 'PREMIUM_WAVE';
   if (raw === 'FVG_REVERSAL' || raw === 'FVG_REVERSE') return 'FVG_CHOCH';
   return raw;
 }
@@ -87,6 +88,7 @@ function capturePct(trade: Trade): number | null {
 function formatSetupName(setup: string): string {
   if (setup === 'MOM_BURST') return 'Momentum Burst';
   if (setup === 'TREND_FLOW') return 'Trend Flow';
+  if (setup === 'PREMIUM_WAVE') return 'Premium Wave';
   if (setup === 'UNLABELED') return 'Unlabeled';
   return setup.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 }

@@ -5,6 +5,7 @@ const SETUP_STYLES: Record<string, { bg: string; text: string; ring: string }> =
   SQUEEZE:   { bg: "bg-purple-500/15", text: "text-purple-400", ring: "ring-purple-500/30" },
   PULLBACK:  { bg: "bg-cyan-500/15", text: "text-cyan-300", ring: "ring-cyan-500/30" },
   TREND_FLOW: { bg: "bg-emerald-500/15", text: "text-emerald-300", ring: "ring-emerald-500/30" },
+  PREMIUM_WAVE: { bg: "bg-lime-500/15", text: "text-lime-300", ring: "ring-lime-500/30" },
   FVG_CHOCH: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
 };
 
@@ -29,6 +30,9 @@ function canonical(setup: string): string {
   if (u === "TREND_FLOW" || u === "TREND") {
     return "TREND_FLOW";
   }
+  if (u === "PREMIUM_WAVE" || u === "WAVE") {
+    return "PREMIUM_WAVE";
+  }
   if (u === "FVG_CHOCH" || u === "FVG_REVERSAL" || u === "FVG_REVERSE") {
     return "FVG_CHOCH";
   }
@@ -49,9 +53,11 @@ export function SetupChip({
     ? "Pullback"
     : key === "TREND_FLOW"
       ? "Trend Flow"
-      : key === "FVG_CHOCH"
-        ? "Zone Pullback"
-        : key.replace("_", " ");
+      : key === "PREMIUM_WAVE"
+        ? "Premium Wave"
+        : key === "FVG_CHOCH"
+          ? "Zone Pullback"
+          : key.replace("_", " ");
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold tracking-wide ring-1 ring-inset ${style.bg} ${style.text} ${style.ring}`}
