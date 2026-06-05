@@ -27,6 +27,26 @@ from alpha.utils import setup_logger
 # Delta Exchange option contract multipliers (underlying units per contract).
 CONTRACT_MULTIPLIER: dict[str, float] = {"BTC": 0.001, "ETH": 0.01}
 
+
+def _rsi(closes: list[float], period: int = 14) -> float:
+    """Simple Wilder-ish RSI on a close series. Returns 50 on insufficient data."""
+    if len(closes) < period + 1:
+        return 50.0
+    gains = 0.0
+    losses = 0.0
+    for i in range(len(closes) - period, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains += diff
+        else:
+            losses -= diff
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
 # How close to expiry we force-close (options settle; this is a contract reality).
 PRE_EXPIRY_CLOSE_SEC = 30 * 60
 # Skip strikes whose nearest expiry is sooner than this when opening.
@@ -156,8 +176,8 @@ class BasePaperOptions:
     OTM_STEPS = 0                   # 0 = ATM; lanes may reach 1 step OTM on strong moves
     # Ride-the-wave exits (premium %, leverage = 1 since buy-only)
     HARD_STOP_PCT = -45.0           # thesis dead — catastrophic premium loss
-    TRAIL_ARM_PCT = 40.0            # after a big run, lock it
-    TRAIL_RETRACE_PCT = 0.50        # exit if premium gives back half the peak
+    TRAIL_ARM_PCT = 18.0            # arm the trail early so mid-size peaks aren't given back
+    TRAIL_RETRACE_PCT = 0.45        # exit if premium gives back this fraction of the peak
     # Delta options fee model: ~0.03% of underlying notional per side, capped 10% of premium
     FEE_NOTIONAL_RATE = 0.0003
     FEE_PREMIUM_CAP = 0.10
@@ -171,7 +191,17 @@ class BasePaperOptions:
         chain: PaperOptionChain,
         *,
         logger_name: str,
+        setup_override: str | None = None,
+        trail_arm: float | None = None,
+        otm_steps: int | None = None,
     ) -> None:
+        # Per-variant overrides (instance attrs shadow class attrs).
+        if setup_override:
+            self.SETUP_TYPE = setup_override
+        if trail_arm is not None:
+            self.TRAIL_ARM_PCT = trail_arm
+        if otm_steps is not None:
+            self.OTM_STEPS = otm_steps
         self.pair = pair                       # underlying perp, e.g. BTC/USD:USD
         self.options_exchange = options_exchange
         self.futures_exchange = futures_exchange
@@ -644,18 +674,71 @@ class EmaPullbackOptions(BasePaperOptions):
         return close > ema21
 
 
+class MeanReversionOptions(BasePaperOptions):
+    """Fade RSI extremes on 5m: oversold → buy CALL, overbought → buy PUT.
+
+    A counter-trend bet that the underlying snaps back to its mean. Tests
+    whether reversals (vs the trend-following lanes) carry any edge.
+    """
+
+    SETUP_TYPE = "OPT_MEAN_REVERT"
+    TIMEFRAME = "5m"
+    RSI_LOW = 30.0
+    RSI_HIGH = 70.0
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 30:
+            return None
+        closed = rows[:-1]
+        closes = [r[4] for r in closed]
+        rsi = _rsi(closes, 14)
+        ts = int(closed[-1][0])
+        if rsi <= self.RSI_LOW:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "rsi": rsi, "confidence_score": _clamp(60 + (self.RSI_LOW - rsi) * 1.5, 55, 90)}
+        if rsi >= self.RSI_HIGH:
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "rsi": rsi, "confidence_score": _clamp(60 + (rsi - self.RSI_HIGH) * 1.5, 55, 90)}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        # Exit once price has reverted back to the mean (RSI crosses 50).
+        if len(rows) < 16:
+            return False
+        closes = [r[4] for r in rows[:-1]]
+        rsi = _rsi(closes, 14)
+        if self._direction == "long":
+            return rsi >= 52.0
+        return rsi <= 48.0
+
+
 def build_paper_options_strategies(
     pair: str,
     options_exchange: Any,
     futures_exchange: Any,
     db: Database,
 ) -> list[BasePaperOptions]:
-    """All buy-only paper option lanes for one underlying (BTC/ETH)."""
+    """Grid of buy-only paper option lanes for one underlying (BTC/ETH).
+
+    Free paper sims — run many strategy x moneyness combinations so the data
+    can tell us which actually carries edge.
+    """
     base = pair.split("/")[0]
     chain = PaperOptionChain(options_exchange, base)
+
+    def mk(cls, name, **kw):
+        return cls(pair, options_exchange, futures_exchange, db, chain,
+                   logger_name=f"paper.opt.{name}.{base}", **kw)
+
     return [
-        TrendRideOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.trend.{base}"),
-        DonchianBreakoutOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.donchian.{base}"),
-        MomentumImpulseOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.momentum.{base}"),
-        EmaPullbackOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.emapull.{base}"),
+        # trend-following ride-the-wave (the lanes showing edge) — ATM + OTM variants
+        mk(TrendRideOptions, "trend"),
+        mk(TrendRideOptions, "trend_otm", setup_override="OPT_TREND_RIDE_OTM", otm_steps=1),
+        mk(DonchianBreakoutOptions, "donchian"),
+        mk(DonchianBreakoutOptions, "donchian_otm", setup_override="OPT_DONCHIAN_OTM", otm_steps=1),
+        mk(EmaPullbackOptions, "emapull"),
+        # patient trend variant: only trail after a bigger run (capture moonshots)
+        mk(TrendRideOptions, "trend_runner", setup_override="OPT_TREND_RUNNER", trail_arm=35.0),
+        # fast momentum (kept as the control — confirmed weak)
+        mk(MomentumImpulseOptions, "momentum"),
+        # counter-trend mean reversion (new market combination)
+        mk(MeanReversionOptions, "meanrevert"),
     ]

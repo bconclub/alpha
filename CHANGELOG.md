@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-06 · Widen the paper options grid + earlier wave trail
+
+- `paper_options.py`: early read showed slow ride-the-wave lanes (5m) winning (50–77% peaks) while fast 1m momentum loses. Acting on it:
+  - `TRAIL_ARM_PCT` 40 → **18** (+ retrace 0.50 → 0.45) so mid-size peaks (17–29%) stop giving it all back.
+  - Per-lane config overrides (setup label / trail_arm / otm_steps) on the base runner.
+  - Grid expanded 4 → **8 lanes**: Trend Ride (ATM + OTM), Donchian (ATM + OTM), EMA Pullback, **Trend Runner** (trail arms at +35% to capture moonshots), Momentum (control), and new **Mean Revert** (RSI<30 buy call / RSI>70 buy put — counter-trend test).
+- `dashboard/app/paper/page.tsx`: labels for the new lanes.
+- User-facing: the paper lab now runs more strategy × moneyness combinations per asset, riding winners earlier. More free data toward a real strategy. `(SHA on commit)`
+
 ## 2026-06-06 · Paper Lab dashboard: Options + Futures in one view
 
 - `dashboard/app/paper/page.tsx`: rebuilt as **Paper Lab** with an Options/Futures toggle. Normalizes both ledgers into one view; Options shows premium entry/mark, strike + moneyness, stake, CALL/PUT; Futures shows leverage/margin. Per-instrument $100 balance, win-rate/peak/return stats, Setup Edge / Moneyness(or Leverage) / Pair-Direction panels, exit-reason breakdown.
