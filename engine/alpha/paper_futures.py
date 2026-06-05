@@ -44,6 +44,35 @@ def _pct_move(start: float, end: float) -> float:
     return (end - start) / start * 100.0
 
 
+class PaperFuturesPositionBook:
+    """In-memory paper exposure lock.
+
+    Paper strategies compete with each other. For a realistic futures model,
+    only one paper position may be active per pair at a time.
+    """
+
+    def __init__(self) -> None:
+        self._active: dict[str, dict[str, Any]] = {}
+
+    def get(self, pair: str) -> dict[str, Any] | None:
+        return self._active.get(pair)
+
+    def can_open(self, pair: str) -> bool:
+        return pair not in self._active
+
+    def open(self, pair: str, *, trade_id: int, direction: str, setup_type: str) -> None:
+        self._active[pair] = {
+            "trade_id": trade_id,
+            "direction": direction,
+            "setup_type": setup_type,
+        }
+
+    def close(self, pair: str, trade_id: int | None) -> None:
+        active = self._active.get(pair)
+        if active and active.get("trade_id") == trade_id:
+            self._active.pop(pair, None)
+
+
 class BasePaperFutures:
     """Base runner and paper ledger helpers for one paper futures strategy."""
 
@@ -61,10 +90,19 @@ class BasePaperFutures:
     TRAIL_RETRACE_PCT = 0.45
     COOLDOWN_SEC = 90
 
-    def __init__(self, pair: str, exchange: Any, db: Database, *, logger_name: str) -> None:
+    def __init__(
+        self,
+        pair: str,
+        exchange: Any,
+        db: Database,
+        *,
+        logger_name: str,
+        position_book: PaperFuturesPositionBook,
+    ) -> None:
         self.pair = pair
         self.exchange = exchange
         self.db = db
+        self.position_book = position_book
         self.logger = setup_logger(logger_name)
         self.setup_type = self.SETUP_TYPE
         self.is_active = False
@@ -78,6 +116,7 @@ class BasePaperFutures:
         self._opened_mono = 0.0
         self._last_signal_key: str | None = None
         self._last_close_mono = 0.0
+        self._last_exposure_skip_mono = 0.0
 
     async def start(self) -> None:
         if self.is_active:
@@ -132,6 +171,21 @@ class BasePaperFutures:
             return
         direction, signal_key, metadata = decision
         if self._last_signal_key == signal_key:
+            return
+        if not self.position_book.can_open(self.pair):
+            active = self.position_book.get(self.pair) or {}
+            now = asyncio.get_running_loop().time()
+            if now - self._last_exposure_skip_mono > 60:
+                self.logger.info(
+                    "%s_SKIP %s %s blocked by active paper %s %s id=%s",
+                    self.SETUP_TYPE,
+                    self.pair,
+                    direction.upper(),
+                    active.get("setup_type"),
+                    str(active.get("direction") or "").upper(),
+                    active.get("trade_id"),
+                )
+                self._last_exposure_skip_mono = now
             return
         await self._open(direction, mark, signal_key, metadata)
 
@@ -210,6 +264,12 @@ class BasePaperFutures:
         trade_id = await self.db.log_paper_futures_trade(row)
         if not trade_id:
             return
+        self.position_book.open(
+            self.pair,
+            trade_id=int(trade_id),
+            direction=direction,
+            setup_type=self.SETUP_TYPE,
+        )
         self._trade_id = trade_id
         self._direction = direction
         self._entry_price = entry_price
@@ -317,6 +377,7 @@ class BasePaperFutures:
             self._peak_pnl_pct,
         )
         self._trade_id = None
+        self.position_book.close(self.pair, trade_id)
         self._direction = None
         self._entry_price = 0.0
         self._leverage = self.BASE_LEVERAGE
@@ -336,12 +397,13 @@ class DonchianPaperFutures(BasePaperFutures):
     STOP_PCT = -6.0
     TRAIL_ARM_PCT = 7.0
 
-    def __init__(self, pair: str, exchange: Any, db: Database) -> None:
+    def __init__(self, pair: str, exchange: Any, db: Database, position_book: PaperFuturesPositionBook) -> None:
         super().__init__(
             pair,
             exchange,
             db,
             logger_name=f"paper.donchian.{pair.replace('/', '')}",
+            position_book=position_book,
         )
 
     def _entry_decision(
@@ -414,12 +476,13 @@ class EmaPullbackPaperFutures(BasePaperFutures):
     STOP_PCT = -5.0
     TRAIL_ARM_PCT = 6.0
 
-    def __init__(self, pair: str, exchange: Any, db: Database) -> None:
+    def __init__(self, pair: str, exchange: Any, db: Database, position_book: PaperFuturesPositionBook) -> None:
         super().__init__(
             pair,
             exchange,
             db,
             logger_name=f"paper.ema_pullback.{pair.replace('/', '')}",
+            position_book=position_book,
         )
 
     def _entry_decision(
@@ -484,12 +547,13 @@ class MomentumImpulsePaperFutures(BasePaperFutures):
     MOVE_3M_PCT = 0.16
     VOL_RATIO_MIN = 1.12
 
-    def __init__(self, pair: str, exchange: Any, db: Database) -> None:
+    def __init__(self, pair: str, exchange: Any, db: Database, position_book: PaperFuturesPositionBook) -> None:
         super().__init__(
             pair,
             exchange,
             db,
             logger_name=f"paper.momentum_impulse.{pair.replace('/', '')}",
+            position_book=position_book,
         )
 
     def _entry_decision(
@@ -540,12 +604,20 @@ class SignalMixPaperFutures(BasePaperFutures):
     STOP_PCT = -6.0
     TRAIL_ARM_PCT = 6.0
 
-    def __init__(self, pair: str, exchange: Any, db: Database, scalp_strategy: Any) -> None:
+    def __init__(
+        self,
+        pair: str,
+        exchange: Any,
+        db: Database,
+        scalp_strategy: Any,
+        position_book: PaperFuturesPositionBook,
+    ) -> None:
         super().__init__(
             pair,
             exchange,
             db,
             logger_name=f"paper.signal_mix.{pair.replace('/', '')}",
+            position_book=position_book,
         )
         self.scalp_strategy = scalp_strategy
 
@@ -619,11 +691,12 @@ def build_paper_futures_strategies(
     scalp_strategy: Any | None = None,
 ) -> list[PaperFuturesStrategy]:
     """Return all paper futures strategy lanes for one pair."""
+    position_book = PaperFuturesPositionBook()
     strategies: list[PaperFuturesStrategy] = [
-        DonchianPaperFutures(pair, exchange, db),
-        EmaPullbackPaperFutures(pair, exchange, db),
-        MomentumImpulsePaperFutures(pair, exchange, db),
+        DonchianPaperFutures(pair, exchange, db, position_book),
+        EmaPullbackPaperFutures(pair, exchange, db, position_book),
+        MomentumImpulsePaperFutures(pair, exchange, db, position_book),
     ]
     if scalp_strategy is not None:
-        strategies.append(SignalMixPaperFutures(pair, exchange, db, scalp_strategy))
+        strategies.append(SignalMixPaperFutures(pair, exchange, db, scalp_strategy, position_book))
     return strategies
