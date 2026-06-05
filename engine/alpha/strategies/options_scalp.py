@@ -172,7 +172,7 @@ class OptionsScalpStrategy(BaseStrategy):
     FAST_ENTRY_FILL_WAIT_SEC = 5  # TREND/MOM/PULLBACK must fill now or cancel
     FAST_ENTRY_FILL_POLL_SEC = 1
     FAST_ENTRY_MAX_SPOT_AGAINST_PCT = 0.05
-    FAST_ENTRY_LIMIT_CROSS_PCT = 3.0  # Cross the ask a little so fast option moves actually fill.
+    FAST_ENTRY_LIMIT_CROSS_PCT = 8.0  # Cross the ask enough so fast option moves actually fill.
     FAST_ENTRY_SETUPS = frozenset({"MOM_BURST", "MOVE_PULLBACK", "TREND_FLOW", "FVG_CHOCH"})
     PAPER_FUTURES_ENABLED = True
     PAPER_FUTURES_ACCOUNT_USD = 100.0
@@ -416,6 +416,9 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_FLOW_COOLDOWN_SEC = 900.0
     FAST_MOVE_SPREAD_60S_PCT = 0.45
     FAST_MOVE_SPREAD_20S_PCT = 0.20
+    EXPLOSIVE_MOVE_SPREAD_60S_PCT = 0.75
+    EXPLOSIVE_MOVE_SPREAD_20S_PCT = 0.35
+    EXPLOSIVE_MOVE_MAX_SPREAD_PCT = 18.0
     ACTIVE_MOVE_SPREAD_60S_PCT = 0.30
     ACTIVE_MOVE_SPREAD_20S_PCT = 0.12
     ACTIVE_MOVE_MAX_SPREAD_PCT = 4.5
@@ -5788,6 +5791,11 @@ class OptionsScalpStrategy(BaseStrategy):
         our_dir = 1.0 if option_type == "call" else -1.0
         aligned_60s = our_dir * self._calc_underlying_mom(60.0)
         aligned_20s = our_dir * self._calc_underlying_mom(20.0)
+        if (
+            aligned_60s >= self.EXPLOSIVE_MOVE_SPREAD_60S_PCT
+            and aligned_20s >= self.EXPLOSIVE_MOVE_SPREAD_20S_PCT
+        ):
+            return max(base_max_spread_pct, fast_move_max_spread_pct, self.EXPLOSIVE_MOVE_MAX_SPREAD_PCT)
         if (
             aligned_60s >= self.FAST_MOVE_SPREAD_60S_PCT
             and aligned_20s >= self.FAST_MOVE_SPREAD_20S_PCT
