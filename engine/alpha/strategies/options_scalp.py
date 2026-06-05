@@ -342,7 +342,7 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_E_TRAIL_FRAC = 0.75
     PHASE_E_SL_PCT = -8.0          # GPFC #79: explicit per-phase
     PHASE_TRAIL_SPOT_VETO_PCT = 0.08
-    PHASE_TRAIL_MAX_DEFER_TICKS = 2
+    PHASE_TRAIL_CONFIRM_TICKS = 3
 
     # ── GPFC #80: momentum confirmation on Phase A/B SL ───────────────────
     # Defer the SL trigger when spot is still moving in our trade direction —
@@ -7124,10 +7124,60 @@ class OptionsScalpStrategy(BaseStrategy):
             tag = phase.lower()
             if premium_change_pct <= floor:
                 supports, aligned_move = self._underlying_still_supports_position()
+                premium_velocity = self._calc_premium_velocity()
+                if supports and premium_change_pct > sl_floor:
+                    self._phase_trail_defer_count = 0
+                    self.logger.info(
+                        "[%s] trail_phase_%s DEFERRED - spot still supports "
+                        "(aligned=%+.3f%% premium_vel=%+.1f%% current=%+.1f%% "
+                        "floor=%+.2f%% peak=%+.1f%%)",
+                        self.option_symbol,
+                        tag,
+                        aligned_move,
+                        premium_velocity,
+                        premium_change_pct,
+                        floor,
+                        peak_pnl_pct,
+                    )
+                    return []
+                if premium_change_pct > sl_floor:
+                    self._phase_trail_defer_count += 1
+                    if self._phase_trail_defer_count < self.PHASE_TRAIL_CONFIRM_TICKS:
+                        self.logger.info(
+                            "[%s] trail_phase_%s CONFIRMING - quote below floor "
+                            "(tick=%d/%d aligned=%+.3f%% premium_vel=%+.1f%% "
+                            "current=%+.1f%% floor=%+.2f%% peak=%+.1f%%)",
+                            self.option_symbol,
+                            tag,
+                            self._phase_trail_defer_count,
+                            self.PHASE_TRAIL_CONFIRM_TICKS,
+                            aligned_move,
+                            premium_velocity,
+                            premium_change_pct,
+                            floor,
+                            peak_pnl_pct,
+                        )
+                        return []
+                self.logger.info(
+                    "[%s] trail_phase_%s - confirmed current %+.1f%% <= floor %+.2f%% "
+                    "(peak=%+.1f%% confirm=%d/%d aligned=%+.3f%% premium_vel=%+.1f%%)",
+                    self.option_symbol,
+                    tag,
+                    premium_change_pct,
+                    floor,
+                    peak_pnl_pct,
+                    self._phase_trail_defer_count,
+                    self.PHASE_TRAIL_CONFIRM_TICKS,
+                    aligned_move,
+                    premium_velocity,
+                )
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, f"trail_phase_{tag}"
+                )
                 if (
                     supports
                     and premium_change_pct > sl_floor
-                    and self._phase_trail_defer_count < self.PHASE_TRAIL_MAX_DEFER_TICKS
+                    and self._phase_trail_defer_count < self.PHASE_TRAIL_CONFIRM_TICKS
                 ):
                     self._phase_trail_defer_count += 1
                     self.logger.info(
@@ -7141,7 +7191,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         floor,
                         peak_pnl_pct,
                         self._phase_trail_defer_count,
-                        self.PHASE_TRAIL_MAX_DEFER_TICKS,
+                        self.PHASE_TRAIL_CONFIRM_TICKS,
                     )
                     return []
                 self.logger.info(
