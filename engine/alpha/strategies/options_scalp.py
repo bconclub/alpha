@@ -171,7 +171,7 @@ class OptionsScalpStrategy(BaseStrategy):
     FAST_ENTRY_FILL_WAIT_SEC = 5  # TREND/MOM/PULLBACK must fill now or cancel
     FAST_ENTRY_FILL_POLL_SEC = 1
     FAST_ENTRY_MAX_SPOT_AGAINST_PCT = 0.05
-    FAST_ENTRY_LIMIT_CROSS_PCT = 8.0  # Cross the ask enough so fast option moves actually fill.
+    FAST_ENTRY_LIMIT_CROSS_PCT = 4.0  # STRATEGY.md: cross the ask only modestly — 8% paid up made entries start deep underwater (e.g. -22% in 0min).
     FAST_ENTRY_SETUPS = frozenset({"MOM_BURST", "MOVE_PULLBACK", "TREND_FLOW", "FVG_CHOCH", "PREMIUM_WAVE"})
     PAPER_FUTURES_ENABLED = True
     PAPER_FUTURES_ACCOUNT_USD = 100.0
@@ -295,9 +295,13 @@ class OptionsScalpStrategy(BaseStrategy):
     # the premium loss is catastrophic; -8/-15% is normal options noise in fast
     # Delta books and was cutting trades in 20-30s before the thesis developed.
     PHASE_A_THESIS_WARMUP_SEC = 180.0
-    PHASE_A_EMERGENCY_SL_PCT = -50.0
+    # STRATEGY.md: always-on hard catastrophic stop ~-10/-12%. The -50% warmup
+    # backstop let noise free-fall to -24% market fills. -15% is the universal
+    # warmup floor; the -8% hard-fail (below) cuts never-worked trades earlier so
+    # market-order slippage on illiquid strikes lands near -12%, not -24%.
+    PHASE_A_EMERGENCY_SL_PCT = -15.0
     PHASE_A_DYNAMIC_FAIL_PCT = -8.0
-    PHASE_A_DYNAMIC_HARD_FAIL_PCT = -12.0
+    PHASE_A_DYNAMIC_HARD_FAIL_PCT = -8.0
 
     # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
     # Catches trades that NEVER moved up AND underlying turned against us.
@@ -445,7 +449,7 @@ class OptionsScalpStrategy(BaseStrategy):
     FAST_MOVE_SPREAD_20S_PCT = 0.20
     EXPLOSIVE_MOVE_SPREAD_60S_PCT = 0.75
     EXPLOSIVE_MOVE_SPREAD_20S_PCT = 0.35
-    EXPLOSIVE_MOVE_MAX_SPREAD_PCT = 18.0
+    EXPLOSIVE_MOVE_MAX_SPREAD_PCT = 9.0  # STRATEGY.md: spread/liquidity is the hard gate. 18% spreads = the -24% slippage source.
     ACTIVE_MOVE_SPREAD_60S_PCT = 0.30
     ACTIVE_MOVE_SPREAD_20S_PCT = 0.12
     ACTIVE_MOVE_MAX_SPREAD_PCT = 4.5

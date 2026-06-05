@@ -1,6 +1,14 @@
 # Changelog
 
-## 2026-05-21 · GPFC #82: re-enable SQUEEZE for low-vol regimes (regime-aware)
+## 2026-06-05 17:55 IST · Stop the bleed: always-on hard stop + non-underwater entries
+
+- `engine/STRATEGY.md` (new): compiled price-action strategy — buy-only, ~$29 account, one entry engine, structural exits, premium-dip re-entry, all time-gates to be stripped, dynamic ATM→slightly-OTM strike selection. No option selling, no paper-futures focus. This is the reference we build against.
+- `options_scalp.py` `PHASE_A_EMERGENCY_SL_PCT`: −50% → **−15%**. The −50% warmup backstop was letting noise-level dips free-fall to −16/−24% market fills (today: trades 3682 −24%, 3683 −21%, 3687 −17%). −15% is now the universal warmup floor.
+- `options_scalp.py` `PHASE_A_DYNAMIC_HARD_FAIL_PCT`: −12% → **−8%**. Never-worked trades (peak ≤3%) now cut at −8% observed, so market-order slippage on illiquid Delta strikes lands near −12% instead of −24%.
+- `options_scalp.py` `FAST_ENTRY_LIMIT_CROSS_PCT`: 8% → **4%**. Crossing the ask by 8% made entries start deep underwater (trade 3671: −22% in 0 min). Now we pay up only modestly.
+- `options_scalp.py` `EXPLOSIVE_MOVE_MAX_SPREAD_PCT`: 18% → **9%**. Tolerating 18%-wide spreads was the direct source of the −24% slippage; spread/liquidity is the hard entry gate.
+- User-facing: live options trades should stop producing −20%+ losses on trades that never worked; entries no longer start instantly deep in the red. Surgical bleed-stop ahead of the full structural exit rewrite.
+- (SHA filled on commit)
 
 - `options_scalp.py`: `ENABLED_SETUPS = {"MOM_BURST", "SQUEEZE"}` — SQUEEZE re-enabled
 - `options_scalp.py`: added IV-regime constants — `SQUEEZE_MAX_IV_FOR_ENTRY = 0.35`, `MOM_BURST_MIN_IV_FOR_ENTRY = 0.25`, `SQUEEZE_REQUIRES_LOW_VOL = True`
