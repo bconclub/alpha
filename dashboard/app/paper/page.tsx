@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { getSupabase } from '@/lib/supabase';
 import type { PaperFuturesTrade } from '@/lib/types';
 
 function money(value?: number | null): string {
@@ -40,23 +39,18 @@ export default function PaperFuturesPage() {
   const fetchRows = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const supabase = getSupabase();
-    if (!supabase) {
+    try {
+      const response = await fetch('/api/paper-futures', { cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setRows([]);
+        setError(payload.error || 'Failed to load paper futures rows.');
+      } else {
+        setRows((payload.rows ?? []) as PaperFuturesTrade[]);
+      }
+    } catch (err) {
       setRows([]);
-      setError('Supabase client is not configured.');
-      setLoading(false);
-      return;
-    }
-    const { data, error: queryError } = await supabase
-      .from('paper_futures_trades')
-      .select('*')
-      .order('opened_at', { ascending: false })
-      .limit(200);
-    if (queryError) {
-      setRows([]);
-      setError(queryError.message);
-    } else {
-      setRows((data ?? []) as PaperFuturesTrade[]);
+      setError(err instanceof Error ? err.message : 'Failed to load paper futures rows.');
     }
     setLoading(false);
   }, []);
