@@ -18,7 +18,8 @@ const TIME_WINDOWS: { key: TimeWindow; label: string }[] = [
   { key: '7d', label: '7d' },
 ];
 
-const LIVE_SETUPS = ['SQUEEZE', 'MOM_BURST', 'PULLBACK', 'TREND_FLOW', 'FVG_CHOCH'] as const;
+const LIVE_SETUPS = ['SQUEEZE', 'MOM_BURST', 'PULLBACK', 'TREND_FLOW'] as const;
+const LIVE_SETUP_SET = new Set<string>(LIVE_SETUPS);
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 type SetupStats = {
@@ -88,7 +89,6 @@ function capturePct(trade: Trade): number | null {
 function formatSetupName(setup: string): string {
   if (setup === 'MOM_BURST') return 'Momentum Burst';
   if (setup === 'TREND_FLOW') return 'Trend Flow';
-  if (setup === 'FVG_CHOCH') return 'Zone Pullback';
   if (setup === 'UNLABELED') return 'Unlabeled';
   return setup.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -150,6 +150,7 @@ export default function StrategiesPage() {
     return trades
       .filter((trade) => trade.status === 'closed')
       .filter((trade) => getTradeTime(trade) >= cutoff.getTime())
+      .filter((trade) => LIVE_SETUP_SET.has(canonicalSetup(trade.setup_type)))
       .sort((a, b) => getTradeTime(b) - getTradeTime(a));
   }, [trades, cutoff]);
 
@@ -158,11 +159,8 @@ export default function StrategiesPage() {
     for (const trade of recentClosedTrades) {
       found.add(canonicalSetup(trade.setup_type));
     }
-    for (const config of setupConfigs) {
-      found.add(canonicalSetup(config.setup_type));
-    }
     return Array.from(found).filter((setup) => setup !== 'UNLABELED' || recentClosedTrades.some((trade) => canonicalSetup(trade.setup_type) === 'UNLABELED'));
-  }, [recentClosedTrades, setupConfigs]);
+  }, [recentClosedTrades]);
 
   const setupStats = useMemo(() => {
     return setupOrder
