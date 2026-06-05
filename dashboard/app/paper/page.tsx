@@ -38,7 +38,23 @@ function signedClass(value?: number | null): string {
   const n = Number(value ?? 0);
   if (n > 0) return 'text-emerald-300';
   if (n < 0) return 'text-red-300';
-  return 'text-zinc-300';
+  return 'text-white';
+}
+
+function winRateClass(value: number, count: number): string {
+  if (count === 0 || value === 0) return 'text-white';
+  if (value < 20) return 'text-red-300';
+  if (value < 40) return 'text-amber-300';
+  if (value < 67) return 'text-emerald-300';
+  return 'text-fuchsia-300';
+}
+
+function peakClass(value?: number | null): string {
+  const n = Number(value ?? 0);
+  if (n <= 0) return 'text-white';
+  if (n < 2) return 'text-lime-200';
+  if (n < 6) return 'text-emerald-300';
+  return 'text-green-300';
 }
 
 function shortPair(pair: string): string {
@@ -50,15 +66,15 @@ function setupLabel(setup?: string | null): string {
   return SETUP_LABELS[setup] || setup.replace(/_/g, ' ');
 }
 
-function holdSeconds(row: PaperFuturesTrade): number {
+function holdSeconds(row: PaperFuturesTrade, nowMs = Date.now()): number {
   const start = new Date(row.opened_at).getTime();
-  const end = row.closed_at ? new Date(row.closed_at).getTime() : Date.now();
+  const end = row.closed_at ? new Date(row.closed_at).getTime() : nowMs;
   if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
   return Math.max(0, Math.round((end - start) / 1000));
 }
 
-function holdTime(rowOrSeconds: PaperFuturesTrade | number): string {
-  const seconds = typeof rowOrSeconds === 'number' ? rowOrSeconds : holdSeconds(rowOrSeconds);
+function holdTime(rowOrSeconds: PaperFuturesTrade | number, nowMs = Date.now()): string {
+  const seconds = typeof rowOrSeconds === 'number' ? rowOrSeconds : holdSeconds(rowOrSeconds, nowMs);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rem = seconds % 60;
@@ -152,6 +168,7 @@ export default function PaperFuturesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [windowKey, setWindowKey] = useState<WindowKey>('today');
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const fetchRows = useCallback(async () => {
     setLoading(true);
@@ -176,9 +193,20 @@ export default function PaperFuturesPage() {
     fetchRows();
   }, [fetchRows]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const filteredRows = useMemo(() => {
     const start = windowStart(windowKey);
-    return rows.filter((row) => new Date(row.opened_at).getTime() >= start);
+    return rows
+      .filter((row) => new Date(row.opened_at).getTime() >= start)
+      .sort((a, b) => {
+        if (a.status === 'open' && b.status !== 'open') return -1;
+        if (a.status !== 'open' && b.status === 'open') return 1;
+        return new Date(b.opened_at).getTime() - new Date(a.opened_at).getTime();
+      });
   }, [rows, windowKey]);
 
   const stats = useMemo(() => {
@@ -193,7 +221,6 @@ export default function PaperFuturesPage() {
     const captures = closed.map(capturePct).filter((value): value is number => value !== null);
     const openRows = filteredRows.filter((r) => r.status === 'open');
     const leverages = Array.from(new Set(filteredRows.map((r) => `${Number(r.leverage).toFixed(0)}x`))).join(', ') || '-';
-    const confidences = filteredRows.map(confidenceScore).filter((value): value is number => value !== null);
 
     return {
       total: filteredRows.length,
@@ -205,11 +232,10 @@ export default function PaperFuturesPage() {
       fees,
       peakAvg,
       avgCapture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
-      avgHold: closed.length ? Math.round(closed.reduce((sum, row) => sum + holdSeconds(row), 0) / closed.length) : 0,
+      avgHold: closed.length ? Math.round(closed.reduce((sum, row) => sum + holdSeconds(row, nowMs), 0) / closed.length) : 0,
       leverages,
-      avgConfidence: confidences.length ? confidences.reduce((sum, value) => sum + value, 0) / confidences.length : null,
     };
-  }, [filteredRows]);
+  }, [filteredRows, nowMs]);
 
   const setupStats = useMemo(
     () => buildGroupStats(filteredRows, (row) => row.setup_type || 'UNKNOWN', (row) => setupLabel(row.setup_type)),
@@ -268,17 +294,16 @@ export default function PaperFuturesPage() {
         </div>
       </div>
 
-      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-9">
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-8">
         {[
           ['Net P&L', money(stats.net), signedClass(stats.net)],
           ['Gross', money(stats.gross), signedClass(stats.gross)],
           ['Fees', money(-stats.fees), 'text-amber-300'],
-          ['Win Rate', `${stats.winRate.toFixed(0)}%`, stats.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'],
+          ['Win Rate', `${stats.winRate.toFixed(0)}%`, winRateClass(stats.winRate, stats.closed)],
           ['Trades', `${stats.total}`, 'text-white'],
-          ['Open', `${stats.open}`, stats.open ? 'text-sky-300' : 'text-zinc-300'],
-          ['Avg Peak', pct(stats.peakAvg), 'text-emerald-300'],
+          ['Live', `${stats.open}`, stats.open ? 'text-emerald-300' : 'text-white'],
+          ['Avg Peak', pct(stats.peakAvg), peakClass(stats.peakAvg)],
           ['Leverage', stats.leverages, 'text-violet-200'],
-          ['Confidence', stats.avgConfidence === null ? '-' : `${stats.avgConfidence.toFixed(0)}`, 'text-cyan-200'],
         ].map(([label, value, valueClass]) => (
           <div key={label} className="rounded-md border border-zinc-800 bg-[#0d0e12] p-3 shadow-sm shadow-black">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
@@ -302,7 +327,7 @@ export default function PaperFuturesPage() {
           <div className="grid gap-3 md:grid-cols-3">
             <Insight label="Net after fees" value={money(stats.net)} tone={stats.net >= 0 ? 'good' : 'bad'} />
             <Insight label="Avg capture" value={stats.avgCapture === null ? '-' : pct(stats.avgCapture)} tone={(stats.avgCapture ?? 0) >= 50 ? 'good' : 'warn'} />
-            <Insight label="Avg hold" value={holdTime(stats.avgHold)} tone={stats.avgHold >= 300 ? 'good' : 'warn'} />
+            <Insight label="Avg hold" value={holdTime(stats.avgHold, nowMs)} tone={stats.avgHold >= 300 ? 'good' : 'warn'} />
           </div>
         </div>
         <div className="rounded-lg border border-zinc-800 bg-[#0d0e12] p-4">
@@ -332,6 +357,7 @@ export default function PaperFuturesPage() {
               <thead className="border-b border-zinc-800 bg-[#15161a] text-[10px] uppercase tracking-wider text-zinc-400">
                 <tr>
                   <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Pair</th>
                   <th className="px-4 py-3">Dir</th>
                   <th className="px-4 py-3">Setup</th>
@@ -344,6 +370,7 @@ export default function PaperFuturesPage() {
                   <th className="px-4 py-3 text-right">Gross</th>
                   <th className="px-4 py-3 text-right">Fees</th>
                   <th className="px-4 py-3 text-right">Net P&L</th>
+                  <th className="px-4 py-3 text-right">P&L %</th>
                   <th className="px-4 py-3 text-right">Peak</th>
                   <th className="px-4 py-3 text-right">Capture</th>
                   <th className="px-4 py-3">Hold</th>
@@ -356,10 +383,26 @@ export default function PaperFuturesPage() {
                   const mark = row.exit_price ?? row.current_price;
                   const cap = capturePct(row);
                   const confidence = confidenceScore(row);
+                  const isLive = row.status === 'open';
                   return (
-                    <tr key={row.id} className="border-b border-zinc-900 text-zinc-100 last:border-0 hover:bg-zinc-900/55">
+                    <tr
+                      key={row.id}
+                      className={`border-b border-zinc-900 text-zinc-100 last:border-0 hover:bg-zinc-900/55 ${
+                        isLive ? 'bg-emerald-950/20 shadow-[inset_3px_0_0_rgba(52,211,153,0.85)]' : ''
+                      }`}
+                    >
                       <td className="px-4 py-3 font-mono text-xs text-zinc-300">
                         {new Date(row.opened_at).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3">
+                        {isLive ? (
+                          <span className="inline-flex items-center gap-2 rounded border border-emerald-400/40 bg-emerald-400/15 px-2 py-1 text-xs font-bold text-emerald-200">
+                            <span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.9)]" />
+                            LIVE
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-500">Closed</span>
+                        )}
                       </td>
                       <td className="px-4 py-3 font-bold text-white">{shortPair(row.pair)}</td>
                       <td className="px-4 py-3">
@@ -381,13 +424,14 @@ export default function PaperFuturesPage() {
                       <td className={`px-4 py-3 text-right font-mono ${signedClass(row.gross_pnl_usd)}`}>{money(row.gross_pnl_usd)}</td>
                       <td className="px-4 py-3 text-right font-mono text-amber-300">{money(-(Number(row.fees_usd ?? 0)))}</td>
                       <td className={`px-4 py-3 text-right font-mono font-bold ${signedClass(row.pnl_usd)}`}>
-                        {money(row.pnl_usd)} <span className="text-xs opacity-80">{pct(row.pnl_pct)}</span>
+                        {money(row.pnl_usd)}
                       </td>
-                      <td className="px-4 py-3 text-right font-mono text-emerald-300">{pct(row.peak_pnl_pct)}</td>
+                      <td className={`px-4 py-3 text-right font-mono ${signedClass(row.pnl_pct)}`}>{pct(row.pnl_pct)}</td>
+                      <td className={`px-4 py-3 text-right font-mono ${peakClass(row.peak_pnl_pct)}`}>{pct(row.peak_pnl_pct)}</td>
                       <td className={`px-4 py-3 text-right font-mono ${cap === null ? 'text-zinc-500' : cap >= 50 ? 'text-emerald-300' : 'text-amber-300'}`}>
                         {cap === null ? '-' : pct(cap)}
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-300">{holdTime(row)}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-300">{holdTime(row, nowMs)}</td>
                       <td className="px-4 py-3 text-xs capitalize text-zinc-300">{(row.exit_reason || row.status).replace(/_/g, ' ')}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-400">
                         {row.option_trade_id ? `Option #${row.option_trade_id}` : 'Independent'}
@@ -427,8 +471,8 @@ function PerformancePanel({ title, rows }: { title: string; rows: GroupStats[] }
             </div>
             <div className="grid grid-cols-5 gap-2 text-[11px]">
               <Metric label="Trades" value={row.trades.toString()} />
-              <Metric label="Win" value={`${row.winRate.toFixed(0)}%`} tone={row.winRate >= 50 ? 'good' : 'bad'} />
-              <Metric label="Peak" value={pct(row.avgPeak)} tone="good" />
+              <Metric label="Win" value={`${row.winRate.toFixed(0)}%`} className={winRateClass(row.winRate, row.closed)} />
+              <Metric label="Peak" value={pct(row.avgPeak)} className={peakClass(row.avgPeak)} />
               <Metric label="Conf" value={row.confidence === null ? '-' : row.confidence.toFixed(0)} tone={(row.confidence ?? 0) >= 76 ? 'good' : 'warn'} />
               <Metric label="Hold" value={holdTime(row.avgHold)} />
             </div>
@@ -440,8 +484,8 @@ function PerformancePanel({ title, rows }: { title: string; rows: GroupStats[] }
   );
 }
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' | 'warn' }) {
-  const color = tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-red-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
+function Metric({ label, value, tone, className }: { label: string; value: string; tone?: 'good' | 'bad' | 'warn'; className?: string }) {
+  const color = className || (tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-red-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100');
   return (
     <div>
       <div className="uppercase tracking-wider text-zinc-600">{label}</div>
