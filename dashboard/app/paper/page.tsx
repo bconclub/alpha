@@ -301,9 +301,6 @@ export default function PaperFuturesPage() {
       <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Paper Futures</h1>
-          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
-            Paper-only futures lab. Delta BTC/ETH futures support leverage up to 100x by product; this lab currently records the modeled leverage on every row so we can compare risk before enabling real futures.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
