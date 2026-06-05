@@ -417,81 +417,86 @@ export default function PaperFuturesPage() {
         ) : filteredRows.length === 0 ? (
           <div className="p-5 text-sm text-zinc-400">No paper futures rows in this window.</div>
         ) : (
-          <div className="grid gap-3 p-3">
-            {filteredRows.map((row) => (
-              <PaperTradeCard key={row.id} row={row} nowMs={nowMs} />
-            ))}
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1180px] text-left text-sm">
+              <thead className="border-b border-zinc-800 bg-[#15161a] text-[10px] uppercase tracking-wider text-zinc-500">
+                <tr>
+                  <th className="sticky left-0 z-20 w-[260px] bg-[#15161a] px-4 py-3">Trade</th>
+                  <th className="px-4 py-3 text-right">Conf</th>
+                  <th className="px-4 py-3 text-right">Lev</th>
+                  <th className="px-4 py-3 text-right">Entry</th>
+                  <th className="px-4 py-3 text-right">Mark</th>
+                  <th className="px-4 py-3 text-right">Margin</th>
+                  <th className="px-4 py-3 text-right">Notional</th>
+                  <th className="px-4 py-3 text-right">Gross</th>
+                  <th className="px-4 py-3 text-right">Fees</th>
+                  <th className="px-4 py-3 text-right">Net</th>
+                  <th className="px-4 py-3 text-right">Return</th>
+                  <th className="px-4 py-3 text-right">Peak</th>
+                  <th className="px-4 py-3">Hold</th>
+                  <th className="px-4 py-3">Exit</th>
+                  <th className="px-4 py-3">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRows.map((row) => {
+                  const mark = row.exit_price ?? row.current_price;
+                  const confidence = confidenceScore(row);
+                  const isLive = row.status === 'open';
+                  const marginReturn = marginReturnPct(row);
+                  return (
+                    <tr
+                      key={row.id}
+                      className={`border-b border-zinc-900 text-zinc-100 last:border-0 hover:bg-zinc-900/55 ${
+                        isLive ? 'bg-emerald-950/15' : ''
+                      }`}
+                    >
+                      <td className={`sticky left-0 z-10 px-4 py-3 ${isLive ? 'bg-[#071611]' : 'bg-[#08090c]'}`}>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {isLive ? (
+                            <span className="inline-flex items-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/15 px-2 py-1 text-[10px] font-bold text-emerald-200">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
+                              LIVE
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-semibold text-zinc-500">Closed</span>
+                          )}
+                          <span className="font-bold text-white">{shortPair(row.pair)}</span>
+                          <span className={row.direction === 'long' ? 'font-bold text-emerald-300' : 'font-bold text-red-300'}>
+                            {row.direction.toUpperCase()}
+                          </span>
+                          <span className="rounded border border-sky-400/30 bg-sky-500/20 px-2 py-0.5 text-[10px] font-semibold text-sky-100">
+                            {setupLabel(row.setup_type)}
+                          </span>
+                        </div>
+                        <div className="mt-1 font-mono text-[11px] text-zinc-500">
+                          {new Date(row.opened_at).toLocaleString()}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-cyan-200">{confidence === null ? '-' : confidence.toFixed(0)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-violet-200">{Number(row.leverage).toFixed(0)}x</td>
+                      <td className="px-4 py-3 text-right font-mono">{Number(row.entry_price).toFixed(2)}</td>
+                      <td className="px-4 py-3 text-right font-mono">{mark ? Number(mark).toFixed(2) : '-'}</td>
+                      <td className="px-4 py-3 text-right font-mono">${Number(row.margin_usd).toFixed(2)}</td>
+                      <td className="px-4 py-3 text-right font-mono">${Number(row.notional_usd).toFixed(2)}</td>
+                      <td className={`px-4 py-3 text-right font-mono ${signedClass(row.gross_pnl_usd)}`}>{money(row.gross_pnl_usd)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-amber-300">{money(-(Number(row.fees_usd ?? 0)))}</td>
+                      <td className={`px-4 py-3 text-right font-mono font-bold ${signedClass(row.pnl_usd)}`}>{money(row.pnl_usd)}</td>
+                      <td className={`px-4 py-3 text-right font-mono font-bold ${signedClass(marginReturn)}`}>{marginReturn === null ? '-' : pct(marginReturn)}</td>
+                      <td className={`px-4 py-3 text-right font-mono ${peakClass(row.peak_pnl_pct)}`}>{pct(row.peak_pnl_pct)}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-300">{holdTime(row, nowMs)}</td>
+                      <td className="px-4 py-3 text-xs capitalize text-zinc-300">{(row.exit_reason || row.status).replace(/_/g, ' ')}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-400">
+                        {row.option_trade_id ? `Option #${row.option_trade_id}` : 'Independent'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function PaperTradeCard({ row, nowMs }: { row: PaperFuturesTrade; nowMs: number }) {
-  const mark = row.exit_price ?? row.current_price;
-  const confidence = confidenceScore(row);
-  const isLive = row.status === 'open';
-  const marginReturn = marginReturnPct(row);
-  return (
-    <div
-      className={`rounded-lg border p-4 ${
-        isLive
-          ? 'border-emerald-500/30 bg-emerald-950/15 shadow-[inset_3px_0_0_rgba(52,211,153,0.85)]'
-          : 'border-zinc-800 bg-[#0d0e12]'
-      }`}
-    >
-      <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex flex-wrap items-center gap-2">
-          {isLive ? (
-            <span className="inline-flex items-center gap-2 rounded border border-emerald-400/40 bg-emerald-400/15 px-2 py-1 text-xs font-bold text-emerald-200">
-              <span className="h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.9)]" />
-              LIVE
-            </span>
-          ) : (
-            <span className="rounded border border-zinc-700 px-2 py-1 text-xs font-semibold text-zinc-400">Closed</span>
-          )}
-          <span className="text-lg font-bold text-white">{shortPair(row.pair)}</span>
-          <span className={row.direction === 'long' ? 'font-bold text-emerald-300' : 'font-bold text-red-300'}>
-            {row.direction.toUpperCase()}
-          </span>
-          <span className="rounded border border-sky-400/30 bg-sky-500/20 px-2 py-1 text-xs font-semibold text-sky-100">
-            {setupLabel(row.setup_type)}
-          </span>
-        </div>
-        <div className="font-mono text-xs text-zinc-400">
-          {new Date(row.opened_at).toLocaleString()}
-        </div>
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6">
-        <TradeMetric label="Confidence" value={confidence === null ? '-' : confidence.toFixed(0)} className="text-cyan-200" />
-        <TradeMetric label="Leverage" value={`${Number(row.leverage).toFixed(0)}x`} className="text-violet-200" />
-        <TradeMetric label="Entry" value={Number(row.entry_price).toFixed(2)} />
-        <TradeMetric label="Exit / Mark" value={mark ? Number(mark).toFixed(2) : '-'} />
-        <TradeMetric label="Margin at Risk" value={`$${Number(row.margin_usd).toFixed(2)}`} />
-        <TradeMetric label="Notional" value={`$${Number(row.notional_usd).toFixed(2)}`} />
-        <TradeMetric label="Gross P&L" value={money(row.gross_pnl_usd)} className={signedClass(row.gross_pnl_usd)} />
-        <TradeMetric label="Fees" value={money(-(Number(row.fees_usd ?? 0)))} className="text-amber-300" />
-        <TradeMetric label="Net P&L" value={money(row.pnl_usd)} className={signedClass(row.pnl_usd)} strong />
-        <TradeMetric label="Return on Margin" value={marginReturn === null ? '-' : pct(marginReturn)} className={signedClass(marginReturn)} strong />
-        <TradeMetric label="Peak" value={pct(row.peak_pnl_pct)} className={peakClass(row.peak_pnl_pct)} />
-        <TradeMetric label="Hold" value={holdTime(row, nowMs)} />
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-zinc-500">
-        <span>Exit: <span className="capitalize text-zinc-300">{(row.exit_reason || row.status).replace(/_/g, ' ')}</span></span>
-        <span>Source: <span className="text-zinc-300">{row.option_trade_id ? `Option #${row.option_trade_id}` : 'Independent'}</span></span>
-      </div>
-    </div>
-  );
-}
-
-function TradeMetric({ label, value, className = 'text-zinc-100', strong = false }: { label: string; value: string; className?: string; strong?: boolean }) {
-  return (
-    <div className="rounded-md border border-zinc-900 bg-black/25 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-zinc-600">{label}</div>
-      <div className={`mt-1 font-mono ${strong ? 'text-lg font-bold' : 'font-semibold'} ${className}`}>{value}</div>
     </div>
   );
 }
