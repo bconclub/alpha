@@ -6,6 +6,16 @@ import type { PaperFuturesTrade } from '@/lib/types';
 
 type WindowKey = 'today' | '7d' | '14d' | '28d' | 'all';
 
+interface PaperBotStatus {
+  bot_state?: string | null;
+  is_running?: boolean | null;
+  is_paused?: boolean | null;
+  uptime_seconds?: number | null;
+  timestamp?: string | null;
+  created_at?: string | null;
+  inr_usd_rate?: number | null;
+}
+
 const WINDOW_LABELS: Record<WindowKey, string> = {
   today: 'Today',
   '7d': '7 days',
@@ -26,6 +36,10 @@ function money(value?: number | null, decimals = 4): string {
   const n = Number(value ?? 0);
   const sign = n > 0 ? '+' : n < 0 ? '-' : '';
   return `${sign}$${Math.abs(n).toFixed(decimals)}`;
+}
+
+function money2(value?: number | null): string {
+  return money(value, 2);
 }
 
 function pct(value?: number | null): string {
@@ -165,6 +179,8 @@ function buildGroupStats(rows: PaperFuturesTrade[], keyFor: (row: PaperFuturesTr
 
 export default function PaperFuturesPage() {
   const [rows, setRows] = useState<PaperFuturesTrade[]>([]);
+  const [botStatus, setBotStatus] = useState<PaperBotStatus | null>(null);
+  const [paperAccountUsd, setPaperAccountUsd] = useState(50);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [windowKey, setWindowKey] = useState<WindowKey>('today');
@@ -181,6 +197,8 @@ export default function PaperFuturesPage() {
         setError(payload.error || 'Failed to load paper futures rows.');
       } else {
         setRows((payload.rows ?? []) as PaperFuturesTrade[]);
+        setBotStatus((payload.botStatus ?? null) as PaperBotStatus | null);
+        setPaperAccountUsd(Number(payload.paperAccountUsd ?? 50));
       }
     } catch (err) {
       setRows([]);
@@ -221,6 +239,10 @@ export default function PaperFuturesPage() {
     const captures = closed.map(capturePct).filter((value): value is number => value !== null);
     const openRows = filteredRows.filter((r) => r.status === 'open');
     const leverages = Array.from(new Set(filteredRows.map((r) => `${Number(r.leverage).toFixed(0)}x`))).join(', ') || '-';
+    const liveNet = openRows.reduce((sum, r) => sum + Number(r.pnl_usd ?? 0), 0);
+    const closedAllNet = rows
+      .filter((r) => r.status === 'closed')
+      .reduce((sum, r) => sum + Number(r.pnl_usd ?? 0), 0);
 
     return {
       total: filteredRows.length,
@@ -234,8 +256,10 @@ export default function PaperFuturesPage() {
       avgCapture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
       avgHold: closed.length ? Math.round(closed.reduce((sum, row) => sum + holdSeconds(row, nowMs), 0) / closed.length) : 0,
       leverages,
+      liveNet,
+      paperBalance: paperAccountUsd + closedAllNet,
     };
-  }, [filteredRows, nowMs]);
+  }, [filteredRows, nowMs, paperAccountUsd, rows]);
 
   const setupStats = useMemo(
     () => buildGroupStats(filteredRows, (row) => row.setup_type || 'UNKNOWN', (row) => setupLabel(row.setup_type)),
@@ -271,19 +295,6 @@ export default function PaperFuturesPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {(Object.keys(WINDOW_LABELS) as WindowKey[]).map((key) => (
-            <button
-              key={key}
-              onClick={() => setWindowKey(key)}
-              className={`rounded-md border px-3 py-2 text-sm font-semibold ${
-                windowKey === key
-                  ? 'border-sky-300 bg-sky-400/15 text-sky-100'
-                  : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-100'
-              }`}
-            >
-              {WINDOW_LABELS[key]}
-            </button>
-          ))}
           <button
             onClick={fetchRows}
             className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-semibold text-zinc-100 hover:bg-zinc-800"
@@ -291,6 +302,52 @@ export default function PaperFuturesPage() {
             <RefreshCw size={15} />
             Refresh
           </button>
+        </div>
+      </div>
+
+      <div className="mb-5 rounded-xl border border-zinc-800 bg-[#101116] p-4 shadow-sm shadow-black">
+        <div className="mb-2 flex items-center justify-between gap-4">
+          <span className="text-xs uppercase tracking-wider text-zinc-500">Paper Account Balance</span>
+          <div className="flex gap-1">
+            {(['today', '7d', '14d', '28d'] as WindowKey[]).map((key) => (
+              <button
+                key={key}
+                onClick={() => setWindowKey(key)}
+                className={`rounded px-2 py-1 text-[10px] font-bold transition-colors ${
+                  windowKey === key
+                    ? 'bg-white/10 text-white'
+                    : 'border border-white/10 text-zinc-500 hover:text-zinc-200'
+                }`}
+              >
+                {WINDOW_LABELS[key].toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+          <div>
+            <div className="font-mono text-4xl font-bold leading-none text-white">{money2(stats.paperBalance)}</div>
+            <div className="mt-1 font-mono text-xs text-zinc-500">
+              Starting {money2(paperAccountUsd)} | {money2(stats.paperBalance * Number(botStatus?.inr_usd_rate ?? 86.5)).replace('$', '₹')}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className={`h-2 w-2 rounded-full ${botStatus?.bot_state === 'running' || botStatus?.is_running ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+              <span className={`text-sm font-semibold ${botStatus?.bot_state === 'running' || botStatus?.is_running ? 'text-emerald-300' : 'text-amber-300'}`}>
+                {botStatus?.bot_state === 'running' || botStatus?.is_running ? 'Running' : 'Paused'}
+              </span>
+              <span className="font-mono text-xs text-zinc-500">{holdTime(Number(botStatus?.uptime_seconds ?? 0), nowMs)}</span>
+            </div>
+            <div className={`font-mono text-sm font-bold ${signedClass(stats.net)}`}>
+              {WINDOW_LABELS[windowKey]} {money(stats.net)}
+            </div>
+            {stats.open > 0 && (
+              <div className={`font-mono text-sm font-bold ${signedClass(stats.liveNet)}`}>
+                Live {money(stats.liveNet)}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

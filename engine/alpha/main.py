@@ -49,6 +49,7 @@ class AlphaBot:
 
         # Delta futures pairs (used for market analysis → options signals)
         self.delta_pairs: list[str] = config.delta.pairs
+        self.paper_futures_pairs: list[str] = []
 
         # Scalp strategies: pair -> ScalpStrategy (provides signals to options)
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
@@ -136,6 +137,50 @@ class AlphaBot:
             return self._scalp_strategies.get(f"{exchange}:{pair}")
         return self._scalp_strategies.get(f"delta:{pair}")
 
+    async def _select_top_delta_futures_pairs(self, limit: int = 5) -> list[str]:
+        """Pick the most liquid active Delta USD perpetuals for paper futures.
+
+        This is paper-only. Live options continue using config.delta.options_pairs.
+        """
+        fallback = list(dict.fromkeys(self.delta_pairs or config.delta.options_pairs))
+        if not self.delta:
+            return fallback[:limit]
+        try:
+            await self.delta.load_markets()
+            markets = [
+                m for m in self.delta.markets.values()
+                if m.get("active")
+                and m.get("swap")
+                and m.get("linear")
+                and m.get("quote") == "USD"
+                and m.get("symbol")
+            ]
+            symbols = [str(m["symbol"]) for m in markets]
+            tickers = await self.delta.fetch_tickers(symbols)
+            ranked: list[tuple[float, str]] = []
+            for symbol in symbols:
+                ticker = tickers.get(symbol) or {}
+                quote_volume = float(ticker.get("quoteVolume") or 0.0)
+                if quote_volume <= 0:
+                    continue
+                ranked.append((quote_volume, symbol))
+            ranked.sort(reverse=True)
+            selected = [symbol for _, symbol in ranked[:limit]]
+            if not selected:
+                raise RuntimeError("no Delta futures tickers had quote volume")
+            logger.info(
+                "Paper futures top-volume Delta pairs: %s",
+                ", ".join(f"{symbol}=${volume:,.0f}" for volume, symbol in ranked[:limit]),
+            )
+            return selected
+        except Exception as exc:
+            logger.warning(
+                "Could not select top Delta futures by volume (%s); falling back to %s",
+                exc,
+                ", ".join(fallback[:limit]) or "none",
+            )
+            return fallback[:limit]
+
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
         from pathlib import Path
@@ -216,6 +261,9 @@ class AlphaBot:
             delta_pairs=self.delta_pairs if self.delta else None,
         )
 
+        if self.delta:
+            self.paper_futures_pairs = await self._select_top_delta_futures_pairs(limit=5)
+
         # Register Delta scalp strategies (provide market signals to options)
         if self.delta:
             for pair in self.delta_pairs:
@@ -257,7 +305,7 @@ class AlphaBot:
         # Independent paper futures experiments. These never place exchange
         # orders; they only write paper rows for comparing futures-style logic.
         if self.delta:
-            for pair in self.delta_pairs:
+            for pair in self.paper_futures_pairs:
                 self._paper_futures_strategies[pair] = build_paper_futures_strategies(
                     pair,
                     self.delta,
@@ -309,9 +357,10 @@ class AlphaBot:
                 paper_started += 1
         if self._paper_futures_strategies:
             logger.info(
-                "Paper futures experiments started on %d/%d strategy lanes",
+                "Paper futures experiments started on %d/%d strategy lanes (%s)",
                 paper_started,
                 paper_total,
+                ", ".join(self.paper_futures_pairs),
             )
 
         # ── GPFC #48: merge duplicate open rows for the same symbol ──

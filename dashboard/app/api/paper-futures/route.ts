@@ -23,5 +23,15 @@ export async function GET() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ rows: data ?? [] });
+  const { data: statusRows } = await supabase
+    .from('bot_status')
+    .select('bot_state,is_running,is_paused,uptime_seconds,timestamp,created_at,inr_usd_rate')
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  return NextResponse.json({
+    rows: data ?? [],
+    botStatus: statusRows?.[0] ?? null,
+    paperAccountUsd: 50,
+  });
 }
