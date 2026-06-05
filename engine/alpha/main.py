@@ -58,6 +58,12 @@ class AlphaBot:
         # Independent paper futures strategies: pair -> paper-only strategy lanes
         self._paper_futures_strategies: dict[str, list[PaperFuturesStrategy]] = {}
 
+        # PAPER-ONLY MODE: when on, NO live orders are ever placed (live options
+        # + live scalp entries disabled). Only the paper lab runs. Durable across
+        # restarts so a crash-restart can never silently resume live trading.
+        # Default ON until the paper lab proves a real edge. Flip with PAPER_ONLY=0.
+        self.paper_only: bool = os.getenv("PAPER_ONLY", "1").strip().lower() not in ("0", "false", "no", "off")
+
         # ─── GPFC #43: orphan-adopt cooldowns ───
         # Reconciler tries to adopt any live Delta options position the bot
         # isn't actively managing. When adoption must be deferred (strategy
@@ -277,7 +283,8 @@ class AlphaBot:
 
         # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals
         # Options use Delta exchange, signals come from Delta scalp strategies
-        if self.delta and self.delta_options and self._options_enabled:
+        # PAPER-ONLY: skip building live options entirely (proven net-negative bleeder).
+        if self.delta and self.delta_options and self._options_enabled and not self.paper_only:
             for pair in config.delta.options_pairs:
                 # Map options pair to Delta scalp strategy (delta-prefixed keys)
                 base = pair.split("/")[0]
@@ -312,6 +319,13 @@ class AlphaBot:
                     self.db,
                     self._scalp_strategies.get(f"delta:{pair}"),
                 )
+
+        # PAPER-ONLY: hard-block every live entry path via the risk manager so a
+        # restart can never resume real trading. Paper lanes ignore this flag.
+        if self.paper_only:
+            self.risk_manager.is_paused = True
+            self.risk_manager._pause_reason = "PAPER-ONLY mode (no live trading)"
+            logger.warning("⚠️ PAPER-ONLY MODE — live trading disabled; only paper lab runs")
 
         # Inject restored position state into strategy instances
         await self._restore_strategy_state()

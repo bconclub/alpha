@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-05 23:55 IST · PAPER-ONLY mode: live trading disabled (durable)
+
+- **Live bot paused** via `bot_commands` (id 314) — stops the real-money bleed immediately.
+- `main.py`: new `self.paper_only` flag (env `PAPER_ONLY`, **defaults ON**). When on: live options strategies are never built, and `risk_manager.is_paused` is forced True at startup so **no live entry can fire — durable across the ~21 restarts/day** (an in-memory pause alone would be wiped by a crash-restart). Paper lanes ignore the flag and keep running.
+- `supabase/migrations/20260605_create_paper_options_trades.sql` (new, applied): `paper_options_trades` table — buy-only price-action paper options ledger (premium-based, $100 account), parallel to `paper_futures_trades` so the dashboard can show which row is an OPTION vs a FUTURE.
+- Rationale: 1,396 live option trades show no edge in ANY slice (97% taken in CHOPPY regime, every hold-bucket negative, even quality-gated trades lose). Stop risking real money; rebuild + prove edge in paper first.
+- User-facing: live trading is OFF. Next: paper options engine (BTC/ETH), paper futures restricted to BTC/ETH @ $100, and a paper-first dashboard.
+- (SHA on commit)
+
 ## 2026-06-05 17:55 IST · Stop the bleed: always-on hard stop + non-underwater entries
 
 - `engine/STRATEGY.md` (new): compiled price-action strategy — buy-only, ~$29 account, one entry engine, structural exits, premium-dip re-entry, all time-gates to be stripped, dynamic ATM→slightly-OTM strike selection. No option selling, no paper-futures focus. This is the reference we build against.
@@ -7,8 +16,7 @@
 - `options_scalp.py` `PHASE_A_DYNAMIC_HARD_FAIL_PCT`: −12% → **−8%**. Never-worked trades (peak ≤3%) now cut at −8% observed, so market-order slippage on illiquid Delta strikes lands near −12% instead of −24%.
 - `options_scalp.py` `FAST_ENTRY_LIMIT_CROSS_PCT`: 8% → **4%**. Crossing the ask by 8% made entries start deep underwater (trade 3671: −22% in 0 min). Now we pay up only modestly.
 - `options_scalp.py` `EXPLOSIVE_MOVE_MAX_SPREAD_PCT`: 18% → **9%**. Tolerating 18%-wide spreads was the direct source of the −24% slippage; spread/liquidity is the hard entry gate.
-- User-facing: live options trades should stop producing −20%+ losses on trades that never worked; entries no longer start instantly deep in the red. Surgical bleed-stop ahead of the full structural exit rewrite.
-- (SHA filled on commit)
+- User-facing: live options trades should stop producing −20%+ losses on trades that never worked; entries no longer start instantly deep in the red. Surgical bleed-stop ahead of the full structural exit rewrite. `(a9495db)`
 
 - `options_scalp.py`: `ENABLED_SETUPS = {"MOM_BURST", "SQUEEZE"}` — SQUEEZE re-enabled
 - `options_scalp.py`: added IV-regime constants — `SQUEEZE_MAX_IV_FOR_ENTRY = 0.35`, `MOM_BURST_MIN_IV_FOR_ENTRY = 0.25`, `SQUEEZE_REQUIRES_LOW_VOL = True`
