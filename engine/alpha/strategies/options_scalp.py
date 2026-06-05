@@ -134,6 +134,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ── Class-level shared state ──────────────────────────────────────
     _global_in_position: bool = False  # legacy mirror; do not gate cross-asset entries
     _global_position_asset: str | None = None
+    _bad_option_symbol_lockout_until: dict[str, float] = {}
 
     # ── Delta Exchange contract multiplier (options) ─────────────
     CONTRACT_MULTIPLIER: dict[str, float] = {"ETH": 0.01, "BTC": 0.001}
@@ -217,9 +218,14 @@ class OptionsScalpStrategy(BaseStrategy):
     PREMIUM_WAVE_MIN_DELTA_ABS = 0.20
     PREMIUM_WAVE_MIN_IV = 0.20
     PREMIUM_WAVE_COOLDOWN_SEC = 300.0
-    PREMIUM_WAVE_MAX_LAST_RISE_PCT = 11.0
-    PREMIUM_WAVE_MAX_CUM_RISE_PCT = 22.0
-    PREMIUM_WAVE_MAX_FROM_5M_LOW_PCT = 24.0
+    PREMIUM_WAVE_MAX_LAST_RISE_PCT = 7.5
+    PREMIUM_WAVE_MAX_CUM_RISE_PCT = 18.0
+    PREMIUM_WAVE_MAX_FROM_5M_LOW_PCT = 20.0
+    PREMIUM_WAVE_MIN_PULLBACK_FROM_HIGH_PCT = 12.0
+    PREMIUM_WAVE_MIN_REBOUND_FROM_PULLBACK_LOW_PCT = 4.0
+    BAD_STOP_SYMBOL_LOCKOUT_SEC = 900.0
+    BAD_STOP_LOCKOUT_PEAK_MAX_PCT = 3.0
+    BAD_STOP_LOCKOUT_LOSS_PCT = -12.0
     # If spread is wider than the phase-A stop, the trade is born near/under
     # stop before thesis can play out. Keep entries tighter than the -3% phase-A
     # guard so we do not buy options that immediately stop on bid/ask alone.
@@ -456,7 +462,7 @@ class OptionsScalpStrategy(BaseStrategy):
     REENTRY_MIN_ALIGNED_20S_PCT = 0.06
     REENTRY_MIN_ACCEL_RATIO = 0.45
     REENTRY_MIN_EXPECTED_EDGE_PCT = 8.0
-    REENTRY_ALLOWED_SETUPS = frozenset({"MOM_BURST", "TREND_FLOW", "MOVE_PULLBACK"})
+    REENTRY_ALLOWED_SETUPS = frozenset({"MOM_BURST", "TREND_FLOW", "MOVE_PULLBACK", "PREMIUM_WAVE"})
 
     # GPFC #95: BTC options have much larger absolute premiums than ETH. With
     # a ~$10 account, ATM/near-OTM BTC options frequently require $7-$12
@@ -1452,6 +1458,49 @@ class OptionsScalpStrategy(BaseStrategy):
                 out.append(strike)
         return out
 
+    def _option_symbol_lockout_remaining(self, symbol: str | None) -> float:
+        """Seconds remaining on a bad-stop lockout for this exact option."""
+        if not symbol:
+            return 0.0
+        now = time.monotonic()
+        until = float(self._bad_option_symbol_lockout_until.get(symbol, 0.0) or 0.0)
+        if until <= now:
+            self._bad_option_symbol_lockout_until.pop(symbol, None)
+            return 0.0
+        return until - now
+
+    def _lock_bad_option_symbol(
+        self,
+        symbol: str | None,
+        *,
+        exit_type: str,
+        pnl_pct: float,
+        peak_pnl_pct: float,
+    ) -> None:
+        """Avoid immediate revenge entries in the exact option that just failed."""
+        if not symbol:
+            return
+        exit_key = exit_type.lower()
+        if not exit_key.startswith("stop_phase") and exit_key not in {"dead"}:
+            return
+        if (
+            peak_pnl_pct > self.BAD_STOP_LOCKOUT_PEAK_MAX_PCT
+            or pnl_pct > self.BAD_STOP_LOCKOUT_LOSS_PCT
+        ):
+            return
+        until = time.monotonic() + self.BAD_STOP_SYMBOL_LOCKOUT_SEC
+        self._bad_option_symbol_lockout_until[symbol] = until
+        self.logger.info(
+            "[%s] BAD_STOP_LOCKOUT: %s blocked for %.0fs after %s "
+            "(peak=%+.1f%% pnl=%+.1f%%)",
+            self.pair,
+            symbol,
+            self.BAD_STOP_SYMBOL_LOCKOUT_SEC,
+            exit_type,
+            peak_pnl_pct,
+            pnl_pct,
+        )
+
     def _is_btc_small_account_mode(self) -> bool:
         capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         return self._base_asset == "BTC" and 0 < capital < self.OPT_SURVIVAL_BALANCE
@@ -1521,15 +1570,38 @@ class OptionsScalpStrategy(BaseStrategy):
         premium_5m = (current - prem_5m) / prem_5m * 100.0
         premium_15m = (current - prem_15m) / prem_15m * 100.0
         now = time.monotonic()
-        recent_premiums = [
-            float(premium)
+        recent_points = [
+            (float(t), float(premium))
             for t, premium, _spot in history
             if premium > 0 and now - t <= 300.0
         ]
+        recent_premiums = [premium for _t, premium in recent_points]
         recent_low = min(recent_premiums) if recent_premiums else current
+        recent_high = max(recent_premiums) if recent_premiums else current
+        high_at = 0.0
+        for t, premium in recent_points:
+            if premium == recent_high:
+                high_at = t
+                break
+        lows_after_high = [
+            premium
+            for t, premium in recent_points
+            if high_at > 0 and t >= high_at
+        ]
+        pullback_low = min(lows_after_high) if lows_after_high else current
         premium_from_5m_low = (
             (current - recent_low) / recent_low * 100.0
             if recent_low > 0
+            else 0.0
+        )
+        premium_pullback_from_high = (
+            (recent_high - pullback_low) / recent_high * 100.0
+            if recent_high > 0
+            else 0.0
+        )
+        premium_rebound_from_pullback_low = (
+            (current - pullback_low) / pullback_low * 100.0
+            if pullback_low > 0
             else 0.0
         )
         option_dir = 1.0 if option_type == "call" else -1.0
@@ -1540,6 +1612,10 @@ class OptionsScalpStrategy(BaseStrategy):
             "premium_15m_pct": premium_15m,
             "premium_from_5m_low_pct": premium_from_5m_low,
             "premium_5m_low": recent_low,
+            "premium_5m_high": recent_high,
+            "premium_pullback_low": pullback_low,
+            "premium_pullback_from_high_pct": premium_pullback_from_high,
+            "premium_rebound_from_pullback_low_pct": premium_rebound_from_pullback_low,
             "underlying_5m_pct": underlying_5m,
             "underlying_15m_pct": underlying_15m,
             "premium_now": current,
@@ -2446,17 +2522,6 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_bot_state = "scanning"
         self._cached_target_strike = None
 
-        # GLOBAL POSITION LOCK — only 1 option across all assets (BTC+ETH)
-        if False and OptionsScalpStrategy._global_in_position and not self.in_position:
-            if self._tick_count % 6 == 0:
-                self.logger.info(
-                    "[%s] OPTIONS GLOBAL_LOCK — %s has an open option",
-                    self.pair,
-                    OptionsScalpStrategy._global_position_asset or "another asset",
-                )
-            self._cached_bot_state = "blocked:other_asset_in_position"
-            return []
-
         reentry_signals = await self._check_second_chance_reentry()
         if reentry_signals:
             return reentry_signals
@@ -3206,6 +3271,10 @@ class OptionsScalpStrategy(BaseStrategy):
         premium_5m = float(snapshot.get("premium_5m_pct", 0.0))
         premium_15m = float(snapshot.get("premium_15m_pct", 0.0))
         premium_from_low = float(snapshot.get("premium_from_5m_low_pct", 0.0))
+        pullback_from_high = float(snapshot.get("premium_pullback_from_high_pct", 0.0))
+        rebound_from_pullback_low = float(
+            snapshot.get("premium_rebound_from_pullback_low_pct", 0.0)
+        )
         underlying_5m = float(snapshot.get("underlying_5m_pct", 0.0))
         underlying_15m = float(snapshot.get("underlying_15m_pct", 0.0))
         premium_lifting = (
@@ -3217,6 +3286,23 @@ class OptionsScalpStrategy(BaseStrategy):
             or underlying_15m >= self.PREMIUM_WAVE_MIN_UNDERLYING_15M_PCT
         )
         if not premium_lifting or not underlying_aligned:
+            return []
+        if (
+            pullback_from_high < self.PREMIUM_WAVE_MIN_PULLBACK_FROM_HIGH_PCT
+            or rebound_from_pullback_low < self.PREMIUM_WAVE_MIN_REBOUND_FROM_PULLBACK_LOW_PCT
+        ):
+            self._cached_bot_state = "blocked:premium_wave_wait_pullback"
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] PREMIUM_WAVE_PULLBACK_WAIT: dir=%s pullback=%.1f%%/%.1f%% "
+                    "rebound=%.1f%%/%.1f%% -- detect wave, enter only on pullback/re-lift",
+                    self.pair,
+                    trend_dir,
+                    pullback_from_high,
+                    self.PREMIUM_WAVE_MIN_PULLBACK_FROM_HIGH_PCT,
+                    rebound_from_pullback_low,
+                    self.PREMIUM_WAVE_MIN_REBOUND_FROM_PULLBACK_LOW_PCT,
+                )
             return []
         if premium_from_low > self.PREMIUM_WAVE_MAX_FROM_5M_LOW_PCT:
             self._cached_bot_state = "blocked:premium_wave_extended"
@@ -3263,6 +3349,15 @@ class OptionsScalpStrategy(BaseStrategy):
         for strike in self._entry_candidate_strikes(atm_strike, option_type):
             symbol = self._build_option_symbol(strike, option_type, self._selected_expiry)
             if not symbol:
+                continue
+            lockout_remaining = self._option_symbol_lockout_remaining(symbol)
+            if lockout_remaining > 0:
+                self.logger.info(
+                    "[%s] PREMIUM_WAVE_SYMBOL_LOCKED: %s blocked for %.0fs",
+                    self.pair,
+                    symbol,
+                    lockout_remaining,
+                )
                 continue
             try:
                 ticker = await self.options_exchange.fetch_ticker(symbol)
@@ -3386,7 +3481,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.logger.info(
             "[%s] PREMIUM_WAVE_ENTRY: dir=%s trend15=%+.2f%% trend45=%+.2f%% "
             "premium5=%+.1f%% premium15=%+.1f%% underlying5=%+.2f%% underlying15=%+.2f%% "
-            "%s $%.0f ask=$%.4f conf=%.2f",
+            "pullback=%.1f%% rebound=%.1f%% %s $%.0f ask=$%.4f conf=%.2f",
             self.pair,
             trend_dir,
             trend_15m,
@@ -3395,6 +3490,8 @@ class OptionsScalpStrategy(BaseStrategy):
             premium_15m,
             underlying_5m,
             underlying_15m,
+            pullback_from_high,
+            rebound_from_pullback_low,
             option_type.upper(),
             selected_strike,
             entry_ask,
@@ -4782,6 +4879,18 @@ class OptionsScalpStrategy(BaseStrategy):
                 "[%s] setup %s disabled by ENABLED_SETUPS — aborting entry",
                 self.pair, setup_type,
             )
+            self._reset_breakout_state()
+            return []
+
+        lockout_remaining = self._option_symbol_lockout_remaining(selected_symbol)
+        if lockout_remaining > 0:
+            self.logger.info(
+                "[%s] ENTRY_SYMBOL_LOCKED: %s blocked for %.0fs after bad stop",
+                self.pair,
+                selected_symbol,
+                lockout_remaining,
+            )
+            self._cached_bot_state = f"blocked:same_symbol_bad_stop:{int(lockout_remaining)}s"
             self._reset_breakout_state()
             return []
 
@@ -7759,6 +7868,12 @@ class OptionsScalpStrategy(BaseStrategy):
             ((self.highest_premium - self.entry_premium) / self.entry_premium * 100)
             if self.entry_premium > 0
             else 0
+        )
+        self._lock_bad_option_symbol(
+            self.option_symbol,
+            exit_type=exit_type,
+            pnl_pct=pnl_pct,
+            peak_pnl_pct=peak_pnl_pct,
         )
         self._remember_second_chance_reentry(
             exit_type=exit_type,
