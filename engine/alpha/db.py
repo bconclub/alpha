@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from functools import partial
 from typing import Any
 
@@ -31,6 +32,7 @@ class Database:
 
     def __init__(self) -> None:
         self._client: Client | None = None
+        self._paper_futures_disabled_until: float = 0.0
 
     async def connect(self) -> None:
         url = config.supabase.url
@@ -269,6 +271,8 @@ class Database:
         """Insert a paper futures shadow trade and return its row ID."""
         if not self.is_connected:
             return None
+        if time.monotonic() < self._paper_futures_disabled_until:
+            return None
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
@@ -289,6 +293,13 @@ class Database:
             )
             return row_id
         except Exception as exc:
+            if "paper_futures_trades" in str(exc) and ("schema cache" in str(exc) or "PGRST205" in str(exc)):
+                self._paper_futures_disabled_until = time.monotonic() + 300
+                logger.warning(
+                    "paper_futures_trades missing in Supabase; paper logging paused for 5m. "
+                    "Run supabase/migrations/20260605_create_paper_futures_trades.sql"
+                )
+                return None
             logger.error("paper_futures INSERT FAILED: %s | data=%s", exc, data)
             return None
 
