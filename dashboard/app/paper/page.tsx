@@ -418,24 +418,24 @@ export default function PaperFuturesPage() {
           <div className="p-5 text-sm text-zinc-400">No paper futures rows in this window.</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1180px] text-left text-sm">
+            <table className="w-full min-w-[1520px] text-left text-sm">
               <thead className="border-b border-zinc-800 bg-[#15161a] text-[10px] uppercase tracking-wider text-zinc-500">
                 <tr>
-                  <th className="sticky left-0 z-20 w-[260px] bg-[#15161a] px-4 py-3">Trade</th>
-                  <th className="px-4 py-3 text-right">Conf</th>
-                  <th className="px-4 py-3 text-right">Lev</th>
-                  <th className="px-4 py-3 text-right">Entry</th>
-                  <th className="px-4 py-3 text-right">Mark</th>
-                  <th className="px-4 py-3 text-right">Margin</th>
-                  <th className="px-4 py-3 text-right">Notional</th>
-                  <th className="px-4 py-3 text-right">Gross</th>
-                  <th className="px-4 py-3 text-right">Fees</th>
-                  <th className="px-4 py-3 text-right">Net</th>
-                  <th className="px-4 py-3 text-right">Return</th>
-                  <th className="px-4 py-3 text-right">Peak</th>
-                  <th className="px-4 py-3">Hold</th>
-                  <th className="px-4 py-3">Exit</th>
-                  <th className="px-4 py-3">Source</th>
+                  <th className="sticky left-0 z-20 w-[420px] bg-[#15161a] px-4 py-3">Trade</th>
+                  <th className="px-3 py-3 text-right">Conf</th>
+                  <th className="px-3 py-3 text-right">Lev</th>
+                  <th className="px-3 py-3 text-right">Entry</th>
+                  <th className="px-3 py-3 text-right">Mark</th>
+                  <th className="px-3 py-3 text-right">Margin</th>
+                  <th className="px-3 py-3 text-right">Notional</th>
+                  <th className="px-3 py-3 text-right">Gross</th>
+                  <th className="px-3 py-3 text-right">Fees</th>
+                  <th className="px-3 py-3 text-right">Net</th>
+                  <th className="px-3 py-3 text-right">Return</th>
+                  <th className="px-3 py-3 text-right">Peak</th>
+                  <th className="px-3 py-3">Hold</th>
+                  <th className="px-3 py-3">Exit</th>
+                  <th className="px-3 py-3">Source</th>
                 </tr>
               </thead>
               <tbody>
@@ -451,10 +451,10 @@ export default function PaperFuturesPage() {
                         isLive ? 'bg-emerald-950/15' : ''
                       }`}
                     >
-                      <td className={`sticky left-0 z-10 px-4 py-3 ${isLive ? 'bg-[#071611]' : 'bg-[#08090c]'}`}>
-                        <div className="flex flex-wrap items-center gap-2">
+                      <td className={`sticky left-0 z-10 whitespace-nowrap px-4 py-3 ${isLive ? 'bg-[#071611]' : 'bg-[#08090c]'}`}>
+                        <div className="flex items-center gap-2">
                           {isLive ? (
-                            <span className="inline-flex items-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/15 px-2 py-1 text-[10px] font-bold text-emerald-200">
+                            <span className="inline-flex items-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/15 px-2 py-0.5 text-[10px] font-bold text-emerald-200">
                               <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
                               LIVE
                             </span>
@@ -468,25 +468,23 @@ export default function PaperFuturesPage() {
                           <span className="rounded border border-sky-400/30 bg-sky-500/20 px-2 py-0.5 text-[10px] font-semibold text-sky-100">
                             {setupLabel(row.setup_type)}
                           </span>
-                        </div>
-                        <div className="mt-1 font-mono text-[11px] text-zinc-500">
-                          {new Date(row.opened_at).toLocaleString()}
+                          <span className="font-mono text-[11px] text-zinc-500">{new Date(row.opened_at).toLocaleString()}</span>
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-right font-mono text-cyan-200">{confidence === null ? '-' : confidence.toFixed(0)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-violet-200">{Number(row.leverage).toFixed(0)}x</td>
-                      <td className="px-4 py-3 text-right font-mono">{Number(row.entry_price).toFixed(2)}</td>
-                      <td className="px-4 py-3 text-right font-mono">{mark ? Number(mark).toFixed(2) : '-'}</td>
-                      <td className="px-4 py-3 text-right font-mono">${Number(row.margin_usd).toFixed(2)}</td>
-                      <td className="px-4 py-3 text-right font-mono">${Number(row.notional_usd).toFixed(2)}</td>
-                      <td className={`px-4 py-3 text-right font-mono ${signedClass(row.gross_pnl_usd)}`}>{money(row.gross_pnl_usd)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-amber-300">{money(-(Number(row.fees_usd ?? 0)))}</td>
-                      <td className={`px-4 py-3 text-right font-mono font-bold ${signedClass(row.pnl_usd)}`}>{money(row.pnl_usd)}</td>
-                      <td className={`px-4 py-3 text-right font-mono font-bold ${signedClass(marginReturn)}`}>{marginReturn === null ? '-' : pct(marginReturn)}</td>
-                      <td className={`px-4 py-3 text-right font-mono ${peakClass(row.peak_pnl_pct)}`}>{pct(row.peak_pnl_pct)}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-300">{holdTime(row, nowMs)}</td>
-                      <td className="px-4 py-3 text-xs capitalize text-zinc-300">{(row.exit_reason || row.status).replace(/_/g, ' ')}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-400">
+                      <td className="px-3 py-3 text-right font-mono text-cyan-200">{confidence === null ? '-' : confidence.toFixed(0)}</td>
+                      <td className="px-3 py-3 text-right font-mono text-violet-200">{Number(row.leverage).toFixed(0)}x</td>
+                      <td className="px-3 py-3 text-right font-mono">{Number(row.entry_price).toFixed(2)}</td>
+                      <td className="px-3 py-3 text-right font-mono">{mark ? Number(mark).toFixed(2) : '-'}</td>
+                      <td className="px-3 py-3 text-right font-mono">${Number(row.margin_usd).toFixed(2)}</td>
+                      <td className="px-3 py-3 text-right font-mono">${Number(row.notional_usd).toFixed(2)}</td>
+                      <td className={`px-3 py-3 text-right font-mono ${signedClass(row.gross_pnl_usd)}`}>{money(row.gross_pnl_usd)}</td>
+                      <td className="px-3 py-3 text-right font-mono text-amber-300">{money(-(Number(row.fees_usd ?? 0)))}</td>
+                      <td className={`px-3 py-3 text-right font-mono font-bold ${signedClass(row.pnl_usd)}`}>{money(row.pnl_usd)}</td>
+                      <td className={`px-3 py-3 text-right font-mono font-bold ${signedClass(marginReturn)}`}>{marginReturn === null ? '-' : pct(marginReturn)}</td>
+                      <td className={`px-3 py-3 text-right font-mono ${peakClass(row.peak_pnl_pct)}`}>{pct(row.peak_pnl_pct)}</td>
+                      <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-zinc-300">{holdTime(row, nowMs)}</td>
+                      <td className="whitespace-nowrap px-3 py-3 text-xs capitalize text-zinc-300">{(row.exit_reason || row.status).replace(/_/g, ' ')}</td>
+                      <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-zinc-400">
                         {row.option_trade_id ? `Option #${row.option_trade_id}` : 'Independent'}
                       </td>
                     </tr>
