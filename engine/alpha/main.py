@@ -24,7 +24,7 @@ from alpha.db import Database
 from alpha.market_analyzer import MarketAnalyzer
 from alpha.price_feed import PriceFeed
 from alpha.risk_manager import RiskManager
-from alpha.paper_futures import DonchianPaperFutures
+from alpha.paper_futures import PaperFuturesStrategy, build_paper_futures_strategies
 from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
@@ -54,8 +54,8 @@ class AlphaBot:
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
         # Options overlay strategies: pair -> OptionsScalpStrategy
         self._options_strategies: dict[str, OptionsScalpStrategy] = {}
-        # Independent paper futures strategies: pair -> paper-only strategy
-        self._paper_futures_strategies: dict[str, DonchianPaperFutures] = {}
+        # Independent paper futures strategies: pair -> paper-only strategy lanes
+        self._paper_futures_strategies: dict[str, list[PaperFuturesStrategy]] = {}
 
         # ─── GPFC #43: orphan-adopt cooldowns ───
         # Reconciler tries to adopt any live Delta options position the bot
@@ -258,10 +258,11 @@ class AlphaBot:
         # orders; they only write paper rows for comparing futures-style logic.
         if self.delta:
             for pair in self.delta_pairs:
-                self._paper_futures_strategies[pair] = DonchianPaperFutures(
+                self._paper_futures_strategies[pair] = build_paper_futures_strategies(
                     pair,
                     self.delta,
                     self.db,
+                    self._scalp_strategies.get(f"delta:{pair}"),
                 )
 
         # Inject restored position state into strategy instances
@@ -298,17 +299,19 @@ class AlphaBot:
             logger.info("Options overlay started on %d pairs", len(self._options_strategies))
 
         paper_started = 0
-        for pair, paper in self._paper_futures_strategies.items():
+        paper_total = sum(len(strategies) for strategies in self._paper_futures_strategies.values())
+        for pair, paper_strategies in self._paper_futures_strategies.items():
             if not self._delta_enabled:
                 logger.info("Skipping paper futures %s — delta exchange disabled", pair)
                 continue
-            await paper.start()
-            paper_started += 1
+            for paper in paper_strategies:
+                await paper.start()
+                paper_started += 1
         if self._paper_futures_strategies:
             logger.info(
-                "Paper futures experiments started on %d/%d pairs",
+                "Paper futures experiments started on %d/%d strategy lanes",
                 paper_started,
-                len(self._paper_futures_strategies),
+                paper_total,
             )
 
         # ── GPFC #48: merge duplicate open rows for the same symbol ──
@@ -522,9 +525,10 @@ class AlphaBot:
         for pair, opts in self._options_strategies.items():
             if opts.is_active:
                 stop_tasks.append(opts.stop())
-        for pair, paper in self._paper_futures_strategies.items():
-            if paper.is_active:
-                stop_tasks.append(paper.stop())
+        for pair, paper_strategies in self._paper_futures_strategies.items():
+            for paper in paper_strategies:
+                if paper.is_active:
+                    stop_tasks.append(paper.stop())
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
 
@@ -1331,9 +1335,10 @@ class AlphaBot:
                 for pair, opts in self._options_strategies.items():
                     if opts.is_active:
                         stop_tasks.append(opts.stop())
-                for pair, paper in self._paper_futures_strategies.items():
-                    if paper.is_active:
-                        stop_tasks.append(paper.stop())
+                for pair, paper_strategies in self._paper_futures_strategies.items():
+                    for paper in paper_strategies:
+                        if paper.is_active:
+                            stop_tasks.append(paper.stop())
                 if stop_tasks:
                     await asyncio.gather(*stop_tasks, return_exceptions=True)
                 await self.alerts.send_command_confirmation("pause")
@@ -1350,9 +1355,10 @@ class AlphaBot:
                 for pair, opts in self._options_strategies.items():
                     if not opts.is_active:
                         await opts.start()
-                for pair, paper in self._paper_futures_strategies.items():
-                    if not paper.is_active and self._delta_enabled:
-                        await paper.start()
+                for pair, paper_strategies in self._paper_futures_strategies.items():
+                    for paper in paper_strategies:
+                        if not paper.is_active and self._delta_enabled:
+                            await paper.start()
                 label = "force_resume" if force else "resume"
                 await self.alerts.send_command_confirmation(label)
                 result_msg = "Bot force-resumed (win-rate bypass active)" if force else "Bot resumed"
@@ -1423,11 +1429,12 @@ class AlphaBot:
                             tasks.append(opts.start())
                         elif not enabled and opts.is_active:
                             tasks.append(opts.stop())
-                    for pair, paper in self._paper_futures_strategies.items():
-                        if enabled and not paper.is_active:
-                            tasks.append(paper.start())
-                        elif not enabled and paper.is_active:
-                            tasks.append(paper.stop())
+                    for pair, paper_strategies in self._paper_futures_strategies.items():
+                        for paper in paper_strategies:
+                            if enabled and not paper.is_active:
+                                tasks.append(paper.start())
+                            elif not enabled and paper.is_active:
+                                tasks.append(paper.stop())
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 result_msg = f"{exchange.title()} {'enabled' if enabled else 'disabled'} ({len(tasks)} strategies)"

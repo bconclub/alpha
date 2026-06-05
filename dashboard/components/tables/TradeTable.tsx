@@ -12,8 +12,6 @@ import {
   cn,
   getPnLColor,
   tradesToCSV,
-  getExchangeLabel,
-  getExchangeColor,
   getPositionTypeLabel,
   getPositionTypeColor,
   formatLeverage,
@@ -126,7 +124,6 @@ const COLUMNS: ColumnDef[] = [
   { key: 'price', label: 'Entry', align: 'right' },
   // ── Scrollable columns ──
   { key: 'timestamp', label: 'Date' },
-  { key: 'exchange', label: 'Exchange' },
   { key: 'exit_price', label: 'Exit', align: 'right' },
   { key: 'amount', label: 'Contracts', align: 'right' },
   { key: 'setup_type', label: 'Setup' },
@@ -992,10 +989,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         <span className={cn('text-[10px] font-medium', getPositionTypeColor(trade.position_type))}>
                           {isOptionTrade(trade) ? 'OPT' : getPositionTypeLabel(trade.position_type)}
                         </span>
-                        <span
-                          className="inline-block h-2 w-2 rounded-full"
-                          style={{ backgroundColor: getExchangeColor(trade.exchange) }}
-                        />
                       </div>
                       <div className="flex items-center gap-2">
                         <div className="text-right">
@@ -1331,19 +1324,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Date */}
                         <td className="whitespace-nowrap px-4 py-3 text-zinc-300">
                           {formatDate(trade.timestamp)}
-                        </td>
-
-                        {/* Exchange */}
-                        <td className="whitespace-nowrap px-4 py-3">
-                          <span className="inline-flex items-center gap-1.5">
-                            <span
-                              className="inline-block h-2 w-2 rounded-full"
-                              style={{ backgroundColor: getExchangeColor(trade.exchange) }}
-                            />
-                            <span className="text-zinc-300 text-xs">
-                              {getExchangeLabel(trade.exchange)}
-                            </span>
-                          </span>
                         </td>
 
                         {/* Exit Price */}

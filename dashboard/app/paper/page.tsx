@@ -88,7 +88,7 @@ export default function PaperFuturesPage() {
         <div>
           <h1 className="text-xl font-bold text-zinc-100">Paper Futures</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            Independent Donchian paper trades plus futures twins from filled options signals.
+            Multi-strategy paper lab: Donchian, EMA pullback, momentum impulse, signal mix, and option twins.
           </p>
         </div>
         <button

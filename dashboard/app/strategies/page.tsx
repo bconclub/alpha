@@ -1,562 +1,424 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
-import { PnLChart } from '@/components/charts/PnLChart';
-import { Badge } from '@/components/ui/Badge';
-import {
-  formatPnL,
-  formatCurrency,
-  getStrategyLabel,
-  cn,
-  getPnLColor,
-} from '@/lib/utils';
-import type { Strategy, Trade, SetupConfig, SignalState } from '@/lib/types';
+import { SetupChip } from '@/components/ui/SetupChip';
+import { cn, formatDate, formatDuration, formatPnL, getPnLColor } from '@/lib/utils';
+import type { SetupConfig, Trade } from '@/lib/types';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+type TimeWindow = 'today' | '24h' | 'jun3' | 'jun1' | '7d';
 
-const STRATEGIES: Strategy[] = ['scalp', 'options_scalp'];
-
-const SETUP_TYPES = [
-  'ANTIC',
-  'RSI_OVERRIDE',
-  'BB_SQUEEZE',
-  'LIQ_SWEEP',
-  'FVG_FILL',
-  'VOL_DIVERGENCE',
-  'VWAP_RECLAIM',
-  'TREND_CONT',
-  'MOMENTUM_BURST',
-  'MEAN_REVERT',
-  'MULTI_SIGNAL',
-  'MIXED',
-] as const;
-
-// Signal groups for the monitor
-const CORE_SIGNALS = ['MOM_60S', 'VOL', 'RSI', 'BB'] as const;
-const BONUS_SIGNALS = ['MOM_5M', 'TCONT', 'VWAP', 'BBSQZ', 'LIQSWEEP', 'FVG', 'VOLDIV'] as const;
-
-const ALL_PAIR_BASES = ['BTC', 'ETH', 'XRP', 'SOL'] as const;
-
-type TimePeriod = '24h' | '7d' | '14d' | 'all';
-
-const TIME_PERIODS: { key: TimePeriod; label: string }[] = [
+const TIME_WINDOWS: { key: TimeWindow; label: string }[] = [
+  { key: 'today', label: 'Today' },
   { key: '24h', label: '24h' },
+  { key: 'jun3', label: 'Since Jun 3' },
+  { key: 'jun1', label: 'Since Jun 1' },
   { key: '7d', label: '7d' },
-  { key: '14d', label: '14d' },
-  { key: 'all', label: 'All Time' },
 ];
 
-function getPeriodCutoff(period: TimePeriod): Date | null {
-  if (period === 'all') return null;
-  const ms = { '24h': 24, '7d': 7 * 24, '14d': 14 * 24 }[period] * 60 * 60 * 1000;
-  return new Date(Date.now() - ms);
+const LIVE_SETUPS = ['SQUEEZE', 'MOM_BURST', 'PULLBACK', 'TREND_FLOW', 'FVG_CHOCH'] as const;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+type SetupStats = {
+  setup: string;
+  enabled: boolean;
+  trades: Trade[];
+  total: number;
+  wins: number;
+  losses: number;
+  net: number;
+  gross: number;
+  fees: number;
+  winRate: number;
+  avgPeak: number;
+  avgCapture: number;
+  avgHoldSec: number;
+  bestPeak: number;
+  lastTrade?: Trade;
+};
+
+function canonicalSetup(setup: string | null | undefined): string {
+  const raw = (setup || '').trim().toUpperCase();
+  if (!raw) return 'UNLABELED';
+  if (raw === 'BB_SQUEEZE' || raw === 'BB_SQUEEZE_BREAKOUT' || raw === 'SQUEEZE_BREAKOUT') return 'SQUEEZE';
+  if (raw === 'MOMENTUM_BURST' || raw === 'MOMENTUM_BURST_ENTRY') return 'MOM_BURST';
+  if (raw === 'MOVE_PULLBACK' || raw === 'PULL_BACK') return 'PULLBACK';
+  if (raw === 'FVG_REVERSAL' || raw === 'FVG_REVERSE') return 'FVG_CHOCH';
+  return raw;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+function getWindowCutoff(window: TimeWindow): Date {
+  const now = new Date();
+  if (window === '24h') return new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  if (window === '7d') return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  if (window === 'jun1') return new Date('2026-06-01T00:00:00+05:30');
+  if (window === 'jun3') return new Date('2026-06-03T00:00:00+05:30');
 
-function extractBaseAsset(pair: string): string {
-  if (pair.includes('/')) return pair.split('/')[0];
-  return pair.replace(/USD.*$/, '');
+  const istNow = new Date(now.getTime() + IST_OFFSET_MS);
+  const startIst = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate());
+  return new Date(startIst - IST_OFFSET_MS);
 }
 
-function computeSetupStats(trades: Trade[], setupType: string) {
-  const filtered = trades.filter(
-    (t) => t.status === 'closed' && t.setup_type?.toUpperCase() === setupType.toUpperCase(),
-  );
-  const wins = filtered.filter((t) => t.pnl > 0).length;
-  const losses = filtered.filter((t) => t.pnl <= 0).length;
-  const totalPnL = filtered.reduce((sum, t) => sum + t.pnl, 0);
-  const avgWin = wins > 0 ? filtered.filter(t => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / wins : 0;
-  const avgLoss = losses > 0 ? filtered.filter(t => t.pnl <= 0).reduce((s, t) => s + t.pnl, 0) / losses : 0;
-  const winRate = filtered.length > 0 ? (wins / filtered.length) * 100 : 0;
-
-  // Last 5 trades (W/L)
-  const sorted = [...filtered].sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  );
-  const last5 = sorted.slice(0, 5).map((t) => t.pnl > 0);
-
-  return { totalTrades: filtered.length, wins, losses, totalPnL, avgWin, avgLoss, winRate, last5 };
+function getTradeTime(trade: Trade): number {
+  return new Date(trade.timestamp).getTime();
 }
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
+function holdSeconds(trade: Trade): number {
+  const start = new Date(trade.timestamp).getTime();
+  const end = trade.closed_at ? new Date(trade.closed_at).getTime() : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+  return Math.round((end - start) / 1000);
+}
+
+function pct(value: number | null | undefined): string {
+  const n = Number(value ?? 0);
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(2)}%`;
+}
+
+function capturePct(trade: Trade): number | null {
+  const peak = Number(trade.peak_pnl ?? 0);
+  const taken = Number(trade.pnl_pct ?? 0);
+  if (peak <= 0) return null;
+  return (taken / peak) * 100;
+}
+
+function formatSetupName(setup: string): string {
+  if (setup === 'MOM_BURST') return 'Momentum Burst';
+  if (setup === 'TREND_FLOW') return 'Trend Flow';
+  if (setup === 'FVG_CHOCH') return 'Zone Pullback';
+  if (setup === 'UNLABELED') return 'Unlabeled';
+  return setup.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function shortPair(pair: string): string {
+  const m = pair.match(/^(\w+)\/.*-(\d{6})-(\d+)-([CP])$/);
+  if (!m) return pair.replace('/USD:USD', '');
+  const [, asset, , strike, cp] = m;
+  return `${asset} ${strike}${cp}`;
+}
+
+function buildConfigMap(configs: SetupConfig[]): Record<string, SetupConfig> {
+  const map: Record<string, SetupConfig> = {};
+  for (const config of configs) {
+    map[canonicalSetup(config.setup_type)] = config;
+  }
+  return map;
+}
+
+function computeStats(setup: string, trades: Trade[], configMap: Record<string, SetupConfig>): SetupStats {
+  const setupTrades = trades.filter((trade) => canonicalSetup(trade.setup_type) === setup);
+  const wins = setupTrades.filter((trade) => Number(trade.pnl ?? 0) > 0).length;
+  const losses = setupTrades.length - wins;
+  const net = setupTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
+  const gross = setupTrades.reduce((sum, trade) => sum + Number(trade.gross_pnl ?? trade.pnl ?? 0), 0);
+  const fees = setupTrades.reduce((sum, trade) => sum + Number(trade.entry_fee ?? 0) + Number(trade.exit_fee ?? 0), 0);
+  const peaks = setupTrades.map((trade) => Number(trade.peak_pnl ?? 0));
+  const captures = setupTrades.map(capturePct).filter((value): value is number => value != null);
+  const holdTotal = setupTrades.reduce((sum, trade) => sum + holdSeconds(trade), 0);
+
+  return {
+    setup,
+    enabled: configMap[setup]?.enabled ?? true,
+    trades: setupTrades,
+    total: setupTrades.length,
+    wins,
+    losses,
+    net,
+    gross,
+    fees,
+    winRate: setupTrades.length ? (wins / setupTrades.length) * 100 : 0,
+    avgPeak: peaks.length ? peaks.reduce((sum, value) => sum + value, 0) / peaks.length : 0,
+    avgCapture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : 0,
+    avgHoldSec: setupTrades.length ? holdTotal / setupTrades.length : 0,
+    bestPeak: peaks.length ? Math.max(...peaks) : 0,
+    lastTrade: setupTrades[0],
+  };
+}
 
 export default function StrategiesPage() {
-  const { trades, setupConfigs, signalStates, pairConfigs, botStatus } = useSupabase();
-  const [activeTab, setActiveTab] = useState<Strategy>('scalp');
-  const [timePeriod, setTimePeriod] = useState<TimePeriod>('all');
+  const { trades, setupConfigs, refreshViews } = useSupabase();
+  const [timeWindow, setTimeWindow] = useState<TimeWindow>('jun3');
+  const [savingSetup, setSavingSetup] = useState<string | null>(null);
 
-  const scalpEnabled = botStatus?.scalp_enabled ?? true;
-  const optionsEnabled = botStatus?.options_scalp_enabled ?? false;
+  const cutoff = useMemo(() => getWindowCutoff(timeWindow), [timeWindow]);
+  const configMap = useMemo(() => buildConfigMap(setupConfigs), [setupConfigs]);
 
-  const filteredTrades = useMemo(
-    () => trades.filter((t) => t.strategy === activeTab),
-    [trades, activeTab],
-  );
+  const recentClosedTrades = useMemo(() => {
+    return trades
+      .filter((trade) => trade.status === 'closed')
+      .filter((trade) => getTradeTime(trade) >= cutoff.getTime())
+      .sort((a, b) => getTradeTime(b) - getTradeTime(a));
+  }, [trades, cutoff]);
 
-  // Trades filtered by selected time period (for setup stats only)
-  const periodTrades = useMemo(() => {
-    const cutoff = getPeriodCutoff(timePeriod);
-    if (!cutoff) return trades;
-    return trades.filter((t) => new Date(t.timestamp).getTime() >= cutoff.getTime());
-  }, [trades, timePeriod]);
+  const setupOrder = useMemo(() => {
+    const found = new Set<string>(LIVE_SETUPS);
+    for (const trade of recentClosedTrades) {
+      found.add(canonicalSetup(trade.setup_type));
+    }
+    for (const config of setupConfigs) {
+      found.add(canonicalSetup(config.setup_type));
+    }
+    return Array.from(found).filter((setup) => setup !== 'UNLABELED' || recentClosedTrades.some((trade) => canonicalSetup(trade.setup_type) === 'UNLABELED'));
+  }, [recentClosedTrades, setupConfigs]);
 
-  // Setup stats scoped to selected time period
   const setupStats = useMemo(() => {
-    const map: Record<string, ReturnType<typeof computeSetupStats>> = {};
-    for (const st of SETUP_TYPES) {
-      map[st] = computeSetupStats(periodTrades, st);
-    }
-    return map;
-  }, [periodTrades]);
+    return setupOrder
+      .map((setup) => computeStats(setup, recentClosedTrades, configMap))
+      .sort((a, b) => {
+        if (b.total !== a.total) return b.total - a.total;
+        return a.net - b.net;
+      });
+  }, [setupOrder, recentClosedTrades, configMap]);
 
-  // Sort setups by P&L ascending (worst first)
-  const sortedSetups = useMemo(() => {
-    return [...SETUP_TYPES].sort(
-      (a, b) => setupStats[a].totalPnL - setupStats[b].totalPnL,
-    );
-  }, [setupStats]);
+  const totals = useMemo(() => {
+    const wins = recentClosedTrades.filter((trade) => Number(trade.pnl ?? 0) > 0).length;
+    const net = recentClosedTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
+    const avgPeak = recentClosedTrades.length
+      ? recentClosedTrades.reduce((sum, trade) => sum + Number(trade.peak_pnl ?? 0), 0) / recentClosedTrades.length
+      : 0;
+    const avgHold = recentClosedTrades.length
+      ? recentClosedTrades.reduce((sum, trade) => sum + holdSeconds(trade), 0) / recentClosedTrades.length
+      : 0;
+    return {
+      trades: recentClosedTrades.length,
+      winRate: recentClosedTrades.length ? (wins / recentClosedTrades.length) * 100 : 0,
+      net,
+      avgPeak,
+      avgHold,
+    };
+  }, [recentClosedTrades]);
 
-  // Setup config map
-  const setupConfigMap = useMemo(() => {
-    const map: Record<string, SetupConfig> = {};
-    for (const sc of setupConfigs) {
-      map[sc.setup_type] = sc;
-    }
-    return map;
-  }, [setupConfigs]);
-
-  // Signal state map: { pairBase: { signal_id: SignalState } }
-  const signalMap = useMemo(() => {
-    const map: Record<string, Record<string, SignalState>> = {};
-    for (const s of signalStates) {
-      if (!map[s.pair]) map[s.pair] = {};
-      map[s.pair][s.signal_id] = s;
-    }
-    return map;
-  }, [signalStates]);
-
-  // Determine which pairs are active (have signal data + not disabled)
-  const disabledBases = useMemo(() => {
-    const disabled = new Set<string>();
-    for (const pc of pairConfigs) {
-      if (!pc.enabled) {
-        disabled.add(extractBaseAsset(pc.pair));
-      }
-    }
-    return disabled;
-  }, [pairConfigs]);
-
-  const activePairs = useMemo(() => {
-    return ALL_PAIR_BASES.filter(
-      (base) => !disabledBases.has(base) && signalMap[base] != null,
-    );
-  }, [disabledBases, signalMap]);
-
-  // Filter signal rows: only show signals that have data for at least one active pair
-  const visibleCoreSignals = useMemo(() => {
-    return CORE_SIGNALS.filter((sigId) =>
-      activePairs.some((p) => {
-        const s = signalMap[p]?.[sigId];
-        return s != null;
-      }),
-    );
-  }, [activePairs, signalMap]);
-
-  const visibleBonusSignals = useMemo(() => {
-    return BONUS_SIGNALS.filter((sigId) =>
-      activePairs.some((p) => {
-        const s = signalMap[p]?.[sigId];
-        return s != null;
-      }),
-    );
-  }, [activePairs, signalMap]);
-
-  // Toggle setup enable/disable
-  const handleSetupToggle = useCallback(async (setupType: string) => {
+  const handleSetupToggle = useCallback(async (setup: string, enabled: boolean) => {
     const client = getSupabase();
     if (!client) return;
-
-    const current = setupConfigMap[setupType];
-    const newEnabled = !(current?.enabled ?? true);
-
-    await client.from('setup_config').upsert({
-      setup_type: setupType,
-      enabled: newEnabled,
-      updated_at: new Date().toISOString(),
-    });
-
-    await client.from('bot_commands').insert({
-      command: 'update_config',
-      params: { setup_type: setupType, enabled: newEnabled },
-      executed: false,
-    });
-  }, [setupConfigMap]);
-
-  const handleStrategyToggle = useCallback(async (strategy: 'scalp' | 'options_scalp') => {
-    const client = getSupabase();
-    if (!client) return;
-    const currentlyEnabled = strategy === 'scalp' ? scalpEnabled : optionsEnabled;
-    await client.from('bot_commands').insert({
-      command: 'toggle_strategy',
-      params: { strategy, enabled: !currentlyEnabled },
-      executed: false,
-    });
-  }, [scalpEnabled, optionsEnabled]);
+    setSavingSetup(setup);
+    try {
+      const existing = setupConfigs.find((config) => canonicalSetup(config.setup_type) === setup);
+      const setupTypeForDb = existing?.setup_type ?? setup;
+      await client.from('setup_config').upsert({
+        setup_type: setupTypeForDb,
+        enabled,
+        updated_at: new Date().toISOString(),
+      });
+      await client.from('bot_commands').insert({
+        command: 'update_config',
+        params: { setup_type: setupTypeForDb, enabled },
+        executed: false,
+      });
+      refreshViews();
+    } finally {
+      setSavingSetup(null);
+    }
+  }, [refreshViews, setupConfigs]);
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
-        Strategy Performance
-      </h1>
-
-      {/* ------------------------------------------------------------------- */}
-      {/* Strategy Toggles                                                     */}
-      {/* ------------------------------------------------------------------- */}
-      <div className="flex gap-3">
-        {([
-          { key: 'scalp' as const, label: 'Scalp', enabled: scalpEnabled },
-          { key: 'options_scalp' as const, label: 'Options Scalp', enabled: optionsEnabled },
-        ]).map(({ key, label, enabled }) => (
-          <div
-            key={key}
-            className={cn(
-              'flex items-center gap-3 border rounded-xl px-4 py-3 transition-all',
-              enabled ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-800 bg-zinc-900/30 opacity-60',
-            )}
-          >
-            <span className="text-sm font-semibold text-white">{label}</span>
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight text-white">Strategy Performance</h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            Recent performance by the setups Alpha is actually trading.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {TIME_WINDOWS.map(({ key, label }) => (
             <button
-              onClick={() => handleStrategyToggle(key)}
+              key={key}
+              onClick={() => setTimeWindow(key)}
               className={cn(
-                'relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 shrink-0',
-                enabled ? 'bg-emerald-500' : 'bg-zinc-700',
+                'rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
+                timeWindow === key
+                  ? 'bg-sky-500/20 text-sky-200 ring-1 ring-sky-400/30'
+                  : 'bg-zinc-900 text-zinc-400 ring-1 ring-zinc-800 hover:text-zinc-200',
               )}
             >
-              <span
-                className={cn(
-                  'inline-block h-3 w-3 rounded-full bg-white transition-transform duration-200',
-                  enabled ? 'translate-x-5' : 'translate-x-1',
-                )}
-              />
+              {label}
             </button>
-            <span className={cn('text-[10px] font-mono', enabled ? 'text-emerald-400' : 'text-zinc-500')}>
-              {enabled ? 'ON' : 'OFF'}
-            </span>
+          ))}
+          <button
+            onClick={refreshViews}
+            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-300 ring-1 ring-zinc-800 hover:text-white"
+          >
+            <RefreshCw size={13} />
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        {[
+          ['Trades', totals.trades.toString(), 'text-zinc-100'],
+          ['Win Rate', `${totals.winRate.toFixed(0)}%`, totals.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'],
+          ['Net P&L', formatPnL(totals.net), getPnLColor(totals.net)],
+          ['Avg Peak', pct(totals.avgPeak), 'text-cyan-300'],
+          ['Avg Hold', formatDuration(totals.avgHold), 'text-zinc-100'],
+        ].map(([label, value, color]) => (
+          <div key={label} className="rounded-md border border-zinc-800 bg-[#0d1117] p-3">
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+            <div className={cn('mt-1 font-mono text-lg font-semibold', color)}>{value}</div>
           </div>
         ))}
       </div>
 
-      {/* ------------------------------------------------------------------- */}
-      {/* Setup Control                                                        */}
-      {/* ------------------------------------------------------------------- */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-white">Setup Control</h2>
-          <div className="flex gap-1">
-            {TIME_PERIODS.map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => setTimePeriod(key)}
-                className={cn(
-                  'px-3 py-1 text-xs font-medium rounded-lg transition-colors',
-                  timePeriod === key
-                    ? 'bg-teal-600 text-white'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 bg-zinc-800/50',
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {sortedSetups.map((setupType) => {
-            const stats = setupStats[setupType];
-            const config = setupConfigMap[setupType];
-            const enabled = config?.enabled ?? true;
-            const wr = stats.winRate;
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+        {setupStats.map((stats) => {
+          const hasTrades = stats.total > 0;
+          const cold = hasTrades && stats.winRate < 35 && stats.net < 0;
+          const hot = hasTrades && stats.winRate >= 50 && stats.net > 0;
 
-            // Background tint based on WR
-            const bgTint = stats.totalTrades === 0
-              ? ''
-              : wr > 50
-                ? 'bg-emerald-500/[0.06]'
-                : wr < 30
-                  ? 'bg-red-500/[0.06]'
-                  : '';
-
-            return (
-              <div
-                key={setupType}
-                className={cn(
-                  'border rounded-xl p-4 transition-all',
-                  enabled ? 'border-zinc-700' : 'border-zinc-800 opacity-40',
-                  bgTint,
-                )}
-              >
-                {/* Header: name + toggle */}
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-sm font-semibold text-white truncate">
-                      {setupType.replace(/_/g, ' ')}
-                    </span>
-                    {stats.totalTrades >= 3 && wr >= 60 && (
-                      <Badge variant="success" className="text-[8px] px-1.5 py-0">HOT</Badge>
-                    )}
-                    {stats.totalTrades >= 3 && wr < 30 && (
-                      <Badge variant="danger" className="text-[8px] px-1.5 py-0">COLD</Badge>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => handleSetupToggle(setupType)}
-                    className={cn(
-                      'relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 shrink-0',
-                      enabled ? 'bg-emerald-500' : 'bg-zinc-700',
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        'inline-block h-3 w-3 rounded-full bg-white transition-transform duration-200',
-                        enabled ? 'translate-x-5' : 'translate-x-1',
-                      )}
-                    />
-                  </button>
-                </div>
-
-                {stats.totalTrades === 0 ? (
-                  <p className="text-xs text-zinc-600">No trades</p>
-                ) : (
-                  <>
-                    {/* Stats row */}
-                    <div className="grid grid-cols-3 gap-3 text-xs mb-3">
-                      <div>
-                        <span className="text-zinc-500 block text-[10px]">Trades</span>
-                        <div className="text-zinc-200 font-mono font-medium">{stats.totalTrades}</div>
-                      </div>
-                      <div>
-                        <span className="text-zinc-500 block text-[10px]">Win Rate</span>
-                        <div className={cn(
-                          'font-mono font-medium',
-                          wr >= 50 ? 'text-emerald-400' : 'text-red-400',
-                        )}>
-                          {wr.toFixed(0)}%
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-zinc-500 block text-[10px]">Net P&L</span>
-                        <div className={cn('font-mono font-medium', getPnLColor(stats.totalPnL))}>
-                          {formatPnL(stats.totalPnL)}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Last 5 trades dots */}
-                    {stats.last5.length > 0 && (
-                      <div className="flex items-center gap-1 mb-2">
-                        <span className="text-[10px] text-zinc-500 mr-1">Last {stats.last5.length}:</span>
-                        {stats.last5.map((isWin, i) => (
-                          <span
-                            key={i}
-                            className={cn(
-                              'inline-block h-2.5 w-2.5 rounded-full',
-                              isWin
-                                ? 'bg-emerald-400 shadow-[0_0_3px_rgba(52,211,153,0.4)]'
-                                : 'bg-red-400 shadow-[0_0_3px_rgba(248,113,113,0.4)]',
-                            )}
-                            title={isWin ? 'Win' : 'Loss'}
-                          />
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Avg win / avg loss */}
-                    <div className="flex gap-3 text-[10px] font-mono">
-                      <span className="text-emerald-400">
-                        Avg W: {formatCurrency(stats.avgWin)}
-                      </span>
-                      <span className="text-red-400">
-                        Avg L: {formatCurrency(stats.avgLoss)}
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ------------------------------------------------------------------- */}
-      {/* Tabbed P&L chart per strategy                                        */}
-      {/* ------------------------------------------------------------------- */}
-      <div>
-        <div className="flex gap-1 mb-4 overflow-x-auto">
-          {STRATEGIES.map((strategy) => (
-            <button
-              key={strategy}
-              onClick={() => setActiveTab(strategy)}
+          return (
+            <section
+              key={stats.setup}
               className={cn(
-                'px-4 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap',
-                activeTab === strategy
-                  ? 'bg-zinc-700 text-white'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800',
+                'rounded-lg border bg-[#0d1117] p-4',
+                cold ? 'border-red-500/30' : hot ? 'border-emerald-500/30' : 'border-zinc-800',
               )}
             >
-              {getStrategyLabel(strategy)}
-            </button>
-          ))}
-        </div>
-        <PnLChart trades={filteredTrades} strategy={activeTab} />
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <SetupChip setup={stats.setup} />
+                    <span className="text-sm font-semibold text-white">{formatSetupName(stats.setup)}</span>
+                    {hot && <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-emerald-300">Working</span>}
+                    {cold && <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-red-300">Bleeding</span>}
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    {hasTrades
+                      ? `${stats.wins} wins / ${stats.losses} losses in selected window`
+                      : 'No closed trades in selected window'}
+                  </p>
+                </div>
+                <button
+                  disabled={savingSetup === stats.setup}
+                  onClick={() => handleSetupToggle(stats.setup, !stats.enabled)}
+                  className={cn(
+                    'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                    stats.enabled ? 'bg-emerald-500' : 'bg-zinc-700',
+                    savingSetup === stats.setup && 'opacity-60',
+                  )}
+                  title={stats.enabled ? 'Disable setup' : 'Enable setup'}
+                >
+                  <span
+                    className={cn(
+                      'inline-block h-4 w-4 rounded-full bg-white transition-transform',
+                      stats.enabled ? 'translate-x-6' : 'translate-x-1',
+                    )}
+                  />
+                </button>
+              </div>
+
+              <div className="mt-4 grid grid-cols-3 gap-3 md:grid-cols-6">
+                <Metric label="Trades" value={stats.total.toString()} />
+                <Metric label="Win" value={`${stats.winRate.toFixed(0)}%`} color={stats.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'} />
+                <Metric label="Net" value={formatPnL(stats.net)} color={getPnLColor(stats.net)} />
+                <Metric label="Avg Peak" value={pct(stats.avgPeak)} color="text-cyan-300" />
+                <Metric label="Capture" value={`${stats.avgCapture.toFixed(0)}%`} color={stats.avgCapture >= 50 ? 'text-emerald-300' : 'text-amber-300'} />
+                <Metric label="Hold" value={formatDuration(stats.avgHoldSec)} />
+              </div>
+
+              {stats.lastTrade && (
+                <div className="mt-4 rounded-md bg-zinc-950/70 px-3 py-2 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-zinc-200">Last trade</span>
+                    <span className="font-mono text-zinc-500">{formatDate(stats.lastTrade.timestamp)}</span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
+                    <Mini label="Pair" value={shortPair(stats.lastTrade.pair)} />
+                    <Mini label="Net" value={formatPnL(stats.lastTrade.pnl)} color={getPnLColor(stats.lastTrade.pnl)} />
+                    <Mini label="Peak" value={pct(stats.lastTrade.peak_pnl)} color="text-cyan-300" />
+                    <Mini label="Taken" value={pct(stats.lastTrade.pnl_pct)} color={getPnLColor(stats.lastTrade.pnl_pct ?? 0)} />
+                    <Mini label="Exit" value={stats.lastTrade.exit_reason || 'Unknown'} />
+                  </div>
+                </div>
+              )}
+            </section>
+          );
+        })}
       </div>
 
-      {/* ------------------------------------------------------------------- */}
-      {/* Signal Monitor                                                       */}
-      {/* ------------------------------------------------------------------- */}
-      <div>
-        <h2 className="text-lg font-semibold text-white mb-4">Signal Monitor</h2>
-        {signalStates.length === 0 ? (
-          <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-8 text-center text-sm text-zinc-500">
-            No signal data yet — engine will publish signals when scanning
-          </div>
-        ) : activePairs.length === 0 ? (
-          <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-8 text-center text-sm text-zinc-500">
-            No active pairs with signal data
-          </div>
+      <section className="rounded-lg border border-zinc-800 bg-[#0d1117]">
+        <div className="border-b border-zinc-800 px-4 py-3">
+          <h2 className="text-sm font-semibold text-white">Recent Setup Trades</h2>
+        </div>
+        {recentClosedTrades.length === 0 ? (
+          <div className="p-6 text-sm text-zinc-500">No closed trades in this window.</div>
         ) : (
-          <div className="bg-[#0d1117] border border-zinc-800 rounded-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-zinc-900/50">
-                    <th className="px-3 py-2.5 text-left text-[10px] font-medium uppercase tracking-wider text-zinc-500 sticky left-0 bg-zinc-900/50 z-10">
-                      Signal
-                    </th>
-                    {activePairs.map((pair) => (
-                      <th
-                        key={pair}
-                        className="px-3 py-2.5 text-center text-[10px] font-medium uppercase tracking-wider text-zinc-500"
-                      >
-                        {pair}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {/* Core signals */}
-                  {visibleCoreSignals.length > 0 && (
-                    <>
-                      <tr>
-                        <td
-                          colSpan={activePairs.length + 1}
-                          className="px-3 py-1.5 text-[9px] font-semibold text-zinc-500 uppercase tracking-widest bg-zinc-900/30"
-                        >
-                          Core 4
-                        </td>
-                      </tr>
-                      {visibleCoreSignals.map((signalId) => (
-                        <SignalRow key={signalId} signalId={signalId} pairs={activePairs} signalMap={signalMap} />
-                      ))}
-                    </>
-                  )}
-                  {/* Bonus signals */}
-                  {visibleBonusSignals.length > 0 && (
-                    <>
-                      <tr>
-                        <td
-                          colSpan={activePairs.length + 1}
-                          className="px-3 py-1.5 text-[9px] font-semibold text-zinc-500 uppercase tracking-widest bg-zinc-900/30"
-                        >
-                          Bonus
-                        </td>
-                      </tr>
-                      {visibleBonusSignals.map((signalId) => (
-                        <SignalRow key={signalId} signalId={signalId} pairs={activePairs} signalMap={signalMap} />
-                      ))}
-                    </>
-                  )}
-                </tbody>
-              </table>
-            </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[920px] text-left text-sm">
+              <thead className="bg-zinc-900/70 text-[10px] uppercase tracking-wider text-zinc-500">
+                <tr>
+                  <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3">Pair</th>
+                  <th className="px-4 py-3">Setup</th>
+                  <th className="px-4 py-3 text-right">Net</th>
+                  <th className="px-4 py-3 text-right">P&L %</th>
+                  <th className="px-4 py-3 text-right">Peak</th>
+                  <th className="px-4 py-3 text-right">Capture</th>
+                  <th className="px-4 py-3 text-right">Hold</th>
+                  <th className="px-4 py-3">Exit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentClosedTrades.slice(0, 80).map((trade) => {
+                  const capture = capturePct(trade);
+                  return (
+                    <tr key={trade.id} className="border-t border-zinc-900 text-zinc-300">
+                      <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-zinc-500">{formatDate(trade.timestamp)}</td>
+                      <td className="whitespace-nowrap px-4 py-3 font-semibold text-zinc-100">{shortPair(trade.pair)}</td>
+                      <td className="whitespace-nowrap px-4 py-3"><SetupChip setup={canonicalSetup(trade.setup_type)} /></td>
+                      <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', getPnLColor(trade.pnl))}>{formatPnL(trade.pnl)}</td>
+                      <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', getPnLColor(trade.pnl_pct ?? 0))}>{pct(trade.pnl_pct)}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-cyan-300">{pct(trade.peak_pnl)}</td>
+                      <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', capture != null && capture >= 50 ? 'text-emerald-300' : 'text-amber-300')}>
+                        {capture == null ? '-' : `${capture.toFixed(0)}%`}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-400">{formatDuration(holdSeconds(trade))}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-xs text-zinc-400">{trade.exit_reason || 'Unknown'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Signal Row Component
-// ---------------------------------------------------------------------------
-
-function SignalRow({
-  signalId,
-  pairs,
-  signalMap,
+function Metric({
+  label,
+  value,
+  color = 'text-zinc-100',
 }: {
-  signalId: string;
-  pairs: readonly string[] | string[];
-  signalMap: Record<string, Record<string, SignalState>>;
+  label: string;
+  value: string;
+  color?: string;
 }) {
   return (
-    <tr className="border-b border-zinc-800/30">
-      <td className="px-3 py-2 text-xs font-mono text-zinc-300 sticky left-0 bg-[#0d1117] z-10">
-        {signalId}
-      </td>
-      {pairs.map((pair) => {
-        const signal = signalMap[pair]?.[signalId];
-        if (!signal) {
-          return (
-            <td key={pair} className="px-3 py-2 text-center text-zinc-700">
-              —
-            </td>
-          );
-        }
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className={cn('mt-1 font-mono text-sm font-semibold', color)}>{value}</div>
+    </div>
+  );
+}
 
-        const dirArrow =
-          signal.direction === 'bull' ? '\u2191' :
-          signal.direction === 'bear' ? '\u2193' : '';
-        const firing = signal.firing;
-
-        return (
-          <td key={pair} className="px-3 py-2 text-center">
-            <div className="flex items-center justify-center gap-1.5">
-              {/* Firing dot */}
-              <span
-                className={cn(
-                  'inline-block h-2 w-2 rounded-full',
-                  firing ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]' : 'bg-zinc-700',
-                )}
-              />
-              {/* Value */}
-              <span className={cn(
-                'font-mono text-[10px]',
-                firing ? 'text-emerald-300' : 'text-zinc-600',
-              )}>
-                {signal.value != null ? signal.value.toFixed(2) : '—'}
-              </span>
-              {/* Direction arrow */}
-              {dirArrow && (
-                <span className={cn(
-                  'text-[10px]',
-                  signal.direction === 'bull' ? 'text-emerald-400' :
-                  signal.direction === 'bear' ? 'text-red-400' : 'text-zinc-500',
-                )}>
-                  {dirArrow}
-                </span>
-              )}
-            </div>
-          </td>
-        );
-      })}
-    </tr>
+function Mini({
+  label,
+  value,
+  color = 'text-zinc-300',
+}: {
+  label: string;
+  value: string;
+  color?: string;
+}) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-zinc-600">{label}</div>
+      <div className={cn('mt-0.5 truncate font-mono text-xs', color)}>{value}</div>
+    </div>
   );
 }

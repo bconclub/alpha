@@ -1,41 +1,67 @@
-"""Independent paper futures strategies.
+"""Independent paper futures strategy lab.
 
 These strategies never place exchange orders. They write to
-paper_futures_trades so we can compare futures-style signals against the live
-options system before risking real futures capital.
+paper_futures_trades so we can compare futures-style entries, holding rules,
+and exits against the live options system before risking real futures capital.
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from alpha.db import Database
 from alpha.utils import setup_logger
 
 
-class DonchianPaperFutures:
-    """Paper-only Donchian channel breakout strategy for Delta perpetuals."""
+class PaperFuturesStrategy(Protocol):
+    pair: str
+    setup_type: str
+    is_active: bool
 
-    SETUP_TYPE = "DONCHIAN_BREAKOUT"
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+
+def _ema(values: list[float], period: int) -> float:
+    if not values:
+        return 0.0
+    alpha = 2.0 / (period + 1)
+    ema = values[0]
+    for value in values[1:]:
+        ema = value * alpha + ema * (1.0 - alpha)
+    return ema
+
+
+def _pct_move(start: float, end: float) -> float:
+    if start <= 0:
+        return 0.0
+    return (end - start) / start * 100.0
+
+
+class BasePaperFutures:
+    """Base runner and paper ledger helpers for one paper futures strategy."""
+
+    SETUP_TYPE = "PAPER_BASE"
+    TIMEFRAME = "5m"
+    CHECK_INTERVAL_SEC = 30
     PAPER_ACCOUNT_USD = 100.0
     ALLOC_PCT = 0.25
     LEVERAGE = 5.0
     FEE_RATE = 0.0005
-    CHANNEL_LEN = 20
-    TIMEFRAME = "5m"
-    CHECK_INTERVAL_SEC = 30
     MAX_HOLD_SEC = 45 * 60
-    STOP_PCT = -4.0
+    STOP_PCT = -6.0
     TRAIL_ARM_PCT = 6.0
     TRAIL_RETRACE_PCT = 0.45
+    COOLDOWN_SEC = 90
 
-    def __init__(self, pair: str, exchange: Any, db: Database) -> None:
+    def __init__(self, pair: str, exchange: Any, db: Database, *, logger_name: str) -> None:
         self.pair = pair
         self.exchange = exchange
         self.db = db
-        self.logger = setup_logger(f"paper.donchian.{pair.replace('/', '')}")
+        self.logger = setup_logger(logger_name)
+        self.setup_type = self.SETUP_TYPE
         self.is_active = False
         self._task: asyncio.Task[None] | None = None
         self._trade_id: int | None = None
@@ -43,17 +69,17 @@ class DonchianPaperFutures:
         self._entry_price = 0.0
         self._peak_pnl_pct = 0.0
         self._opened_mono = 0.0
-        self._last_signal_candle_ts: int | None = None
+        self._last_signal_key: str | None = None
+        self._last_close_mono = 0.0
 
     async def start(self) -> None:
         if self.is_active:
             return
         self.is_active = True
         self.logger.info(
-            "Starting paper futures strategy: %s %s channel=%d %s",
+            "Starting paper futures strategy: %s %s tf=%s",
             self.SETUP_TYPE,
             self.pair,
-            self.CHANNEL_LEN,
             self.TIMEFRAME,
         )
         self._task = asyncio.create_task(self._run())
@@ -78,49 +104,71 @@ class DonchianPaperFutures:
             await asyncio.sleep(self.CHECK_INTERVAL_SEC)
 
     async def check(self) -> None:
-        rows = await self.exchange.fetch_ohlcv(
-            self.pair,
-            self.TIMEFRAME,
-            limit=self.CHANNEL_LEN + 3,
-        )
-        if len(rows) < self.CHANNEL_LEN + 2:
-            return
-
-        closed = rows[:-1]  # ignore currently forming candle
-        signal_candle = closed[-1]
-        history = closed[-(self.CHANNEL_LEN + 1):-1]
-        upper = max(float(r[2]) for r in history)
-        lower = min(float(r[3]) for r in history)
-        mid = (upper + lower) / 2.0
-        close = float(signal_candle[4])
-        candle_ts = int(signal_candle[0])
-
-        ticker = await self.exchange.fetch_ticker(self.pair)
-        mark = float(ticker.get("last") or close)
+        rows = await self._fetch_rows()
+        mark = await self._fetch_mark(rows)
         if mark <= 0:
             return
 
         if self._trade_id:
             await self._mark_open(mark)
-            await self._maybe_exit(mark=mark, close=close, mid=mid, upper=upper, lower=lower)
+            reason = self._exit_reason(mark, rows)
+            if reason:
+                await self._close(mark, reason, self._metadata(rows))
             return
 
-        if self._last_signal_candle_ts == candle_ts:
+        now_mono = asyncio.get_running_loop().time()
+        if now_mono - self._last_close_mono < self.COOLDOWN_SEC:
             return
 
-        if close > upper:
-            await self._open("long", mark, candle_ts, upper, lower, mid)
-        elif close < lower:
-            await self._open("short", mark, candle_ts, upper, lower, mid)
+        decision = self._entry_decision(rows, mark)
+        if decision is None:
+            return
+        direction, signal_key, metadata = decision
+        if self._last_signal_key == signal_key:
+            return
+        await self._open(direction, mark, signal_key, metadata)
+
+    async def _fetch_rows(self) -> list[list[float]]:
+        rows = await self.exchange.fetch_ohlcv(self.pair, self.TIMEFRAME, limit=80)
+        return [[float(x) for x in row] for row in rows]
+
+    async def _fetch_mark(self, rows: list[list[float]]) -> float:
+        ticker = await self.exchange.fetch_ticker(self.pair)
+        if ticker.get("last"):
+            return float(ticker["last"])
+        if rows:
+            return float(rows[-1][4])
+        return 0.0
+
+    def _entry_decision(
+        self,
+        rows: list[list[float]],
+        mark: float,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        raise NotImplementedError
+
+    def _exit_reason(self, mark: float, rows: list[list[float]]) -> str:
+        pnl_pct = self._pnl_pct(mark)
+        age = asyncio.get_running_loop().time() - self._opened_mono
+        if pnl_pct <= self.STOP_PCT:
+            return "paper_stop"
+        if self._peak_pnl_pct >= self.TRAIL_ARM_PCT:
+            floor = self._peak_pnl_pct * (1.0 - self.TRAIL_RETRACE_PCT)
+            if pnl_pct <= floor:
+                return "paper_trail"
+        if age >= self.MAX_HOLD_SEC:
+            return "paper_max_hold"
+        return ""
+
+    def _metadata(self, rows: list[list[float]]) -> dict[str, Any]:
+        return {"source": "independent_paper_strategy", "strategy": self.SETUP_TYPE}
 
     async def _open(
         self,
         direction: str,
         entry_price: float,
-        candle_ts: int,
-        upper: float,
-        lower: float,
-        mid: float,
+        signal_key: str,
+        metadata: dict[str, Any],
     ) -> None:
         if not self.db.is_connected:
             return
@@ -144,11 +192,8 @@ class DonchianPaperFutures:
             "metadata": {
                 "source": "independent_paper_strategy",
                 "strategy": self.SETUP_TYPE,
-                "timeframe": self.TIMEFRAME,
-                "channel_len": self.CHANNEL_LEN,
-                "upper": upper,
-                "lower": lower,
-                "mid": mid,
+                "signal_key": signal_key,
+                **metadata,
             },
         }
         trade_id = await self.db.log_paper_futures_trade(row)
@@ -159,23 +204,21 @@ class DonchianPaperFutures:
         self._entry_price = entry_price
         self._peak_pnl_pct = 0.0
         self._opened_mono = asyncio.get_running_loop().time()
-        self._last_signal_candle_ts = candle_ts
+        self._last_signal_key = signal_key
         self.logger.info(
-            "DONCHIAN_PAPER_OPEN id=%s %s %s entry=%.2f upper=%.2f lower=%.2f",
+            "%s_OPEN id=%s %s %s entry=%.2f",
+            self.SETUP_TYPE,
             trade_id,
             self.pair,
             direction.upper(),
             entry_price,
-            upper,
-            lower,
         )
 
     def _pnl_pct(self, price: float) -> float:
         if self._entry_price <= 0:
             return 0.0
         mult = 1.0 if self._direction == "long" else -1.0
-        spot_pct = (price - self._entry_price) / self._entry_price * 100.0 * mult
-        return spot_pct * self.LEVERAGE
+        return _pct_move(self._entry_price, price) * mult * self.LEVERAGE
 
     async def _mark_open(self, price: float) -> None:
         if not self._trade_id:
@@ -194,41 +237,7 @@ class DonchianPaperFutures:
             },
         )
 
-    async def _maybe_exit(
-        self,
-        *,
-        mark: float,
-        close: float,
-        mid: float,
-        upper: float,
-        lower: float,
-    ) -> None:
-        pnl_pct = self._pnl_pct(mark)
-        age = asyncio.get_running_loop().time() - self._opened_mono
-        reason = ""
-        if pnl_pct <= self.STOP_PCT:
-            reason = "paper_stop"
-        elif self._peak_pnl_pct >= self.TRAIL_ARM_PCT:
-            floor = self._peak_pnl_pct * (1.0 - self.TRAIL_RETRACE_PCT)
-            if pnl_pct <= floor:
-                reason = "paper_trail"
-        if not reason and self._direction == "long" and close < mid:
-            reason = "donchian_mid_revert"
-        if not reason and self._direction == "short" and close > mid:
-            reason = "donchian_mid_revert"
-        if not reason and age >= self.MAX_HOLD_SEC:
-            reason = "paper_max_hold"
-        if reason:
-            await self._close(mark, reason, upper, lower, mid)
-
-    async def _close(
-        self,
-        exit_price: float,
-        reason: str,
-        upper: float,
-        lower: float,
-        mid: float,
-    ) -> None:
+    async def _close(self, exit_price: float, reason: str, metadata: dict[str, Any]) -> None:
         if not self._trade_id:
             return
         pnl_pct = self._pnl_pct(exit_price)
@@ -255,16 +264,13 @@ class DonchianPaperFutures:
                 "metadata": {
                     "source": "independent_paper_strategy",
                     "strategy": self.SETUP_TYPE,
-                    "timeframe": self.TIMEFRAME,
-                    "channel_len": self.CHANNEL_LEN,
-                    "upper": upper,
-                    "lower": lower,
-                    "mid": mid,
+                    **metadata,
                 },
             },
         )
         self.logger.info(
-            "DONCHIAN_PAPER_CLOSE id=%s %s exit=%.2f reason=%s net=$%+.4f pnl=%+.2f%% peak=%+.2f%%",
+            "%s_CLOSE id=%s %s exit=%.2f reason=%s net=$%+.4f pnl=%+.2f%% peak=%+.2f%%",
+            self.SETUP_TYPE,
             trade_id,
             self.pair,
             exit_price,
@@ -278,3 +284,276 @@ class DonchianPaperFutures:
         self._entry_price = 0.0
         self._peak_pnl_pct = 0.0
         self._opened_mono = 0.0
+        self._last_close_mono = asyncio.get_running_loop().time()
+
+
+class DonchianPaperFutures(BasePaperFutures):
+    """Paper-only Donchian channel breakout strategy for Delta perpetuals."""
+
+    SETUP_TYPE = "DONCHIAN_BREAKOUT"
+    CHANNEL_LEN = 20
+    TIMEFRAME = "5m"
+    MAX_HOLD_SEC = 45 * 60
+    STOP_PCT = -6.0
+    TRAIL_ARM_PCT = 7.0
+
+    def __init__(self, pair: str, exchange: Any, db: Database) -> None:
+        super().__init__(
+            pair,
+            exchange,
+            db,
+            logger_name=f"paper.donchian.{pair.replace('/', '')}",
+        )
+
+    def _entry_decision(
+        self,
+        rows: list[list[float]],
+        mark: float,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        if len(rows) < self.CHANNEL_LEN + 2:
+            return None
+        closed = rows[:-1]
+        signal = closed[-1]
+        history = closed[-(self.CHANNEL_LEN + 1):-1]
+        upper = max(float(r[2]) for r in history)
+        lower = min(float(r[3]) for r in history)
+        close = float(signal[4])
+        candle_ts = int(signal[0])
+        mid = (upper + lower) / 2.0
+        metadata = {
+            "timeframe": self.TIMEFRAME,
+            "channel_len": self.CHANNEL_LEN,
+            "upper": upper,
+            "lower": lower,
+            "mid": mid,
+        }
+        if close > upper:
+            return "long", f"{candle_ts}:long", metadata
+        if close < lower:
+            return "short", f"{candle_ts}:short", metadata
+        return None
+
+    def _exit_reason(self, mark: float, rows: list[list[float]]) -> str:
+        reason = super()._exit_reason(mark, rows)
+        if reason:
+            return reason
+        if len(rows) < self.CHANNEL_LEN + 2:
+            return ""
+        closed = rows[:-1]
+        history = closed[-(self.CHANNEL_LEN + 1):-1]
+        mid = (max(float(r[2]) for r in history) + min(float(r[3]) for r in history)) / 2.0
+        close = float(closed[-1][4])
+        if self._direction == "long" and close < mid:
+            return "donchian_mid_revert"
+        if self._direction == "short" and close > mid:
+            return "donchian_mid_revert"
+        return ""
+
+
+class EmaPullbackPaperFutures(BasePaperFutures):
+    """Paper-only trend pullback strategy using EMA 8/21 structure."""
+
+    SETUP_TYPE = "EMA_PULLBACK"
+    TIMEFRAME = "5m"
+    MAX_HOLD_SEC = 50 * 60
+    STOP_PCT = -5.0
+    TRAIL_ARM_PCT = 6.0
+
+    def __init__(self, pair: str, exchange: Any, db: Database) -> None:
+        super().__init__(
+            pair,
+            exchange,
+            db,
+            logger_name=f"paper.ema_pullback.{pair.replace('/', '')}",
+        )
+
+    def _entry_decision(
+        self,
+        rows: list[list[float]],
+        mark: float,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        if len(rows) < 35:
+            return None
+        closed = rows[:-1]
+        closes = [float(r[4]) for r in closed]
+        lows = [float(r[3]) for r in closed]
+        highs = [float(r[2]) for r in closed]
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        close = closes[-1]
+        prev_close = closes[-2]
+        candle_ts = int(closed[-1][0])
+        trend_gap = _pct_move(ema21, ema8)
+        metadata = {
+            "timeframe": self.TIMEFRAME,
+            "ema8": ema8,
+            "ema21": ema21,
+            "trend_gap_pct": trend_gap,
+        }
+        if ema8 > ema21 and close > ema21 and lows[-1] <= ema8 and close > prev_close:
+            return "long", f"{candle_ts}:long", metadata
+        if ema8 < ema21 and close < ema21 and highs[-1] >= ema8 and close < prev_close:
+            return "short", f"{candle_ts}:short", metadata
+        return None
+
+    def _exit_reason(self, mark: float, rows: list[list[float]]) -> str:
+        reason = super()._exit_reason(mark, rows)
+        if reason:
+            return reason
+        if len(rows) < 35:
+            return ""
+        closed = rows[:-1]
+        closes = [float(r[4]) for r in closed]
+        ema21 = _ema(closes[-55:], 21)
+        close = closes[-1]
+        if self._direction == "long" and close < ema21:
+            return "ema21_lost"
+        if self._direction == "short" and close > ema21:
+            return "ema21_reclaimed"
+        return ""
+
+
+class MomentumImpulsePaperFutures(BasePaperFutures):
+    """Paper-only continuation entry when a 1m impulse has volume support."""
+
+    SETUP_TYPE = "MOMENTUM_IMPULSE"
+    TIMEFRAME = "1m"
+    MAX_HOLD_SEC = 25 * 60
+    STOP_PCT = -5.0
+    TRAIL_ARM_PCT = 5.0
+    TRAIL_RETRACE_PCT = 0.50
+    MOVE_3M_PCT = 0.16
+    VOL_RATIO_MIN = 1.12
+
+    def __init__(self, pair: str, exchange: Any, db: Database) -> None:
+        super().__init__(
+            pair,
+            exchange,
+            db,
+            logger_name=f"paper.momentum_impulse.{pair.replace('/', '')}",
+        )
+
+    def _entry_decision(
+        self,
+        rows: list[list[float]],
+        mark: float,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        if len(rows) < 30:
+            return None
+        closed = rows[:-1]
+        closes = [float(r[4]) for r in closed]
+        vols = [float(r[5]) for r in closed]
+        ema9 = _ema(closes[-20:], 9)
+        move_3m = _pct_move(closes[-4], closes[-1])
+        avg_vol = sum(vols[-21:-1]) / max(1, len(vols[-21:-1]))
+        vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 0.0
+        candle_ts = int(closed[-1][0])
+        metadata = {
+            "timeframe": self.TIMEFRAME,
+            "move_3m_pct": move_3m,
+            "vol_ratio": vol_ratio,
+            "ema9": ema9,
+        }
+        if move_3m >= self.MOVE_3M_PCT and vol_ratio >= self.VOL_RATIO_MIN and closes[-1] > ema9:
+            return "long", f"{candle_ts}:long", metadata
+        if move_3m <= -self.MOVE_3M_PCT and vol_ratio >= self.VOL_RATIO_MIN and closes[-1] < ema9:
+            return "short", f"{candle_ts}:short", metadata
+        return None
+
+
+class SignalMixPaperFutures(BasePaperFutures):
+    """Paper-only entries from the live scalp signal mix, including blocked ideas."""
+
+    SETUP_TYPE = "SIGNAL_MIX"
+    TIMEFRAME = "signals"
+    CHECK_INTERVAL_SEC = 15
+    MAX_HOLD_SEC = 35 * 60
+    STOP_PCT = -6.0
+    TRAIL_ARM_PCT = 6.0
+
+    def __init__(self, pair: str, exchange: Any, db: Database, scalp_strategy: Any) -> None:
+        super().__init__(
+            pair,
+            exchange,
+            db,
+            logger_name=f"paper.signal_mix.{pair.replace('/', '')}",
+        )
+        self.scalp_strategy = scalp_strategy
+
+    async def _fetch_rows(self) -> list[list[float]]:
+        return []
+
+    def _entry_decision(
+        self,
+        rows: list[list[float]],
+        mark: float,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        state = getattr(self.scalp_strategy, "last_signal_state", None) or {}
+        if not state:
+            return None
+        state_ts = float(state.get("timestamp") or 0.0)
+        if state_ts and asyncio.get_running_loop().time() - state_ts > 90:
+            return None
+
+        bull_count = int(state.get("bull_count") or 0)
+        bear_count = int(state.get("bear_count") or 0)
+        strength = int(state.get("strength") or max(bull_count, bear_count))
+        side = state.get("side")
+        if side not in ("long", "short"):
+            if bull_count >= 3 and bull_count > bear_count:
+                side = "long"
+                strength = max(strength, bull_count)
+            elif bear_count >= 3 and bear_count > bull_count:
+                side = "short"
+                strength = max(strength, bear_count)
+            else:
+                return None
+
+        momentum_60s = float(state.get("momentum_60s") or 0.0)
+        aligned = (side == "long" and momentum_60s >= 0.05) or (side == "short" and momentum_60s <= -0.05)
+        if strength < 3 or not aligned:
+            return None
+
+        signal_bucket = int(state_ts // 60) if state_ts else int(asyncio.get_running_loop().time() // 60)
+        direction = "long" if side == "long" else "short"
+        metadata = {
+            "timeframe": "signal_state",
+            "strength": strength,
+            "bull_count": bull_count,
+            "bear_count": bear_count,
+            "momentum_60s": momentum_60s,
+            "rsi": state.get("rsi"),
+            "trend_15m": state.get("trend_15m"),
+            "reason": state.get("reason"),
+            "skip_reason": state.get("skip_reason"),
+        }
+        return direction, f"{signal_bucket}:{direction}:{strength}", metadata
+
+    def _exit_reason(self, mark: float, rows: list[list[float]]) -> str:
+        reason = super()._exit_reason(mark, rows)
+        if reason:
+            return reason
+        state = getattr(self.scalp_strategy, "last_signal_state", None) or {}
+        momentum_60s = float(state.get("momentum_60s") or 0.0)
+        if self._direction == "long" and momentum_60s < -0.08:
+            return "signal_momentum_flip"
+        if self._direction == "short" and momentum_60s > 0.08:
+            return "signal_momentum_flip"
+        return ""
+
+
+def build_paper_futures_strategies(
+    pair: str,
+    exchange: Any,
+    db: Database,
+    scalp_strategy: Any | None = None,
+) -> list[PaperFuturesStrategy]:
+    """Return all paper futures strategy lanes for one pair."""
+    strategies: list[PaperFuturesStrategy] = [
+        DonchianPaperFutures(pair, exchange, db),
+        EmaPullbackPaperFutures(pair, exchange, db),
+        MomentumImpulsePaperFutures(pair, exchange, db),
+    ]
+    if scalp_strategy is not None:
+        strategies.append(SignalMixPaperFutures(pair, exchange, db, scalp_strategy))
+    return strategies
