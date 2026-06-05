@@ -418,10 +418,11 @@ export default function PaperFuturesPage() {
           <div className="p-5 text-sm text-zinc-400">No paper futures rows in this window.</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1520px] text-left text-sm">
+            <table className="w-full min-w-[1580px] text-left text-sm">
               <thead className="border-b border-zinc-800 bg-[#15161a] text-[10px] uppercase tracking-wider text-zinc-500">
                 <tr>
-                  <th className="sticky left-0 z-20 w-[420px] bg-[#15161a] px-4 py-3">Trade</th>
+                  <th className="sticky left-0 z-20 w-[330px] bg-[#15161a] px-4 py-3">Trade</th>
+                  <th className="px-3 py-3">Opened</th>
                   <th className="px-3 py-3 text-right">Conf</th>
                   <th className="px-3 py-3 text-right">Lev</th>
                   <th className="px-3 py-3 text-right">Entry</th>
@@ -452,9 +453,9 @@ export default function PaperFuturesPage() {
                       }`}
                     >
                       <td className={`sticky left-0 z-10 whitespace-nowrap px-4 py-3 ${isLive ? 'bg-[#071611]' : 'bg-[#08090c]'}`}>
-                        <div className="flex items-center gap-2">
+                        <div className="grid grid-cols-[58px_58px_54px_110px] items-center gap-2">
                           {isLive ? (
-                            <span className="inline-flex items-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/15 px-2 py-0.5 text-[10px] font-bold text-emerald-200">
+                            <span className="inline-flex items-center justify-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/15 px-2 py-0.5 text-[10px] font-bold text-emerald-200">
                               <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
                               LIVE
                             </span>
@@ -465,12 +466,12 @@ export default function PaperFuturesPage() {
                           <span className={row.direction === 'long' ? 'font-bold text-emerald-300' : 'font-bold text-red-300'}>
                             {row.direction.toUpperCase()}
                           </span>
-                          <span className="rounded border border-sky-400/30 bg-sky-500/20 px-2 py-0.5 text-[10px] font-semibold text-sky-100">
+                          <span className="truncate rounded border border-sky-400/30 bg-sky-500/20 px-2 py-0.5 text-center text-[10px] font-semibold text-sky-100">
                             {setupLabel(row.setup_type)}
                           </span>
-                          <span className="font-mono text-[11px] text-zinc-500">{new Date(row.opened_at).toLocaleString()}</span>
                         </div>
                       </td>
+                      <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-zinc-500">{new Date(row.opened_at).toLocaleString()}</td>
                       <td className="px-3 py-3 text-right font-mono text-cyan-200">{confidence === null ? '-' : confidence.toFixed(0)}</td>
                       <td className="px-3 py-3 text-right font-mono text-violet-200">{Number(row.leverage).toFixed(0)}x</td>
                       <td className="px-3 py-3 text-right font-mono">{Number(row.entry_price).toFixed(2)}</td>
