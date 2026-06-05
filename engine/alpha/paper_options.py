@@ -47,6 +47,119 @@ def _rsi(closes: list[float], period: int = 14) -> float:
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
+
+def _ema_series(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * alpha + out[-1] * (1.0 - alpha))
+    return out
+
+
+def _atr(rows: list[list[float]], period: int = 14) -> float:
+    """Average true range over the last `period` bars."""
+    if len(rows) < period + 1:
+        return 0.0
+    trs: list[float] = []
+    for i in range(1, len(rows)):
+        h, l, pc = rows[i][2], rows[i][3], rows[i - 1][4]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    return sum(trs[-period:]) / period
+
+
+def _vwap(rows: list[list[float]]) -> float:
+    """Rolling volume-weighted average price over the supplied bars."""
+    pv = 0.0
+    vol = 0.0
+    for r in rows:
+        typical = (r[2] + r[3] + r[4]) / 3.0
+        v = r[5]
+        pv += typical * v
+        vol += v
+    return pv / vol if vol > 0 else 0.0
+
+
+def _macd(closes: list[float], fast: int = 12, slow: int = 26, sig: int = 9) -> tuple[float, float]:
+    """Return (macd_line, signal_line) at the latest bar."""
+    if len(closes) < slow + sig:
+        return 0.0, 0.0
+    ef = _ema_series(closes, fast)
+    es = _ema_series(closes, slow)
+    macd_line = [ef[i] - es[i] for i in range(len(closes))]
+    signal = _ema_series(macd_line[-(sig * 3):], sig)
+    return macd_line[-1], signal[-1]
+
+
+def _supertrend_dir(rows: list[list[float]], period: int = 10, mult: float = 3.0) -> int:
+    """Supertrend direction: +1 uptrend, -1 downtrend, 0 unknown."""
+    n = len(rows)
+    if n < period + 2:
+        return 0
+    highs = [r[2] for r in rows]
+    lows = [r[3] for r in rows]
+    closes = [r[4] for r in rows]
+    tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])) for i in range(1, n)]
+    direction = 1
+    fu = 0.0
+    fl = 0.0
+    for i in range(period, n):
+        atr = sum(tr[i - period:i]) / period
+        hl2 = (highs[i] + lows[i]) / 2.0
+        bu = hl2 + mult * atr
+        bl = hl2 - mult * atr
+        if i == period:
+            fu, fl = bu, bl
+            direction = 1 if closes[i] >= hl2 else -1
+            continue
+        fu = bu if (bu < fu or closes[i - 1] > fu) else fu
+        fl = bl if (bl > fl or closes[i - 1] < fl) else fl
+        if direction == 1:
+            direction = -1 if closes[i] < fl else 1
+        else:
+            direction = 1 if closes[i] > fu else -1
+    return direction
+
+
+class PaperMarketData:
+    """Per-underlying shared cache of spot + OHLCV so many lanes don't hammer the API."""
+
+    TTL = 4.0
+
+    def __init__(self, futures_exchange: Any, pair: str) -> None:
+        self.ex = futures_exchange
+        self.pair = pair
+        self._ohlcv: dict[str, tuple[float, list[list[float]]]] = {}
+        self._spot: tuple[float, float] = (0.0, 0.0)
+
+    async def ohlcv(self, tf: str) -> list[list[float]]:
+        now = asyncio.get_running_loop().time()
+        cached = self._ohlcv.get(tf)
+        if cached and now - cached[0] < self.TTL:
+            return cached[1]
+        try:
+            raw = await self.ex.fetch_ohlcv(self.pair, tf, limit=120)
+            rows = [[float(x) for x in r] for r in raw]
+        except Exception:
+            rows = cached[1] if cached else []
+        self._ohlcv[tf] = (now, rows)
+        return rows
+
+    async def spot(self) -> float:
+        now = asyncio.get_running_loop().time()
+        if self._spot[0] and now - self._spot[0] < self.TTL:
+            return self._spot[1]
+        price = self._spot[1]
+        try:
+            t = await self.ex.fetch_ticker(self.pair)
+            price = float(t.get("last") or t.get("bid") or 0) or price
+        except Exception:
+            pass
+        if price > 0:
+            self._spot = (now, price)
+        return self._spot[1]
+
 # How close to expiry we force-close (options settle; this is a contract reality).
 PRE_EXPIRY_CLOSE_SEC = 30 * 60
 # Skip strikes whose nearest expiry is sooner than this when opening.
@@ -191,10 +304,12 @@ class BasePaperOptions:
         chain: PaperOptionChain,
         *,
         logger_name: str,
+        data: "PaperMarketData | None" = None,
         setup_override: str | None = None,
         trail_arm: float | None = None,
         otm_steps: int | None = None,
     ) -> None:
+        self.data = data
         # Per-variant overrides (instance attrs shadow class attrs).
         if setup_override:
             self.SETUP_TYPE = setup_override
@@ -286,13 +401,20 @@ class BasePaperOptions:
 
     # ── data ───────────────────────────────────────────────────────────
     async def _fetch_ohlcv(self) -> list[list[float]]:
+        if self.data is not None:
+            return await self.data.ohlcv(self.TIMEFRAME)
         try:
-            rows = await self.futures_exchange.fetch_ohlcv(self.pair, self.TIMEFRAME, limit=80)
+            rows = await self.futures_exchange.fetch_ohlcv(self.pair, self.TIMEFRAME, limit=120)
             return [[float(x) for x in row] for row in rows]
         except Exception:
             return []
 
     async def _fetch_spot(self, rows: list[list[float]]) -> float:
+        if self.data is not None:
+            spot = await self.data.spot()
+            if spot > 0:
+                return spot
+            return float(rows[-1][4]) if rows else 0.0
         try:
             ticker = await self.futures_exchange.fetch_ticker(self.pair)
             last = ticker.get("last") or ticker.get("bid")
@@ -710,6 +832,140 @@ class MeanReversionOptions(BasePaperOptions):
         return rsi <= 48.0
 
 
+class VwapPullbackOptions(BasePaperOptions):
+    """Institutional VWAP play: in an uptrend buy the dip toward VWAP (call),
+    in a downtrend buy the rally toward VWAP (put). Exit when VWAP is lost."""
+
+    SETUP_TYPE = "OPT_VWAP_PULLBACK"
+    TIMEFRAME = "5m"
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 35:
+            return None
+        closed = rows[:-1]
+        closes = [r[4] for r in closed]
+        vwap = _vwap(closed)
+        if vwap <= 0:
+            return None
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        close, prev = closes[-1], closes[-2]
+        ts = int(closed[-1][0])
+        dist = (close - vwap) / vwap * 100.0
+        conf = _clamp(66 + (0.5 - abs(dist)) * 18, 55, 90)
+        if ema8 > ema21 and -0.15 < dist < 0.5 and close > prev:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "vwap": vwap, "dist_pct": dist, "confidence_score": conf}
+        if ema8 < ema21 and -0.5 < dist < 0.15 and close < prev:
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "vwap": vwap, "dist_pct": dist, "confidence_score": conf}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 35:
+            return False
+        closed = rows[:-1]
+        vwap = _vwap(closed)
+        if vwap <= 0:
+            return False
+        close = closed[-1][4]
+        return close < vwap if self._direction == "long" else close > vwap
+
+
+class SupertrendOptions(BasePaperOptions):
+    """ATR Supertrend: ride the trend direction, exit on the supertrend flip."""
+
+    SETUP_TYPE = "OPT_SUPERTREND"
+    TIMEFRAME = "5m"
+    ST_PERIOD = 10
+    ST_MULT = 3.0
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < self.ST_PERIOD + 5:
+            return None
+        closed = rows[:-1]
+        d = _supertrend_dir(closed, self.ST_PERIOD, self.ST_MULT)
+        ts = int(closed[-1][0])
+        if d == 1:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "supertrend": 1, "confidence_score": 72.0}
+        if d == -1:
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "supertrend": -1, "confidence_score": 72.0}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < self.ST_PERIOD + 5:
+            return False
+        d = _supertrend_dir(rows[:-1], self.ST_PERIOD, self.ST_MULT)
+        return d == -1 if self._direction == "long" else d == 1
+
+
+class OpeningRangeBreakoutOptions(BasePaperOptions):
+    """ORB: break of the UTC-day opening range (first ORB_BARS bars) → ride the break."""
+
+    SETUP_TYPE = "OPT_ORB"
+    TIMEFRAME = "5m"
+    ORB_BARS = 3
+
+    def _orb(self, closed):
+        today = datetime.fromtimestamp(int(closed[-1][0]) / 1000, tz=timezone.utc).date()
+        todays = [r for r in closed if datetime.fromtimestamp(int(r[0]) / 1000, tz=timezone.utc).date() == today]
+        if len(todays) < self.ORB_BARS + 1:
+            return None
+        opening = todays[:self.ORB_BARS]
+        return max(r[2] for r in opening), min(r[3] for r in opening)
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < self.ORB_BARS + 2:
+            return None
+        closed = rows[:-1]
+        orb = self._orb(closed)
+        if not orb:
+            return None
+        orh, orl = orb
+        close = closed[-1][4]
+        day = datetime.fromtimestamp(int(closed[-1][0]) / 1000, tz=timezone.utc).strftime("%y%m%d")
+        if close > orh:
+            return "long", f"{day}:long", {"timeframe": self.TIMEFRAME, "orb_high": orh, "orb_low": orl, "confidence_score": 74.0}
+        if close < orl:
+            return "short", f"{day}:short", {"timeframe": self.TIMEFRAME, "orb_high": orh, "orb_low": orl, "confidence_score": 74.0}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < self.ORB_BARS + 2:
+            return False
+        orb = self._orb(rows[:-1])
+        if not orb:
+            return False
+        orh, orl = orb
+        close = rows[:-1][-1][4]
+        return close < orh if self._direction == "long" else close > orl
+
+
+class MacdCrossOptions(BasePaperOptions):
+    """MACD: long when MACD>signal and >0, short when MACD<signal and <0; exit on cross."""
+
+    SETUP_TYPE = "OPT_MACD"
+    TIMEFRAME = "5m"
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 40:
+            return None
+        closed = rows[:-1]
+        closes = [r[4] for r in closed]
+        macd, sig = _macd(closes)
+        ts = int(closed[-1][0])
+        if macd > sig and macd > 0:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "macd": macd, "signal": sig, "confidence_score": 70.0}
+        if macd < sig and macd < 0:
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "macd": macd, "signal": sig, "confidence_score": 70.0}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 40:
+            return False
+        closes = [r[4] for r in rows[:-1]]
+        macd, sig = _macd(closes)
+        return macd < sig if self._direction == "long" else macd > sig
+
+
 def build_paper_options_strategies(
     pair: str,
     options_exchange: Any,
@@ -718,15 +974,16 @@ def build_paper_options_strategies(
 ) -> list[BasePaperOptions]:
     """Grid of buy-only paper option lanes for one underlying (BTC/ETH).
 
-    Free paper sims — run many strategy x moneyness combinations so the data
-    can tell us which actually carries edge.
+    Free paper sims — run many proven strategy families x moneyness combinations
+    so the data can tell us which actually carries edge in the current regime.
     """
     base = pair.split("/")[0]
     chain = PaperOptionChain(options_exchange, base)
+    data = PaperMarketData(futures_exchange, pair)
 
     def mk(cls, name, **kw):
         return cls(pair, options_exchange, futures_exchange, db, chain,
-                   logger_name=f"paper.opt.{name}.{base}", **kw)
+                   logger_name=f"paper.opt.{name}.{base}", data=data, **kw)
 
     return [
         # trend-following ride-the-wave (the lanes showing edge) — ATM + OTM variants
@@ -735,10 +992,14 @@ def build_paper_options_strategies(
         mk(DonchianBreakoutOptions, "donchian"),
         mk(DonchianBreakoutOptions, "donchian_otm", setup_override="OPT_DONCHIAN_OTM", otm_steps=1),
         mk(EmaPullbackOptions, "emapull"),
-        # patient trend variant: only trail after a bigger run (capture moonshots)
+        # patient trend variant: trail later to capture moonshots
         mk(TrendRideOptions, "trend_runner", setup_override="OPT_TREND_RUNNER", trail_arm=35.0),
-        # fast momentum (kept as the control — confirmed weak)
-        mk(MomentumImpulseOptions, "momentum"),
-        # counter-trend mean reversion (new market combination)
+        # ── canonical institutional / quant strategies (researched) ──
+        mk(VwapPullbackOptions, "vwap"),
+        mk(SupertrendOptions, "supertrend"),
+        mk(OpeningRangeBreakoutOptions, "orb"),
+        mk(MacdCrossOptions, "macd"),
+        # counter-trend / control
         mk(MeanReversionOptions, "meanrevert"),
+        mk(MomentumImpulseOptions, "momentum"),
     ]

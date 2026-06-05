@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-06-06 · Bring in the strategy canon: VWAP, Supertrend, ORB, MACD (researched)
+
+- Researched the most-used institutional/quant intraday strategies and implemented the proven families as new paper option lanes (buy-only, ride-the-wave exits):
+  - **VWAP Pullback** — buy dips toward session VWAP in an uptrend / rallies in a downtrend (the #1 institutional benchmark).
+  - **Supertrend** — ATR trend, ride direction, exit on the flip.
+  - **Opening Range Breakout (ORB)** — break of the UTC-day opening range.
+  - **MACD** — MACD/signal cross with zero-line filter.
+- `paper_options.py`: added indicator helpers (`_atr`, `_vwap`, `_macd`, `_supertrend_dir`, `_ema_series`) and a per-underlying **shared market-data cache** (`PaperMarketData`) so 12 lanes/asset don't hammer the exchange (spot + OHLCV cached ~4s).
+- Options grid is now **12 lanes per asset** (BTC + ETH): Trend Ride (ATM/OTM), Donchian (ATM/OTM), EMA Pullback, Trend Runner, VWAP, Supertrend, ORB, MACD, Mean Revert, Momentum.
+- `dashboard/app/paper/page.tsx`: labels for the new lanes.
+- User-facing: the paper lab now stress-tests the canonical strategy playbook on BTC/ETH options — the routine will rank them every 2h. `(SHA on commit)`
+
 ## 2026-06-06 · Widen the paper options grid + earlier wave trail
 
 - `paper_options.py`: early read showed slow ride-the-wave lanes (5m) winning (50–77% peaks) while fast 1m momentum loses. Acting on it:

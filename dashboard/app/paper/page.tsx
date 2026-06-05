@@ -50,6 +50,7 @@ const SETUP_LABELS: Record<string, string> = {
   SIGNAL_MIX: 'Signal Mix', OPTIONS_TWIN: 'Options Twin',
   OPT_TREND_RIDE: 'Trend Ride', OPT_DONCHIAN: 'Donchian', OPT_MOMENTUM: 'Momentum', OPT_EMA_PULLBACK: 'EMA Pullback',
   OPT_TREND_RIDE_OTM: 'Trend Ride OTM', OPT_DONCHIAN_OTM: 'Donchian OTM', OPT_TREND_RUNNER: 'Trend Runner', OPT_MEAN_REVERT: 'Mean Revert',
+  OPT_VWAP_PULLBACK: 'VWAP Pullback', OPT_SUPERTREND: 'Supertrend', OPT_ORB: 'Opening Range', OPT_MACD: 'MACD',
 };
 
 const num = (v: unknown): number => {
