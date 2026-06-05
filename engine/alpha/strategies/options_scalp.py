@@ -411,6 +411,9 @@ class OptionsScalpStrategy(BaseStrategy):
     TREND_REGIME_45M_PCT = 1.00
     TREND_REGIME_STRONG_15M_PCT = 0.85
     TREND_COUNTER_BLOCK_ENABLED = True
+    ANALYZER_COUNTER_BLOCK_ADX = 25.0
+    ANALYZER_COUNTER_BLOCK_1H_PCT = 0.50
+    ANALYZER_COUNTER_BLOCK_24H_PCT = 1.50
 
     # GPFC #88: directional staircase entry. This catches the market shape
     # where several 5m candles walk one way without a clean pullback trigger.
@@ -1584,6 +1587,59 @@ class OptionsScalpStrategy(BaseStrategy):
             move_45m,
         )
         return False
+
+    def _direction_allowed_by_analyzer(self, direction: str, setup_type: str) -> bool:
+        """Block tiny bounce entries against the broader analyzed market tape."""
+        if not self.TREND_COUNTER_BLOCK_ENABLED or not self._market_analyzer:
+            return True
+        try:
+            analysis = self._market_analyzer.last_analysis_for(self.pair)
+        except Exception:
+            analysis = None
+        if not analysis:
+            return True
+
+        condition = getattr(analysis, "condition", None)
+        condition_value = getattr(condition, "value", condition)
+        analyzer_dir = str(getattr(analysis, "direction", "neutral") or "neutral").lower()
+        if condition != MarketCondition.TRENDING and condition_value != MarketCondition.TRENDING.value:
+            return True
+        if analyzer_dir not in {"bullish", "bearish"}:
+            return True
+
+        desired = "bullish" if direction == "UP" else "bearish"
+        if analyzer_dir == desired:
+            return True
+
+        try:
+            adx = float(getattr(analysis, "adx", 0.0) or 0.0)
+            change_1h = float(getattr(analysis, "price_change_1h", 0.0) or 0.0)
+            change_24h = float(getattr(analysis, "price_change_24h", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return True
+
+        signed_1h = change_1h if analyzer_dir == "bullish" else -change_1h
+        signed_24h = change_24h if analyzer_dir == "bullish" else -change_24h
+        if (
+            adx >= self.ANALYZER_COUNTER_BLOCK_ADX
+            and (
+                signed_1h >= self.ANALYZER_COUNTER_BLOCK_1H_PCT
+                or signed_24h >= self.ANALYZER_COUNTER_BLOCK_24H_PCT
+            )
+        ):
+            self.logger.info(
+                "[%s] %s_ANALYZER_COUNTERTREND_SKIP: dir=%s blocked by %s analyzer "
+                "(ADX=%.1f 1h=%+.2f%% 24h=%+.2f%%)",
+                self.pair,
+                setup_type,
+                direction,
+                analyzer_dir.upper(),
+                adx,
+                change_1h,
+                change_24h,
+            )
+            return False
+        return True
 
     def _build_option_symbol(
         self,
@@ -3333,6 +3389,9 @@ class OptionsScalpStrategy(BaseStrategy):
         if not self._direction_allowed_by_trend(direction, ohlcv, "MOVE_PULLBACK"):
             self._move_pullback_state = None
             return []
+        if not self._direction_allowed_by_analyzer(direction, "MOVE_PULLBACK"):
+            self._move_pullback_state = None
+            return []
 
         retrace_price = float(state.get("retrace_price") or 0)
         if retrace_price > 0:
@@ -4736,6 +4795,7 @@ class OptionsScalpStrategy(BaseStrategy):
             "MOVE_PULLBACK": "move_pullback",
             "TREND_FLOW": "trend_flow",
             "FVG_CHOCH": "fvg_choch",
+            "PREMIUM_WAVE": "premium_wave",
         }.get(setup_type, "mom_burst")
         if self._pending_entry_path_override:
             _entry_path = self._pending_entry_path_override
@@ -4757,6 +4817,10 @@ class OptionsScalpStrategy(BaseStrategy):
         # the time we actually fire. Re-evaluate freshly-built metadata here so
         # no order goes through with conf < CONFIDENCE_MIN_ENTRY.
         _exec_conf = (self._pending_entry_signals or {}).get("confidence")
+        if setup_type == "PREMIUM_WAVE":
+            _exec_conf = max(float(_exec_conf or 0.0), entry_confidence * 100.0)
+            if self._pending_entry_signals is not None:
+                self._pending_entry_signals["confidence"] = round(_exec_conf, 1)
         if _exec_conf is None or _exec_conf < self.CONFIDENCE_MIN_ENTRY:
             self.logger.warning(
                 "[%s] ENTRY_BLOCKED conf=%s below floor %.0f (path=execute_breakout_entry, setup=%s)",
@@ -6190,6 +6254,22 @@ class OptionsScalpStrategy(BaseStrategy):
             breakdown["choch"] = 100.0 if fvg.get("choch_level") is not None else 0.0
             breakdown["fvg_retest"] = 100.0 if fvg.get("fvg_1m_mid") is not None else 0.0
             score = max(score, fvg_score)
+        if entry_path == "premium_wave":
+            wave = self._last_entry_quality or {}
+            premium_5m = max(0.0, float(wave.get("premium_5m_pct") or 0.0))
+            premium_15m = max(0.0, float(wave.get("premium_15m_pct") or 0.0))
+            underlying_5m = max(0.0, float(wave.get("underlying_5m_pct") or 0.0))
+            underlying_15m = max(0.0, float(wave.get("underlying_15m_pct") or 0.0))
+            breakdown["premium_wave"] = max(
+                min(100.0, premium_5m / self.PREMIUM_WAVE_MIN_5M_RISE_PCT * 70.0),
+                min(100.0, premium_15m / self.PREMIUM_WAVE_MIN_15M_RISE_PCT * 70.0),
+            )
+            breakdown["wave_underlying"] = max(
+                min(100.0, underlying_5m / self.PREMIUM_WAVE_MIN_UNDERLYING_5M_PCT * 70.0),
+                min(100.0, underlying_15m / self.PREMIUM_WAVE_MIN_UNDERLYING_15M_PCT * 70.0),
+            )
+            wave_score = max(float(getattr(self, "_breakout_confidence", 0.0) or 0.0) * 100.0, 72.0)
+            score = max(score, round(wave_score, 1))
         score = max(0.0, min(100.0, score))
         # Round each component for clean storage.
         breakdown = {k: round(v, 1) for k, v in breakdown.items()}
@@ -6202,7 +6282,7 @@ class OptionsScalpStrategy(BaseStrategy):
             return "1:3"
         if path == "fvg_choch":
             return "1:3"
-        if path in {"mom_burst", "move_pullback", "trend_flow"}:
+        if path in {"mom_burst", "move_pullback", "trend_flow", "premium_wave"}:
             return "1:2"
         if path == "squeeze_confirmed":
             return "1:1"
