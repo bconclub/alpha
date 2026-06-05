@@ -19,6 +19,7 @@ export interface Trade {
   collateral?: number;      // margin posted (notional/leverage). Options: premium/50
   strategy: Strategy;
   pnl: number;              // NET P&L (after fees)
+  net_pnl?: number;         // Alias used by options rows / table display
   pnl_pct?: number;
   gross_pnl?: number;       // GROSS P&L (before fees)
   entry_fee?: number;       // fee paid on entry
@@ -66,6 +67,35 @@ export interface Trade {
     regime?: string | null;
     [key: string]: unknown;
   } | null;
+}
+
+export interface PaperFuturesTrade {
+  id: string;
+  created_at: string;
+  updated_at?: string;
+  option_trade_id?: number | null;
+  option_symbol?: string | null;
+  pair: string;
+  base_asset?: string | null;
+  setup_type?: string | null;
+  direction: 'long' | 'short';
+  status: 'open' | 'closed' | 'cancelled';
+  opened_at: string;
+  closed_at?: string | null;
+  entry_price: number;
+  current_price?: number | null;
+  exit_price?: number | null;
+  paper_account_usd: number;
+  margin_usd: number;
+  notional_usd: number;
+  leverage: number;
+  pnl_pct: number;
+  peak_pnl_pct: number;
+  gross_pnl_usd?: number;
+  fees_usd?: number;
+  pnl_usd: number;
+  exit_reason?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface StrategyLog {

@@ -173,6 +173,11 @@ class OptionsScalpStrategy(BaseStrategy):
     FAST_ENTRY_FILL_POLL_SEC = 1
     FAST_ENTRY_MAX_SPOT_AGAINST_PCT = 0.05
     FAST_ENTRY_SETUPS = frozenset({"MOM_BURST", "MOVE_PULLBACK", "TREND_FLOW", "FVG_CHOCH"})
+    PAPER_FUTURES_ENABLED = True
+    PAPER_FUTURES_ACCOUNT_USD = 100.0
+    PAPER_FUTURES_ALLOC_PCT = 0.25
+    PAPER_FUTURES_LEVERAGE = 5.0
+    PAPER_FUTURES_FEE_RATE = 0.0005
     SQUEEZE_CHEAP_PERCENTILE = 0.25  # Buy bottom 25% of 30-min premium range
     SQUEEZE_HISTORY_MIN = 30  # Track premium history for 30 min
     # Dynamic confirmation window thresholds (GPFC #21) — UPDATED
@@ -266,8 +271,8 @@ class OptionsScalpStrategy(BaseStrategy):
     # GPFC #95: do not let ordinary bid/ask noise kill a fresh options entry
     # within seconds. Phase A only becomes active after this warmup unless the
     # premium loss is already emergency-sized.
-    PHASE_A_THESIS_WARMUP_SEC = 90.0
-    PHASE_A_EMERGENCY_SL_PCT = -12.0
+    PHASE_A_THESIS_WARMUP_SEC = 180.0
+    PHASE_A_EMERGENCY_SL_PCT = -15.0
 
     # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
     # Catches trades that NEVER moved up AND underlying turned against us.
@@ -276,7 +281,7 @@ class OptionsScalpStrategy(BaseStrategy):
     DEAD_PEAK_MAX_PCT = 3.0         # GPFC #72: 0.5 → 3.0; catches the sub-3% peak trades that bled to -16% SL
     DEAD_PREMIUM_DROP_PCT = -8.0    # premium dropped ≥ 8% from entry
     DEAD_UNDERLYING_AGAINST_PCT = 0.05  # underlying moved > 0.05% against us in 60s
-    DEAD_MIN_HOLD_SEC = 90.0
+    DEAD_MIN_HOLD_SEC = 180.0
 
     # ── GPFC #78 / #79: phase-based exits (regime-switching by peak P&L) ─
     # GPFC #79 tightens phase-B/C/D/E backstops since trail is the primary
@@ -289,7 +294,7 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_A_PEAK_MAX_PCT = 3.0
     PHASE_A_SL_PCT = -3.0
     PHASE_B_PEAK_MAX_PCT = 9.0
-    PHASE_B_SL_PCT = -5.0          # GPFC #79: was -8
+    PHASE_B_SL_PCT = -12.0
     PHASE_B_BREAKEVEN_ARM_PCT = 8.0
     # GPFC #85: treat dashboard-rounded +8% peaks as armed, then protect while
     # the option is still green. Waiting until +0.5%/red was too late in thin
@@ -298,8 +303,8 @@ class OptionsScalpStrategy(BaseStrategy):
     PHASE_B_BREAKEVEN_EXIT_PCT = 4.0
     # GPFC #93: small-peak protection. A +5-8% option peak is not a real runner
     # yet, but it is enough edge to stop round-tripping to a red phase-B stop.
-    PHASE_B_MICRO_PROTECT_ARM_PCT = 5.0
-    PHASE_B_MICRO_PROTECT_EXIT_PCT = 0.0
+    PHASE_B_MICRO_PROTECT_ARM_PCT = 8.0
+    PHASE_B_MICRO_PROTECT_EXIT_PCT = -4.0
     PHASE_B_DEVELOPMENT_ARM_PCT = 5.0
     PHASE_B_DEVELOPMENT_MAX_SEC = 900.0
     PHASE_B_DEVELOPMENT_SL_PCT = -12.0
@@ -567,6 +572,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # DB trade ID
         self._db_trade_id: int | None = None
+        self._paper_futures_id: int | None = None
+        self._paper_futures_entry_spot: float = 0.0
+        self._paper_futures_peak_pct: float = 0.0
+        self._paper_futures_direction: str | None = None
 
         # Regime skip logging throttle
         self._last_regime_log: float = 0.0
@@ -4947,6 +4956,164 @@ class OptionsScalpStrategy(BaseStrategy):
             )
         ]
 
+    async def _start_paper_futures_shadow(
+        self,
+        *,
+        option_trade_id: int | None,
+        option_symbol: str,
+        setup_type: str,
+        direction: str | None,
+        entry_spot: float,
+    ) -> None:
+        """Start a paper futures twin for the filled options signal."""
+        if (
+            not self.PAPER_FUTURES_ENABLED
+            or not self._db
+            or not self._db.is_connected
+            or self._paper_futures_id
+            or entry_spot <= 0
+        ):
+            return
+        fut_direction = "long" if direction == "UP" else "short"
+        margin = self.PAPER_FUTURES_ACCOUNT_USD * self.PAPER_FUTURES_ALLOC_PCT
+        notional = margin * self.PAPER_FUTURES_LEVERAGE
+        now_iso = datetime.now(timezone.utc).isoformat()
+        row = {
+            "option_trade_id": option_trade_id,
+            "option_symbol": option_symbol,
+            "pair": self.pair,
+            "base_asset": self._base_asset,
+            "setup_type": setup_type,
+            "direction": fut_direction,
+            "status": "open",
+            "entry_price": round(entry_spot, 8),
+            "current_price": round(entry_spot, 8),
+            "paper_account_usd": self.PAPER_FUTURES_ACCOUNT_USD,
+            "margin_usd": round(margin, 8),
+            "notional_usd": round(notional, 8),
+            "leverage": self.PAPER_FUTURES_LEVERAGE,
+            "opened_at": now_iso,
+            "updated_at": now_iso,
+            "metadata": {
+                "source": "options_signal_shadow",
+                "option_side": self.option_side,
+                "contracts": self._contracts,
+                "entry_premium": self.entry_premium,
+            },
+        }
+        paper_id = await self._db.log_paper_futures_trade(row)
+        if paper_id:
+            self._paper_futures_id = paper_id
+            self._paper_futures_entry_spot = entry_spot
+            self._paper_futures_peak_pct = 0.0
+            self._paper_futures_direction = fut_direction
+            self.logger.info(
+                "[%s] PAPER_FUTURES_OPEN id=%s %s $%.2f margin %.1fx entry=%.2f setup=%s",
+                self.pair,
+                paper_id,
+                fut_direction.upper(),
+                margin,
+                self.PAPER_FUTURES_LEVERAGE,
+                entry_spot,
+                setup_type,
+            )
+
+    async def _update_paper_futures_shadow(self, spot_price: float) -> None:
+        """Mark the paper futures twin to current spot while the option is open."""
+        if (
+            not self._paper_futures_id
+            or not self._db
+            or not self._db.is_connected
+            or self._paper_futures_entry_spot <= 0
+            or spot_price <= 0
+        ):
+            return
+        direction_mult = 1.0 if self._paper_futures_direction == "long" else -1.0
+        spot_move_pct = (
+            (spot_price - self._paper_futures_entry_spot)
+            / self._paper_futures_entry_spot
+            * 100.0
+            * direction_mult
+        )
+        pnl_pct = spot_move_pct * self.PAPER_FUTURES_LEVERAGE
+        self._paper_futures_peak_pct = max(self._paper_futures_peak_pct, pnl_pct)
+        margin = self.PAPER_FUTURES_ACCOUNT_USD * self.PAPER_FUTURES_ALLOC_PCT
+        pnl_usd = margin * pnl_pct / 100.0
+        await self._db.update_paper_futures_trade(
+            self._paper_futures_id,
+            {
+                "current_price": round(spot_price, 8),
+                "pnl_pct": round(pnl_pct, 4),
+                "pnl_usd": round(pnl_usd, 8),
+                "peak_pnl_pct": round(self._paper_futures_peak_pct, 4),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    async def _close_paper_futures_shadow(
+        self,
+        *,
+        exit_spot: float,
+        exit_reason: str,
+    ) -> None:
+        """Close the paper futures twin when the real option closes."""
+        if (
+            not self._paper_futures_id
+            or not self._db
+            or not self._db.is_connected
+            or self._paper_futures_entry_spot <= 0
+        ):
+            self._paper_futures_id = None
+            self._paper_futures_entry_spot = 0.0
+            self._paper_futures_peak_pct = 0.0
+            self._paper_futures_direction = None
+            return
+        if exit_spot <= 0:
+            exit_spot = self._last_spot_price or self._paper_futures_entry_spot
+        direction_mult = 1.0 if self._paper_futures_direction == "long" else -1.0
+        spot_move_pct = (
+            (exit_spot - self._paper_futures_entry_spot)
+            / self._paper_futures_entry_spot
+            * 100.0
+            * direction_mult
+        )
+        pnl_pct = spot_move_pct * self.PAPER_FUTURES_LEVERAGE
+        margin = self.PAPER_FUTURES_ACCOUNT_USD * self.PAPER_FUTURES_ALLOC_PCT
+        notional = margin * self.PAPER_FUTURES_LEVERAGE
+        gross_pnl = margin * pnl_pct / 100.0
+        fees = notional * self.PAPER_FUTURES_FEE_RATE * 2
+        net_pnl = gross_pnl - fees
+        peak_pct = max(self._paper_futures_peak_pct, pnl_pct)
+        await self._db.update_paper_futures_trade(
+            self._paper_futures_id,
+            {
+                "status": "closed",
+                "exit_price": round(exit_spot, 8),
+                "current_price": round(exit_spot, 8),
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "pnl_pct": round(pnl_pct, 4),
+                "gross_pnl_usd": round(gross_pnl, 8),
+                "fees_usd": round(fees, 8),
+                "pnl_usd": round(net_pnl, 8),
+                "peak_pnl_pct": round(peak_pct, 4),
+                "exit_reason": exit_reason,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        self.logger.info(
+            "[%s] PAPER_FUTURES_CLOSE id=%s exit=%.2f net=$%+.4f pnl=%+.2f%% peak=%+.2f%%",
+            self.pair,
+            self._paper_futures_id,
+            exit_spot,
+            net_pnl,
+            pnl_pct,
+            peak_pct,
+        )
+        self._paper_futures_id = None
+        self._paper_futures_entry_spot = 0.0
+        self._paper_futures_peak_pct = 0.0
+        self._paper_futures_direction = None
+
     # ==================================================================
     # DYNAMIC OPTION SIZING
     # ==================================================================
@@ -6068,6 +6235,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 if spot_price > 0:
                     self._last_spot_price = spot_price
                     self._update_momentum_history(spot_price)
+                    await self._update_paper_futures_shadow(float(spot_price))
         except Exception:
             pass  # Non-critical, continue without momentum data
 
@@ -6677,6 +6845,20 @@ class OptionsScalpStrategy(BaseStrategy):
                     fill_price,
                     self._db_trade_id,
                 )
+
+            paper_direction = None
+            if signal and hasattr(signal, "metadata") and signal.metadata:
+                paper_direction = signal.metadata.get("direction") or signal.metadata.get("breakout_direction")
+            if not paper_direction:
+                paper_direction = "UP" if option_side == "call" else "DOWN"
+            paper_entry_spot = float(self._last_spot_price or spot or 0.0)
+            await self._start_paper_futures_shadow(
+                option_trade_id=self._db_trade_id,
+                option_symbol=option_symbol,
+                setup_type=setup_type,
+                direction=paper_direction,
+                entry_spot=paper_entry_spot,
+            )
         except Exception:
             self.logger.exception("[%s] _write_entry_to_db FAILED", option_symbol)
 
@@ -6823,6 +7005,11 @@ class OptionsScalpStrategy(BaseStrategy):
                     "exit_reason": exit_reason,
                     "position_state": None,
                 },
+            )
+
+            await self._close_paper_futures_shadow(
+                exit_spot=float(self._last_spot_price or spot or 0.0),
+                exit_reason=exit_reason,
             )
 
             self.logger.info(

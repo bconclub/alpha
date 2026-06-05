@@ -99,6 +99,58 @@ create index if not exists idx_trades_setup_type   on public.trades (setup_type)
 
 
 -- ============================================================================
+-- 1b. PAPER_FUTURES_TRADES
+-- Shadow futures ledger for filled options signals. This is paper only; it lets
+-- us compare whether the same signal performs better on perpetual futures than
+-- on options before enabling real futures capital.
+-- ============================================================================
+create table if not exists public.paper_futures_trades (
+    id                  bigint generated always as identity primary key,
+    created_at          timestamptz not null default now(),
+    updated_at          timestamptz not null default now(),
+
+    option_trade_id     bigint references public.trades(id) on delete set null,
+    option_symbol       text,
+
+    pair                text not null,
+    base_asset          text,
+    setup_type          text,
+    direction           text not null check (direction in ('long', 'short')),
+    status              text not null default 'open'
+                        check (status in ('open', 'closed', 'cancelled')),
+
+    opened_at           timestamptz not null default now(),
+    closed_at           timestamptz,
+
+    entry_price         numeric(20,8) not null,
+    current_price       numeric(20,8),
+    exit_price          numeric(20,8),
+
+    paper_account_usd   numeric(20,8) not null default 100,
+    margin_usd          numeric(20,8) not null,
+    notional_usd        numeric(20,8) not null,
+    leverage            numeric(8,2) not null default 5,
+
+    pnl_pct             numeric(12,4) not null default 0,
+    peak_pnl_pct        numeric(12,4) not null default 0,
+    gross_pnl_usd       numeric(20,8) not null default 0,
+    fees_usd            numeric(20,8) not null default 0,
+    pnl_usd             numeric(20,8) not null default 0,
+
+    exit_reason         text,
+    metadata            jsonb not null default '{}'::jsonb
+);
+
+create index if not exists idx_paper_futures_opened_at
+    on public.paper_futures_trades (opened_at desc);
+create index if not exists idx_paper_futures_status
+    on public.paper_futures_trades (status);
+create index if not exists idx_paper_futures_option_trade
+    on public.paper_futures_trades (option_trade_id)
+    where option_trade_id is not null;
+
+
+-- ============================================================================
 -- 2. STRATEGY_LOG
 -- Every 5-minute analysis cycle logs which strategy was selected and why,
 -- along with the raw indicator values that drove the decision.
@@ -246,6 +298,7 @@ create index if not exists idx_bot_commands_ts      on public.bot_commands (crea
 -- ============================================================================
 
 alter table public.trades       enable row level security;
+alter table public.paper_futures_trades enable row level security;
 alter table public.strategy_log enable row level security;
 alter table public.bot_status   enable row level security;
 alter table public.bot_commands enable row level security;
@@ -256,6 +309,11 @@ alter table public.bot_commands enable row level security;
 do $$ begin
     create policy "Allow read access for authenticated users"
         on public.trades for select to authenticated using (true);
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+    create policy "Allow read access for authenticated users"
+        on public.paper_futures_trades for select to authenticated using (true);
 exception when duplicate_object then null; end $$;
 
 do $$ begin

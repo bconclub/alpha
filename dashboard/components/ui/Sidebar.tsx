@@ -33,6 +33,17 @@ const navItems = [
     ),
   },
   {
+    name: 'Paper',
+    href: '/paper',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M3 4C3 3.44772 3.44772 3 4 3H16C16.5523 3 17 3.44772 17 4V16C17 16.5523 16.5523 17 16 17H4C3.44772 17 3 16.5523 3 16V4Z" stroke="currentColor" strokeWidth="1.5"/>
+        <path d="M6 13L9 10L11 12L14 7" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d="M6 6H9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" opacity="0.6"/>
+      </svg>
+    ),
+  },
+  {
     name: 'P&L',
     href: '/pnl',
     icon: (
@@ -73,8 +84,9 @@ const squeezeIcon = (
 const bottomNavItems = [
   { name: 'Dashboard', href: '/', icon: navItems[0].icon },
   { name: 'Trades', href: '/trades', icon: navItems[1].icon },
+  { name: 'Paper', href: '/paper', icon: navItems[2].icon },
   { name: 'P&L', href: '/pnl', icon: navItems[3].icon },
-  { name: 'Strategy', href: '/strategies', icon: navItems[2].icon },
+  { name: 'Strategy', href: '/strategies', icon: navItems[4].icon },
 ];
 
 export function Sidebar() {

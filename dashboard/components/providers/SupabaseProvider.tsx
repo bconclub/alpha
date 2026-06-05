@@ -69,6 +69,7 @@ function normalizeTrade(raw: any): Trade {
     collateral: raw.collateral != null ? Number(raw.collateral) : undefined,
     strategy: raw.strategy ?? '',
     pnl: raw.pnl ?? 0,
+    net_pnl: raw.net_pnl ?? raw.pnl ?? 0,
     // Keep null/undefined distinct from 0 — null means "not yet calculated"
     pnl_pct: raw.pnl_pct != null ? raw.pnl_pct : undefined,
     gross_pnl: raw.gross_pnl ?? undefined,

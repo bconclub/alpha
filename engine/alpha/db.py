@@ -27,6 +27,7 @@ class Database:
     TABLE_BOT_COMMANDS = "bot_commands"
     TABLE_ACTIVITY_LOG = "activity_log"
     TABLE_CHANGELOG = "changelog"
+    TABLE_PAPER_FUTURES = "paper_futures_trades"
 
     def __init__(self) -> None:
         self._client: Client | None = None
@@ -263,6 +264,51 @@ class Database:
                 "update_trade_metadata id=%s patch=%s failed: %s",
                 trade_id, patch, exc,
             )
+
+    async def log_paper_futures_trade(self, data: dict[str, Any]) -> int | None:
+        """Insert a paper futures shadow trade and return its row ID."""
+        if not self.is_connected:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table(self.TABLE_PAPER_FUTURES)  # type: ignore[union-attr]
+                    .insert(data)
+                    .execute()
+                ),
+            )
+            row_id = result.data[0].get("id") if result.data else None
+            logger.info(
+                "Paper futures logged (id=%s): %s %s @ %s",
+                row_id,
+                data.get("direction"),
+                data.get("pair"),
+                data.get("entry_price"),
+            )
+            return row_id
+        except Exception as exc:
+            logger.error("paper_futures INSERT FAILED: %s | data=%s", exc, data)
+            return None
+
+    async def update_paper_futures_trade(self, trade_id: int, data: dict[str, Any]) -> None:
+        """Update an existing paper futures shadow trade."""
+        if not self.is_connected:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table(self.TABLE_PAPER_FUTURES)  # type: ignore[union-attr]
+                    .update(data)
+                    .eq("id", trade_id)
+                    .execute()
+                ),
+            )
+        except Exception as exc:
+            logger.warning("paper_futures UPDATE FAILED id=%s: %s", trade_id, exc)
 
     async def _fetch_existing_peak_pnl(self, trade_id: int) -> float | None:
         """Return the current peak_pnl for a trade row, or None if unavailable.
