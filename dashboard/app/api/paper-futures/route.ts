@@ -13,25 +13,33 @@ export async function GET() {
     );
   }
 
-  const { data, error } = await supabase
-    .from('paper_futures_trades')
-    .select('*')
-    .order('opened_at', { ascending: false })
-    .limit(200);
+  const [futuresRes, optionsRes, statusRes] = await Promise.all([
+    supabase
+      .from('paper_futures_trades')
+      .select('*')
+      .order('opened_at', { ascending: false })
+      .limit(300),
+    supabase
+      .from('paper_options_trades')
+      .select('*')
+      .order('opened_at', { ascending: false })
+      .limit(300),
+    supabase
+      .from('bot_status')
+      .select('bot_state,is_running,is_paused,uptime_seconds,timestamp,created_at,inr_usd_rate')
+      .order('created_at', { ascending: false })
+      .limit(1),
+  ]);
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  if (futuresRes.error) {
+    return NextResponse.json({ error: futuresRes.error.message }, { status: 500 });
   }
 
-  const { data: statusRows } = await supabase
-    .from('bot_status')
-    .select('bot_state,is_running,is_paused,uptime_seconds,timestamp,created_at,inr_usd_rate')
-    .order('created_at', { ascending: false })
-    .limit(1);
-
   return NextResponse.json({
-    rows: data ?? [],
-    botStatus: statusRows?.[0] ?? null,
-    paperAccountUsd: 50,
+    rows: futuresRes.data ?? [],
+    futures: futuresRes.data ?? [],
+    options: optionsRes.data ?? [],
+    botStatus: statusRes.data?.[0] ?? null,
+    paperAccountUsd: 100,
   });
 }

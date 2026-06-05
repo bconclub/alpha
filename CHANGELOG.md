@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-06 · Paper Lab dashboard: Options + Futures in one view
+
+- `dashboard/app/paper/page.tsx`: rebuilt as **Paper Lab** with an Options/Futures toggle. Normalizes both ledgers into one view; Options shows premium entry/mark, strike + moneyness, stake, CALL/PUT; Futures shows leverage/margin. Per-instrument $100 balance, win-rate/peak/return stats, Setup Edge / Moneyness(or Leverage) / Pair-Direction panels, exit-reason breakdown.
+- `dashboard/app/api/paper-futures/route.ts`: now returns both `options` (paper_options_trades) and `futures` (paper_futures_trades) plus bot status; paperAccountUsd 50 → 100.
+- User-facing: `/paper` now shows the BTC/ETH options AND futures labs side by side with one click. `(SHA on commit)`
+
 ## 2026-06-06 · Paper OPTIONS lab (buy-only, ride-the-wave) + BTC/ETH-only paper @ $100
 
 - `engine/alpha/paper_options.py` (new): buy-only paper options lab. Reads the REAL Delta option chain + live premiums for BTC/ETH, picks ATM (or 1-step OTM on strong moves), "buys" a call (up) or put (down) on a genuine underlying price-action move, then **rides the wave** — holds through premium noise while the underlying structure supports the trade, exits on underlying reversal / hard −45% premium stop / big-run trail / pre-expiry. **No time-based decision gates** (no min-hold, no cooldown). 4 lanes: OPT_TREND_RIDE, OPT_DONCHIAN, OPT_MOMENTUM, OPT_EMA_PULLBACK. Writes `paper_options_trades` with confidence + greeks + price-action context.
