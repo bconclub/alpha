@@ -50,7 +50,7 @@ create table if not exists public.trades (
     leverage      numeric(5,2) not null default 1,     -- 1 = spot, >1 = futures/options
     position_type text        not null default 'spot'  -- 'spot', 'long', 'short'
                   check (position_type in ('spot', 'long', 'short')),
-    collateral    numeric(20,8),                        -- margin posted (notional/leverage)
+    collateral    numeric(20,8),                        -- margin/stake. Options: entry_price * contracts * option multiplier
 
     -- Exchange reference
     order_id      text,                                -- ccxt order id

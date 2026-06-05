@@ -132,10 +132,8 @@ class OptionsScalpStrategy(BaseStrategy):
     check_interval_sec = 5  # 5-second ticks
 
     # ── Class-level shared state ──────────────────────────────────────
-    _global_in_position: bool = (
-        False  # ONE option at a time across ALL assets (BTC+ETH)
-    )
-    _global_position_asset: str | None = None  # which asset holds the lock
+    _global_in_position: bool = False  # legacy mirror; do not gate cross-asset entries
+    _global_position_asset: str | None = None
 
     # ── Delta Exchange contract multiplier (options) ─────────────
     CONTRACT_MULTIPLIER: dict[str, float] = {"ETH": 0.01, "BTC": 0.001}
@@ -219,6 +217,9 @@ class OptionsScalpStrategy(BaseStrategy):
     PREMIUM_WAVE_MIN_DELTA_ABS = 0.20
     PREMIUM_WAVE_MIN_IV = 0.20
     PREMIUM_WAVE_COOLDOWN_SEC = 300.0
+    PREMIUM_WAVE_MAX_LAST_RISE_PCT = 11.0
+    PREMIUM_WAVE_MAX_CUM_RISE_PCT = 22.0
+    PREMIUM_WAVE_MAX_FROM_5M_LOW_PCT = 24.0
     # If spread is wider than the phase-A stop, the trade is born near/under
     # stop before thesis can play out. Keep entries tighter than the -3% phase-A
     # guard so we do not buy options that immediately stop on bid/ask alone.
@@ -289,6 +290,8 @@ class OptionsScalpStrategy(BaseStrategy):
     # Delta books and was cutting trades in 20-30s before the thesis developed.
     PHASE_A_THESIS_WARMUP_SEC = 180.0
     PHASE_A_EMERGENCY_SL_PCT = -50.0
+    PHASE_A_DYNAMIC_FAIL_PCT = -8.0
+    PHASE_A_DYNAMIC_HARD_FAIL_PCT = -12.0
 
     # ── GPFC #67: DEAD-on-arrival cutter ──────────────────────────────
     # Catches trades that NEVER moved up AND underlying turned against us.
@@ -791,7 +794,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._last_spot_price = float(price)
         self._update_momentum_history(float(price))
 
-        if self.in_position or OptionsScalpStrategy._global_in_position:
+        if self.in_position:
             return False
         if "MOVE_PULLBACK" not in self.ENABLED_SETUPS:
             return False
@@ -1517,12 +1520,26 @@ class OptionsScalpStrategy(BaseStrategy):
 
         premium_5m = (current - prem_5m) / prem_5m * 100.0
         premium_15m = (current - prem_15m) / prem_15m * 100.0
+        now = time.monotonic()
+        recent_premiums = [
+            float(premium)
+            for t, premium, _spot in history
+            if premium > 0 and now - t <= 300.0
+        ]
+        recent_low = min(recent_premiums) if recent_premiums else current
+        premium_from_5m_low = (
+            (current - recent_low) / recent_low * 100.0
+            if recent_low > 0
+            else 0.0
+        )
         option_dir = 1.0 if option_type == "call" else -1.0
         underlying_5m = option_dir * ((spot_now - spot_5m) / spot_5m * 100.0)
         underlying_15m = option_dir * ((spot_now - spot_15m) / spot_15m * 100.0)
         return {
             "premium_5m_pct": premium_5m,
             "premium_15m_pct": premium_15m,
+            "premium_from_5m_low_pct": premium_from_5m_low,
+            "premium_5m_low": recent_low,
             "underlying_5m_pct": underlying_5m,
             "underlying_15m_pct": underlying_15m,
             "premium_now": current,
@@ -2430,7 +2447,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self._cached_target_strike = None
 
         # GLOBAL POSITION LOCK — only 1 option across all assets (BTC+ETH)
-        if OptionsScalpStrategy._global_in_position and not self.in_position:
+        if False and OptionsScalpStrategy._global_in_position and not self.in_position:
             if self._tick_count % 6 == 0:
                 self.logger.info(
                     "[%s] OPTIONS GLOBAL_LOCK — %s has an open option",
@@ -3188,6 +3205,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
         premium_5m = float(snapshot.get("premium_5m_pct", 0.0))
         premium_15m = float(snapshot.get("premium_15m_pct", 0.0))
+        premium_from_low = float(snapshot.get("premium_from_5m_low_pct", 0.0))
         underlying_5m = float(snapshot.get("underlying_5m_pct", 0.0))
         underlying_15m = float(snapshot.get("underlying_15m_pct", 0.0))
         premium_lifting = (
@@ -3199,6 +3217,17 @@ class OptionsScalpStrategy(BaseStrategy):
             or underlying_15m >= self.PREMIUM_WAVE_MIN_UNDERLYING_15M_PCT
         )
         if not premium_lifting or not underlying_aligned:
+            return []
+        if premium_from_low > self.PREMIUM_WAVE_MAX_FROM_5M_LOW_PCT:
+            self._cached_bot_state = "blocked:premium_wave_extended"
+            self.logger.info(
+                "[%s] PREMIUM_WAVE_EXTENSION_SKIP: dir=%s premium is %.1f%% "
+                "above recent 5m low (max %.1f%%) -- wait for pullback/re-lift",
+                self.pair,
+                trend_dir,
+                premium_from_low,
+                self.PREMIUM_WAVE_MAX_FROM_5M_LOW_PCT,
+            )
             return []
 
         spot = float(self._last_spot_price or 0.0)
@@ -3260,6 +3289,34 @@ class OptionsScalpStrategy(BaseStrategy):
                     continue
 
             exec_snapshot = self._entry_execution_snapshot(ticker, ask, option_type)
+            last_rise_pct = exec_snapshot.get("premium_last_rise_pct")
+            cum_rise_pct = exec_snapshot.get("premium_cum_rise_pct")
+            if (
+                last_rise_pct is not None
+                and last_rise_pct > self.PREMIUM_WAVE_MAX_LAST_RISE_PCT
+            ):
+                self.logger.info(
+                    "[%s] PREMIUM_WAVE_CHASE_SKIP: %s last premium candle %.1f%% "
+                    "> %.1f%% -- too close to local top",
+                    self.pair,
+                    symbol,
+                    last_rise_pct,
+                    self.PREMIUM_WAVE_MAX_LAST_RISE_PCT,
+                )
+                continue
+            if (
+                cum_rise_pct is not None
+                and cum_rise_pct > self.PREMIUM_WAVE_MAX_CUM_RISE_PCT
+            ):
+                self.logger.info(
+                    "[%s] PREMIUM_WAVE_CHASE_SKIP: %s cumulative premium jump %.1f%% "
+                    "> %.1f%% -- wait for pullback",
+                    self.pair,
+                    symbol,
+                    cum_rise_pct,
+                    self.PREMIUM_WAVE_MAX_CUM_RISE_PCT,
+                )
+                continue
             mark_gap_pct = exec_snapshot.get("entry_mark_gap_pct")
             if mark_gap_pct is not None and mark_gap_pct > self.PREMIUM_WAVE_MAX_MARK_GAP_PCT:
                 self.logger.info(
@@ -6746,6 +6803,33 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # ── PHASE A: tight SL (-3%) with GPFC #80 momentum confirmation ──
         if phase == "A" and premium_change_pct <= self.PHASE_A_SL_PCT:
+            dynamic_failed = (
+                premium_change_pct <= self.PHASE_A_DYNAMIC_FAIL_PCT
+                and self._underlying_turned_against(self.DEAD_UNDERLYING_AGAINST_PCT)
+            )
+            dynamic_hard_failed = (
+                peak_pnl_pct <= self.PHASE_A_PEAK_MAX_PCT
+                and premium_change_pct <= self.PHASE_A_DYNAMIC_HARD_FAIL_PCT
+            )
+            if (
+                position_age_sec < self.PHASE_A_THESIS_WARMUP_SEC
+                and (dynamic_failed or dynamic_hard_failed)
+            ):
+                self.logger.info(
+                    "[%s] stop_phase_a DYNAMIC_FAIL -- age=%.0fs<%.0fs "
+                    "current=%+.1f%% peak=%+.1f%% against=%s hard=%s",
+                    self.option_symbol,
+                    position_age_sec,
+                    self.PHASE_A_THESIS_WARMUP_SEC,
+                    premium_change_pct,
+                    peak_pnl_pct,
+                    dynamic_failed,
+                    dynamic_hard_failed,
+                )
+                await self._persist_sl_defer_count()
+                return await self._do_option_exit(
+                    current_premium, premium_change_pct, "stop_phase_a"
+                )
             if (
                 position_age_sec < self.PHASE_A_THESIS_WARMUP_SEC
                 and premium_change_pct > self.PHASE_A_EMERGENCY_SL_PCT
@@ -7219,7 +7303,7 @@ class OptionsScalpStrategy(BaseStrategy):
             actual_fill = await self._resolve_fill_price(order, option_symbol)
 
             if actual_fill and actual_fill > 0:
-                collateral = actual_fill * contracts / self.OPTIONS_LEVERAGE
+                collateral = actual_fill * contracts * mult
                 self.executor.db.client.table("trades").update(
                     {
                         "entry_price": round(actual_fill, 8),
@@ -7240,7 +7324,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     entry_fee,
                 )
             else:
-                collateral = fill_price * contracts / self.OPTIONS_LEVERAGE
+                collateral = fill_price * contracts * mult
                 self.executor.db.client.table("trades").update(
                     {
                         "entry_price": round(fill_price, 8),
@@ -8226,8 +8310,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 if alerts is not None:
                     import asyncio
 
-                    collateral = fill_price * self._contracts / self.OPTIONS_LEVERAGE
                     _mult = self.CONTRACT_MULTIPLIER.get(self._base_asset, 0.01)
+                    collateral = fill_price * self._contracts * _mult
                     _spot = self._last_spot_price or signal.metadata.get(
                         "spot_price", 0
                     )
@@ -8240,7 +8324,7 @@ class OptionsScalpStrategy(BaseStrategy):
                         f"\U0001f4e5 {self._base_asset} option opened\n"
                         f"{self.option_side.upper()} ${self.strike_price:.0f} | "
                         f"x{self._contracts} @ ${fill_price:.2f}\n"
-                        f"Collateral: ${collateral:.2f} | Fee: ${_fee:.4f}"
+                        f"Stake: ${collateral:.2f} | Fee: ${_fee:.4f}"
                     )
                     asyncio.get_event_loop().create_task(alerts.send_text(msg))
             except Exception:

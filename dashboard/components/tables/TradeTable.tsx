@@ -88,6 +88,25 @@ const OPTION_CONTRACT_MULTIPLIER: Record<string, number> = {
   ETH: 0.01,
 };
 
+function getOptionRiskBasis(trade: Trade): {
+  stake: number;
+  modeledMargin: number | null;
+  multiplier: number;
+  contracts: number;
+} | null {
+  if (!isOptionTrade(trade)) return null;
+  const contracts = trade.contracts ?? trade.amount ?? 0;
+  const entryPrice = trade.price ?? 0;
+  if (contracts <= 0 || entryPrice <= 0) return null;
+
+  const asset = extractBaseAsset(trade.pair);
+  const multiplier = OPTION_CONTRACT_MULTIPLIER[asset] ?? 0.01;
+  const stake = entryPrice * contracts * multiplier;
+  const modeledMargin = trade.leverage > 1 ? stake / trade.leverage : null;
+
+  return { stake, modeledMargin, multiplier, contracts };
+}
+
 // ── Options helpers ──────────────────────────────────────────
 /** Options symbol pattern: contains date-strike-C/P  (e.g. "260221-98000-C") */
 const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
@@ -1401,15 +1420,21 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           {display.isUnrealized && (
                             <span className="text-[9px] text-zinc-500 ml-0.5 font-normal">live</span>
                           )}
-                          {isOptionTrade(trade) && trade.status === 'closed' && (
-                            <div className="text-[9px] text-zinc-500 font-normal mt-0.5"
-                                 title={`Collateral: $${(trade.collateral ?? ((trade.price * ((trade.contracts ?? trade.amount) || 1)) / Math.max(trade.leverage, 1))).toFixed(4)} (${trade.leverage}x)`}>
-                              risk: ${(trade.collateral ?? ((trade.price * ((trade.contracts ?? trade.amount) || 1)) / Math.max(trade.leverage, 1))).toFixed(4)}
-                            </div>
-                          )}
+                          {isOptionTrade(trade) && trade.status === 'closed' && (() => {
+                            const risk = getOptionRiskBasis(trade);
+                            if (!risk) return null;
+                            return (
+                              <div
+                                className="text-[9px] text-zinc-500 font-normal mt-0.5"
+                                title={`Max long-option stake: entry premium × contracts × ${risk.multiplier} = $${risk.stake.toFixed(4)}. Options leverage field: ${trade.leverage}x${risk.modeledMargin != null ? `; old margin formula would be $${risk.modeledMargin.toFixed(4)}` : ''}.`}
+                              >
+                                stake: ${risk.stake.toFixed(4)}
+                              </div>
+                            );
+                          })()}
                         </td>
 
-                        {/* P&L % (return on collateral) */}
+                        {/* P&L % (premium move for options, return on collateral for futures) */}
                         <td
                           className={cn(
                             'whitespace-nowrap px-4 py-3 text-right font-mono text-xs',

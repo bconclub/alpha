@@ -16,7 +16,7 @@ export interface Trade {
   amount: number;
   contracts?: number | null; // integer contract count (Delta futures/options)
   cost?: number;
-  collateral?: number;      // margin posted (notional/leverage). Options: premium/50
+  collateral?: number;      // margin/stake. Options: entry premium * contracts * option multiplier
   strategy: Strategy;
   pnl: number;              // NET P&L (after fees)
   net_pnl?: number;         // Alias used by options rows / table display
