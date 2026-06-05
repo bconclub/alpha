@@ -169,7 +169,7 @@ export default function PaperFuturesPage() {
                       <td className={`px-4 py-3 text-right font-mono ${positive ? 'text-emerald-300' : Number(row.pnl_usd) < 0 ? 'text-red-300' : 'text-zinc-400'}`}>
                         {money(row.pnl_usd)} <span className="text-xs text-zinc-500">{pct(row.pnl_pct)}</span>
                       </td>
-                      <td className="px-4 py-3 text-right font-mono text-cyan-300">{pct(row.peak_pnl_pct)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-emerald-300">{pct(row.peak_pnl_pct)}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-400">{holdTime(row)}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-500">
                         {row.option_trade_id ? `Option #${row.option_trade_id}` : 'Independent'}

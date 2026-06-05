@@ -1071,11 +1071,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         const capture = peak > 0 ? Math.round((taken / peak) * 100) : null;
                         return (
                           <span className="font-mono text-zinc-400">
-                            <span className={cn(
-                              peak >= 0.3 ? 'text-emerald-400' :
-                              peak >= 0.1 ? 'text-yellow-400' :
-                              peak >= 0 ? 'text-zinc-400' : 'text-red-400'
-                            )}>
+                            <span className="text-emerald-400">
                               pk {peak >= 0 ? '+' : ''}{peak.toFixed(2)}%
                             </span>
                             {capture != null && (
@@ -1522,11 +1518,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         {/* Peak P&L */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
                           {trade.peak_pnl != null ? (
-                            <span className={cn(
-                              trade.peak_pnl >= 0.3 ? 'text-emerald-400' :
-                              trade.peak_pnl >= 0.1 ? 'text-yellow-400' :
-                              trade.peak_pnl >= 0 ? 'text-zinc-400' : 'text-red-400'
-                            )}>
+                            <span className="text-emerald-400">
                               {trade.peak_pnl >= 0 ? '+' : ''}{trade.peak_pnl.toFixed(2)}%
                             </span>
                           ) : (

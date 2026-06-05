@@ -249,7 +249,7 @@ export default function StrategiesPage() {
           ['Trades', totals.trades.toString(), 'text-zinc-100'],
           ['Win Rate', `${totals.winRate.toFixed(0)}%`, totals.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'],
           ['Net P&L', formatPnL(totals.net), getPnLColor(totals.net)],
-          ['Avg Peak', pct(totals.avgPeak), 'text-cyan-300'],
+          ['Avg Peak', pct(totals.avgPeak), 'text-emerald-300'],
           ['Avg Hold', formatDuration(totals.avgHold), 'text-zinc-100'],
         ].map(([label, value, color]) => (
           <div key={label} className="rounded-md border border-zinc-800 bg-[#0d1117] p-3">
@@ -310,7 +310,7 @@ export default function StrategiesPage() {
                 <Metric label="Trades" value={stats.total.toString()} />
                 <Metric label="Win" value={`${stats.winRate.toFixed(0)}%`} color={stats.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'} />
                 <Metric label="Net" value={formatPnL(stats.net)} color={getPnLColor(stats.net)} />
-                <Metric label="Avg Peak" value={pct(stats.avgPeak)} color="text-cyan-300" />
+                <Metric label="Avg Peak" value={pct(stats.avgPeak)} color="text-emerald-300" />
                 <Metric label="Capture" value={`${stats.avgCapture.toFixed(0)}%`} color={stats.avgCapture >= 50 ? 'text-emerald-300' : 'text-amber-300'} />
                 <Metric label="Hold" value={formatDuration(stats.avgHoldSec)} />
               </div>
@@ -324,7 +324,7 @@ export default function StrategiesPage() {
                   <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
                     <Mini label="Pair" value={shortPair(stats.lastTrade.pair)} />
                     <Mini label="Net" value={formatPnL(stats.lastTrade.pnl)} color={getPnLColor(stats.lastTrade.pnl)} />
-                    <Mini label="Peak" value={pct(stats.lastTrade.peak_pnl)} color="text-cyan-300" />
+                    <Mini label="Peak" value={pct(stats.lastTrade.peak_pnl)} color="text-emerald-300" />
                     <Mini label="Taken" value={pct(stats.lastTrade.pnl_pct)} color={getPnLColor(stats.lastTrade.pnl_pct ?? 0)} />
                     <Mini label="Exit" value={stats.lastTrade.exit_reason || 'Unknown'} />
                   </div>
@@ -367,7 +367,7 @@ export default function StrategiesPage() {
                       <td className="whitespace-nowrap px-4 py-3"><SetupChip setup={canonicalSetup(trade.setup_type)} /></td>
                       <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', getPnLColor(trade.pnl))}>{formatPnL(trade.pnl)}</td>
                       <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', getPnLColor(trade.pnl_pct ?? 0))}>{pct(trade.pnl_pct)}</td>
-                      <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-cyan-300">{pct(trade.peak_pnl)}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-emerald-300">{pct(trade.peak_pnl)}</td>
                       <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', capture != null && capture >= 50 ? 'text-emerald-300' : 'text-amber-300')}>
                         {capture == null ? '-' : `${capture.toFixed(0)}%`}
                       </td>
