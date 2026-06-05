@@ -8,14 +8,13 @@ import { SetupChip } from '@/components/ui/SetupChip';
 import { cn, formatDate, formatDuration, formatPnL, getPnLColor } from '@/lib/utils';
 import type { SetupConfig, Trade } from '@/lib/types';
 
-type TimeWindow = 'today' | '24h' | 'jun3' | 'jun1' | '7d';
+type TimeWindow = 'today' | '7d' | '14d' | '28d';
 
 const TIME_WINDOWS: { key: TimeWindow; label: string }[] = [
   { key: 'today', label: 'Today' },
-  { key: '24h', label: '24h' },
-  { key: 'jun3', label: 'Since Jun 3' },
-  { key: 'jun1', label: 'Since Jun 1' },
-  { key: '7d', label: '7d' },
+  { key: '7d', label: '7 days' },
+  { key: '14d', label: '14 days' },
+  { key: '28d', label: '28 days' },
 ];
 
 const LIVE_SETUPS = ['SQUEEZE', 'MOM_BURST', 'PULLBACK', 'TREND_FLOW'] as const;
@@ -52,10 +51,9 @@ function canonicalSetup(setup: string | null | undefined): string {
 
 function getWindowCutoff(window: TimeWindow): Date {
   const now = new Date();
-  if (window === '24h') return new Date(now.getTime() - 24 * 60 * 60 * 1000);
   if (window === '7d') return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  if (window === 'jun1') return new Date('2026-06-01T00:00:00+05:30');
-  if (window === 'jun3') return new Date('2026-06-03T00:00:00+05:30');
+  if (window === '14d') return new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+  if (window === '28d') return new Date(now.getTime() - 28 * 24 * 60 * 60 * 1000);
 
   const istNow = new Date(now.getTime() + IST_OFFSET_MS);
   const startIst = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate());
@@ -140,7 +138,7 @@ function computeStats(setup: string, trades: Trade[], configMap: Record<string, 
 
 export default function StrategiesPage() {
   const { trades, setupConfigs, refreshViews } = useSupabase();
-  const [timeWindow, setTimeWindow] = useState<TimeWindow>('jun3');
+  const [timeWindow, setTimeWindow] = useState<TimeWindow>('today');
   const [savingSetup, setSavingSetup] = useState<string | null>(null);
 
   const cutoff = useMemo(() => getWindowCutoff(timeWindow), [timeWindow]);
