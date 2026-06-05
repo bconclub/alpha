@@ -125,7 +125,7 @@ create table if not exists public.paper_futures_trades (
     current_price       numeric(20,8),
     exit_price          numeric(20,8),
 
-    paper_account_usd   numeric(20,8) not null default 100,
+    paper_account_usd   numeric(20,8) not null default 50,
     margin_usd          numeric(20,8) not null,
     notional_usd        numeric(20,8) not null,
     leverage            numeric(8,2) not null default 5,

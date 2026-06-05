@@ -86,6 +86,13 @@ function capturePct(row: PaperFuturesTrade): number | null {
   return (pnl / peak) * 100;
 }
 
+function confidenceScore(row: PaperFuturesTrade): number | null {
+  const raw = row.metadata?.confidence_score;
+  if (raw === null || raw === undefined) return null;
+  const score = Number(raw);
+  return Number.isFinite(score) ? score : null;
+}
+
 interface GroupStats {
   key: string;
   label: string;
@@ -97,6 +104,7 @@ interface GroupStats {
   avgPeak: number;
   avgHold: number;
   capture: number | null;
+  confidence: number | null;
   winRate: number;
 }
 
@@ -120,6 +128,7 @@ function buildGroupStats(rows: PaperFuturesTrade[], keyFor: (row: PaperFuturesTr
         ? Math.round(closed.reduce((sum, row) => sum + holdSeconds(row), 0) / closed.length)
         : 0;
       const captures = closed.map(capturePct).filter((value): value is number => value !== null);
+      const confidences = bucket.map(confidenceScore).filter((value): value is number => value !== null);
       return {
         key,
         label: labelFor(bucket[0]),
@@ -131,6 +140,7 @@ function buildGroupStats(rows: PaperFuturesTrade[], keyFor: (row: PaperFuturesTr
         avgPeak,
         avgHold,
         capture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
+        confidence: confidences.length ? confidences.reduce((sum, value) => sum + value, 0) / confidences.length : null,
         winRate: closed.length ? (wins / closed.length) * 100 : 0,
       };
     })
@@ -183,6 +193,7 @@ export default function PaperFuturesPage() {
     const captures = closed.map(capturePct).filter((value): value is number => value !== null);
     const openRows = filteredRows.filter((r) => r.status === 'open');
     const leverages = Array.from(new Set(filteredRows.map((r) => `${Number(r.leverage).toFixed(0)}x`))).join(', ') || '-';
+    const confidences = filteredRows.map(confidenceScore).filter((value): value is number => value !== null);
 
     return {
       total: filteredRows.length,
@@ -196,6 +207,7 @@ export default function PaperFuturesPage() {
       avgCapture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
       avgHold: closed.length ? Math.round(closed.reduce((sum, row) => sum + holdSeconds(row), 0) / closed.length) : 0,
       leverages,
+      avgConfidence: confidences.length ? confidences.reduce((sum, value) => sum + value, 0) / confidences.length : null,
     };
   }, [filteredRows]);
 
@@ -256,7 +268,7 @@ export default function PaperFuturesPage() {
         </div>
       </div>
 
-      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-8">
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-9">
         {[
           ['Net P&L', money(stats.net), signedClass(stats.net)],
           ['Gross', money(stats.gross), signedClass(stats.gross)],
@@ -266,6 +278,7 @@ export default function PaperFuturesPage() {
           ['Open', `${stats.open}`, stats.open ? 'text-sky-300' : 'text-zinc-300'],
           ['Avg Peak', pct(stats.peakAvg), 'text-emerald-300'],
           ['Leverage', stats.leverages, 'text-violet-200'],
+          ['Confidence', stats.avgConfidence === null ? '-' : `${stats.avgConfidence.toFixed(0)}`, 'text-cyan-200'],
         ].map(([label, value, valueClass]) => (
           <div key={label} className="rounded-md border border-zinc-800 bg-[#0d0e12] p-3 shadow-sm shadow-black">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
@@ -315,13 +328,14 @@ export default function PaperFuturesPage() {
           <div className="p-5 text-sm text-zinc-400">No paper futures rows in this window.</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1280px] text-left text-sm">
+            <table className="w-full min-w-[1360px] text-left text-sm">
               <thead className="border-b border-zinc-800 bg-[#15161a] text-[10px] uppercase tracking-wider text-zinc-400">
                 <tr>
                   <th className="px-4 py-3">Time</th>
                   <th className="px-4 py-3">Pair</th>
                   <th className="px-4 py-3">Dir</th>
                   <th className="px-4 py-3">Setup</th>
+                  <th className="px-4 py-3 text-right">Conf</th>
                   <th className="px-4 py-3 text-right">Lev</th>
                   <th className="px-4 py-3 text-right">Entry</th>
                   <th className="px-4 py-3 text-right">Exit/Mark</th>
@@ -341,6 +355,7 @@ export default function PaperFuturesPage() {
                 {filteredRows.map((row) => {
                   const mark = row.exit_price ?? row.current_price;
                   const cap = capturePct(row);
+                  const confidence = confidenceScore(row);
                   return (
                     <tr key={row.id} className="border-b border-zinc-900 text-zinc-100 last:border-0 hover:bg-zinc-900/55">
                       <td className="px-4 py-3 font-mono text-xs text-zinc-300">
@@ -357,6 +372,7 @@ export default function PaperFuturesPage() {
                           {setupLabel(row.setup_type)}
                         </span>
                       </td>
+                      <td className="px-4 py-3 text-right font-mono text-cyan-200">{confidence === null ? '-' : confidence.toFixed(0)}</td>
                       <td className="px-4 py-3 text-right font-mono text-violet-200">{Number(row.leverage).toFixed(0)}x</td>
                       <td className="px-4 py-3 text-right font-mono">{Number(row.entry_price).toFixed(2)}</td>
                       <td className="px-4 py-3 text-right font-mono">{mark ? Number(mark).toFixed(2) : '-'}</td>
@@ -413,7 +429,7 @@ function PerformancePanel({ title, rows }: { title: string; rows: GroupStats[] }
               <Metric label="Trades" value={row.trades.toString()} />
               <Metric label="Win" value={`${row.winRate.toFixed(0)}%`} tone={row.winRate >= 50 ? 'good' : 'bad'} />
               <Metric label="Peak" value={pct(row.avgPeak)} tone="good" />
-              <Metric label="Capture" value={row.capture === null ? '-' : pct(row.capture)} tone={(row.capture ?? 0) >= 50 ? 'good' : 'warn'} />
+              <Metric label="Conf" value={row.confidence === null ? '-' : row.confidence.toFixed(0)} tone={(row.confidence ?? 0) >= 76 ? 'good' : 'warn'} />
               <Metric label="Hold" value={holdTime(row.avgHold)} />
             </div>
           </div>

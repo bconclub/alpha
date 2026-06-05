@@ -15,6 +15,10 @@ from alpha.db import Database
 from alpha.utils import setup_logger
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 class PaperFuturesStrategy(Protocol):
     pair: str
     setup_type: str
@@ -46,9 +50,10 @@ class BasePaperFutures:
     SETUP_TYPE = "PAPER_BASE"
     TIMEFRAME = "5m"
     CHECK_INTERVAL_SEC = 30
-    PAPER_ACCOUNT_USD = 100.0
+    PAPER_ACCOUNT_USD = 50.0
     ALLOC_PCT = 0.25
-    LEVERAGE = 5.0
+    BASE_LEVERAGE = 5.0
+    MAX_LEVERAGE = 100.0
     FEE_RATE = 0.0005
     MAX_HOLD_SEC = 45 * 60
     STOP_PCT = -6.0
@@ -67,7 +72,9 @@ class BasePaperFutures:
         self._trade_id: int | None = None
         self._direction: str | None = None
         self._entry_price = 0.0
+        self._leverage = self.BASE_LEVERAGE
         self._peak_pnl_pct = 0.0
+        self._entry_metadata: dict[str, Any] = {}
         self._opened_mono = 0.0
         self._last_signal_key: str | None = None
         self._last_close_mono = 0.0
@@ -172,8 +179,10 @@ class BasePaperFutures:
     ) -> None:
         if not self.db.is_connected:
             return
+        confidence = _clamp(float(metadata.get("confidence_score") or 55.0), 0.0, 100.0)
+        leverage = self._leverage_for_confidence(confidence)
         margin = self.PAPER_ACCOUNT_USD * self.ALLOC_PCT
-        notional = margin * self.LEVERAGE
+        notional = margin * leverage
         now_iso = datetime.now(timezone.utc).isoformat()
         row = {
             "pair": self.pair,
@@ -186,13 +195,15 @@ class BasePaperFutures:
             "paper_account_usd": self.PAPER_ACCOUNT_USD,
             "margin_usd": round(margin, 8),
             "notional_usd": round(notional, 8),
-            "leverage": self.LEVERAGE,
+            "leverage": leverage,
             "opened_at": now_iso,
             "updated_at": now_iso,
             "metadata": {
                 "source": "independent_paper_strategy",
                 "strategy": self.SETUP_TYPE,
                 "signal_key": signal_key,
+                "confidence_score": round(confidence, 1),
+                "leverage_model": "confidence_ladder_v1",
                 **metadata,
             },
         }
@@ -202,23 +213,50 @@ class BasePaperFutures:
         self._trade_id = trade_id
         self._direction = direction
         self._entry_price = entry_price
+        self._leverage = leverage
         self._peak_pnl_pct = 0.0
+        self._entry_metadata = {
+            "source": "independent_paper_strategy",
+            "strategy": self.SETUP_TYPE,
+            "signal_key": signal_key,
+            "confidence_score": round(confidence, 1),
+            "leverage_model": "confidence_ladder_v1",
+            **metadata,
+        }
         self._opened_mono = asyncio.get_running_loop().time()
         self._last_signal_key = signal_key
         self.logger.info(
-            "%s_OPEN id=%s %s %s entry=%.2f",
+            "%s_OPEN id=%s %s %s entry=%.2f lev=%.0fx conf=%.1f",
             self.SETUP_TYPE,
             trade_id,
             self.pair,
             direction.upper(),
             entry_price,
+            leverage,
+            confidence,
         )
+
+    def _leverage_for_confidence(self, confidence: float) -> float:
+        """Map setup quality to modeled futures leverage.
+
+        This deliberately uses broad buckets so paper results reveal whether
+        higher leverage improves edge or just amplifies noise.
+        """
+        if confidence >= 92:
+            return min(100.0, self.MAX_LEVERAGE)
+        if confidence >= 84:
+            return min(50.0, self.MAX_LEVERAGE)
+        if confidence >= 76:
+            return min(25.0, self.MAX_LEVERAGE)
+        if confidence >= 66:
+            return min(10.0, self.MAX_LEVERAGE)
+        return self.BASE_LEVERAGE
 
     def _pnl_pct(self, price: float) -> float:
         if self._entry_price <= 0:
             return 0.0
         mult = 1.0 if self._direction == "long" else -1.0
-        return _pct_move(self._entry_price, price) * mult * self.LEVERAGE
+        return _pct_move(self._entry_price, price) * mult * self._leverage
 
     async def _mark_open(self, price: float) -> None:
         if not self._trade_id:
@@ -242,7 +280,7 @@ class BasePaperFutures:
             return
         pnl_pct = self._pnl_pct(exit_price)
         margin = self.PAPER_ACCOUNT_USD * self.ALLOC_PCT
-        notional = margin * self.LEVERAGE
+        notional = margin * self._leverage
         gross = margin * pnl_pct / 100.0
         fees = notional * self.FEE_RATE * 2
         net = gross - fees
@@ -262,8 +300,7 @@ class BasePaperFutures:
                 "exit_reason": reason,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {
-                    "source": "independent_paper_strategy",
-                    "strategy": self.SETUP_TYPE,
+                    **self._entry_metadata,
                     **metadata,
                 },
             },
@@ -282,7 +319,9 @@ class BasePaperFutures:
         self._trade_id = None
         self._direction = None
         self._entry_price = 0.0
+        self._leverage = self.BASE_LEVERAGE
         self._peak_pnl_pct = 0.0
+        self._entry_metadata = {}
         self._opened_mono = 0.0
         self._last_close_mono = asyncio.get_running_loop().time()
 
@@ -320,16 +359,32 @@ class DonchianPaperFutures(BasePaperFutures):
         close = float(signal[4])
         candle_ts = int(signal[0])
         mid = (upper + lower) / 2.0
+        channel_width_pct = _pct_move(lower, upper) if lower > 0 else 0.0
         metadata = {
             "timeframe": self.TIMEFRAME,
             "channel_len": self.CHANNEL_LEN,
             "upper": upper,
             "lower": lower,
             "mid": mid,
+            "channel_width_pct": channel_width_pct,
         }
         if close > upper:
+            breakout_pct = _pct_move(upper, close)
+            metadata.update(
+                {
+                    "breakout_pct": breakout_pct,
+                    "confidence_score": _clamp(68.0 + breakout_pct * 45.0 + min(channel_width_pct, 2.0) * 2.0, 55.0, 94.0),
+                },
+            )
             return "long", f"{candle_ts}:long", metadata
         if close < lower:
+            breakout_pct = abs(_pct_move(lower, close))
+            metadata.update(
+                {
+                    "breakout_pct": breakout_pct,
+                    "confidence_score": _clamp(68.0 + breakout_pct * 45.0 + min(channel_width_pct, 2.0) * 2.0, 55.0, 94.0),
+                },
+            )
             return "short", f"{candle_ts}:short", metadata
         return None
 
@@ -384,15 +439,19 @@ class EmaPullbackPaperFutures(BasePaperFutures):
         prev_close = closes[-2]
         candle_ts = int(closed[-1][0])
         trend_gap = _pct_move(ema21, ema8)
+        follow_through_pct = abs(_pct_move(prev_close, close))
         metadata = {
             "timeframe": self.TIMEFRAME,
             "ema8": ema8,
             "ema21": ema21,
             "trend_gap_pct": trend_gap,
+            "follow_through_pct": follow_through_pct,
         }
         if ema8 > ema21 and close > ema21 and lows[-1] <= ema8 and close > prev_close:
+            metadata["confidence_score"] = _clamp(62.0 + abs(trend_gap) * 12.0 + follow_through_pct * 18.0, 50.0, 88.0)
             return "long", f"{candle_ts}:long", metadata
         if ema8 < ema21 and close < ema21 and highs[-1] >= ema8 and close < prev_close:
+            metadata["confidence_score"] = _clamp(62.0 + abs(trend_gap) * 12.0 + follow_through_pct * 18.0, 50.0, 88.0)
             return "short", f"{candle_ts}:short", metadata
         return None
 
@@ -455,8 +514,18 @@ class MomentumImpulsePaperFutures(BasePaperFutures):
             "ema9": ema9,
         }
         if move_3m >= self.MOVE_3M_PCT and vol_ratio >= self.VOL_RATIO_MIN and closes[-1] > ema9:
+            metadata["confidence_score"] = _clamp(
+                64.0 + (move_3m - self.MOVE_3M_PCT) * 70.0 + (vol_ratio - self.VOL_RATIO_MIN) * 12.0,
+                55.0,
+                96.0,
+            )
             return "long", f"{candle_ts}:long", metadata
         if move_3m <= -self.MOVE_3M_PCT and vol_ratio >= self.VOL_RATIO_MIN and closes[-1] < ema9:
+            metadata["confidence_score"] = _clamp(
+                64.0 + (abs(move_3m) - self.MOVE_3M_PCT) * 70.0 + (vol_ratio - self.VOL_RATIO_MIN) * 12.0,
+                55.0,
+                96.0,
+            )
             return "short", f"{candle_ts}:short", metadata
         return None
 
@@ -526,6 +595,7 @@ class SignalMixPaperFutures(BasePaperFutures):
             "trend_15m": state.get("trend_15m"),
             "reason": state.get("reason"),
             "skip_reason": state.get("skip_reason"),
+            "confidence_score": _clamp(55.0 + strength * 8.0 + abs(momentum_60s) * 120.0, 55.0, 96.0),
         }
         return direction, f"{signal_bucket}:{direction}:{strength}", metadata
 
