@@ -25,6 +25,7 @@ from alpha.market_analyzer import MarketAnalyzer
 from alpha.price_feed import PriceFeed
 from alpha.risk_manager import RiskManager
 from alpha.paper_futures import PaperFuturesStrategy, build_paper_futures_strategies
+from alpha.paper_options import BasePaperOptions, build_paper_options_strategies
 from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
@@ -57,6 +58,10 @@ class AlphaBot:
         self._options_strategies: dict[str, OptionsScalpStrategy] = {}
         # Independent paper futures strategies: pair -> paper-only strategy lanes
         self._paper_futures_strategies: dict[str, list[PaperFuturesStrategy]] = {}
+        # Independent paper OPTIONS strategies: pair -> buy-only option lanes
+        self._paper_options_strategies: dict[str, list[BasePaperOptions]] = {}
+        # Paper lab universe — BTC + ETH only.
+        self.paper_pairs: list[str] = []
 
         # PAPER-ONLY MODE: when on, NO live orders are ever placed (live options
         # + live scalp entries disabled). Only the paper lab runs. Durable across
@@ -142,6 +147,24 @@ class AlphaBot:
         if exchange:
             return self._scalp_strategies.get(f"{exchange}:{pair}")
         return self._scalp_strategies.get(f"delta:{pair}")
+
+    def _paper_btc_eth_pairs(self) -> list[str]:
+        """Paper lab universe: BTC + ETH underlying perps only."""
+        candidates = list(dict.fromkeys(
+            (config.delta.options_pairs or []) + (self.delta_pairs or [])
+        ))
+        wanted = [p for p in candidates if p.split("/")[0] in ("BTC", "ETH")]
+        if not wanted:
+            wanted = ["BTC/USD:USD", "ETH/USD:USD"]
+        # de-dupe by base asset, keep BTC first then ETH
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for base in ("BTC", "ETH"):
+            for p in wanted:
+                if p.split("/")[0] == base and base not in seen:
+                    ordered.append(p)
+                    seen.add(base)
+        return ordered
 
     async def _select_top_delta_futures_pairs(self, limit: int = 5) -> list[str]:
         """Pick the most liquid active Delta USD perpetuals for paper futures.
@@ -268,7 +291,9 @@ class AlphaBot:
         )
 
         if self.delta:
-            self.paper_futures_pairs = await self._select_top_delta_futures_pairs(limit=5)
+            # Paper lab is BTC + ETH only (futures + options).
+            self.paper_pairs = self._paper_btc_eth_pairs()
+            self.paper_futures_pairs = self.paper_pairs
 
         # Register Delta scalp strategies (provide market signals to options)
         if self.delta:
@@ -318,6 +343,17 @@ class AlphaBot:
                     self.delta,
                     self.db,
                     self._scalp_strategies.get(f"delta:{pair}"),
+                )
+
+        # Independent paper OPTIONS lab (buy-only, BTC/ETH). Reads the real
+        # Delta option chain + premiums; never places orders.
+        if self.delta and self.delta_options:
+            for pair in self.paper_pairs:
+                self._paper_options_strategies[pair] = build_paper_options_strategies(
+                    pair,
+                    self.delta_options,
+                    self.delta,
+                    self.db,
                 )
 
         # PAPER-ONLY: hard-block every live entry path via the risk manager so a
@@ -375,6 +411,24 @@ class AlphaBot:
                 paper_started,
                 paper_total,
                 ", ".join(self.paper_futures_pairs),
+            )
+
+        # Start paper OPTIONS lanes (buy-only, BTC/ETH)
+        opt_started = 0
+        opt_total = sum(len(s) for s in self._paper_options_strategies.values())
+        for pair, opt_lanes in self._paper_options_strategies.items():
+            if not self._delta_enabled:
+                logger.info("Skipping paper options %s — delta exchange disabled", pair)
+                continue
+            for lane in opt_lanes:
+                await lane.start()
+                opt_started += 1
+        if self._paper_options_strategies:
+            logger.info(
+                "Paper OPTIONS lab started on %d/%d lanes (%s)",
+                opt_started,
+                opt_total,
+                ", ".join(self.paper_pairs),
             )
 
         # ── GPFC #48: merge duplicate open rows for the same symbol ──
@@ -592,6 +646,10 @@ class AlphaBot:
             for paper in paper_strategies:
                 if paper.is_active:
                     stop_tasks.append(paper.stop())
+        for pair, opt_lanes in self._paper_options_strategies.items():
+            for lane in opt_lanes:
+                if lane.is_active:
+                    stop_tasks.append(lane.stop())
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
 
@@ -1402,6 +1460,10 @@ class AlphaBot:
                     for paper in paper_strategies:
                         if paper.is_active:
                             stop_tasks.append(paper.stop())
+                for pair, opt_lanes in self._paper_options_strategies.items():
+                    for lane in opt_lanes:
+                        if lane.is_active:
+                            stop_tasks.append(lane.stop())
                 if stop_tasks:
                     await asyncio.gather(*stop_tasks, return_exceptions=True)
                 await self.alerts.send_command_confirmation("pause")
@@ -1409,22 +1471,34 @@ class AlphaBot:
 
             elif command == "resume":
                 force = bool(params.get("force", False))
-                self.risk_manager.unpause(force=force)
-                await self._analysis_cycle()  # re-evaluate and start strategies
-                # Restart scalp + options overlays + paper futures
-                for pair, scalp in self._scalp_strategies.items():
-                    if not scalp.is_active:
-                        await scalp.start()
-                for pair, opts in self._options_strategies.items():
-                    if not opts.is_active:
-                        await opts.start()
+                # Restart paper lab lanes regardless of mode.
                 for pair, paper_strategies in self._paper_futures_strategies.items():
                     for paper in paper_strategies:
                         if not paper.is_active and self._delta_enabled:
                             await paper.start()
-                label = "force_resume" if force else "resume"
-                await self.alerts.send_command_confirmation(label)
-                result_msg = "Bot force-resumed (win-rate bypass active)" if force else "Bot resumed"
+                for pair, opt_lanes in self._paper_options_strategies.items():
+                    for lane in opt_lanes:
+                        if not lane.is_active and self._delta_enabled:
+                            await lane.start()
+                if self.paper_only:
+                    # PAPER-ONLY: never bring live trading back. Keep is_paused on.
+                    self.risk_manager.is_paused = True
+                    self.risk_manager._pause_reason = "PAPER-ONLY mode (no live trading)"
+                    await self.alerts.send_command_confirmation("resume")
+                    result_msg = "Paper lab resumed (PAPER-ONLY: live stays off)"
+                else:
+                    self.risk_manager.unpause(force=force)
+                    await self._analysis_cycle()  # re-evaluate and start strategies
+                    # Restart scalp + options overlays (live)
+                    for pair, scalp in self._scalp_strategies.items():
+                        if not scalp.is_active:
+                            await scalp.start()
+                    for pair, opts in self._options_strategies.items():
+                        if not opts.is_active:
+                            await opts.start()
+                    label = "force_resume" if force else "resume"
+                    await self.alerts.send_command_confirmation(label)
+                    result_msg = "Bot force-resumed (win-rate bypass active)" if force else "Bot resumed"
 
             elif command == "force_strategy":
                 # Only scalp and options_scalp are active — force_strategy is a no-op
@@ -1498,6 +1572,12 @@ class AlphaBot:
                                 tasks.append(paper.start())
                             elif not enabled and paper.is_active:
                                 tasks.append(paper.stop())
+                    for pair, opt_lanes in self._paper_options_strategies.items():
+                        for lane in opt_lanes:
+                            if enabled and not lane.is_active:
+                                tasks.append(lane.start())
+                            elif not enabled and lane.is_active:
+                                tasks.append(lane.stop())
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 result_msg = f"{exchange.title()} {'enabled' if enabled else 'disabled'} ({len(tasks)} strategies)"

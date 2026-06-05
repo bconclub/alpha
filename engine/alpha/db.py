@@ -29,10 +29,12 @@ class Database:
     TABLE_ACTIVITY_LOG = "activity_log"
     TABLE_CHANGELOG = "changelog"
     TABLE_PAPER_FUTURES = "paper_futures_trades"
+    TABLE_PAPER_OPTIONS = "paper_options_trades"
 
     def __init__(self) -> None:
         self._client: Client | None = None
         self._paper_futures_disabled_until: float = 0.0
+        self._paper_options_disabled_until: float = 0.0
 
     async def connect(self) -> None:
         url = config.supabase.url
@@ -320,6 +322,61 @@ class Database:
             )
         except Exception as exc:
             logger.warning("paper_futures UPDATE FAILED id=%s: %s", trade_id, exc)
+
+    async def log_paper_options_trade(self, data: dict[str, Any]) -> int | None:
+        """Insert a buy-only paper OPTIONS trade and return its row ID."""
+        if not self.is_connected:
+            return None
+        if time.monotonic() < self._paper_options_disabled_until:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table(self.TABLE_PAPER_OPTIONS)  # type: ignore[union-attr]
+                    .insert(data)
+                    .execute()
+                ),
+            )
+            row_id = result.data[0].get("id") if result.data else None
+            logger.info(
+                "Paper options logged (id=%s): %s %s %s @ %s",
+                row_id,
+                data.get("direction"),
+                data.get("option_symbol"),
+                data.get("setup_type"),
+                data.get("entry_premium"),
+            )
+            return row_id
+        except Exception as exc:
+            if "paper_options_trades" in str(exc) and ("schema cache" in str(exc) or "PGRST205" in str(exc)):
+                self._paper_options_disabled_until = time.monotonic() + 300
+                logger.warning(
+                    "paper_options_trades missing in Supabase; paper options logging paused for 5m. "
+                    "Run supabase/migrations/20260605_create_paper_options_trades.sql"
+                )
+                return None
+            logger.error("paper_options INSERT FAILED: %s | data=%s", exc, data)
+            return None
+
+    async def update_paper_options_trade(self, trade_id: int, data: dict[str, Any]) -> None:
+        """Update an existing paper OPTIONS trade."""
+        if not self.is_connected:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table(self.TABLE_PAPER_OPTIONS)  # type: ignore[union-attr]
+                    .update(data)
+                    .eq("id", trade_id)
+                    .execute()
+                ),
+            )
+        except Exception as exc:
+            logger.warning("paper_options UPDATE FAILED id=%s: %s", trade_id, exc)
 
     async def _fetch_existing_peak_pnl(self, trade_id: int) -> float | None:
         """Return the current peak_pnl for a trade row, or None if unavailable.

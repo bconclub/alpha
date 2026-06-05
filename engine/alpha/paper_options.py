@@ -1,0 +1,661 @@
+"""Independent paper OPTIONS strategy lab (buy-only, price-action, ride-the-wave).
+
+These strategies never place exchange orders. They read the REAL Delta option
+chain + live premiums for BTC/ETH, "buy" a call (up view) or put (down view) on
+a genuine underlying price-action move, then RIDE THE WAVE — holding through
+premium noise while the underlying structure supports the trade, and exiting
+only when the underlying move is over (or a hard catastrophic stop / expiry).
+
+No time-based decision gates: no min-hold, no cooldown, no fixed scalp timer.
+The only clock is the contract's own expiry (options settle — that's reality,
+not a strategy choice).
+
+Rows are written to paper_options_trades so we can compare option behaviour
+against paper futures before risking any real capital.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+from alpha.db import Database
+from alpha.paper_futures import _clamp, _ema, _pct_move
+from alpha.utils import setup_logger
+
+# Delta Exchange option contract multipliers (underlying units per contract).
+CONTRACT_MULTIPLIER: dict[str, float] = {"BTC": 0.001, "ETH": 0.01}
+
+# How close to expiry we force-close (options settle; this is a contract reality).
+PRE_EXPIRY_CLOSE_SEC = 30 * 60
+# Skip strikes whose nearest expiry is sooner than this when opening.
+MIN_EXPIRY_HOURS_FOR_ENTRY = 2.0
+
+
+class PaperOptionChain:
+    """Reads the real Delta option chain for one base asset (BTC/ETH).
+
+    Shared by all paper-option lanes on the same underlying so the chain is
+    scanned once. Never trades — pure read of options_exchange.markets + tickers.
+    """
+
+    REFRESH_SEC = 120.0
+
+    def __init__(self, options_exchange: Any, base_asset: str) -> None:
+        self.options_exchange = options_exchange
+        self.base_asset = base_asset
+        self.logger = setup_logger(f"paper.optchain.{base_asset}")
+        self._chain: list[dict[str, Any]] = []
+        self._expiry: datetime | None = None
+        self._strikes: list[float] = []
+        self._symbol_lookup: dict[tuple[float, str], str] = {}
+        self._last_refresh = 0.0
+
+    def refresh(self) -> None:
+        now = asyncio.get_running_loop().time()
+        if self._chain and now - self._last_refresh < self.REFRESH_SEC:
+            return
+        markets = getattr(self.options_exchange, "markets", None) or {}
+        now_utc = datetime.now(timezone.utc)
+        chain: list[dict[str, Any]] = []
+        for symbol, market in markets.items():
+            try:
+                if market.get("type") != "option":
+                    continue
+                if market.get("base") != self.base_asset:
+                    continue
+                if not market.get("active", True):
+                    continue
+                expiry_ts = market.get("expiry")
+                if expiry_ts is None:
+                    continue
+                expiry_dt = datetime.fromtimestamp(expiry_ts / 1000, tz=timezone.utc)
+                if expiry_dt <= now_utc:
+                    continue
+                chain.append(
+                    {
+                        "symbol": symbol,
+                        "strike": float(market.get("strike", 0) or 0),
+                        "option_type": (market.get("optionType") or "").lower(),
+                        "expiry": expiry_dt,
+                    }
+                )
+            except Exception:
+                continue
+        chain.sort(key=lambda x: (x["expiry"], x["strike"]))
+        self._chain = chain
+        self._last_refresh = now
+        if not chain:
+            self._expiry = None
+            self._strikes = []
+            self._symbol_lookup = {}
+            return
+        # nearest expiry that is at least MIN_EXPIRY_HOURS away if possible
+        expiries = sorted({c["expiry"] for c in chain})
+        chosen = expiries[0]
+        for exp in expiries:
+            if (exp - now_utc).total_seconds() / 3600.0 >= MIN_EXPIRY_HOURS_FOR_ENTRY:
+                chosen = exp
+                break
+        self._expiry = chosen
+        self._strikes = sorted({c["strike"] for c in chain if c["expiry"] == chosen})
+        self._symbol_lookup = {
+            (c["strike"], c["option_type"]): c["symbol"]
+            for c in chain
+            if c["expiry"] == chosen
+        }
+
+    @property
+    def expiry(self) -> datetime | None:
+        return self._expiry
+
+    def seconds_to_expiry(self) -> float:
+        if not self._expiry:
+            return 0.0
+        return (self._expiry - datetime.now(timezone.utc)).total_seconds()
+
+    def atm_strike(self, spot: float) -> float | None:
+        if not self._strikes or spot <= 0:
+            return None
+        return min(self._strikes, key=lambda s: abs(s - spot))
+
+    def pick_strike(self, spot: float, option_type: str, otm_steps: int = 0) -> float | None:
+        """ATM (otm_steps=0) or N steps out-of-the-money."""
+        atm = self.atm_strike(spot)
+        if atm is None:
+            return None
+        if otm_steps <= 0:
+            return atm
+        idx = self._strikes.index(atm)
+        if option_type == "call":
+            idx = min(len(self._strikes) - 1, idx + otm_steps)
+        else:
+            idx = max(0, idx - otm_steps)
+        return self._strikes[idx]
+
+    def symbol_for(self, strike: float, option_type: str) -> str | None:
+        sym = self._symbol_lookup.get((strike, option_type))
+        if sym:
+            return sym
+        if not self._expiry:
+            return None
+        expiry_str = self._expiry.strftime("%y%m%d")
+        cp = "C" if option_type == "call" else "P"
+        return f"{self.base_asset}/USD:USD-{expiry_str}-{int(strike)}-{cp}"
+
+
+class BasePaperOptions:
+    """Base runner + paper ledger for one buy-only option strategy lane."""
+
+    SETUP_TYPE = "PAPER_OPT_BASE"
+    TIMEFRAME = "5m"
+    CHECK_INTERVAL_SEC = 5
+    PAPER_ACCOUNT_USD = 100.0
+    STAKE_USD = 8.0                 # target premium spent per trade (aggressive on $100)
+    OTM_STEPS = 0                   # 0 = ATM; lanes may reach 1 step OTM on strong moves
+    # Ride-the-wave exits (premium %, leverage = 1 since buy-only)
+    HARD_STOP_PCT = -45.0           # thesis dead — catastrophic premium loss
+    TRAIL_ARM_PCT = 40.0            # after a big run, lock it
+    TRAIL_RETRACE_PCT = 0.50        # exit if premium gives back half the peak
+    # Delta options fee model: ~0.03% of underlying notional per side, capped 10% of premium
+    FEE_NOTIONAL_RATE = 0.0003
+    FEE_PREMIUM_CAP = 0.10
+
+    def __init__(
+        self,
+        pair: str,
+        options_exchange: Any,
+        futures_exchange: Any,
+        db: Database,
+        chain: PaperOptionChain,
+        *,
+        logger_name: str,
+    ) -> None:
+        self.pair = pair                       # underlying perp, e.g. BTC/USD:USD
+        self.options_exchange = options_exchange
+        self.futures_exchange = futures_exchange
+        self.db = db
+        self.chain = chain
+        self.base_asset = pair.split("/")[0]
+        self.multiplier = CONTRACT_MULTIPLIER.get(self.base_asset, 0.01)
+        self.logger = setup_logger(logger_name)
+        self.setup_type = self.SETUP_TYPE
+        self.is_active = False
+        self._task: asyncio.Task[None] | None = None
+        # open position state
+        self._trade_id: int | None = None
+        self._option_symbol: str | None = None
+        self._option_type: str | None = None   # call | put
+        self._direction: str | None = None     # long | short (underlying view)
+        self._strike = 0.0
+        self._entry_premium = 0.0
+        self._contracts = 0.0
+        self._stake = 0.0
+        self._peak_pnl_pct = 0.0
+        self._entry_metadata: dict[str, Any] = {}
+        self._last_signal_key: str | None = None
+
+    # ── lifecycle ──────────────────────────────────────────────────────
+    async def start(self) -> None:
+        if self.is_active:
+            return
+        self.is_active = True
+        self.logger.info("Starting paper OPTIONS lane: %s %s", self.SETUP_TYPE, self.pair)
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        self.is_active = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _run(self) -> None:
+        while self.is_active:
+            try:
+                await self.check()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                self.logger.exception("Paper options check failed")
+            await asyncio.sleep(self.CHECK_INTERVAL_SEC)
+
+    # ── main tick ──────────────────────────────────────────────────────
+    async def check(self) -> None:
+        # Ensure the options market map is loaded so the chain can be read.
+        if not getattr(self.options_exchange, "markets", None):
+            try:
+                await self.options_exchange.load_markets()
+            except Exception:
+                return
+        self.chain.refresh()
+        rows = await self._fetch_ohlcv()
+        spot = await self._fetch_spot(rows)
+        if spot <= 0:
+            return
+
+        if self._trade_id:
+            premium = await self._fetch_premium(self._option_symbol, side="mark")
+            if premium > 0:
+                await self._mark_open(premium)
+                reason = self._exit_reason(premium, rows, spot)
+                if reason:
+                    await self._close(premium, reason)
+            return
+
+        decision = self._entry_decision(rows, spot)
+        if decision is None:
+            return
+        direction, signal_key, meta = decision
+        if self._last_signal_key == signal_key:
+            return
+        await self._try_open(direction, spot, signal_key, meta)
+
+    # ── data ───────────────────────────────────────────────────────────
+    async def _fetch_ohlcv(self) -> list[list[float]]:
+        try:
+            rows = await self.futures_exchange.fetch_ohlcv(self.pair, self.TIMEFRAME, limit=80)
+            return [[float(x) for x in row] for row in rows]
+        except Exception:
+            return []
+
+    async def _fetch_spot(self, rows: list[list[float]]) -> float:
+        try:
+            ticker = await self.futures_exchange.fetch_ticker(self.pair)
+            last = ticker.get("last") or ticker.get("bid")
+            if last:
+                return float(last)
+        except Exception:
+            pass
+        return float(rows[-1][4]) if rows else 0.0
+
+    async def _fetch_premium(self, symbol: str | None, *, side: str) -> float:
+        if not symbol:
+            return 0.0
+        try:
+            t = await self.options_exchange.fetch_ticker(symbol)
+        except Exception:
+            return 0.0
+        info = t.get("info") or {}
+        ask = float(t.get("ask") or 0)
+        bid = float(t.get("bid") or 0)
+        mark = float(t.get("mark") or info.get("mark_price") or 0)
+        last = float(t.get("last") or 0)
+        if side == "ask":
+            return ask or mark or last or bid
+        # mark / mid
+        if mark > 0:
+            return mark
+        if ask > 0 and bid > 0:
+            return (ask + bid) / 2.0
+        return last or ask or bid
+
+    async def _fetch_greeks(self, symbol: str | None) -> dict[str, Any]:
+        if not symbol:
+            return {}
+        try:
+            t = await self.options_exchange.fetch_ticker(symbol)
+        except Exception:
+            return {}
+        info = t.get("info") or {}
+        out: dict[str, Any] = {}
+        for k in ("delta", "gamma", "theta", "vega"):
+            v = info.get(k)
+            if v is not None:
+                try:
+                    out[k] = float(v)
+                except Exception:
+                    pass
+        iv = info.get("mark_vol") or info.get("iv")
+        if iv is not None:
+            try:
+                out["iv"] = float(iv)
+            except Exception:
+                pass
+        out["ask"] = float(t.get("ask") or 0)
+        out["bid"] = float(t.get("bid") or 0)
+        return out
+
+    # ── strategy hooks (override) ──────────────────────────────────────
+    def _entry_decision(self, rows: list[list[float]], spot: float):
+        """Return (direction 'long'/'short', signal_key, metadata) or None."""
+        raise NotImplementedError
+
+    def _underlying_reversed(self, rows: list[list[float]], spot: float) -> bool:
+        """True when the underlying move that justified the trade is over."""
+        return False
+
+    # ── ride-the-wave exit ─────────────────────────────────────────────
+    def _premium_pnl_pct(self, premium: float) -> float:
+        if self._entry_premium <= 0:
+            return 0.0
+        return _pct_move(self._entry_premium, premium)
+
+    def _exit_reason(self, premium: float, rows: list[list[float]], spot: float) -> str:
+        # 1) contract reality: settle before expiry
+        if self.chain.seconds_to_expiry() <= PRE_EXPIRY_CLOSE_SEC:
+            return "pre_expiry"
+        pnl = self._premium_pnl_pct(premium)
+        # 2) catastrophic stop (thesis dead)
+        if pnl <= self.HARD_STOP_PCT:
+            return "hard_stop"
+        # 3) lock a big winner after the wave gave back half its peak
+        if self._peak_pnl_pct >= self.TRAIL_ARM_PCT:
+            floor = self._peak_pnl_pct * (1.0 - self.TRAIL_RETRACE_PCT)
+            if pnl <= floor:
+                return "wave_trail"
+        # 4) underlying move is over — exit and bank the wave (price-action exit)
+        if self._underlying_reversed(rows, spot):
+            return "underlying_reversed"
+        return ""
+
+    # ── open / mark / close ────────────────────────────────────────────
+    async def _try_open(self, direction: str, spot: float, signal_key: str, meta: dict[str, Any]) -> None:
+        if not self.db.is_connected:
+            return
+        if self.chain.seconds_to_expiry() <= PRE_EXPIRY_CLOSE_SEC:
+            return
+        option_type = "call" if direction == "long" else "put"
+        otm = int(meta.get("otm_steps", self.OTM_STEPS) or 0)
+        strike = self.chain.pick_strike(spot, option_type, otm_steps=otm)
+        if strike is None:
+            return
+        symbol = self.chain.symbol_for(strike, option_type)
+        if not symbol:
+            return
+        entry_premium = await self._fetch_premium(symbol, side="ask")
+        if entry_premium <= 0:
+            return
+        per_contract_usd = entry_premium * self.multiplier
+        if per_contract_usd <= 0:
+            return
+        contracts = max(1.0, round(self.STAKE_USD / per_contract_usd))
+        stake = entry_premium * contracts * self.multiplier
+        notional = contracts * spot * self.multiplier
+        greeks = await self._fetch_greeks(symbol)
+        confidence = _clamp(float(meta.get("confidence_score") or 60.0), 0.0, 100.0)
+        moneyness = "ATM" if otm == 0 else f"OTM{otm}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        metadata = {
+            "source": "paper_options_lab",
+            "strategy": self.SETUP_TYPE,
+            "signal_key": signal_key,
+            "confidence_score": round(confidence, 1),
+            "hard_stop_pct": self.HARD_STOP_PCT,
+            "trail_arm_pct": self.TRAIL_ARM_PCT,
+            "spot_at_entry": round(spot, 4),
+            "greeks": greeks,
+            **meta,
+        }
+        row = {
+            "pair": self.pair,
+            "base_asset": self.base_asset,
+            "option_symbol": symbol,
+            "option_type": option_type,
+            "strike": float(strike),
+            "expiry": self.chain.expiry.strftime("%y%m%d") if self.chain.expiry else None,
+            "moneyness": moneyness,
+            "setup_type": self.SETUP_TYPE,
+            "direction": direction,
+            "status": "open",
+            "opened_at": now_iso,
+            "updated_at": now_iso,
+            "entry_premium": round(entry_premium, 8),
+            "current_premium": round(entry_premium, 8),
+            "spot_at_entry": round(spot, 8),
+            "contracts": contracts,
+            "option_multiplier": self.multiplier,
+            "paper_account_usd": self.PAPER_ACCOUNT_USD,
+            "stake_usd": round(stake, 8),
+            "notional_usd": round(notional, 8),
+            "peak_pnl_pct": 0.0,
+            "metadata": metadata,
+        }
+        trade_id = await self.db.log_paper_options_trade(row)
+        if not trade_id:
+            return
+        self._trade_id = int(trade_id)
+        self._option_symbol = symbol
+        self._option_type = option_type
+        self._direction = direction
+        self._strike = float(strike)
+        self._entry_premium = entry_premium
+        self._contracts = contracts
+        self._stake = stake
+        self._peak_pnl_pct = 0.0
+        self._entry_metadata = metadata
+        self._last_signal_key = signal_key
+        self.logger.info(
+            "%s_OPEN id=%s %s %s %s strike=%s prem=%.4f x%.0f stake=$%.2f conf=%.0f",
+            self.SETUP_TYPE, trade_id, self.pair, direction.upper(), moneyness,
+            strike, entry_premium, contracts, stake, confidence,
+        )
+
+    async def _mark_open(self, premium: float) -> None:
+        if not self._trade_id:
+            return
+        pnl = self._premium_pnl_pct(premium)
+        self._peak_pnl_pct = max(self._peak_pnl_pct, pnl)
+        await self.db.update_paper_options_trade(
+            self._trade_id,
+            {
+                "current_premium": round(premium, 8),
+                "pnl_pct": round(pnl, 4),
+                "pnl_usd": round(self._stake * pnl / 100.0, 8),
+                "peak_pnl_pct": round(self._peak_pnl_pct, 4),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    def _fees(self, notional: float) -> float:
+        per_side = min(self.FEE_PREMIUM_CAP * self._stake, self.FEE_NOTIONAL_RATE * notional)
+        return per_side * 2.0
+
+    async def _close(self, exit_premium: float, reason: str) -> None:
+        if not self._trade_id:
+            return
+        pnl = self._premium_pnl_pct(exit_premium)
+        gross = self._stake * pnl / 100.0
+        notional = self._contracts * (self._entry_metadata.get("spot_at_entry") or 0) * self.multiplier
+        fees = self._fees(notional)
+        net = gross - fees
+        trade_id = self._trade_id
+        await self.db.update_paper_options_trade(
+            trade_id,
+            {
+                "status": "closed",
+                "exit_premium": round(exit_premium, 8),
+                "current_premium": round(exit_premium, 8),
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "pnl_pct": round(pnl, 4),
+                "gross_pnl_usd": round(gross, 8),
+                "fees_usd": round(fees, 8),
+                "pnl_usd": round(net, 8),
+                "peak_pnl_pct": round(max(self._peak_pnl_pct, pnl), 4),
+                "exit_reason": reason,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        self.logger.info(
+            "%s_CLOSE id=%s %s exit=%.4f reason=%s net=$%+.3f pnl=%+.1f%% peak=%+.1f%%",
+            self.SETUP_TYPE, trade_id, self.pair, exit_premium, reason, net, pnl, self._peak_pnl_pct,
+        )
+        self._trade_id = None
+        self._option_symbol = None
+        self._option_type = None
+        self._direction = None
+        self._strike = 0.0
+        self._entry_premium = 0.0
+        self._contracts = 0.0
+        self._stake = 0.0
+        self._peak_pnl_pct = 0.0
+        self._entry_metadata = {}
+
+
+# ── strategy lanes (price-action on the underlying → buy call/put) ─────────
+
+class TrendRideOptions(BasePaperOptions):
+    """Strong EMA trend → buy ATM in trend direction and ride until trend breaks."""
+
+    SETUP_TYPE = "OPT_TREND_RIDE"
+    TIMEFRAME = "5m"
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 30:
+            return None
+        closed = rows[:-1]
+        closes = [r[4] for r in closed]
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        close = closes[-1]
+        ts = int(closed[-1][0])
+        gap = _pct_move(ema21, ema8)
+        if ema8 > ema21 and close > ema8 and gap > 0.05:
+            conf = _clamp(64 + abs(gap) * 14, 55, 92)
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "ema8": ema8, "ema21": ema21, "trend_gap_pct": gap, "confidence_score": conf}
+        if ema8 < ema21 and close < ema8 and gap < -0.05:
+            conf = _clamp(64 + abs(gap) * 14, 55, 92)
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "ema8": ema8, "ema21": ema21, "trend_gap_pct": gap, "confidence_score": conf}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 30:
+            return False
+        closes = [r[4] for r in rows[:-1]]
+        ema21 = _ema(closes[-55:], 21)
+        close = closes[-1]
+        if self._direction == "long":
+            return close < ema21
+        return close > ema21
+
+
+class DonchianBreakoutOptions(BasePaperOptions):
+    """20-bar channel breakout → buy in breakout direction, ride to mid-revert."""
+
+    SETUP_TYPE = "OPT_DONCHIAN"
+    TIMEFRAME = "5m"
+    CHANNEL_LEN = 20
+
+    def _channel(self, rows):
+        closed = rows[:-1]
+        history = closed[-(self.CHANNEL_LEN + 1):-1]
+        upper = max(r[2] for r in history)
+        lower = min(r[3] for r in history)
+        return upper, lower, (upper + lower) / 2.0
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < self.CHANNEL_LEN + 2:
+            return None
+        upper, lower, _mid = self._channel(rows)
+        signal = rows[:-1][-1]
+        close = signal[4]
+        ts = int(signal[0])
+        if close > upper:
+            bp = _pct_move(upper, close)
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "upper": upper, "lower": lower, "breakout_pct": bp, "confidence_score": _clamp(66 + bp * 45, 55, 93)}
+        if close < lower:
+            bp = abs(_pct_move(lower, close))
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "upper": upper, "lower": lower, "breakout_pct": bp, "confidence_score": _clamp(66 + bp * 45, 55, 93)}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < self.CHANNEL_LEN + 2:
+            return False
+        _u, _l, mid = self._channel(rows)
+        close = rows[:-1][-1][4]
+        if self._direction == "long":
+            return close < mid
+        return close > mid
+
+
+class MomentumImpulseOptions(BasePaperOptions):
+    """1m impulse + volume → buy and ride; can reach 1 step OTM on strong moves."""
+
+    SETUP_TYPE = "OPT_MOMENTUM"
+    TIMEFRAME = "1m"
+    MOVE_3M_PCT = 0.16
+    VOL_RATIO_MIN = 1.12
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 30:
+            return None
+        closed = rows[:-1]
+        closes = [r[4] for r in closed]
+        vols = [r[5] for r in closed]
+        ema9 = _ema(closes[-20:], 9)
+        move_3m = _pct_move(closes[-4], closes[-1])
+        avg_vol = sum(vols[-21:-1]) / max(1, len(vols[-21:-1]))
+        vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 0.0
+        ts = int(closed[-1][0])
+        strong = abs(move_3m) >= self.MOVE_3M_PCT * 2
+        if move_3m >= self.MOVE_3M_PCT and vol_ratio >= self.VOL_RATIO_MIN and closes[-1] > ema9:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "move_3m_pct": move_3m, "vol_ratio": vol_ratio, "otm_steps": 1 if strong else 0, "confidence_score": _clamp(64 + (abs(move_3m) - self.MOVE_3M_PCT) * 70, 55, 95)}
+        if move_3m <= -self.MOVE_3M_PCT and vol_ratio >= self.VOL_RATIO_MIN and closes[-1] < ema9:
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "move_3m_pct": move_3m, "vol_ratio": vol_ratio, "otm_steps": 1 if strong else 0, "confidence_score": _clamp(64 + (abs(move_3m) - self.MOVE_3M_PCT) * 70, 55, 95)}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 22:
+            return False
+        closes = [r[4] for r in rows[:-1]]
+        ema9 = _ema(closes[-20:], 9)
+        close = closes[-1]
+        if self._direction == "long":
+            return close < ema9
+        return close > ema9
+
+
+class EmaPullbackOptions(BasePaperOptions):
+    """Trend + pullback-to-EMA8 entry → buy with the trend, ride to EMA21 loss."""
+
+    SETUP_TYPE = "OPT_EMA_PULLBACK"
+    TIMEFRAME = "5m"
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 35:
+            return None
+        closed = rows[:-1]
+        closes = [r[4] for r in closed]
+        lows = [r[3] for r in closed]
+        highs = [r[2] for r in closed]
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        close, prev = closes[-1], closes[-2]
+        ts = int(closed[-1][0])
+        gap = _pct_move(ema21, ema8)
+        ft = abs(_pct_move(prev, close))
+        if ema8 > ema21 and close > ema21 and lows[-1] <= ema8 and close > prev:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "trend_gap_pct": gap, "follow_through_pct": ft, "confidence_score": _clamp(62 + abs(gap) * 12 + ft * 18, 50, 88)}
+        if ema8 < ema21 and close < ema21 and highs[-1] >= ema8 and close < prev:
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "trend_gap_pct": gap, "follow_through_pct": ft, "confidence_score": _clamp(62 + abs(gap) * 12 + ft * 18, 50, 88)}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 35:
+            return False
+        closes = [r[4] for r in rows[:-1]]
+        ema21 = _ema(closes[-55:], 21)
+        close = closes[-1]
+        if self._direction == "long":
+            return close < ema21
+        return close > ema21
+
+
+def build_paper_options_strategies(
+    pair: str,
+    options_exchange: Any,
+    futures_exchange: Any,
+    db: Database,
+) -> list[BasePaperOptions]:
+    """All buy-only paper option lanes for one underlying (BTC/ETH)."""
+    base = pair.split("/")[0]
+    chain = PaperOptionChain(options_exchange, base)
+    return [
+        TrendRideOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.trend.{base}"),
+        DonchianBreakoutOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.donchian.{base}"),
+        MomentumImpulseOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.momentum.{base}"),
+        EmaPullbackOptions(pair, options_exchange, futures_exchange, db, chain, logger_name=f"paper.opt.emapull.{base}"),
+    ]

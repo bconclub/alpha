@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-06 · Paper OPTIONS lab (buy-only, ride-the-wave) + BTC/ETH-only paper @ $100
+
+- `engine/alpha/paper_options.py` (new): buy-only paper options lab. Reads the REAL Delta option chain + live premiums for BTC/ETH, picks ATM (or 1-step OTM on strong moves), "buys" a call (up) or put (down) on a genuine underlying price-action move, then **rides the wave** — holds through premium noise while the underlying structure supports the trade, exits on underlying reversal / hard −45% premium stop / big-run trail / pre-expiry. **No time-based decision gates** (no min-hold, no cooldown). 4 lanes: OPT_TREND_RIDE, OPT_DONCHIAN, OPT_MOMENTUM, OPT_EMA_PULLBACK. Writes `paper_options_trades` with confidence + greeks + price-action context.
+- `db.py`: `log_paper_options_trade` / `update_paper_options_trade` (+ 5-min backoff if the table is missing), `TABLE_PAPER_OPTIONS`.
+- `main.py`: paper lab is now **BTC + ETH only** (was top-5 volume). Builds + starts both paper futures and paper options lanes on BTC/ETH; wired into shutdown/pause/resume/toggle. `resume` in PAPER-ONLY mode restarts only the paper lab and keeps live off.
+- `paper_futures.py`: paper account **$50 → $100**.
+- User-facing: the paper lab now runs BTC/ETH futures AND options side by side on a $100 paper account, aggressively, riding moves — all with no real money. Dashboard rebuild next.
+- (SHA on commit)
+
 ## 2026-06-05 23:55 IST · PAPER-ONLY mode: live trading disabled (durable)
 
 - **Live bot paused** via `bot_commands` (id 314) — stops the real-money bleed immediately.
