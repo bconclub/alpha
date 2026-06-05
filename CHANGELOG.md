@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-06 · Bump paper account $100 → $1,000 (headroom + bigger size)
+
+- Paper account base raised **$100 → $1,000** for both labs so the running balance has plenty of headroom and won't hit zero while we test.
+- `paper_options.py`: `STAKE_USD` $8 → **$80** per trade (scaled 10×, aggressive).
+- `paper_futures.py`: account $1,000 → margin auto-scales to $250/trade (ALLOC 25%).
+- Dashboard API + page default account → $1,000; table column defaults → 1000.
+- Existing rows kept as-is (not rewritten); balance now = $1,000 + cumulative net, so options ≈ $944 and futures ≈ $881 with room to run.
+- User-facing: paper labs keep trading aggressively on a $1,000 bankroll each. `(SHA on commit)`
+
 ## 2026-06-06 · Bring in the strategy canon: VWAP, Supertrend, ORB, MACD (researched)
 
 - Researched the most-used institutional/quant intraday strategies and implemented the proven families as new paper option lanes (buy-only, ride-the-wave exits):

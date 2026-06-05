@@ -284,8 +284,8 @@ class BasePaperOptions:
     SETUP_TYPE = "PAPER_OPT_BASE"
     TIMEFRAME = "5m"
     CHECK_INTERVAL_SEC = 5
-    PAPER_ACCOUNT_USD = 100.0
-    STAKE_USD = 8.0                 # target premium spent per trade (aggressive on $100)
+    PAPER_ACCOUNT_USD = 1000.0
+    STAKE_USD = 80.0                # target premium spent per trade (aggressive on $1000)
     OTM_STEPS = 0                   # 0 = ATM; lanes may reach 1 step OTM on strong moves
     # Ride-the-wave exits (premium %, leverage = 1 since buy-only)
     HARD_STOP_PCT = -45.0           # thesis dead — catastrophic premium loss

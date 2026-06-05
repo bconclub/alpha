@@ -177,7 +177,7 @@ export default function PaperLabPage() {
   const [futures, setFutures] = useState<URow[]>([]);
   const [options, setOptions] = useState<URow[]>([]);
   const [botStatus, setBotStatus] = useState<PaperBotStatus | null>(null);
-  const [paperAccountUsd, setPaperAccountUsd] = useState(100);
+  const [paperAccountUsd, setPaperAccountUsd] = useState(1000);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [instrument, setInstrument] = useState<Instrument>('options');
@@ -197,7 +197,7 @@ export default function PaperLabPage() {
         setFutures(((payload.futures ?? payload.rows ?? []) as Record<string, any>[]).map(mapFutures));
         setOptions(((payload.options ?? []) as Record<string, any>[]).map(mapOptions));
         setBotStatus((payload.botStatus ?? null) as PaperBotStatus | null);
-        setPaperAccountUsd(num(payload.paperAccountUsd) || 100);
+        setPaperAccountUsd(num(payload.paperAccountUsd) || 1000);
       }
     } catch (err) {
       setFutures([]); setOptions([]);

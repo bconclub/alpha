@@ -40,6 +40,6 @@ export async function GET() {
     futures: futuresRes.data ?? [],
     options: optionsRes.data ?? [],
     botStatus: statusRes.data?.[0] ?? null,
-    paperAccountUsd: 100,
+    paperAccountUsd: 1000,
   });
 }
