@@ -4,10 +4,28 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { PaperFuturesTrade } from '@/lib/types';
 
-function money(value?: number | null): string {
+type WindowKey = 'today' | '7d' | '14d' | '28d' | 'all';
+
+const WINDOW_LABELS: Record<WindowKey, string> = {
+  today: 'Today',
+  '7d': '7 days',
+  '14d': '14 days',
+  '28d': '28 days',
+  all: 'All',
+};
+
+const SETUP_LABELS: Record<string, string> = {
+  DONCHIAN_BREAKOUT: 'Donchian',
+  EMA_PULLBACK: 'EMA Pullback',
+  MOMENTUM_IMPULSE: 'Momentum',
+  SIGNAL_MIX: 'Signal Mix',
+  OPTIONS_TWIN: 'Options Twin',
+};
+
+function money(value?: number | null, decimals = 4): string {
   const n = Number(value ?? 0);
   const sign = n > 0 ? '+' : n < 0 ? '-' : '';
-  return `${sign}$${Math.abs(n).toFixed(4)}`;
+  return `${sign}$${Math.abs(n).toFixed(decimals)}`;
 }
 
 function pct(value?: number | null): string {
@@ -16,25 +34,114 @@ function pct(value?: number | null): string {
   return `${sign}${n.toFixed(2)}%`;
 }
 
+function signedClass(value?: number | null): string {
+  const n = Number(value ?? 0);
+  if (n > 0) return 'text-emerald-300';
+  if (n < 0) return 'text-red-300';
+  return 'text-zinc-300';
+}
+
 function shortPair(pair: string): string {
   return pair.replace('/USD:USD', '').replace('/USDT', '');
 }
 
-function holdTime(row: PaperFuturesTrade): string {
+function setupLabel(setup?: string | null): string {
+  if (!setup) return '-';
+  return SETUP_LABELS[setup] || setup.replace(/_/g, ' ');
+}
+
+function holdSeconds(row: PaperFuturesTrade): number {
   const start = new Date(row.opened_at).getTime();
   const end = row.closed_at ? new Date(row.closed_at).getTime() : Date.now();
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return '-';
-  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.max(0, Math.round((end - start) / 1000));
+}
+
+function holdTime(rowOrSeconds: PaperFuturesTrade | number): string {
+  const seconds = typeof rowOrSeconds === 'number' ? rowOrSeconds : holdSeconds(rowOrSeconds);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rem = seconds % 60;
-  return `${minutes}m ${rem}s`;
+  if (minutes < 60) return `${minutes}m ${rem}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function windowStart(key: WindowKey): number {
+  const now = new Date();
+  if (key === 'all') return 0;
+  if (key === 'today') {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return start.getTime();
+  }
+  const days = key === '7d' ? 7 : key === '14d' ? 14 : 28;
+  return now.getTime() - days * 24 * 60 * 60 * 1000;
+}
+
+function capturePct(row: PaperFuturesTrade): number | null {
+  const peak = Number(row.peak_pnl_pct ?? 0);
+  const pnl = Number(row.pnl_pct ?? 0);
+  if (peak <= 0 || row.status !== 'closed') return null;
+  return (pnl / peak) * 100;
+}
+
+interface GroupStats {
+  key: string;
+  label: string;
+  trades: number;
+  closed: number;
+  wins: number;
+  net: number;
+  fees: number;
+  avgPeak: number;
+  avgHold: number;
+  capture: number | null;
+  winRate: number;
+}
+
+function buildGroupStats(rows: PaperFuturesTrade[], keyFor: (row: PaperFuturesTrade) => string, labelFor = keyFor): GroupStats[] {
+  const buckets = new Map<string, PaperFuturesTrade[]>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    buckets.set(key, [...(buckets.get(key) || []), row]);
+  }
+
+  return Array.from(buckets.entries())
+    .map(([key, bucket]) => {
+      const closed = bucket.filter((row) => row.status === 'closed');
+      const wins = closed.filter((row) => Number(row.pnl_usd ?? 0) > 0).length;
+      const net = closed.reduce((sum, row) => sum + Number(row.pnl_usd ?? 0), 0);
+      const fees = closed.reduce((sum, row) => sum + Number(row.fees_usd ?? 0), 0);
+      const avgPeak = closed.length
+        ? closed.reduce((sum, row) => sum + Number(row.peak_pnl_pct ?? 0), 0) / closed.length
+        : 0;
+      const avgHold = closed.length
+        ? Math.round(closed.reduce((sum, row) => sum + holdSeconds(row), 0) / closed.length)
+        : 0;
+      const captures = closed.map(capturePct).filter((value): value is number => value !== null);
+      return {
+        key,
+        label: labelFor(bucket[0]),
+        trades: bucket.length,
+        closed: closed.length,
+        wins,
+        net,
+        fees,
+        avgPeak,
+        avgHold,
+        capture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
+        winRate: closed.length ? (wins / closed.length) * 100 : 0,
+      };
+    })
+    .sort((a, b) => b.net - a.net);
 }
 
 export default function PaperFuturesPage() {
   const [rows, setRows] = useState<PaperFuturesTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [windowKey, setWindowKey] = useState<WindowKey>('today');
 
   const fetchRows = useCallback(async () => {
     setLoading(true);
@@ -59,113 +166,214 @@ export default function PaperFuturesPage() {
     fetchRows();
   }, [fetchRows]);
 
+  const filteredRows = useMemo(() => {
+    const start = windowStart(windowKey);
+    return rows.filter((row) => new Date(row.opened_at).getTime() >= start);
+  }, [rows, windowKey]);
+
   const stats = useMemo(() => {
-    const closed = rows.filter((r) => r.status === 'closed');
+    const closed = filteredRows.filter((r) => r.status === 'closed');
     const wins = closed.filter((r) => Number(r.pnl_usd) > 0).length;
     const net = closed.reduce((sum, r) => sum + Number(r.pnl_usd ?? 0), 0);
+    const gross = closed.reduce((sum, r) => sum + Number(r.gross_pnl_usd ?? 0), 0);
+    const fees = closed.reduce((sum, r) => sum + Number(r.fees_usd ?? 0), 0);
     const peakAvg = closed.length
       ? closed.reduce((sum, r) => sum + Number(r.peak_pnl_pct ?? 0), 0) / closed.length
       : 0;
+    const captures = closed.map(capturePct).filter((value): value is number => value !== null);
+    const openRows = filteredRows.filter((r) => r.status === 'open');
+    const leverages = Array.from(new Set(filteredRows.map((r) => `${Number(r.leverage).toFixed(0)}x`))).join(', ') || '-';
+
     return {
-      total: rows.length,
-      open: rows.filter((r) => r.status === 'open').length,
+      total: filteredRows.length,
+      open: openRows.length,
       closed: closed.length,
       winRate: closed.length ? (wins / closed.length) * 100 : 0,
       net,
+      gross,
+      fees,
       peakAvg,
+      avgCapture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : null,
+      avgHold: closed.length ? Math.round(closed.reduce((sum, row) => sum + holdSeconds(row), 0) / closed.length) : 0,
+      leverages,
     };
-  }, [rows]);
+  }, [filteredRows]);
+
+  const setupStats = useMemo(
+    () => buildGroupStats(filteredRows, (row) => row.setup_type || 'UNKNOWN', (row) => setupLabel(row.setup_type)),
+    [filteredRows],
+  );
+
+  const leverageStats = useMemo(
+    () => buildGroupStats(filteredRows, (row) => `${Number(row.leverage).toFixed(0)}x`),
+    [filteredRows],
+  );
+
+  const pairStats = useMemo(
+    () => buildGroupStats(filteredRows, (row) => `${shortPair(row.pair)} ${row.direction}`, (row) => `${shortPair(row.pair)} ${row.direction.toUpperCase()}`),
+    [filteredRows],
+  );
+
+  const exitStats = useMemo(
+    () => buildGroupStats(
+      filteredRows.filter((row) => row.status === 'closed'),
+      (row) => row.exit_reason || 'open',
+      (row) => (row.exit_reason || 'unknown').replace(/_/g, ' '),
+    ),
+    [filteredRows],
+  );
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] p-4 md:p-6">
-      <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+    <div className="min-h-screen bg-[#050507] p-4 text-zinc-100 md:p-6">
+      <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <h1 className="text-xl font-bold text-zinc-100">Paper Futures</h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            Multi-strategy paper lab: Donchian, EMA pullback, momentum impulse, signal mix, and option twins.
+          <h1 className="text-2xl font-bold text-white">Paper Futures</h1>
+          <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+            Paper-only futures lab. Delta BTC/ETH futures support leverage up to 100x by product; this lab currently records the modeled leverage on every row so we can compare risk before enabling real futures.
           </p>
         </div>
-        <button
-          onClick={fetchRows}
-          className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
-        >
-          <RefreshCw size={15} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {(Object.keys(WINDOW_LABELS) as WindowKey[]).map((key) => (
+            <button
+              key={key}
+              onClick={() => setWindowKey(key)}
+              className={`rounded-md border px-3 py-2 text-sm font-semibold ${
+                windowKey === key
+                  ? 'border-sky-300 bg-sky-400/15 text-sky-100'
+                  : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-100'
+              }`}
+            >
+              {WINDOW_LABELS[key]}
+            </button>
+          ))}
+          <button
+            onClick={fetchRows}
+            className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-semibold text-zinc-100 hover:bg-zinc-800"
+          >
+            <RefreshCw size={15} />
+            Refresh
+          </button>
+        </div>
       </div>
 
-      <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-6">
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-8">
         {[
-          ['Total', stats.total.toString()],
-          ['Open', stats.open.toString()],
-          ['Closed', stats.closed.toString()],
-          ['Win Rate', `${stats.winRate.toFixed(0)}%`],
-          ['Net', money(stats.net)],
-          ['Avg Peak', pct(stats.peakAvg)],
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-md border border-zinc-800 bg-zinc-950 p-3">
+          ['Net P&L', money(stats.net), signedClass(stats.net)],
+          ['Gross', money(stats.gross), signedClass(stats.gross)],
+          ['Fees', money(-stats.fees), 'text-amber-300'],
+          ['Win Rate', `${stats.winRate.toFixed(0)}%`, stats.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'],
+          ['Trades', `${stats.total}`, 'text-white'],
+          ['Open', `${stats.open}`, stats.open ? 'text-sky-300' : 'text-zinc-300'],
+          ['Avg Peak', pct(stats.peakAvg), 'text-emerald-300'],
+          ['Leverage', stats.leverages, 'text-violet-200'],
+        ].map(([label, value, valueClass]) => (
+          <div key={label} className="rounded-md border border-zinc-800 bg-[#0d0e12] p-3 shadow-sm shadow-black">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
-            <div className="mt-1 font-mono text-lg text-zinc-100">{value}</div>
+            <div className={`mt-1 font-mono text-lg ${valueClass}`}>{value}</div>
           </div>
         ))}
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
+      <div className="mb-5 grid gap-3 xl:grid-cols-3">
+        <PerformancePanel title="Setup Edge" rows={setupStats} />
+        <PerformancePanel title="Leverage Read" rows={leverageStats} />
+        <PerformancePanel title="Pair Direction" rows={pairStats} />
+      </div>
+
+      <div className="mb-5 grid gap-3 xl:grid-cols-[1.2fr_0.8fr]">
+        <div className="rounded-lg border border-zinc-800 bg-[#0d0e12] p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-bold text-white">What To Watch</h2>
+            <span className="text-xs text-zinc-500">{WINDOW_LABELS[windowKey]}</span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            <Insight label="Net after fees" value={money(stats.net)} tone={stats.net >= 0 ? 'good' : 'bad'} />
+            <Insight label="Avg capture" value={stats.avgCapture === null ? '-' : pct(stats.avgCapture)} tone={(stats.avgCapture ?? 0) >= 50 ? 'good' : 'warn'} />
+            <Insight label="Avg hold" value={holdTime(stats.avgHold)} tone={stats.avgHold >= 300 ? 'good' : 'warn'} />
+          </div>
+        </div>
+        <div className="rounded-lg border border-zinc-800 bg-[#0d0e12] p-4">
+          <h2 className="mb-3 text-sm font-bold text-white">Exit Reasons</h2>
+          <div className="space-y-2">
+            {exitStats.slice(0, 5).map((row) => (
+              <div key={row.key} className="flex items-center justify-between gap-3 text-sm">
+                <span className="capitalize text-zinc-300">{row.label}</span>
+                <span className={`font-mono ${signedClass(row.net)}`}>{money(row.net)}</span>
+              </div>
+            ))}
+            {!exitStats.length && <div className="text-sm text-zinc-500">No closed exits in this window.</div>}
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-zinc-800 bg-[#08090c]">
         {error ? (
           <div className="p-5 text-sm text-red-300">{error}</div>
         ) : loading ? (
           <div className="p-5 text-sm text-zinc-400">Loading paper trades...</div>
-        ) : rows.length === 0 ? (
-          <div className="p-5 text-sm text-zinc-400">No paper futures rows yet.</div>
+        ) : filteredRows.length === 0 ? (
+          <div className="p-5 text-sm text-zinc-400">No paper futures rows in this window.</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1040px] text-left text-sm">
-              <thead className="border-b border-zinc-800 bg-zinc-900/70 text-[10px] uppercase tracking-wider text-zinc-500">
+            <table className="w-full min-w-[1280px] text-left text-sm">
+              <thead className="border-b border-zinc-800 bg-[#15161a] text-[10px] uppercase tracking-wider text-zinc-400">
                 <tr>
                   <th className="px-4 py-3">Time</th>
                   <th className="px-4 py-3">Pair</th>
                   <th className="px-4 py-3">Dir</th>
                   <th className="px-4 py-3">Setup</th>
+                  <th className="px-4 py-3 text-right">Lev</th>
                   <th className="px-4 py-3 text-right">Entry</th>
                   <th className="px-4 py-3 text-right">Exit/Mark</th>
                   <th className="px-4 py-3 text-right">Margin</th>
                   <th className="px-4 py-3 text-right">Notional</th>
-                  <th className="px-4 py-3 text-right">P&L</th>
+                  <th className="px-4 py-3 text-right">Gross</th>
+                  <th className="px-4 py-3 text-right">Fees</th>
+                  <th className="px-4 py-3 text-right">Net P&L</th>
                   <th className="px-4 py-3 text-right">Peak</th>
+                  <th className="px-4 py-3 text-right">Capture</th>
                   <th className="px-4 py-3">Hold</th>
+                  <th className="px-4 py-3">Exit</th>
                   <th className="px-4 py-3">Source</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => {
-                  const positive = Number(row.pnl_usd) > 0;
+                {filteredRows.map((row) => {
                   const mark = row.exit_price ?? row.current_price;
+                  const cap = capturePct(row);
                   return (
-                    <tr key={row.id} className="border-b border-zinc-900 text-zinc-200 last:border-0">
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-400">
+                    <tr key={row.id} className="border-b border-zinc-900 text-zinc-100 last:border-0 hover:bg-zinc-900/55">
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-300">
                         {new Date(row.opened_at).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 font-semibold">{shortPair(row.pair)}</td>
+                      <td className="px-4 py-3 font-bold text-white">{shortPair(row.pair)}</td>
                       <td className="px-4 py-3">
-                        <span className={row.direction === 'long' ? 'text-emerald-300' : 'text-red-300'}>
+                        <span className={row.direction === 'long' ? 'font-bold text-emerald-300' : 'font-bold text-red-300'}>
                           {row.direction.toUpperCase()}
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className="rounded bg-sky-500/15 px-2 py-1 text-xs text-sky-200">
-                          {row.setup_type || '-'}
+                        <span className="rounded border border-sky-400/30 bg-sky-500/20 px-2 py-1 text-xs font-semibold text-sky-100">
+                          {setupLabel(row.setup_type)}
                         </span>
                       </td>
+                      <td className="px-4 py-3 text-right font-mono text-violet-200">{Number(row.leverage).toFixed(0)}x</td>
                       <td className="px-4 py-3 text-right font-mono">{Number(row.entry_price).toFixed(2)}</td>
                       <td className="px-4 py-3 text-right font-mono">{mark ? Number(mark).toFixed(2) : '-'}</td>
                       <td className="px-4 py-3 text-right font-mono">${Number(row.margin_usd).toFixed(2)}</td>
                       <td className="px-4 py-3 text-right font-mono">${Number(row.notional_usd).toFixed(2)}</td>
-                      <td className={`px-4 py-3 text-right font-mono ${positive ? 'text-emerald-300' : Number(row.pnl_usd) < 0 ? 'text-red-300' : 'text-zinc-400'}`}>
-                        {money(row.pnl_usd)} <span className="text-xs text-zinc-500">{pct(row.pnl_pct)}</span>
+                      <td className={`px-4 py-3 text-right font-mono ${signedClass(row.gross_pnl_usd)}`}>{money(row.gross_pnl_usd)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-amber-300">{money(-(Number(row.fees_usd ?? 0)))}</td>
+                      <td className={`px-4 py-3 text-right font-mono font-bold ${signedClass(row.pnl_usd)}`}>
+                        {money(row.pnl_usd)} <span className="text-xs opacity-80">{pct(row.pnl_pct)}</span>
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-emerald-300">{pct(row.peak_pnl_pct)}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-400">{holdTime(row)}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-500">
+                      <td className={`px-4 py-3 text-right font-mono ${cap === null ? 'text-zinc-500' : cap >= 50 ? 'text-emerald-300' : 'text-amber-300'}`}>
+                        {cap === null ? '-' : pct(cap)}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-300">{holdTime(row)}</td>
+                      <td className="px-4 py-3 text-xs capitalize text-zinc-300">{(row.exit_reason || row.status).replace(/_/g, ' ')}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-400">
                         {row.option_trade_id ? `Option #${row.option_trade_id}` : 'Independent'}
                       </td>
                     </tr>
@@ -176,6 +384,52 @@ export default function PaperFuturesPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function Insight({ label, value, tone }: { label: string; value: string; tone: 'good' | 'bad' | 'warn' }) {
+  const color = tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-red-300' : 'text-amber-300';
+  return (
+    <div className="rounded-md border border-zinc-800 bg-black/35 p-3">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className={`mt-1 font-mono text-lg font-bold ${color}`}>{value}</div>
+    </div>
+  );
+}
+
+function PerformancePanel({ title, rows }: { title: string; rows: GroupStats[] }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-[#0d0e12] p-4">
+      <h2 className="mb-3 text-sm font-bold text-white">{title}</h2>
+      <div className="space-y-3">
+        {rows.slice(0, 5).map((row) => (
+          <div key={row.key} className="rounded-md border border-zinc-900 bg-black/30 p-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="text-sm font-bold text-white">{row.label}</span>
+              <span className={`font-mono text-sm font-bold ${signedClass(row.net)}`}>{money(row.net)}</span>
+            </div>
+            <div className="grid grid-cols-5 gap-2 text-[11px]">
+              <Metric label="Trades" value={row.trades.toString()} />
+              <Metric label="Win" value={`${row.winRate.toFixed(0)}%`} tone={row.winRate >= 50 ? 'good' : 'bad'} />
+              <Metric label="Peak" value={pct(row.avgPeak)} tone="good" />
+              <Metric label="Capture" value={row.capture === null ? '-' : pct(row.capture)} tone={(row.capture ?? 0) >= 50 ? 'good' : 'warn'} />
+              <Metric label="Hold" value={holdTime(row.avgHold)} />
+            </div>
+          </div>
+        ))}
+        {!rows.length && <div className="text-sm text-zinc-500">No rows in this window.</div>}
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' | 'warn' }) {
+  const color = tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-red-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
+  return (
+    <div>
+      <div className="uppercase tracking-wider text-zinc-600">{label}</div>
+      <div className={`mt-0.5 font-mono font-semibold ${color}`}>{value}</div>
     </div>
   );
 }
