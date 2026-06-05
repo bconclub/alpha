@@ -1,7 +1,6 @@
--- GPFC #97: Paper futures shadow ledger.
--- Records a futures paper-trade twin for filled options entries so we can
--- compare the same signal on options vs perpetual futures before enabling
--- live futures again.
+-- GPFC #97: Paper futures ledger.
+-- Records both futures paper-trade twins for filled options entries and
+-- independent paper-only futures strategies before enabling live futures capital.
 
 CREATE TABLE IF NOT EXISTS public.paper_futures_trades (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -88,7 +88,7 @@ export default function PaperFuturesPage() {
         <div>
           <h1 className="text-xl font-bold text-zinc-100">Paper Futures</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            Shadow futures trades generated from filled options signals.
+            Independent Donchian paper trades plus futures twins from filled options signals.
           </p>
         </div>
         <button
@@ -139,7 +139,7 @@ export default function PaperFuturesPage() {
                   <th className="px-4 py-3 text-right">P&L</th>
                   <th className="px-4 py-3 text-right">Peak</th>
                   <th className="px-4 py-3">Hold</th>
-                  <th className="px-4 py-3">Option</th>
+                  <th className="px-4 py-3">Source</th>
                 </tr>
               </thead>
               <tbody>
@@ -172,7 +172,7 @@ export default function PaperFuturesPage() {
                       <td className="px-4 py-3 text-right font-mono text-cyan-300">{pct(row.peak_pnl_pct)}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-400">{holdTime(row)}</td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-500">
-                        {row.option_trade_id ? `#${row.option_trade_id}` : '-'}
+                        {row.option_trade_id ? `Option #${row.option_trade_id}` : 'Independent'}
                       </td>
                     </tr>
                   );

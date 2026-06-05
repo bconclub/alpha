@@ -100,9 +100,8 @@ create index if not exists idx_trades_setup_type   on public.trades (setup_type)
 
 -- ============================================================================
 -- 1b. PAPER_FUTURES_TRADES
--- Shadow futures ledger for filled options signals. This is paper only; it lets
--- us compare whether the same signal performs better on perpetual futures than
--- on options before enabling real futures capital.
+-- Paper futures ledger. Includes futures twins for filled options signals and
+-- independent paper-only futures strategies before enabling real futures capital.
 -- ============================================================================
 create table if not exists public.paper_futures_trades (
     id                  bigint generated always as identity primary key,
