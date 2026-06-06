@@ -152,3 +152,59 @@ Best lane: OPT_SELL_NEUTRAL (+$0.65, only positive lanes are SELL). Worst: **FUT
 4. Consider pausing the pure-momentum futures lane (FUT_MOMENTUM_CONF) — it's −$261 of the −$405 and matches the dead "fast 1-min momentum" verdict #3.
 
 **Verdict status:** #6 (OTM selling) 🧪 TESTING — early signs positive but n=3. #8 (aggressive-leverage futures) 🧪 TESTING, **leaning ❌** — first real sample is −40% of bankroll in an hour, exactly as #5 predicted.
+
+### 2026-06-06 19:38 UTC — 2h into clean slate; futures now −62% `[updated by: Cowork]`
+
+**Live-safety flag (read this first):** `bot_status.is_paused` read **false** with `bot_state=running`, scalp + options_scalp enabled. BUT the row's `timestamp` is frozen at **2026-03-11** (stale snapshot or a restart that defaulted to unpaused), and the **last live trade was 2026-06-05 17:47** — i.e. 30 min *before* the explicit `pause` command at 06-05 18:18, and **0 live trades in the last 24h** (`trades` table). So no real money has moved; live is effectively OFF. As a belt-and-suspenders measure I queued a fresh `pause` bot_command (id 319). **Watch next run:** if `is_paused` is still false and any `trades` row appears, that's a real live-armed alert.
+
+**Balances & burns** (FUNDED $1,000 each, deposits table shows 0 refills):
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Options (SELL) | $1,000 | +$0.66 | **$1,000.66** | 0× | 39 |
+| Futures (aggressive) | $1,000 | −$625.70 | **$374.30** | 0× | 6 |
+
+No refill — both ≫ $50 floor. Futures down −62.6% of bankroll; on this trajectory it will hit the floor and burn within ~1 more hour.
+
+**Per-lane (futures, closed):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 17 | 12% | **−$349.82** | 5.5 | 32.5 | 4.6m |
+| FUT_EMA_CONF | 10 | 10% | −$176.85 | 1.6 | 7.7 | 7.6m |
+| FUT_DONCHIAN_100X | 1 | 0% | −$49.21 | 0.0 | 0.0 | 0.5m |
+| FUT_DONCHIAN_50X | 1 | 0% | −$27.71 | 0.0 | 0.0 | 2.1m |
+| FUT_DONCHIAN_CONF | 1 | 0% | −$22.12 | 0.0 | 0.0 | 6.3m |
+
+**Per-lane (options SELL, closed — realized only 6 of 45 trades):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Avg hold |
+|---|---|---|---|---|---|
+| OPT_SELL_CALL | 1 | 100% | +$0.46 | 31.9 | 1.5m |
+| OPT_SELL_NEUTRAL | 2 | 50% | +$0.45 | 15.4 | 29.2m |
+| OPT_SELL_CALL_FAR | 1 | 100% | +$0.07 | 30.1 | 6.2m |
+| OPT_SELL_PUT | 1 | 100% | +$0.03 | 0.4 | 21.2m |
+| OPT_SELL_PUT_FAR | 1 | 0% | −$0.34 | 0.2 | 21.2m |
+
+Best lane: OPT_SELL_CALL +$0.46 (all positive lanes are SELL). Worst: **FUT_MOMENTUM_CONF −$349.82**.
+
+**Futures exit-reason breakdown (this is the whole story):**
+
+| Exit | Cnt | Net | Avg lev | Avg peak% | Avg pnl% (margin) |
+|---|---|---|---|---|---|
+| paper_stop | 20 | −$547.68 | 43× | 0.5 | −6.7 |
+| paper_trail | 8 | −$54.43 | 63× | 11.8 | +3.5 |
+| ema21_reclaimed | 2 | −$23.60 | 25× | 2.0 | −2.2 |
+
+**Key findings:**
+1. **Aggressive futures = STRATEGY failure, not engine bug (now n=30, confirmed).** 20 of 30 exits are `paper_stop` with avg peak **0.5%** — the trade never went green, just straight to a stop. At 43× avg leverage a −6.7% margin stop ≈ a −0.15% price wiggle. Fees are sane ($12.50 on $12.5k notional = 0.1%). The entries have no edge on a 1–8 min horizon and the leverage converts every micro-wiggle into a realized stop. −$548 of the −$626 is these stops. This is verdict #5/#8 reproducing exactly.
+2. **Trail give-back bug persists (now n=8).** paper_trail exits average an 11.8% peak but bank only +3.5% pnl% — i.e. **~30% of peak captured, not the intended ~70%.** Confirmed twice now; worth fixing the give-back band / price-poll cadence. Secondary to the entry problem (even a perfect 70% trail can't rescue a 12%-win lane), but it's leaving ~$50–80 on the table across the trail exits.
+3. **Options SELLING (fixed engine) is the only thing not bleeding, but realized sample is starving.** Only 6 of 45 SELL trades have closed; magnitudes are tiny (±$0.50) now that notional is capped and fees are on premium — exactly the fix working. The other 39 are open and accruing theta (holds need hours, by design). We need many more *closes* before crowning — net +$0.66 over 6 is noise.
+
+**What to change:**
+1. **Futures stop must scale with leverage/volatility (ATR- or price-based), or cap leverage.** As-is, 25–100× + a fixed −6.7% margin stop = guaranteed churn on sub-0.2% noise. n=20 stops with 0.5% avg peak is now overwhelming evidence. This is the #1 change and it's been the #1 change for 3 check-ins running — nothing in the engine has changed (correctly, per the read-only mandate), so the verdict just keeps hardening.
+2. **Strongly consider killing FUT_MOMENTUM_CONF** — it is −$349.82 of the −$625.70 (56%) and matches dead verdict #3 (fast 1-min momentum). The fixed-high-lev Donchian lanes (50×/100×) are also 0% win on tiny samples.
+3. **Fix the trail give-back** (band width + poll granularity) so it banks ~70% of peak.
+4. **Be patient on SELL** — let the 39 open trades close; the realized sample is what matters, and it's only 6 deep.
+
+**Verdict status:** #6 (OTM selling) 🧪 TESTING — fixed engine behaving, but realized n=6, no edge claim yet. #8 (aggressive-leverage futures) 🧪 TESTING → **now firmly leaning ❌** — −62.6% of bankroll in 2h, 20/30 trades stopped on noise without ever going green. One more sample like this and it earns a ❌ DEAD verdict alongside #5.
