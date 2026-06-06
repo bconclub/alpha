@@ -4,6 +4,31 @@
 > up anytime. Pairs with `LEARNINGS.md` (verdicts/principles). Regenerate by
 > re-querying `paper_options_trades` / `paper_futures_trades` and updating below.
 
+## Snapshot — 2026-06-06 (selling + sane-futures round, pre-reset #2)
+
+Both labs reset to $1,000 and ran OPTION SELLING + SANE-LEVERAGE (3–5×) futures. **Both lost.**
+
+### Options — SELLING naked OTM premium
+| Lane | Closed | Win% | Net | Max peak |
+|---|---|---|---|---|
+| OPT_SELL_NEUTRAL | 3 | 0% | −$99.90 | 46% |
+| OPT_SELL_PUT | 10 | 0% | −$225.43 | 34% |
+| OPT_SELL_CALL | 14 | 0% | −$320.94 | 44% |
+| OPT_SELL_CALL_FAR | 14 | 0% | −$368.86 | 44% |
+| OPT_SELL_PUT_FAR | 11 | 0% | −$439.43 | 35% |
+
+**0% realized win.** Theta worked — peaks of +34–46% mean the premium WAS decaying in our favor — but every position reversed and hit the −100% stop before the +50% take-profit. Lessons: (1) TP at +50% is too greedy; peaks ~46% reverse → take profit earlier (~+30–35%). (2) Naked short tail risk is brutal in fast crypto → needs **defined-risk spreads** to be viable.
+
+### Futures — sane leverage 3–5×
+| Lane | Closed | Win% | Net | Lev | Max peak |
+|---|---|---|---|---|---|
+| FUT_DONCHIAN_3X | 7 | 14% | −$19.26 | 3× | 4% |
+| FUT_DONCHIAN_5X | 7 | 14% | −$23.29 | 5× | 7% |
+| FUT_EMA_4X | 21 | 0% | −$58.47 | 4× | 3% |
+| FUT_MOMENTUM_4X | 23 | 17% | −$70.15 | 4× | 3% |
+
+Trend entries 0–17% win in chop; tiny peaks (3–7%) = no follow-through. Sane leverage just loses slowly. Next round cranks to confidence-ladder **25–100×** (user request) — prior data says this amplifies losses, but we test it in paper.
+
 ## Snapshot — 2026-06-06 (pre-reset, end of the BUYING era)
 
 Balances were reset to a clean **$1,000 each** after this snapshot, switching the

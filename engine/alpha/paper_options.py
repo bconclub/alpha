@@ -294,8 +294,8 @@ class BasePaperOptions:
     # SELL mode (theta harvest): collect premium, profit as it decays.
     SELL = False                    # when True this lane WRITES options instead of buying
     SELL_OTM_STEPS = 3              # sell well OTM (lower delta = higher prob of profit)
-    SELL_TP_PCT = 50.0             # take profit when premium has decayed 50% of the credit
-    SELL_SL_PCT = -100.0          # stop when premium doubles (lose 1x the credit)
+    SELL_TP_PCT = 30.0             # bank earlier — data showed peaks ~46% then reversing past the old +50% TP
+    SELL_SL_PCT = -80.0           # cut a bit sooner too (premium up 80%) to cap the naked-short tail
     # Delta options fee model: ~0.03% of underlying notional per side, capped 10% of premium
     FEE_NOTIONAL_RATE = 0.0003
     FEE_PREMIUM_CAP = 0.10

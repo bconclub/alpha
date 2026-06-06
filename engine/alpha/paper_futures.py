@@ -305,15 +305,16 @@ class BasePaperFutures:
         """
         if self.FIXED_LEVERAGE is not None:
             return self.FIXED_LEVERAGE
-        if confidence >= 92:
+        # Aggressive confidence ladder (user request): higher confidence → more leverage.
+        if confidence >= 90:
             return min(100.0, self.MAX_LEVERAGE)
-        if confidence >= 84:
+        if confidence >= 80:
+            return min(75.0, self.MAX_LEVERAGE)
+        if confidence >= 70:
             return min(50.0, self.MAX_LEVERAGE)
-        if confidence >= 76:
+        if confidence >= 60:
             return min(25.0, self.MAX_LEVERAGE)
-        if confidence >= 66:
-            return min(10.0, self.MAX_LEVERAGE)
-        return self.BASE_LEVERAGE
+        return 10.0
 
     def _pnl_pct(self, price: float) -> float:
         if self._entry_price <= 0:
@@ -695,21 +696,24 @@ def build_paper_futures_strategies(
 ) -> list[PaperFuturesStrategy]:
     """Sane-leverage trend/breakout futures test for one pair.
 
-    The reckless 25–100× confidence ladder blew the paper account. This tests the
-    real question: do the trend/breakout ENTRIES carry edge when expressed on
-    futures (no theta, no option spread) at SANE leverage (3–5×)? Each lane runs
-    independently (own position book) so leverages compare side by side.
+    AGGRESSIVE round (user request): trend/breakout entries on the confidence
+    leverage ladder (25–100× by setup quality) plus explicit 50× and 100× lanes.
+    Each lane runs independently (own position book) so leverages compare side by
+    side. NOTE: prior data shows leverage amplifies a negative-edge entry — this
+    tests whether high leverage on the *entry* ever pays. Paper only.
     """
-    def mk(cls, setup: str, lev: float) -> PaperFuturesStrategy:
+    def mk(cls, setup: str, lev: float | None = None) -> PaperFuturesStrategy:
         s = cls(pair, exchange, db, PaperFuturesPositionBook())
-        s.FIXED_LEVERAGE = lev
+        if lev is not None:
+            s.FIXED_LEVERAGE = lev   # else uses the confidence ladder (25–100×)
         s.SETUP_TYPE = setup
         s.setup_type = setup
         return s
 
     return [
-        mk(DonchianPaperFutures, "FUT_DONCHIAN_3X", 3.0),
-        mk(DonchianPaperFutures, "FUT_DONCHIAN_5X", 5.0),
-        mk(EmaPullbackPaperFutures, "FUT_EMA_4X", 4.0),
-        mk(MomentumImpulsePaperFutures, "FUT_MOMENTUM_4X", 4.0),  # control (known weak)
+        mk(DonchianPaperFutures, "FUT_DONCHIAN_CONF"),     # confidence ladder up to 100×
+        mk(EmaPullbackPaperFutures, "FUT_EMA_CONF"),
+        mk(MomentumImpulsePaperFutures, "FUT_MOMENTUM_CONF"),
+        mk(DonchianPaperFutures, "FUT_DONCHIAN_50X", 50.0),
+        mk(DonchianPaperFutures, "FUT_DONCHIAN_100X", 100.0),
     ]

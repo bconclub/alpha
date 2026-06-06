@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-06 · Aggressive futures leverage (25–100×) + selling TP fix + reset #2
+
+- **Findings logged** to `engine/PAPER_RESULTS.md` + `engine/LEARNINGS.md`: option SELLING (naked) = **0% realized win** (theta worked, peaks +34–46%, but all reversed past the +50% TP to the −100% stop); sane-leverage futures 0–17% win, slow bleed.
+- **Futures → aggressive (user request):** confidence leverage ladder **25/50/75/100×** restored + explicit `FUT_DONCHIAN_50X` / `FUT_DONCHIAN_100X` lanes + conf-ladder Donchian/EMA/Momentum. (Prior data says high leverage amplifies losses — testing in paper anyway.)
+- **Selling TP fix:** take-profit +50% → **+30%** (peaks reversed ~46%), stop −100% → **−80%** to cap the naked tail.
+- **Reset #2:** both paper ledgers wiped back to a clean **$1,000** each.
+- Knowledge files to pull up anytime: **`engine/PAPER_RESULTS.md`** (per-lane results) and **`engine/LEARNINGS.md`** (verdicts + principles).
+- `(SHA on commit)`
+
 ## 2026-06-06 · Reset both paper balances to $1,000 + results snapshot in repo
 
 - `engine/PAPER_RESULTS.md` (new): full point-in-time dump of the option-BUYING era + reckless-leverage futures results (every lane, win%, net) before the reset, so the data survives. Only OPT_DONCHIAN (ATM breakout) was net-positive (+$29); futures loss scaled directly with leverage.

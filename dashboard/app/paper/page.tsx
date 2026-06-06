@@ -54,6 +54,8 @@ const SETUP_LABELS: Record<string, string> = {
   OPT_SELL_PUT: 'Sell Put', OPT_SELL_CALL: 'Sell Call', OPT_SELL_NEUTRAL: 'Sell Neutral',
   OPT_SELL_PUT_FAR: 'Sell Put (far)', OPT_SELL_CALL_FAR: 'Sell Call (far)',
   FUT_DONCHIAN_3X: 'Donchian 3x', FUT_DONCHIAN_5X: 'Donchian 5x', FUT_EMA_4X: 'EMA 4x', FUT_MOMENTUM_4X: 'Momentum 4x',
+  FUT_DONCHIAN_CONF: 'Donchian (conf lev)', FUT_EMA_CONF: 'EMA (conf lev)', FUT_MOMENTUM_CONF: 'Momentum (conf lev)',
+  FUT_DONCHIAN_50X: 'Donchian 50x', FUT_DONCHIAN_100X: 'Donchian 100x',
 };
 
 const num = (v: unknown): number => {
