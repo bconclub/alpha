@@ -557,15 +557,14 @@ function MobileTradeCard({ row, isOpt, nowMs }: { row: URow; isOpt: boolean; now
         </div>
       </div>
       <div className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1.5 font-mono text-[11px]">
-        <Field label={isOpt ? 'Strike' : 'Lev'} value={isOpt ? `${row.strike ?? '-'} ${row.moneyness ?? ''}` : `${row.leverage.toFixed(0)}x`} />
-        <Field label="Entry" value={row.entry.toFixed(2)} />
-        <Field label="Mark" value={row.mark === null ? '-' : num(row.mark).toFixed(2)} />
-        <Field label={isOpt ? 'At risk' : 'Margin'} value={`$${row.sizeUsd.toFixed(0)}`} cls="text-amber-300" />
-        <Field label="Notional" value={`$${row.notional.toFixed(0)}`} />
-        <Field label="Liq" value={liq === null ? '—' : `${liq.toFixed(0)}${liqDist !== null ? ` (${liqDist.toFixed(1)}%)` : ''}`} cls={liqDist !== null && liqDist < 1.5 ? 'text-red-300' : 'text-orange-300'} />
-        <Field label="Peak" value={pct(row.peakPct)} cls={peakClass(row.peakPct)} />
+        <Field label="Money in" value={`$${row.sizeUsd.toFixed(0)}`} cls="text-amber-300" />
+        <Field label="Conf (signal)" value={row.confidence === null ? '-' : row.confidence.toFixed(0)} cls="text-cyan-200" />
         <Field label="Hold" value={holdTime(row, nowMs)} />
-        <Field label="Exit" value={(row.exit_reason || row.status).replace(/_/g, ' ')} />
+        <Field label="Entry→Mark" value={`${row.entry.toFixed(isOpt ? 2 : 1)} → ${row.mark === null ? '-' : num(row.mark).toFixed(isOpt ? 2 : 1)}`} />
+        {isOpt
+          ? <Field label="Strike" value={`${row.strike ?? '-'} ${row.moneyness ?? ''}`} />
+          : <Field label={`Liq (${row.leverage.toFixed(0)}x)`} value={liq === null ? '—' : `${liq.toFixed(0)}${liqDist !== null ? ` (${liqDist.toFixed(1)}%)` : ''}`} cls={liqDist !== null && liqDist < 1.5 ? 'text-red-300' : 'text-orange-300'} />}
+        <Field label="Peak" value={pct(row.peakPct)} cls={peakClass(row.peakPct)} />
       </div>
     </div>
   );

@@ -296,6 +296,8 @@ class BasePaperOptions:
     SELL_OTM_STEPS = 3              # sell well OTM (lower delta = higher prob of profit)
     SELL_TP_PCT = 30.0             # bank earlier — data showed peaks ~46% then reversing past the old +50% TP
     SELL_SL_PCT = -80.0           # cut a bit sooner too (premium up 80%) to cap the naked-short tail
+    SELL_MARGIN_USD = 150.0        # real money committed per short (so "money in" is meaningful, not a $3 credit)
+    SELL_MARGIN_RATE = 0.15        # margin ≈ 15% of notional → notional ≈ margin / rate (~$1,000)
     SELL_STRIKE_BUFFER = 0.001     # breach when spot reaches ~0.1% past the short strike
     NOTIONAL_CAP_MULT = 20.0       # cap a trade's underlying notional at 20x the stake (no $80→$312k)
     # Fee model: 0.03% of underlying notional per side, capped at 2.5% of premium/stake (gentle so
@@ -559,17 +561,28 @@ class BasePaperOptions:
         entry_premium = await self._fetch_premium(symbol, side="bid" if self.SELL else "ask")
         if entry_premium <= 0:
             return
-        per_contract_usd = entry_premium * self.multiplier
-        if per_contract_usd <= 0:
-            return
-        contracts = max(1.0, round(self.STAKE_USD / per_contract_usd))
-        # Cap underlying notional so a cheap far-OTM premium can't control a huge position.
-        if spot > 0 and self.multiplier > 0:
-            max_contracts = (self.NOTIONAL_CAP_MULT * self.STAKE_USD) / (spot * self.multiplier)
-            if max_contracts >= 1:
-                contracts = min(contracts, float(int(max_contracts)))
-        stake = entry_premium * contracts * self.multiplier
-        notional = contracts * spot * self.multiplier
+        credit = 0.0
+        if self.SELL:
+            # Size by committed MARGIN (real money at stake), not the tiny premium.
+            if spot <= 0 or self.multiplier <= 0:
+                return
+            target_notional = self.SELL_MARGIN_USD / self.SELL_MARGIN_RATE
+            contracts = max(1.0, float(int(target_notional / (spot * self.multiplier))))
+            notional = contracts * spot * self.multiplier
+            stake = self.SELL_MARGIN_USD                      # money in = margin
+            credit = entry_premium * contracts * self.multiplier   # premium collected (bonus)
+        else:
+            per_contract_usd = entry_premium * self.multiplier
+            if per_contract_usd <= 0:
+                return
+            contracts = max(1.0, round(self.STAKE_USD / per_contract_usd))
+            # Cap underlying notional so a cheap far-OTM premium can't control a huge position.
+            if spot > 0 and self.multiplier > 0:
+                max_contracts = (self.NOTIONAL_CAP_MULT * self.STAKE_USD) / (spot * self.multiplier)
+                if max_contracts >= 1:
+                    contracts = min(contracts, float(int(max_contracts)))
+            stake = entry_premium * contracts * self.multiplier   # money in = premium paid
+            notional = contracts * spot * self.multiplier
         greeks = await self._fetch_greeks(symbol)
         confidence = _clamp(float(meta.get("confidence_score") or 60.0), 0.0, 100.0)
         moneyness = "ATM" if otm == 0 else f"OTM{otm}"
@@ -578,6 +591,7 @@ class BasePaperOptions:
             "source": "paper_options_lab",
             "strategy": self.SETUP_TYPE,
             "side": "sell" if self.SELL else "buy",
+            "credit_usd": round(credit, 4),
             "signal_key": signal_key,
             "confidence_score": round(confidence, 1),
             "hard_stop_pct": self.HARD_STOP_PCT,
@@ -630,17 +644,29 @@ class BasePaperOptions:
             strike, entry_premium, contracts, stake, confidence,
         )
 
+    def _gross_usd(self, premium: float) -> float:
+        """Real $ P&L: buyers profit when premium rises, sellers when it falls."""
+        sign = -1.0 if self.SELL else 1.0
+        return sign * (premium - self._entry_premium) * self._contracts * self.multiplier
+
+    def _return_pct(self, premium: float) -> float:
+        """Return on money committed (premium paid for buys, margin for sells)."""
+        if self._stake <= 0:
+            return 0.0
+        return self._gross_usd(premium) / self._stake * 100.0
+
     async def _mark_open(self, premium: float) -> None:
         if not self._trade_id:
             return
-        pnl = self._premium_pnl_pct(premium)
-        self._peak_pnl_pct = max(self._peak_pnl_pct, pnl)
+        gross = self._gross_usd(premium)
+        ret = self._return_pct(premium)
+        self._peak_pnl_pct = max(self._peak_pnl_pct, ret)
         await self.db.update_paper_options_trade(
             self._trade_id,
             {
                 "current_premium": round(premium, 8),
-                "pnl_pct": round(pnl, 4),
-                "pnl_usd": round(self._stake * pnl / 100.0, 8),
+                "pnl_pct": round(ret, 4),
+                "pnl_usd": round(gross, 8),
                 "peak_pnl_pct": round(self._peak_pnl_pct, 4),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
@@ -653,8 +679,8 @@ class BasePaperOptions:
     async def _close(self, exit_premium: float, reason: str) -> None:
         if not self._trade_id:
             return
-        pnl = self._premium_pnl_pct(exit_premium)
-        gross = self._stake * pnl / 100.0
+        gross = self._gross_usd(exit_premium)
+        ret = self._return_pct(exit_premium)
         notional = self._contracts * (self._entry_metadata.get("spot_at_entry") or 0) * self.multiplier
         fees = self._fees(notional)
         net = gross - fees
@@ -666,18 +692,18 @@ class BasePaperOptions:
                 "exit_premium": round(exit_premium, 8),
                 "current_premium": round(exit_premium, 8),
                 "closed_at": datetime.now(timezone.utc).isoformat(),
-                "pnl_pct": round(pnl, 4),
+                "pnl_pct": round(ret, 4),
                 "gross_pnl_usd": round(gross, 8),
                 "fees_usd": round(fees, 8),
                 "pnl_usd": round(net, 8),
-                "peak_pnl_pct": round(max(self._peak_pnl_pct, pnl), 4),
+                "peak_pnl_pct": round(max(self._peak_pnl_pct, ret), 4),
                 "exit_reason": reason,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
         )
         self.logger.info(
-            "%s_CLOSE id=%s %s exit=%.4f reason=%s net=$%+.3f pnl=%+.1f%% peak=%+.1f%%",
-            self.SETUP_TYPE, trade_id, self.pair, exit_premium, reason, net, pnl, self._peak_pnl_pct,
+            "%s_CLOSE id=%s %s exit=%.4f reason=%s net=$%+.3f ret=%+.1f%% peak=%+.1f%%",
+            self.SETUP_TYPE, trade_id, self.pair, exit_premium, reason, net, ret, self._peak_pnl_pct,
         )
         self._trade_id = None
         self._option_symbol = None

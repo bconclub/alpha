@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-07 · Real "money in" for sells + decluttered mobile card
+
+- **Sells now size by committed MARGIN, not the tiny premium.** Was: collect a $1–3 credit (notional-capped) → trivial, noisy trades. Now: each short commits a real ~$150 margin (≈15% of a ~$1,000 notional); the collected premium is recorded as `credit_usd`. So "money in" is a true, meaningful number.
+- **P&L computed from contracts** for both sides (`_gross_usd`): buyers profit on premium up, sellers on premium down; `pnl_pct` = return on money committed. Cleaner and correct.
+- **Mobile card decluttered:** leads with the signal (setup chip + **Conf**) and the result (Net + return%), then a tight 6-field grid — **Money in**, Conf, Hold, Entry→Mark, Strike/Liq, Peak. Dropped the noise (notional, $0 fees, empty liq on options, redundant open-exit).
+- No reset (per policy); the deploy restart auto-cancels the few open old-basis sells.
+- `(SHA on commit)`
+
 ## 2026-06-07 · Dashboard defaults to "All" (history wasn't lost) + no-more-resets
 
 - **It wasn't resetting.** The `/paper` view defaulted to the "Today" window; just past midnight IST that hid every pre-midnight trade, making it look like only ~3 trades existed. In reality 18 futures + closed history were persisting fine.
