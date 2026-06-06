@@ -152,6 +152,22 @@ function returnPct(row: URow): number | null {
   return row.sizeUsd > 0 ? (row.net / row.sizeUsd) * 100 : null;
 }
 
+// Approx liquidation price for a leveraged futures position (ignores maintenance margin).
+// Long: entry × (1 − 1/lev). Short: entry × (1 + 1/lev). Options don't liquidate this way.
+function liqPrice(row: URow): number | null {
+  if (row.instrument !== 'futures' || row.leverage <= 0 || row.entry <= 0) return null;
+  const f = 1 / row.leverage;
+  return row.direction === 'long' ? row.entry * (1 - f) : row.entry * (1 + f);
+}
+
+// How far the current mark is from liquidation, as % of price (smaller = closer to blowup).
+function liqDistancePct(row: URow): number | null {
+  const liq = liqPrice(row);
+  const px = row.mark ?? row.entry;
+  if (liq === null || !px) return null;
+  return Math.abs((px - liq) / px) * 100;
+}
+
 interface GroupStats {
   key: string; label: string; trades: number; closed: number; wins: number;
   net: number; avgPeak: number; avgHold: number; confidence: number | null; winRate: number;
@@ -183,6 +199,8 @@ export default function PaperLabPage() {
   const [options, setOptions] = useState<URow[]>([]);
   const [botStatus, setBotStatus] = useState<PaperBotStatus | null>(null);
   const [paperAccountUsd, setPaperAccountUsd] = useState(1000);
+  const [funded, setFunded] = useState<{ options: number; futures: number }>({ options: 1000, futures: 1000 });
+  const [burns, setBurns] = useState<{ options: number; futures: number }>({ options: 0, futures: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [instrument, setInstrument] = useState<Instrument>('options');
@@ -203,6 +221,8 @@ export default function PaperLabPage() {
         setOptions(((payload.options ?? []) as Record<string, any>[]).map(mapOptions));
         setBotStatus((payload.botStatus ?? null) as PaperBotStatus | null);
         setPaperAccountUsd(num(payload.paperAccountUsd) || 1000);
+        if (payload.funded) setFunded({ options: num(payload.funded.options) || 1000, futures: num(payload.funded.futures) || 1000 });
+        if (payload.burns) setBurns({ options: num(payload.burns.options), futures: num(payload.burns.futures) });
       }
     } catch (err) {
       setFutures([]); setOptions([]);
@@ -263,9 +283,12 @@ export default function PaperLabPage() {
       avgHold: closed.length ? Math.round(closed.reduce((s, r) => s + holdSeconds(r, nowMs), 0) / closed.length) : 0,
       mix,
       liveNet: openRows.reduce((s, r) => s + r.net, 0),
-      paperBalance: paperAccountUsd + closedAllNet,
+      funded: isOpt ? funded.options : funded.futures,
+      burns: isOpt ? burns.options : burns.futures,
+      paperBalance: (isOpt ? funded.options : funded.futures) + closedAllNet,
+      atRisk: openRows.reduce((s, r) => s + r.sizeUsd, 0),
     };
-  }, [filteredRows, nowMs, paperAccountUsd, allRows, isOpt]);
+  }, [filteredRows, nowMs, allRows, isOpt, funded, burns]);
 
   const setupStats = useMemo(() => buildGroupStats(filteredRows, (r) => r.setup_type || 'UNKNOWN', (r) => setupLabel(r.setup_type)), [filteredRows]);
   const pairStats = useMemo(() => buildGroupStats(filteredRows, (r) => `${shortPair(r.pair)} ${r.direction}`, (r) => `${shortPair(r.pair)} ${r.direction.toUpperCase()}`), [filteredRows]);
@@ -337,9 +360,10 @@ export default function PaperLabPage() {
         </div>
         <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
-            <div className="font-mono text-4xl font-bold leading-none text-white">{money2(stats.paperBalance)}</div>
+            <div className={`font-mono text-4xl font-bold leading-none ${stats.paperBalance < 0 ? 'text-red-300' : 'text-white'}`}>{money2(stats.paperBalance)}</div>
             <div className="mt-1 font-mono text-xs text-zinc-500">
-              Starting {money2(paperAccountUsd)} | ₹{(stats.paperBalance * inr).toFixed(0)}
+              Funded {money2(stats.funded)} · ₹{(stats.paperBalance * inr).toFixed(0)}
+              {stats.burns > 0 && <span className="ml-2 rounded bg-red-500/15 px-1.5 py-0.5 text-red-300">🔥 burned {stats.burns}×</span>}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-4">
@@ -354,7 +378,10 @@ export default function PaperLabPage() {
               {WINDOW_LABELS[windowKey]} {money(stats.net)}
             </div>
             {stats.open > 0 && (
-              <div className={`font-mono text-sm font-bold ${signedClass(stats.liveNet)}`}>Live {money(stats.liveNet)}</div>
+              <>
+                <div className={`font-mono text-sm font-bold ${signedClass(stats.liveNet)}`}>Live {money(stats.liveNet)}</div>
+                <div className="font-mono text-sm font-bold text-amber-300">At risk ${stats.atRisk.toFixed(0)}</div>
+              </>
             )}
           </div>
         </div>
@@ -418,7 +445,8 @@ export default function PaperLabPage() {
         ) : filteredRows.length === 0 ? (
           <div className="p-5 text-sm text-zinc-400">No paper {isOpt ? 'options' : 'futures'} trades in this window yet.</div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[1500px] text-left text-sm">
               <thead className="border-b border-zinc-800 bg-[#15161a] text-[10px] uppercase tracking-wider text-zinc-500">
                 <tr>
@@ -430,6 +458,7 @@ export default function PaperLabPage() {
                   <th className="px-3 py-3 text-right">{isOpt ? 'Mark $' : 'Mark'}</th>
                   <th className="px-3 py-3 text-right">{isOpt ? 'Stake' : 'Margin'}</th>
                   <th className="px-3 py-3 text-right">Notional</th>
+                  <th className="px-3 py-3 text-right">Liq</th>
                   <th className="px-3 py-3 text-right">Gross</th>
                   <th className="px-3 py-3 text-right">Fees</th>
                   <th className="px-3 py-3 text-right">Net</th>
@@ -476,6 +505,7 @@ export default function PaperLabPage() {
                       <td className="px-3 py-3 text-right font-mono">{row.mark === null ? '-' : num(row.mark).toFixed(entryDec)}</td>
                       <td className="px-3 py-3 text-right font-mono">${row.sizeUsd.toFixed(2)}</td>
                       <td className="px-3 py-3 text-right font-mono">${row.notional.toFixed(2)}</td>
+                      <td className="px-3 py-3 text-right font-mono text-orange-300">{liqPrice(row) === null ? '—' : liqPrice(row)!.toFixed(2)}</td>
                       <td className={`px-3 py-3 text-right font-mono ${signedClass(row.gross)}`}>{money(row.gross)}</td>
                       <td className="px-3 py-3 text-right font-mono text-amber-300">{money(-row.fees)}</td>
                       <td className={`px-3 py-3 text-right font-mono font-bold ${signedClass(row.net)}`}>{money(row.net)}</td>
@@ -489,8 +519,63 @@ export default function PaperLabPage() {
               </tbody>
             </table>
           </div>
+          <div className="space-y-2 p-3 md:hidden">
+            {filteredRows.map((row) => (
+              <MobileTradeCard key={`m-${row.instrument}-${row.id}`} row={row} isOpt={isOpt} nowMs={nowMs} />
+            ))}
+          </div>
+          </>
         )}
       </div>
+    </div>
+  );
+}
+
+function MobileTradeCard({ row, isOpt, nowMs }: { row: URow; isOpt: boolean; nowMs: number }) {
+  const isLive = row.status === 'open';
+  const ret = returnPct(row);
+  const liq = liqPrice(row);
+  const liqDist = liqDistancePct(row);
+  return (
+    <div className={`rounded-lg border p-3 ${isLive ? 'border-emerald-500/30 bg-emerald-950/20' : 'border-zinc-800 bg-[#0d0e12]'}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          {isLive
+            ? <span className="inline-flex items-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-200"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />LIVE</span>
+            : <span className="text-[10px] font-semibold text-zinc-500">Closed</span>}
+          <span className="font-bold text-white">{shortPair(row.pair)}</span>
+          <span className={row.direction === 'long' ? 'text-xs font-bold text-emerald-300' : 'text-xs font-bold text-red-300'}>
+            {isOpt ? (row.optionType === 'call' ? 'CALL' : 'PUT') : row.direction.toUpperCase()}
+          </span>
+          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${isOpt ? 'border-lime-400/30 bg-lime-500/15 text-lime-100' : 'border-sky-400/30 bg-sky-500/20 text-sky-100'}`}>
+            {setupLabel(row.setup_type)}
+          </span>
+        </div>
+        <div className={`text-right font-mono text-base font-bold ${signedClass(row.net)}`}>
+          {money2(row.net)}
+          <span className={`ml-1 text-xs ${signedClass(ret)}`}>{ret === null ? '' : `(${pct(ret)})`}</span>
+        </div>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1.5 font-mono text-[11px]">
+        <Field label={isOpt ? 'Strike' : 'Lev'} value={isOpt ? `${row.strike ?? '-'} ${row.moneyness ?? ''}` : `${row.leverage.toFixed(0)}x`} />
+        <Field label="Entry" value={row.entry.toFixed(2)} />
+        <Field label="Mark" value={row.mark === null ? '-' : num(row.mark).toFixed(2)} />
+        <Field label={isOpt ? 'At risk' : 'Margin'} value={`$${row.sizeUsd.toFixed(0)}`} cls="text-amber-300" />
+        <Field label="Notional" value={`$${row.notional.toFixed(0)}`} />
+        <Field label="Liq" value={liq === null ? '—' : `${liq.toFixed(0)}${liqDist !== null ? ` (${liqDist.toFixed(1)}%)` : ''}`} cls={liqDist !== null && liqDist < 1.5 ? 'text-red-300' : 'text-orange-300'} />
+        <Field label="Peak" value={pct(row.peakPct)} cls={peakClass(row.peakPct)} />
+        <Field label="Hold" value={holdTime(row, nowMs)} />
+        <Field label="Exit" value={(row.exit_reason || row.status).replace(/_/g, ' ')} />
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value, cls }: { label: string; value: string; cls?: string }) {
+  return (
+    <div>
+      <div className="uppercase tracking-wide text-zinc-600">{label}</div>
+      <div className={`truncate ${cls || 'text-zinc-200'}`}>{value}</div>
     </div>
   );
 }

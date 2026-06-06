@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-06 · Autonomous refill + mobile/risk dashboard (liquidation, at-risk)
+
+- **Auto-refill bankroll (autonomous):** new `paper_deposits` ledger (seed $1,000/lab). The hourly routine now computes balance = funded + closed net, and when a lab burns to ≤$50 it inserts a +$1,000 refill row and **counts the burn** — labs run forever, and burn-count itself becomes a learning (how aggressive/risky an approach is). Context recorded: real account is ~$50; the $1,000 paper is a sandbox; winning strategy scales down to the real account.
+- **Dashboard mobile fix:** the wide table was unusable on phones. Added a responsive **card view** (`md:hidden`) — each trade as a readable card; the table stays for desktop.
+- **Risk visibility:** added **Liquidation price** (+ distance-to-liq %, red when <1.5%) for futures, **At-risk / Margin** highlighted, and the balance card now shows **Funded**, **🔥 burned N×**, and **At risk $** for live positions.
+- API returns `funded` + `burns` per lab; balance reflects refills.
+- `(SHA on commit)`
+
 ## 2026-06-06 · Hourly Telegram pulse from the co-work routine
 
 - `main.py`: new `notify` bot-command — generic Telegram passthrough (`alerts._send`, sends even in quiet mode). The hourly paper-lab routine inserts a `notify` row each run; the engine (which holds the Telegram token on the VPS) pushes the summary to the user's chat.
