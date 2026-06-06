@@ -334,6 +334,11 @@ class AlphaBot:
                 opts._alpha_bot = self  # back-ref for session tracking
                 self._options_strategies[pair] = opts
 
+        # Void any paper trades left 'open' by a previous (now-dead) process —
+        # we lost their in-memory state on restart, so they're ghost rows.
+        if self.delta:
+            await self.db.cancel_orphan_paper_trades()
+
         # Independent paper futures experiments. These never place exchange
         # orders; they only write paper rows for comparing futures-style logic.
         if self.delta:

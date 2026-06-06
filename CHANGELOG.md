@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-06-06 · Fix ghost "open" paper trades from restarts (no fake trades)
+
+- **Root cause:** on every engine restart (we deployed ~16× tonight) the in-memory position state was lost, but the DB row stayed `status='open'` forever — frozen mark, frozen "profit". That's why you'd see a LONG and SHORT both "open" on the same asset with different (one stale) marks. Not fake P&L generation — orphaned ghost rows.
+- `db.py` `cancel_orphan_paper_trades()`: at startup, void any paper trade still 'open' (it belongs to the dead previous process) → status='cancelled', exit_reason='restart_orphan'.
+- `main.py`: calls it during paper startup, before opening any new positions.
+- Cleaned the existing orphans (1 futures + 2 options) immediately.
+- Dashboard API now hides `cancelled` rows — only real open + closed trades show.
+- User-facing: no more phantom long+short-both-open with frozen marks. If it's closed, it's closed.
+- `(SHA on commit)`
+
 ## 2026-06-06 · Autonomous refill + mobile/risk dashboard (liquidation, at-risk)
 
 - **Auto-refill bankroll (autonomous):** new `paper_deposits` ledger (seed $1,000/lab). The hourly routine now computes balance = funded + closed net, and when a lab burns to ≤$50 it inserts a +$1,000 refill row and **counts the burn** — labs run forever, and burn-count itself becomes a learning (how aggressive/risky an approach is). Context recorded: real account is ~$50; the $1,000 paper is a sandbox; winning strategy scales down to the real account.

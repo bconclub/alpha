@@ -17,11 +17,13 @@ export async function GET() {
     supabase
       .from('paper_futures_trades')
       .select('*')
+      .neq('status', 'cancelled')
       .order('opened_at', { ascending: false })
       .limit(300),
     supabase
       .from('paper_options_trades')
       .select('*')
+      .neq('status', 'cancelled')
       .order('opened_at', { ascending: false })
       .limit(300),
     supabase

@@ -378,6 +378,35 @@ class Database:
         except Exception as exc:
             logger.warning("paper_options UPDATE FAILED id=%s: %s", trade_id, exc)
 
+    async def cancel_orphan_paper_trades(self) -> int:
+        """Cancel any paper trade still 'open' at startup.
+
+        After a restart the engine has lost the in-memory state of any position
+        it had open, so those DB rows are orphans — they would otherwise linger
+        forever as ghost 'open' rows with a frozen mark and fake P&L. Void them.
+        """
+        if not self.is_connected:
+            return 0
+        total = 0
+        for table in (self.TABLE_PAPER_FUTURES, self.TABLE_PAPER_OPTIONS):
+            try:
+                loop = asyncio.get_running_loop()
+                res = await loop.run_in_executor(
+                    None,
+                    lambda t=table: (
+                        self._client.table(t)  # type: ignore[union-attr]
+                        .update({"status": "cancelled", "exit_reason": "restart_orphan", "closed_at": iso_now()})
+                        .eq("status", "open")
+                        .execute()
+                    ),
+                )
+                total += len(res.data or [])
+            except Exception as exc:
+                logger.warning("cancel_orphan_paper_trades(%s) failed: %s", table, exc)
+        if total:
+            logger.info("Cancelled %d orphan paper trade(s) on startup", total)
+        return total
+
     async def _fetch_existing_peak_pnl(self, trade_id: int) -> float | None:
         """Return the current peak_pnl for a trade row, or None if unavailable.
 
