@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-06 · Re-deploy (prev VPS deploy failed) + big-sample finding
+
+- The `fbf41d5` engine deploy **failed at the VPS step** (known flaky SSH) — the bot ran the prior build ($100, 12 lanes) for ~12h, so the $1,000 bump never applied. Re-deploying to land it.
+- **Finding (667 closed paper option trades):** every lane is net-negative on a real sample; the early "100% win" lanes were small-sample noise. Trend lanes have decent win rates (Donchian 68%, Trend Ride 63%, Supertrend 59%) and ~34% avg peaks but still lose — i.e. **the entries are directionally right; the exits give the edge back.** Buying short-dated options is structurally hard (theta + spread + give-back). Next lever is the EXIT/R:R, not the entry.
+- (SHA on commit)
+
 ## 2026-06-06 · Bump paper account $100 → $1,000 (headroom + bigger size)
 
 - Paper account base raised **$100 → $1,000** for both labs so the running balance has plenty of headroom and won't hit zero while we test.
