@@ -308,3 +308,47 @@ Best lane: **OPT_SELL_CALL +$0.96** (CALL-side sells are still the only positive
 4. **Expect a futures auto-refill next run** (~$150 and falling); log it as burn #1 when it trips.
 
 **Verdict status:** #6 (OTM selling) **⚠️ break-even** — n=49, net −$4.01, no edge; needs structural change (spreads), not samples. #8 (aggressive-leverage futures) 🧪 → **now ❌-leaning hard** — −85% of bankroll, and the previously-untested fixed-high-lev Donchian lanes (50×/100×) have now joined the losers (17–20% win), so the loss is no longer just momentum/EMA. One more hour like this earns a full ❌ DEAD alongside #5.
+
+### 2026-06-06 22:39 UTC — futures bankroll fully burned → FIRST AUTO-REFILL (burn #1) `[updated by: Cowork]`
+
+**Live-safety:** `bot_status.is_paused = true` (row stamped 22:37 UTC), `pause_reason = "PAPER-ONLY mode (no live trading)"`, **0** live `options_scalp` trades in the last hour. **Live is OFF.** No alert.
+
+**Engine alive:** last hour futures **opened 15 / last open 22:30 / last close 22:38**, options **opened 7 / last open 22:10**. DB `now()` = 22:38:56 — closes land within ~50s of now, so both labs are actively trading. No stall.
+
+**🔥 AUTO-REFILL FIRED — as predicted last run.** Futures crossed the $50 floor and went negative. Inserted `paper_deposits(futures, 1000, 'refill', 'auto-refill burn #1 …')` (id 3). Futures FUNDED $1,000 → **$2,000**; post-refill balance **$770.40**.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Options (SELL) | $1,000 | +$0.66 | **$1,000.66** | 0× | 50 |
+| Futures (aggressive) | $2,000* | −$1,229.60 | **$770.40** | **1×** | 6 |
+
+*\*$1,000 original + $1,000 refill. Pre-refill balance was −$229.60.*
+
+**⚠️ Data note — options closed sample reset.** Last run options were n=49 closed; this run only **n=6 closed + 50 open**. The prior closed history was cleared and a fresh 50-position fleet opened this hour. So the +$0.66 is a brand-new tiny sample, not a continuation of the n=49 series. Funding/burns unaffected (still 0 refills, $1,000).
+
+**Per-lane — Futures (n=60, aggregated by setup):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 25 | 16% | **−$500.35** | 6.0 | 32.5 | 6m |
+| FUT_DONCHIAN_100X | 8 | 13% | −$244.63 | 7.3 | 28.9 | 3m |
+| FUT_EMA_CONF | 14 | 7% | −$244.55 | 2.3 | 7.7 | 8m |
+| FUT_DONCHIAN_50X | 7 | 14% | −$143.28 | 5.5 | 12.3 | 8m |
+| FUT_DONCHIAN_CONF | 6 | 33% | −$96.80 | 4.5 | 10.4 | 11m |
+
+**Per-lane — Options SELL (n=6, fresh sample):** all five touched lanes flat-to-tiny-green — OPT_SELL_CALL +$0.46, OPT_SELL_NEUTRAL +$0.45, OPT_SELL_CALL_FAR +$0.07, OPT_SELL_PUT +$0.03, OPT_SELL_PUT_FAR −$0.34. Net **+$0.66**. Noise at this n.
+
+Best lane: **FUT_DONCHIAN_CONF −$96.80** (least-bad; only positive-ish futures lane). Worst: **FUT_MOMENTUM_CONF −$500.35** (41% of the loss).
+
+**Key findings:**
+1. **Futures aggressive ladder is fully dead — it burned the entire $1,000 bankroll in ~30h.** All 5 lanes negative, total −$1,229.60 closed. This is the textbook give-back, now quantified across the whole book: **avg peak +5.0% vs avg realized −2.7%; 17 of 60 trades peaked ≥+5% then closed red.** Avg leverage 55×. STRATEGY verdict (not an engine bug): entries reach profit but a fixed % stop with no trail/profit-lock round-trips every winner into a loss, and leverage multiplies the bleed. Fees/exits/sizing all behaving as designed — the *design* is the loser.
+2. **Auto-refill mechanism works** — floor detection + insert fired cleanly on the first real burn. Refill bookkeeping (FUNDED vs BALANCE vs burns) is correct.
+3. **Options is a non-result this hour** — sample was reset to n=6; +$0.66 is noise. Carry the n=49 "flat, no edge, needs spreads" thesis forward; do not over-read the fresh green.
+
+**What to change (single highest-leverage move):**
+1. **Neuter the aggressive futures ladder now** — it has spent a full bankroll proving fixed-stop high-leverage = guaranteed bleed. Minimum: kill FUT_MOMENTUM_CONF (−$500, worst lane) and cap leverage ≤10× until an ATR-scaled stop **+ profit-lock/trail** is in place. Banking even 50% of the +5–7% avg peak flips most of these.
+2. Carry-overs: ATR stop + trail (#1 for 6 runs), move option selling to defined-risk spreads, expect futures burn #2 within ~3–4h at the current ~$220/hr bleed (now from the $2,000 base).
+
+**Verdict status:** #8 (aggressive-leverage futures) 🧪 → **❌ DEAD.** Full $1,000 bankroll burned; all five lanes (momentum, EMA, Donchian 50×/100×/CONF) negative; the give-back is now a whole-book statistic (peak +5.0% → realized −2.7%), not a per-lane artifact. Joins #5. #6 (OTM selling) **⚠️ break-even** unchanged — options sample reset to n=6 this hour, no new signal; thesis (flat, needs spreads) stands on the prior n=49.
