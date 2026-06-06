@@ -33,7 +33,7 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
-### 2026-06-06 17:10 UTC — first check-in after the reset
+### 2026-06-06 17:10 UTC — first check-in after the reset `[updated by: Cowork]`
 
 **What's happening:** Bot is live and trading both new labs. SELL options lanes: 52 closed + 8 open. Sane-leverage futures: 58 closed + 8 open since 06-05.
 
@@ -78,3 +78,31 @@ Futures finding: 27 of 58 exits are `paper_max_hold` at ~30 min. A 30-minute clo
 6. After fixes: reset SELL bankroll and restart the count. The current 52 trades are contaminated — exclude them from any strategy verdict.
 
 **Verdict status:** #6 (OTM selling) and #7 (sane-leverage futures) stay 🧪 TESTING — current data is invalid as evidence either way.
+
+### 2026-06-06 17:38 UTC — post-reset, both labs just restarted clean `[updated by: Cowork]`
+
+**What's happening:** Both labs were reset to $1,000 and restarted ~3 min before this check-in (first trades 17:31–17:35 UTC). The contaminated SELL data (52 trades) and old futures data are gone. This is the FIXED selling engine + aggressive-leverage futures running on a clean slate. **Live trading still OFF** (bot_status is_paused=true; 0 `options_scalp` trades in the last hour).
+
+**What happened (numbers):** Almost nothing closed yet — too early to judge anything.
+
+| Lab | Open | Closed | Balance |
+|---|---|---|---|
+| Options (SELL) | 6 | 0 | $1,000.00 |
+| Futures (aggressive) | 1 | 1 | $979.16 |
+
+Open SELL lanes seeded: OPT_SELL_NEUTRAL×2, OPT_SELL_PUT×2, OPT_SELL_PUT_FAR×2. The single closed futures trade:
+
+| Lane | Dir | Lev | Margin→Notional | Fees | Exit | Hold | Peak | Net |
+|---|---|---|---|---|---|---|---|---|
+| FUT_EMA_CONF | ETH long | 25× | $250→$6,250 | $6.25 | paper_stop | 2.3 min | 0% | −$20.84 |
+
+**Key finding — futures fee model now looks SANE, but the leverage-noise stop-out is back.** Two things from the one trade:
+1. **Fees are no longer the notional bug.** $6.25 on $6,250 notional = 0.1% (reasonable taker round-trip). Margin→notional is a clean 25× (confidence 67 → bottom of the 25–100× ladder). The old "$80 stake controls $312k notional" sizing pathology is not present on the futures side.
+2. **Stopped on noise in 2.3 min.** Spot moved −0.23% (1563.65→1560.00); at 25× that's −5.8% on margin → `paper_stop`. Peak was 0% — the trade never went green, so the peak-capture trail (banks ~70% of peak) had nothing to bank. This is exactly the risk flagged last round: at 25–100× a sub-0.5% wiggle stops you out before the thesis can play. n=1, but it's the pattern to watch.
+
+**What we should change (carry-over, pending sample):**
+1. Futures: the paper_stop is too tight relative to leverage. Either (a) widen the stop to survive normal intrabar noise (e.g. ATR-based, not a fixed % on margin), or (b) cap leverage so a 0.2–0.3% wiggle isn't a −5%+ margin hit. As-is, 25–100× + tight stop = guaranteed churn.
+2. Let the next ~30–50 closes accumulate before any verdict. Both lanes are essentially at sample size 0–1.
+3. Watch the first SELL closes closely to confirm the fee/breach fixes hold (fees ≤ ~12.5% of premium, breach = spot reaching strike, holds measured in hours not minutes).
+
+**Verdict status:** unchanged — #6 (OTM selling) 🧪 TESTING, #8 (aggressive-leverage futures) 🧪 TESTING. Clean data collection just (re)started; nothing to conclude.
