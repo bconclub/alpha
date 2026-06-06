@@ -85,11 +85,11 @@ class BasePaperFutures:
     MAX_LEVERAGE = 100.0
     FIXED_LEVERAGE: float | None = None   # when set, ignore the confidence ladder (sane-leverage test)
     FEE_RATE = 0.0005
-    MAX_HOLD_SEC = 45 * 60
+    MAX_HOLD_SEC = 4 * 60 * 60      # ride winners (was 45m — too short, turned trend into scalping)
     STOP_PCT = -6.0
-    TRAIL_ARM_PCT = 6.0
-    TRAIL_RETRACE_PCT = 0.45
-    COOLDOWN_SEC = 90
+    TRAIL_ARM_PCT = 5.0             # arm the trail early
+    TRAIL_RETRACE_PCT = 0.30        # bank ~70% of the peak — capture it, don't give it back
+    COOLDOWN_SEC = 0               # aggressive: take every opportunity, re-enter immediately
 
     def __init__(
         self,
@@ -397,7 +397,7 @@ class DonchianPaperFutures(BasePaperFutures):
     SETUP_TYPE = "DONCHIAN_BREAKOUT"
     CHANNEL_LEN = 20
     TIMEFRAME = "5m"
-    MAX_HOLD_SEC = 45 * 60
+    MAX_HOLD_SEC = 4 * 60 * 60   # ride the trend
     STOP_PCT = -6.0
     TRAIL_ARM_PCT = 7.0
 
@@ -476,7 +476,7 @@ class EmaPullbackPaperFutures(BasePaperFutures):
 
     SETUP_TYPE = "EMA_PULLBACK"
     TIMEFRAME = "5m"
-    MAX_HOLD_SEC = 50 * 60
+    MAX_HOLD_SEC = 4 * 60 * 60   # ride the trend
     STOP_PCT = -5.0
     TRAIL_ARM_PCT = 6.0
 

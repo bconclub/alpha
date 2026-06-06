@@ -296,9 +296,12 @@ class BasePaperOptions:
     SELL_OTM_STEPS = 3              # sell well OTM (lower delta = higher prob of profit)
     SELL_TP_PCT = 30.0             # bank earlier — data showed peaks ~46% then reversing past the old +50% TP
     SELL_SL_PCT = -80.0           # cut a bit sooner too (premium up 80%) to cap the naked-short tail
-    # Delta options fee model: ~0.03% of underlying notional per side, capped 10% of premium
+    SELL_STRIKE_BUFFER = 0.001     # breach when spot reaches ~0.1% past the short strike
+    NOTIONAL_CAP_MULT = 20.0       # cap a trade's underlying notional at 20x the stake (no $80→$312k)
+    # Fee model: 0.03% of underlying notional per side, capped at 2.5% of premium/stake (gentle so
+    # fees don't dominate the test — the breach + churn bug, not fees, was the real killer).
     FEE_NOTIONAL_RATE = 0.0003
-    FEE_PREMIUM_CAP = 0.10
+    FEE_PREMIUM_CAP = 0.025
 
     def __init__(
         self,
@@ -494,6 +497,16 @@ class BasePaperOptions:
         # SELL: we profit when premium FALLS, so invert.
         return -move if self.SELL else move
 
+    def _sell_strike_breached(self, spot: float) -> bool:
+        """A short option's real risk is the spot reaching the strike (going ITM).
+        Exit a hair before the strike rather than on indicator noise."""
+        if self._strike <= 0 or spot <= 0:
+            return False
+        buf = self.SELL_STRIKE_BUFFER
+        if self._option_type == "put":
+            return spot <= self._strike * (1.0 + buf)   # spot fell to the short put strike
+        return spot >= self._strike * (1.0 - buf)        # spot rose to the short call strike
+
     def _exit_reason(self, premium: float, rows: list[list[float]], spot: float) -> str:
         # 1) contract reality: settle before expiry (sellers want this — full decay)
         if self.chain.seconds_to_expiry() <= PRE_EXPIRY_CLOSE_SEC:
@@ -506,7 +519,7 @@ class BasePaperOptions:
                 return "sell_take_profit"
             if pnl <= self.SELL_SL_PCT:
                 return "sell_stop"
-            if self._underlying_reversed(rows, spot):
+            if self._sell_strike_breached(spot):
                 return "sell_breached"
             return ""
         # BUY: ride-the-wave
@@ -550,6 +563,11 @@ class BasePaperOptions:
         if per_contract_usd <= 0:
             return
         contracts = max(1.0, round(self.STAKE_USD / per_contract_usd))
+        # Cap underlying notional so a cheap far-OTM premium can't control a huge position.
+        if spot > 0 and self.multiplier > 0:
+            max_contracts = (self.NOTIONAL_CAP_MULT * self.STAKE_USD) / (spot * self.multiplier)
+            if max_contracts >= 1:
+                contracts = min(contracts, float(int(max_contracts)))
         stake = entry_premium * contracts * self.multiplier
         notional = contracts * spot * self.multiplier
         greeks = await self._fetch_greeks(symbol)

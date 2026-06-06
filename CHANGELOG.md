@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-06-06 · Act on routine's bug findings: fix selling engine + capture peaks
+
+Acting on the hourly co-work routine's check-in (it found the SELL results were engine bugs, not a verdict):
+- **Sell breach fixed:** exit now fires when SPOT actually reaches the short strike (±0.1%), not on EMA/RSI noise — was dumping winners in 15–25 min before theta could work.
+- **Notional capped:** a trade's underlying notional is limited to 20× the stake (no more $80 controlling $312k far-OTM).
+- **Fees made gentle/realistic:** capped at 2.5% of premium/side (was 10% → ~20% round-trip that alone ate ~$780); fees no longer dominate the test.
+- **Capture peaks (futures):** trail arms at +5% and exits after giving back only 30% of the peak (was 45%) — bank ~70% of the move instead of round-tripping. Max hold 45m→4h so trend lanes ride; cooldown 90s→0 for aggressive re-entry on every opportunity.
+- LEARNINGS.md is the shared brain: routine drops findings hourly, this session acts on them.
+- `(SHA on commit)` · both paper labs reset to clean $1,000 after deploy.
+
 ## 2026-06-06 · Aggressive futures leverage (25–100×) + selling TP fix + reset #2
 
 - **Findings logged** to `engine/PAPER_RESULTS.md` + `engine/LEARNINGS.md`: option SELLING (naked) = **0% realized win** (theta worked, peaks +34–46%, but all reversed past the +50% TP to the −100% stop); sane-leverage futures 0–17% win, slow bleed.
