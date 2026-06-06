@@ -28,3 +28,53 @@
 Options: switch entirely from BUYING to **OTM SELLING** (theta harvest), fresh paper bankroll.
 Futures: test **trend/breakout entries at 3–5× leverage** (sane), no option drag.
 Keep the 2-hourly routine ranking everything. Crown a winner only after a real sample.
+
+---
+
+## Check-in log (2-hourly routine)
+
+### 2026-06-06 17:10 UTC — first check-in after the reset
+
+**What's happening:** Bot is live and trading both new labs. SELL options lanes: 52 closed + 8 open. Sane-leverage futures: 58 closed + 8 open since 06-05.
+
+**What happened (numbers):**
+
+Options SELLING — 0 winners out of 52. Every single lane negative:
+
+| Lane | Closed | Win% | Net |
+|---|---|---|---|
+| OPT_SELL_NEUTRAL | 3 | 0% | −$99.90 |
+| OPT_SELL_PUT | 10 | 0% | −$225.43 |
+| OPT_SELL_CALL | 14 | 0% | −$320.94 |
+| OPT_SELL_CALL_FAR | 14 | 0% | −$368.86 |
+| OPT_SELL_PUT_FAR | 11 | 0% | −$439.43 |
+| **Total** | **52** | **0%** | **≈ −$1,455** |
+
+Futures sane-leverage — all negative, small losses:
+
+| Lane | Closed | Win% | Net |
+|---|---|---|---|
+| FUT_DONCHIAN_3X | 7 | 14% | −$19.26 |
+| FUT_DONCHIAN_5X | 7 | 14% | −$23.29 |
+| FUT_EMA_4X | 21 | 0% | −$58.47 |
+| FUT_MOMENTUM_4X | 23 | 17% | −$70.15 |
+
+**The new thing (key finding): the SELL results are NOT a strategy verdict — they're engine bugs.** Three smoking guns from trade-level inspection:
+
+1. **Fee model is wrong for selling.** Fees ≈ $15–16 on an $80 stake (≈20% per round trip). They're computed as ~0.03% × underlying NOTIONAL × 2 legs (e.g. $80 stake controlling $25k–$312k notional → $15+ fees). Real venues (Deribit-style) charge per-contract on PREMIUM, capped at ~12.5% of premium. ~$780 of the −$1,455 is just this fee bug.
+2. **`sell_breached` exit fires on 51/52 trades within 15–25 min.** Avg exit −14.7% pre-fee while avg PEAK was +16–34%. The breach check is way too tight — trades were winning and got dumped on noise. TP (+50% credit) is unreachable because breach always fires first.
+3. **Hold times of 15–25 min can't harvest theta.** Theta accrues over hours/days. The "ride to near-expiry" logic never engages. We're effectively testing "short gamma for 20 minutes while paying notional fees" — not premium selling.
+
+Also: contract sizing lets $80 of stake control up to $312k notional (ETH far-OTM). That's the old reckless-leverage mistake wearing a new hat.
+
+Futures finding: 27 of 58 exits are `paper_max_hold` at ~30 min. A 30-minute clock on a TREND strategy converts it back into scalping — the exact thing verdicts #1–#3 killed. FUT_EMA_4X is 0/21 (EMA pullback weak again, consistent with options-era EMA lanes). Donchian samples too small to judge.
+
+**What we should change:**
+1. Fix option-sell fees: charge on premium (per-contract, capped ~12.5% of premium), not on underlying notional.
+2. Fix `sell_breached`: trigger on spot CLOSING beyond strike (or strike ± buffer), not touching an over-tight level. Log the breach price vs strike to verify.
+3. Let sells run: min hold measured in hours, ride toward expiry as designed; theta needs time.
+4. Cap notional per trade (e.g. ≤ 5–10× stake) on the sell lanes.
+5. Futures: replace `paper_max_hold` 30 min with trend-break exits (Donchian mid / EMA loss only) or extend max hold to several hours. Until then the 3–5× test isn't testing the thesis.
+6. After fixes: reset SELL bankroll and restart the count. The current 52 trades are contaminated — exclude them from any strategy verdict.
+
+**Verdict status:** #6 (OTM selling) and #7 (sane-leverage futures) stay 🧪 TESTING — current data is invalid as evidence either way.
