@@ -1500,6 +1500,16 @@ class AlphaBot:
                     await self.alerts.send_command_confirmation(label)
                     result_msg = "Bot force-resumed (win-rate bypass active)" if force else "Bot resumed"
 
+            elif command == "notify":
+                # Generic Telegram passthrough — the hourly paper-lab co-work routine
+                # uses this to push its check-in summary to the user's chat.
+                text = (params.get("text") or "").strip()
+                if text:
+                    await self.alerts._send(text, allow_in_quiet=True)
+                    result_msg = f"Notify sent ({len(text)} chars)"
+                else:
+                    result_msg = "Notify skipped — empty text"
+
             elif command == "force_strategy":
                 # Only scalp and options_scalp are active — force_strategy is a no-op
                 result_msg = "Only scalp and options_scalp strategies are active"

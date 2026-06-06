@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-06 · Hourly Telegram pulse from the co-work routine
+
+- `main.py`: new `notify` bot-command — generic Telegram passthrough (`alerts._send`, sends even in quiet mode). The hourly paper-lab routine inserts a `notify` row each run; the engine (which holds the Telegram token on the VPS) pushes the summary to the user's chat.
+- The routine now sends an hourly Telegram update: what was checked, # trades, P/L, what's working, what we should do, what we're doing next. So the user sees the lab evolving in real time.
+- `(SHA on commit)`
+
 ## 2026-06-06 · Act on routine's bug findings: fix selling engine + capture peaks
 
 Acting on the hourly co-work routine's check-in (it found the SELL results were engine bugs, not a verdict):
