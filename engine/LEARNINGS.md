@@ -258,3 +258,53 @@ Best lane: **OPT_SELL_CALL +$0.96** (only positive lanes are CALL-side sells). W
 4. SELL realized sample is now a real n=45 and says "flat" — stop waiting for naked selling to prove a win; iterate the structure (spreads / strike selection) instead.
 
 **Verdict status:** #6 (OTM selling) 🧪 TESTING → **leaning ⚠️ break-even** — fixed engine is sane but n=45 shows no edge (net −$4.53, tiny magnitudes); needs a structural change (spreads), not more samples. #8 (aggressive-leverage futures) 🧪 TESTING, **firmly ❌-leaning** — −62.8% of bankroll, 33/36 losers concentrated in momentum/EMA; unchanged because the lab is idle.
+
+### 2026-06-06 21:39 UTC — labs RESUMED; high-lev Donchian now confirms loss too `[updated by: Cowork]`
+
+**Live-safety:** `bot_status.is_paused = true` (row stamped 21:37 UTC) — flag now reads OFF cleanly (the prior stale-false issue cleared after the re-pause). No live `options_scalp` trades. **Live is OFF.** No alert.
+
+**✅ STALL RESOLVED — the paper engine is opening trades again.** Last hour: futures **opened 15 / closed 12** (last open 21:38), options **opened 4 / closed 10** (last open 21:19). Both labs have open positions (futures 3, options 4). The ~90-min idle window flagged at 20:39 has ended — data collection has resumed, so the "run forever" mandate is back on track. (No engine change was made from this run; it appears to have restarted on its own / with the re-pause cycle.)
+
+**Balances & burns** (FUNDED $1,000 each; `paper_deposits` shows 0 refills):
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Options (SELL) | $1,000 | −$4.01 | **$995.99** | 0× | 4 |
+| Futures (aggressive) | $1,000 | −$850.00 | **$150.01** | 0× | 3 |
+
+No refill — both still ≫ the $50 floor. **Futures is burning ~$220/hr (−$628 → −$850 this hour); at $150 it will likely cross the $50 floor and trigger its first auto-refill within ~1 hour.**
+
+**Per-lane — Options SELL (n=49):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **OPT_SELL_CALL** | 9 | 67% | **+$0.96** | 14.8 | 31.9 | 48m |
+| OPT_SELL_CALL_FAR | 10 | 40% | +$0.30 | 15.9 | 30.1 | 43m |
+| OPT_SELL_PUT_FAR | 9 | 22% | −$1.45 | 0.8 | 7.0 | 45m |
+| OPT_SELL_NEUTRAL | 12 | 25% | −$1.86 | 5.4 | 30.6 | 37m |
+| OPT_SELL_PUT | 9 | 33% | −$2.03 | 0.9 | 6.8 | 45m |
+
+**Per-lane — Futures (n=51):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 21 | 14% | **−$365.10** | 4.9 | 32.5 | 5m |
+| FUT_EMA_CONF | 14 | 14% | −$192.11 | 1.5 | 7.7 | 7m |
+| FUT_DONCHIAN_100X | 6 | 17% | −$185.31 | 7.2 | 28.9 | 2m |
+| FUT_DONCHIAN_50X | 5 | 20% | −$60.68 | 5.3 | 12.3 | 3m |
+| FUT_DONCHIAN_CONF | 5 | 40% | −$46.78 | 4.5 | 10.4 | 5m |
+
+Best lane: **OPT_SELL_CALL +$0.96** (CALL-side sells are still the only positive lanes). Worst: **FUT_MOMENTUM_CONF −$365.10**.
+
+**Key findings:**
+1. **Engine alive again — biggest news of the hour.** The stall is over; both labs added real samples (futures +15 closes, options +4). No further action needed on availability this run.
+2. **Futures: high-leverage Donchian lanes now ALSO confirmed as losers (no longer tiny samples).** Last run they were n=1; now FUT_DONCHIAN_100X is n=6 / 17% win / **−$185** and 50X is n=5 / 20% / −$60. Critically, the 100× lane peaks an avg **+7.2% (max +28.9%) and still nets −$185** — it goes green then round-trips through the stop. This is the give-back problem *multiplied by leverage*: the entries aren't even uniformly bad, but with a fixed % stop and no trail/lock-in, every winner reverses into a loss. **Leverage + no profit-lock = guaranteed bleed**, exactly matching verdicts #5/#8.
+3. **Options still flat/noise at n=49 (−$4.01).** Unchanged thesis: CALL sells win (+$0.96/+$0.30), PUT sells lose (−$1.45/−$2.03). PUT lanes show **near-zero avg peak (0.8–0.9%)** → spot drifted *down* this window, so the puts were breached almost immediately and never accrued theta, while calls decayed cleanly. The naked sell is sane but directionally one-legged; nothing here is an edge.
+
+**What to change (carry-overs hardening, not new):**
+1. **#1 for 5 runs straight — scale the futures stop to leverage/volatility (ATR-based) AND add a profit-lock/trail.** New evidence this run: the 100× lane *reaches* +7–29% peaks before dying. A trail that banks even 50% of peak would flip several of these. Fixed % stop on 50–100× = mathematically doomed.
+2. **Kill FUT_MOMENTUM_CONF** — −$365 of the −$850 (43%), 14% win, dead verdict #3.
+3. **Move option selling to DEFINED-RISK SPREADS** — caps the one-legged PUT tail and lets theta net; naked SELL is proven flat (n=49) and won't improve with more samples.
+4. **Expect a futures auto-refill next run** (~$150 and falling); log it as burn #1 when it trips.
+
+**Verdict status:** #6 (OTM selling) **⚠️ break-even** — n=49, net −$4.01, no edge; needs structural change (spreads), not samples. #8 (aggressive-leverage futures) 🧪 → **now ❌-leaning hard** — −85% of bankroll, and the previously-untested fixed-high-lev Donchian lanes (50×/100×) have now joined the losers (17–20% win), so the loss is no longer just momentum/EMA. One more hour like this earns a full ❌ DEAD alongside #5.

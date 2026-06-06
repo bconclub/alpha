@@ -79,3 +79,21 @@ Takeaway: **loss scales directly with leverage** (5× ≈ flat, 61× momentum = 
 - **Futures = sane leverage trend**: FUT_DONCHIAN_3X / 5X, FUT_EMA_4X, FUT_MOMENTUM_4X (control).
 - Hypotheses: (1) selling harvests the theta buying bled; (2) Donchian/trend entries pay at 3–5× without option drag.
 - The 2-hourly routine ranks all lanes. Crown a winner only after a real sample (hundreds of trades).
+
+## Live snapshot — 2026-06-06 21:39 UTC (post-reset, engine resumed)
+Balances: Options **$995.99** (−$4.01, n=49, 4 open) · Futures **$150.01** (−$850.00, n=51, 3 open). Burns 0× each (both > $50 floor; futures near burn). Live OFF.
+
+| Lane | Closed | Win% | Net | Avg peak% |
+|---|---|---|---|---|
+| OPT_SELL_CALL | 9 | 67% | +$0.96 | 14.8 |
+| OPT_SELL_CALL_FAR | 10 | 40% | +$0.30 | 15.9 |
+| OPT_SELL_PUT_FAR | 9 | 22% | −$1.45 | 0.8 |
+| OPT_SELL_NEUTRAL | 12 | 25% | −$1.86 | 5.4 |
+| OPT_SELL_PUT | 9 | 33% | −$2.03 | 0.9 |
+| FUT_DONCHIAN_CONF | 5 | 40% | −$46.78 | 4.5 |
+| FUT_DONCHIAN_50X | 5 | 20% | −$60.68 | 5.3 |
+| FUT_DONCHIAN_100X | 6 | 17% | −$185.31 | 7.2 |
+| FUT_EMA_CONF | 14 | 14% | −$192.11 | 1.5 |
+| FUT_MOMENTUM_CONF | 21 | 14% | −$365.10 | 4.9 |
+
+Read: options flat/noise (CALL+ / PUT−, directional not edge); futures bleeding across ALL lanes — high-lev Donchian now confirmed losers, 100× peaks +7% avg then round-trips through the fixed stop. Need: ATR/leverage-scaled stop + profit-lock on futures; defined-risk spreads on options. See LEARNINGS check-in log for detail.
