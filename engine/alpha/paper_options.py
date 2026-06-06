@@ -287,10 +287,15 @@ class BasePaperOptions:
     PAPER_ACCOUNT_USD = 1000.0
     STAKE_USD = 80.0                # target premium spent per trade (aggressive on $1000)
     OTM_STEPS = 0                   # 0 = ATM; lanes may reach 1 step OTM on strong moves
-    # Ride-the-wave exits (premium %, leverage = 1 since buy-only)
+    # BUY (ride-the-wave) exits (premium %, leverage = 1 since buy-only)
     HARD_STOP_PCT = -45.0           # thesis dead — catastrophic premium loss
     TRAIL_ARM_PCT = 18.0            # arm the trail early so mid-size peaks aren't given back
     TRAIL_RETRACE_PCT = 0.45        # exit if premium gives back this fraction of the peak
+    # SELL mode (theta harvest): collect premium, profit as it decays.
+    SELL = False                    # when True this lane WRITES options instead of buying
+    SELL_OTM_STEPS = 3              # sell well OTM (lower delta = higher prob of profit)
+    SELL_TP_PCT = 50.0             # take profit when premium has decayed 50% of the credit
+    SELL_SL_PCT = -100.0          # stop when premium doubles (lose 1x the credit)
     # Delta options fee model: ~0.03% of underlying notional per side, capped 10% of premium
     FEE_NOTIONAL_RATE = 0.0003
     FEE_PREMIUM_CAP = 0.10
@@ -317,6 +322,7 @@ class BasePaperOptions:
             self.TRAIL_ARM_PCT = trail_arm
         if otm_steps is not None:
             self.OTM_STEPS = otm_steps
+            self.SELL_OTM_STEPS = otm_steps
         self.pair = pair                       # underlying perp, e.g. BTC/USD:USD
         self.options_exchange = options_exchange
         self.futures_exchange = futures_exchange
@@ -484,13 +490,26 @@ class BasePaperOptions:
     def _premium_pnl_pct(self, premium: float) -> float:
         if self._entry_premium <= 0:
             return 0.0
-        return _pct_move(self._entry_premium, premium)
+        move = _pct_move(self._entry_premium, premium)
+        # SELL: we profit when premium FALLS, so invert.
+        return -move if self.SELL else move
 
     def _exit_reason(self, premium: float, rows: list[list[float]], spot: float) -> str:
-        # 1) contract reality: settle before expiry
+        # 1) contract reality: settle before expiry (sellers want this — full decay)
         if self.chain.seconds_to_expiry() <= PRE_EXPIRY_CLOSE_SEC:
             return "pre_expiry"
         pnl = self._premium_pnl_pct(premium)
+        if self.SELL:
+            # theta harvest: take 50% of credit; cut if premium doubles; or if
+            # the underlying breaks against the short (option going ITM).
+            if pnl >= self.SELL_TP_PCT:
+                return "sell_take_profit"
+            if pnl <= self.SELL_SL_PCT:
+                return "sell_stop"
+            if self._underlying_reversed(rows, spot):
+                return "sell_breached"
+            return ""
+        # BUY: ride-the-wave
         # 2) catastrophic stop (thesis dead)
         if pnl <= self.HARD_STOP_PCT:
             return "hard_stop"
@@ -510,15 +529,21 @@ class BasePaperOptions:
             return
         if self.chain.seconds_to_expiry() <= PRE_EXPIRY_CLOSE_SEC:
             return
-        option_type = "call" if direction == "long" else "put"
-        otm = int(meta.get("otm_steps", self.OTM_STEPS) or 0)
+        if self.SELL:
+            # Sell the side the market is moving AWAY from: bullish → short put, bearish → short call.
+            option_type = "put" if direction == "long" else "call"
+            otm = int(meta.get("otm_steps", self.SELL_OTM_STEPS) or 0)
+        else:
+            option_type = "call" if direction == "long" else "put"
+            otm = int(meta.get("otm_steps", self.OTM_STEPS) or 0)
         strike = self.chain.pick_strike(spot, option_type, otm_steps=otm)
         if strike is None:
             return
         symbol = self.chain.symbol_for(strike, option_type)
         if not symbol:
             return
-        entry_premium = await self._fetch_premium(symbol, side="ask")
+        # Buyers pay the ask; sellers receive the bid.
+        entry_premium = await self._fetch_premium(symbol, side="bid" if self.SELL else "ask")
         if entry_premium <= 0:
             return
         per_contract_usd = entry_premium * self.multiplier
@@ -534,6 +559,7 @@ class BasePaperOptions:
         metadata = {
             "source": "paper_options_lab",
             "strategy": self.SETUP_TYPE,
+            "side": "sell" if self.SELL else "buy",
             "signal_key": signal_key,
             "confidence_score": round(confidence, 1),
             "hard_stop_pct": self.HARD_STOP_PCT,
@@ -966,16 +992,94 @@ class MacdCrossOptions(BasePaperOptions):
         return macd < sig if self._direction == "long" else macd > sig
 
 
+# ── OPTION SELLING lanes (theta harvest — SELL=True) ──────────────────────
+# Buying short-dated options lost across 766 paper trades (theta + spread).
+# These SELL premium instead: collect the credit, profit as it decays, take 50%,
+# cut if it doubles, or ride to near-expiry. The logical flip of a losing buyer.
+
+class SellPutTrendOptions(BasePaperOptions):
+    """Uptrend → short an OTM put (collect premium, profit if price holds up)."""
+    SETUP_TYPE = "OPT_SELL_PUT"
+    TIMEFRAME = "5m"
+    SELL = True
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 35:
+            return None
+        closes = [r[4] for r in rows[:-1]]
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        ts = int(rows[:-1][-1][0])
+        if ema8 > ema21 and closes[-1] > ema21:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "confidence_score": 70.0}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 35:
+            return False
+        closes = [r[4] for r in rows[:-1]]
+        return closes[-1] < _ema(closes[-55:], 21)  # trend broke → short put at risk
+
+
+class SellCallTrendOptions(BasePaperOptions):
+    """Downtrend → short an OTM call (profit if price stays down)."""
+    SETUP_TYPE = "OPT_SELL_CALL"
+    TIMEFRAME = "5m"
+    SELL = True
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 35:
+            return None
+        closes = [r[4] for r in rows[:-1]]
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        ts = int(rows[:-1][-1][0])
+        if ema8 < ema21 and closes[-1] < ema21:
+            return "short", f"{ts}:short", {"timeframe": self.TIMEFRAME, "confidence_score": 70.0}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 35:
+            return False
+        closes = [r[4] for r in rows[:-1]]
+        return closes[-1] > _ema(closes[-55:], 21)
+
+
+class SellPremiumNeutralOptions(BasePaperOptions):
+    """Quiet/range regime → harvest premium via a far-OTM put (BTC/ETH up-drift)."""
+    SETUP_TYPE = "OPT_SELL_NEUTRAL"
+    TIMEFRAME = "5m"
+    SELL = True
+    SELL_OTM_STEPS = 4
+
+    def _entry_decision(self, rows, spot):
+        if len(rows) < 35:
+            return None
+        closes = [r[4] for r in rows[:-1]]
+        gap = abs(_pct_move(_ema(closes[-55:], 21), _ema(closes[-34:], 8)))
+        rsi = _rsi(closes, 14)
+        ts = int(rows[:-1][-1][0])
+        if gap < 0.15 and 40 <= rsi <= 65:
+            return "long", f"{ts}:long", {"timeframe": self.TIMEFRAME, "ema_gap": gap, "rsi": rsi, "confidence_score": 66.0}
+        return None
+
+    def _underlying_reversed(self, rows, spot):
+        if len(rows) < 16:
+            return False
+        return _rsi([r[4] for r in rows[:-1]], 14) < 35
+
+
 def build_paper_options_strategies(
     pair: str,
     options_exchange: Any,
     futures_exchange: Any,
     db: Database,
 ) -> list[BasePaperOptions]:
-    """Grid of buy-only paper option lanes for one underlying (BTC/ETH).
+    """Paper OPTION SELLING lab for one underlying (BTC/ETH).
 
-    Free paper sims — run many proven strategy families x moneyness combinations
-    so the data can tell us which actually carries edge in the current regime.
+    Pivoted from buying (confirmed loser, 766 trades) to SELLING premium —
+    harvest theta, take 50% profit, cut at 2x, ride to near-expiry. OTM strikes
+    at varying distance so the data shows which delta/strategy carries edge.
     """
     base = pair.split("/")[0]
     chain = PaperOptionChain(options_exchange, base)
@@ -986,20 +1090,11 @@ def build_paper_options_strategies(
                    logger_name=f"paper.opt.{name}.{base}", data=data, **kw)
 
     return [
-        # trend-following ride-the-wave (the lanes showing edge) — ATM + OTM variants
-        mk(TrendRideOptions, "trend"),
-        mk(TrendRideOptions, "trend_otm", setup_override="OPT_TREND_RIDE_OTM", otm_steps=1),
-        mk(DonchianBreakoutOptions, "donchian"),
-        mk(DonchianBreakoutOptions, "donchian_otm", setup_override="OPT_DONCHIAN_OTM", otm_steps=1),
-        mk(EmaPullbackOptions, "emapull"),
-        # patient trend variant: trail later to capture moonshots
-        mk(TrendRideOptions, "trend_runner", setup_override="OPT_TREND_RUNNER", trail_arm=35.0),
-        # ── canonical institutional / quant strategies (researched) ──
-        mk(VwapPullbackOptions, "vwap"),
-        mk(SupertrendOptions, "supertrend"),
-        mk(OpeningRangeBreakoutOptions, "orb"),
-        mk(MacdCrossOptions, "macd"),
-        # counter-trend / control
-        mk(MeanReversionOptions, "meanrevert"),
-        mk(MomentumImpulseOptions, "momentum"),
+        # trend-aligned OTM premium selling (3 strikes OTM default)
+        mk(SellPutTrendOptions, "sell_put"),
+        mk(SellCallTrendOptions, "sell_call"),
+        mk(SellPremiumNeutralOptions, "sell_neutral"),
+        # further-OTM variants (lower delta = higher win prob, smaller credit)
+        mk(SellPutTrendOptions, "sell_put_far", setup_override="OPT_SELL_PUT_FAR", otm_steps=5),
+        mk(SellCallTrendOptions, "sell_call_far", setup_override="OPT_SELL_CALL_FAR", otm_steps=5),
     ]

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-06 · Pivot: OPTION SELLING + sane-leverage FUTURES + knowledge table
+
+- **Options: BUYING → SELLING.** Buying lost across 766 trades (theta + spread). Added SELL mode to the paper options engine (collect premium at the bid, profit as it decays): take-profit at +50% of credit, stop at −100% (premium doubles), ride to near-expiry. New lanes: Sell Put / Sell Call (trend-aligned OTM), Sell Neutral (quiet regime far-OTM put), + further-OTM variants. Options lab now SELLS premium instead of buying it.
+- **Futures: sane leverage.** Replaced the reckless 25–100× confidence ladder with a clean trend/breakout test at **3×/4×/5×** (Donchian 3×, Donchian 5×, EMA 4×, Momentum 4× control). Tests whether the directional entries carry edge without option drag. Each lane independent for clean leverage comparison.
+- **`engine/LEARNINGS.md` (new):** knowledge table of every verdict so far (live buying dead, paper buying dead, momentum dead, mean-revert weak, high-lev dead) + hard-won principles, so future setups build on what we know.
+- Dashboard: labels for all new sell + futures lanes.
+- Refresh: new lanes write fresh-tagged rows; selling/sane-futures data starts clean.
+- (SHA on commit)
+
 ## 2026-06-06 · Re-deploy (prev VPS deploy failed) + big-sample finding
 
 - The `fbf41d5` engine deploy **failed at the VPS step** (known flaky SSH) — the bot ran the prior build ($100, 12 lanes) for ~12h, so the $1,000 bump never applied. Re-deploying to land it.

@@ -83,6 +83,7 @@ class BasePaperFutures:
     ALLOC_PCT = 0.25
     BASE_LEVERAGE = 5.0
     MAX_LEVERAGE = 100.0
+    FIXED_LEVERAGE: float | None = None   # when set, ignore the confidence ladder (sane-leverage test)
     FEE_RATE = 0.0005
     MAX_HOLD_SEC = 45 * 60
     STOP_PCT = -6.0
@@ -302,6 +303,8 @@ class BasePaperFutures:
         This deliberately uses broad buckets so paper results reveal whether
         higher leverage improves edge or just amplifies noise.
         """
+        if self.FIXED_LEVERAGE is not None:
+            return self.FIXED_LEVERAGE
         if confidence >= 92:
             return min(100.0, self.MAX_LEVERAGE)
         if confidence >= 84:
@@ -690,13 +693,23 @@ def build_paper_futures_strategies(
     db: Database,
     scalp_strategy: Any | None = None,
 ) -> list[PaperFuturesStrategy]:
-    """Return all paper futures strategy lanes for one pair."""
-    position_book = PaperFuturesPositionBook()
-    strategies: list[PaperFuturesStrategy] = [
-        DonchianPaperFutures(pair, exchange, db, position_book),
-        EmaPullbackPaperFutures(pair, exchange, db, position_book),
-        MomentumImpulsePaperFutures(pair, exchange, db, position_book),
+    """Sane-leverage trend/breakout futures test for one pair.
+
+    The reckless 25–100× confidence ladder blew the paper account. This tests the
+    real question: do the trend/breakout ENTRIES carry edge when expressed on
+    futures (no theta, no option spread) at SANE leverage (3–5×)? Each lane runs
+    independently (own position book) so leverages compare side by side.
+    """
+    def mk(cls, setup: str, lev: float) -> PaperFuturesStrategy:
+        s = cls(pair, exchange, db, PaperFuturesPositionBook())
+        s.FIXED_LEVERAGE = lev
+        s.SETUP_TYPE = setup
+        s.setup_type = setup
+        return s
+
+    return [
+        mk(DonchianPaperFutures, "FUT_DONCHIAN_3X", 3.0),
+        mk(DonchianPaperFutures, "FUT_DONCHIAN_5X", 5.0),
+        mk(EmaPullbackPaperFutures, "FUT_EMA_4X", 4.0),
+        mk(MomentumImpulsePaperFutures, "FUT_MOMENTUM_4X", 4.0),  # control (known weak)
     ]
-    if scalp_strategy is not None:
-        strategies.append(SignalMixPaperFutures(pair, exchange, db, scalp_strategy, position_book))
-    return strategies

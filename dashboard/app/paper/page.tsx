@@ -51,6 +51,9 @@ const SETUP_LABELS: Record<string, string> = {
   OPT_TREND_RIDE: 'Trend Ride', OPT_DONCHIAN: 'Donchian', OPT_MOMENTUM: 'Momentum', OPT_EMA_PULLBACK: 'EMA Pullback',
   OPT_TREND_RIDE_OTM: 'Trend Ride OTM', OPT_DONCHIAN_OTM: 'Donchian OTM', OPT_TREND_RUNNER: 'Trend Runner', OPT_MEAN_REVERT: 'Mean Revert',
   OPT_VWAP_PULLBACK: 'VWAP Pullback', OPT_SUPERTREND: 'Supertrend', OPT_ORB: 'Opening Range', OPT_MACD: 'MACD',
+  OPT_SELL_PUT: 'Sell Put', OPT_SELL_CALL: 'Sell Call', OPT_SELL_NEUTRAL: 'Sell Neutral',
+  OPT_SELL_PUT_FAR: 'Sell Put (far)', OPT_SELL_CALL_FAR: 'Sell Call (far)',
+  FUT_DONCHIAN_3X: 'Donchian 3x', FUT_DONCHIAN_5X: 'Donchian 5x', FUT_EMA_4X: 'EMA 4x', FUT_MOMENTUM_4X: 'Momentum 4x',
 };
 
 const num = (v: unknown): number => {
