@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-06 · Reset both paper balances to $1,000 + results snapshot in repo
+
+- `engine/PAPER_RESULTS.md` (new): full point-in-time dump of the option-BUYING era + reckless-leverage futures results (every lane, win%, net) before the reset, so the data survives. Only OPT_DONCHIAN (ATM breakout) was net-positive (+$29); futures loss scaled directly with leverage.
+- **Balances reset to a clean $1,000 each.** Deleted 829 old buying-option rows and 359 old high-leverage futures rows from the paper ledgers so the new approaches (option SELLING, sane-leverage futures) start fresh from $1,000 — no more old losses dragging the displayed balance.
+- Pairs with `engine/LEARNINGS.md` (verdicts + principles) as the in-repo knowledge base.
+- `(SHA on commit)`
+
 ## 2026-06-06 · Pivot: OPTION SELLING + sane-leverage FUTURES + knowledge table
 
 - **Options: BUYING → SELLING.** Buying lost across 766 trades (theta + spread). Added SELL mode to the paper options engine (collect premium at the bid, profit as it decays): take-profit at +50% of credit, stop at −100% (premium doubles), ride to near-expiry. New lanes: Sell Put / Sell Call (trend-aligned OTM), Sell Neutral (quiet regime far-OTM put), + further-OTM variants. Options lab now SELLS premium instead of buying it.
