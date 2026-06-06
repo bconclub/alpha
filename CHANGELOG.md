@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-07 · Dashboard defaults to "All" (history wasn't lost) + no-more-resets
+
+- **It wasn't resetting.** The `/paper` view defaulted to the "Today" window; just past midnight IST that hid every pre-midnight trade, making it look like only ~3 trades existed. In reality 18 futures + closed history were persisting fine.
+- Changed the default window **Today → All** so every trade we've taken is visible by default.
+- **Policy:** no more destructive resets. Balance refills now go through the additive `paper_deposits` ledger — trade history is never deleted again. (Earlier tonight's `DELETE`-resets were the real history loss; that stops now.)
+- Note: restart-orphan rows are `cancelled` (hidden), never deleted — closed history always persists.
+- `(SHA on commit)`
+
 ## 2026-06-06 · Fix ghost "open" paper trades from restarts (no fake trades)
 
 - **Root cause:** on every engine restart (we deployed ~16× tonight) the in-memory position state was lost, but the DB row stayed `status='open'` forever — frozen mark, frozen "profit". That's why you'd see a LONG and SHORT both "open" on the same asset with different (one stale) marks. Not fake P&L generation — orphaned ghost rows.

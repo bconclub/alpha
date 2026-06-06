@@ -204,7 +204,7 @@ export default function PaperLabPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [instrument, setInstrument] = useState<Instrument>('options');
-  const [windowKey, setWindowKey] = useState<WindowKey>('today');
+  const [windowKey, setWindowKey] = useState<WindowKey>('all');
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const fetchRows = useCallback(async (showLoading = true) => {
