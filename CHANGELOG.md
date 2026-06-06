@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-07 · Deterministic Telegram pulse (engine-formatted, always clean)
+
+- **Problem:** the hourly routine wrote the Telegram text freehand each run, so it kept drifting into dense walls of text. Only hand-formatted one-offs looked clean.
+- **Fix:** new `paper_pulse` bot-command — the **engine** builds the pulse from the DB in a fixed, clean layout (P/L, 🟢 Working, 🔴 Losing, 🧠 Learned, 🔧 Next, status). The routine no longer composes the message; it only passes two short lines (`learned`, `next`, ≤90 chars each). Format is now guaranteed identical every hour.
+- Routine updated to call `paper_pulse` (not `notify`) with just the two insight lines.
+- `(SHA on commit)`
+
 ## 2026-06-07 · Real "money in" for sells + decluttered mobile card
 
 - **Sells now size by committed MARGIN, not the tiny premium.** Was: collect a $1–3 credit (notional-capped) → trivial, noisy trades. Now: each short commits a real ~$150 margin (≈15% of a ~$1,000 notional); the collected premium is recorded as `credit_usd`. So "money in" is a true, meaningful number.

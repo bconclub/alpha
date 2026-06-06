@@ -166,6 +166,68 @@ class AlphaBot:
                     seen.add(base)
         return ordered
 
+    async def _build_paper_pulse(self, params: dict[str, Any]) -> str:
+        """Build the clean, fixed-format paper-lab Telegram pulse from the DB.
+
+        Structure is deterministic (always identical shape); only the short
+        'learned' / 'next' lines come from the routine via params.
+        """
+        loop = asyncio.get_running_loop()
+
+        def fetch(table: str, cols: str) -> list[dict[str, Any]]:
+            try:
+                return self.db.client.table(table).select(cols).limit(2000).execute().data or []
+            except Exception:
+                return []
+
+        opt = await loop.run_in_executor(None, lambda: fetch("paper_options_trades", "setup_type,status,pnl_usd"))
+        fut = await loop.run_in_executor(None, lambda: fetch("paper_futures_trades", "setup_type,status,pnl_usd"))
+        dep = await loop.run_in_executor(None, lambda: fetch("paper_deposits", "lab,amount,kind"))
+
+        def funded(lab: str) -> float:
+            s = sum(float(d.get("amount") or 0) for d in dep if d.get("lab") == lab)
+            return s if s else 1000.0
+
+        def burns(lab: str) -> int:
+            return sum(1 for d in dep if d.get("lab") == lab and d.get("kind") == "refill")
+
+        def net(rows: list[dict[str, Any]]) -> float:
+            return sum(float(r.get("pnl_usd") or 0) for r in rows if r.get("status") == "closed")
+
+        net_opt, net_fut = net(opt), net(fut)
+        bal_opt = funded("options") + net_opt
+        bal_fut = funded("futures") + net_fut
+
+        lane: dict[str, float] = {}
+        for r in opt + fut:
+            if r.get("status") == "closed":
+                k = r.get("setup_type") or "?"
+                lane[k] = lane.get(k, 0.0) + float(r.get("pnl_usd") or 0)
+        best = max(lane.items(), key=lambda x: x[1], default=(None, 0.0))
+        worst = min(lane.items(), key=lambda x: x[1], default=(None, 0.0))
+        working = f"{best[0]} +${best[1]:,.0f}" if best[0] and best[1] > 0 else "nothing yet"
+        losing = f"{worst[0]} −${abs(worst[1]):,.0f}" if worst[0] and worst[1] < 0 else "—"
+
+        learned = (str(params.get("learned") or "").strip()) or "gathering data"
+        nxt = (str(params.get("next") or "").strip()) or "keep the labs running"
+
+        def line(label: str, bal: float, n: float) -> str:
+            dot = "🟢" if n >= 0 else "🔴"
+            sign = "+" if n >= 0 else "−"
+            return f"{dot} {label}  ${bal:,.0f}  ({sign}${abs(n):,.0f})"
+
+        return (
+            "🤖 <b>Alpha Paper Lab</b>\n\n"
+            "<b>P/L</b>\n"
+            f"{line('Options', bal_opt, net_opt)}\n"
+            f"{line('Futures', bal_fut, net_fut)}\n\n"
+            f"🟢 <b>Working</b> — {working}\n\n"
+            f"🔴 <b>Losing</b> — {losing}\n\n"
+            f"🧠 <b>Learned</b>\n{learned}\n\n"
+            f"🔧 <b>Next</b>\n{nxt}\n\n"
+            f"✅ Live OFF · Burns {burns('options')}× / {burns('futures')}×"
+        )
+
     async def _select_top_delta_futures_pairs(self, limit: int = 5) -> list[str]:
         """Pick the most liquid active Delta USD perpetuals for paper futures.
 
@@ -1514,6 +1576,17 @@ class AlphaBot:
                     result_msg = f"Notify sent ({len(text)} chars)"
                 else:
                     result_msg = "Notify skipped — empty text"
+
+            elif command == "paper_pulse":
+                # Deterministic, always-clean paper-lab Telegram pulse. The engine
+                # formats it from the DB; the routine only supplies short
+                # 'learned' / 'next' lines via params. Guarantees consistent shape.
+                try:
+                    text = await self._build_paper_pulse(params)
+                    await self.alerts._send(text, allow_in_quiet=True)
+                    result_msg = "Paper pulse sent"
+                except Exception as exc:
+                    result_msg = f"Paper pulse failed: {exc}"
 
             elif command == "force_strategy":
                 # Only scalp and options_scalp are active — force_strategy is a no-op
