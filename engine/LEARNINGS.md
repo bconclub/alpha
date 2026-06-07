@@ -33,6 +33,59 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-07 08:39 UTC — **BURN #5** (bal hit −$111.99, refilled to ~$888); bleed re-accelerates (−$414/hr); paper_stop = 101% of loss (−$5,149, n=146); paper_trail still NET POSITIVE +$147 (n=95) but gave back ~$82 this hr; verdict unchanged 15th run `[updated by: Cowork]`
+
+**Live OFF** (`is_paused=true`, `bot_state="paused"`, last status @ 08:37 UTC; **0 `options_scalp` trades last hour**). Locks: none.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns |
+|---|---|---|---|---|
+| Options (SELL) | $1,000 | −$67.98 | **$932.02** | 0× |
+| Futures (aggressive) | $6,000* | −$5,111.99 | **$888.01** | **5×** |
+
+*\*$1,000 seed + 5× $1,000 refills. Pre-check balance −$111.99 ≤ $50 → **auto-refill burn #5** fired (deposit `auto-refill burn #5 2026-06-07 08:39Z`), post-refill ~$888.*
+
+**Hour-over-hour:** Futures bal $301.63 → pre-refill **−$111.99 = −$414/hr** — bleed re-accelerated from −$247/hr last hour (closed last hr −$413.61 over 23 trades). Options −$67.98 cumulative, flat noise.
+
+**Per-lane — Futures (n=253):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg lev | Avg hold |
+|---|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 101 | 15% | **−$2,226.17** | 7.02 | 62.03 | 68× | 4.7m |
+| FUT_DONCHIAN_100X | 33 | 9% | −$1,151.42 | 6.82 | 57.90 | 100× | 2.1m |
+| FUT_DONCHIAN_50X | 31 | 16% | −$594.95 | 5.68 | 35.89 | 50× | 6.5m |
+| FUT_DONCHIAN_CONF | 29 | 21% | −$572.49 | 5.74 | 29.41 | 54× | 7.9m |
+| FUT_EMA_CONF | 59 | 34% | −$566.96 | 4.86 | 24.45 | 30× | 11.6m |
+
+Best (least-bad): **FUT_EMA_CONF −$567** (lowest lev 30×, highest win 34%, longest hold). Worst: **FUT_MOMENTUM_CONF −$2,226** (44% of all futures losses; worst lane 15th straight run). **MOMENTUM_CONF + DONCHIAN_100X = −$3,378 = 66% of total loss.**
+
+**Per-lane — Options SELL (n=139):** OPT_SELL_PUT_FAR −$24.29 (2% win, n=48), OPT_SELL_PUT −$19.91 (6%, n=47), OPT_SELL_NEUTRAL −$13.02 (6%, n=34), OPT_SELL_CALL −$6.30 (20%, n=5), OPT_SELL_CALL_FAR −$4.45 (20%, n=5). Net −$67.98 (≈−$0.49/trade). Flat noise, no lane with edge.
+
+**Key findings — exit-reason split, 15th confirmation (n=253):**
+
+| Exit reason | Closed | Net | Avg peak% | Avg lev |
+|---|---|---|---|---|
+| **paper_stop** | 146 | **−$5,149.09** | **+1.20** | 61× |
+| **paper_trail** | 95 | **+$146.92** | **+14.05** | 60× |
+| ema21_lost | 7 | −$107.66 | +2.13 | 25× |
+| ema21_reclaimed | 3 | −$36.65 | +2.11 | 25× |
+| donchian_mid_revert | 1 | −$12.72 | +4.93 | 25× |
+| paper_max_hold | 1 | +$47.23 | +27.42 | 50× |
+
+1. **`paper_trail` cohort still NET POSITIVE +$146.92 (n=95, avg peak +14.05%)** — but gave back ~$82 this hour (was +$229 n=82). New trail exits this hour ran weaker; the cohort is positive but not monotonic. Exit logic still banks gains when a trade runs — **not the problem.**
+2. **`paper_stop` is 101% of the entire futures loss (n=146, −$5,149), avg PEAK only +1.20%.** Entries go against almost immediately, never reach the money, then exit under 61× leverage. The bleed is **wrong-direction entries.**
+3. **STRATEGY verdict re-confirmed (not engine bug).** Fees/sizing/liq/holds sane. Defect = entry filter (breakouts chopped on crypto noise) amplified by 25–100×.
+4. Options clean non-result at n=139, −$67.98 — no lane with edge; defined-risk-spreads thesis holds.
+
+**What to change (single highest-leverage move, unchanged 15 runs):**
+1. **Attack entries, not exits.** Require a pullback/retest before breakout entry and **cap leverage ≤10×** so a wrong entry costs ~−2% not −8%. **Kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (66% of loss).** The profitable paper_trail cohort proves the exit side already works — fix entries and the lab flips.
+2. Carry-over: defined-risk spreads on options.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (5 full-bankroll burns); #6 (OTM selling) **⚠️ break-even** (n=139, no signal); #5 dead. The entry-quality + leverage-cap fix is the standing recommendation.
+
+---
+
 ### 2026-06-07 07:40 UTC — bleed slows (−$247/hr, no burn #5; bal $301.63); paper_trail cohort grows NET POSITIVE +$229 (n=82) → exits profitable; paper_stop = 102% of loss (−$4,817, n=136); verdict unchanged 14th run `[updated by: Cowork]`
 
 **Live OFF** (`is_paused=true`, `pause_reason="PAPER-ONLY mode (no live trading)"`, last status @ 07:37 UTC; **0 `options_scalp` trades last hour**). Locks: none.
