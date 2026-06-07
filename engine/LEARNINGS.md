@@ -437,3 +437,56 @@ Best lane: **FUT_DONCHIAN_CONF −$155.49** (least-bad, 30% win). Worst: **FUT_M
 2. Carry-overs: defined-risk spreads on options (stop bleeding theta tests with no edge). **Expect futures burn #2 next hour** (~$115 buffer at −$440/hr).
 
 **Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD**; #6 (OTM selling) **⚠️ break-even** (n=67, still no signal); #5 still dead. No new verdict changes this hour.
+
+---
+
+### 2026-06-07 01:39 UTC — BURN #2 fired; exit-reason split shows the bleed is WRONG ENTRIES, not round-tripping `[updated by: Cowork]`
+
+**Live OFF** (`is_paused=true`, last @ 01:39 UTC; **0 `options_scalp` trades last hour**). Locks: none.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Options (SELL) | $1,000 | −$16.39 | **$983.61** | 0× | 6 |
+| Futures (aggressive) | $3,000* | −$2,912.03 | **$87.97** | **2×** | 0 |
+
+*\*$1,000 original + $1,000 burn-#1 + $1,000 burn-#2 refill this run (note `auto-refill burn #2 2026-06-07 01:39 UTC`). Pre-refill balance was **−$912.03 ≤ $50 → AUTO-REFILL fired**, restoring to +$87.97.*
+
+**Hour-over-hour:** Futures $165.18 → **−$912.03 before refill** — **this hour closed 39 futures for −$1,041.91, the single worst hour on record (~2.4× the prior −$442 worst).** The burn-#1 refill plus ~$900 more evaporated in one hour. Options −$12.71 (25 closed) — noise.
+
+**Per-lane — Futures (n=129):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 47 | 15% | **−$1,077.57** | 6.83 | 35.37 | 5.2m |
+| FUT_DONCHIAN_100X | 20 | 10% | −$729.71 | 6.55 | 29.41 | 2.1m |
+| FUT_EMA_CONF | 26 | 15% | −$404.81 | 2.45 | 9.36 | 8.5m |
+| FUT_DONCHIAN_CONF | 17 | 24% | −$377.89 | 5.26 | 29.41 | 10.3m |
+| FUT_DONCHIAN_50X | 19 | 21% | −$322.05 | 6.41 | 35.89 | 8.0m |
+
+**Per-lane — Options SELL (n=44):** OPT_SELL_PUT_FAR −$5.81 (7% win), OPT_SELL_PUT −$3.70 (21%), OPT_SELL_CALL −$2.82 (33%), OPT_SELL_CALL_FAR −$2.16 (33%), OPT_SELL_NEUTRAL −$1.89 (20%). Net −$16.39 (≈−$0.37/trade). Flat noise.
+
+Best lane: **FUT_DONCHIAN_50X −$322** (least-bad on $). Worst: **FUT_MOMENTUM_CONF −$1,077** (37% of all futures losses; worst lane for the 10th straight run).
+
+**Key findings — exit-reason breakdown finally isolates the bleed (n=129):**
+
+| Exit reason | Closed | Net | Avg peak% | Avg realized% |
+|---|---|---|---|---|
+| **paper_stop** | 78 | **−$2,787.00** | **+1.31** | **−8.23** |
+| paper_trail | 43 | −$78.58 | +13.45 | +5.90 |
+| ema21_lost | 3 | −$44.30 | +2.54 | −3.41 |
+| ema21_reclaimed | 3 | −$36.65 | +2.11 | −2.39 |
+| donchian_mid_revert | 1 | −$12.72 | +4.93 | −2.59 |
+| paper_max_hold | 1 | +$47.23 | +27.42 | +23.89 |
+
+1. **96% of the entire futures loss is `paper_stop` (78 trades, −$2,787), and their avg PEAK is only +1.31%.** These entries go **against almost immediately** and never reach the money, then exit at −8.23% realized under leverage. **This corrects last hour's "pure round-tripping" read:** the dominant failure is **wrong-direction entries with no edge**, not winners giving back gains.
+2. **The `paper_trail` cohort is actually FINE** — 43 trades, avg peak +13.45%, **avg realized +5.90%**, net only −$78.58. When a trade goes the right way the trailing exit banks ~44% of peak. **Exit logic works; entries do not.**
+3. **STRATEGY verdict confirmed (not engine bug).** Fees/sizing/liq/holds all sane. Defect = the entry filter (breakouts chopped on crypto noise) amplified by 25–100× leverage → −8% per wrong entry.
+4. **Options clean non-result** at n=44, −$16.39 — no lane with edge.
+
+**What to change (single highest-leverage move):**
+1. **Attack the entries, not the exits.** Require a pullback/retest before breakout entry (stop chasing) and cap leverage ≤10× so a wrong entry costs ~−2% not −8%. The profitable `paper_trail` winners prove the exit side already works — fix entries and the lab flips. Throttle/kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (60% of the loss).
+2. Carry-over: defined-risk spreads on options.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (now **2 full-bankroll burns**); #6 (OTM selling) **⚠️ break-even** (n=44, no signal); #5 dead. New actionable signal: the `paper_stop` +1.31% avg-peak data points the fix at entry quality + leverage, not exit logic.
