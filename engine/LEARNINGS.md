@@ -33,6 +33,58 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-07 02:39 UTC — BURN #3 fired; paper_stop bleed re-confirmed at +1.26% avg peak `[updated by: Cowork]`
+
+**Live OFF** (`is_paused=true`; **0 `options_scalp` trades last hour**). Locks: none. Tree clean.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Options (SELL) | $1,000 | −$24.58 | **$975.42** | 0× | — |
+| Futures (aggressive) | $4,000* | −$3,255.55 | **$744.45** | **3×** | — |
+
+*\*$1,000 original + 3×$1,000 refills. Pre-refill balance was **−$255.55 ≤ $50 → AUTO-REFILL fired** (note `auto-refill burn #3 2026-06-07 02:39Z`), restoring to +$744.45.*
+
+**Hour-over-hour:** Futures $87.97 → **−$255.55 before refill** — this hour closed ~21 futures for **−$341.07** (much calmer than last hour's −$1,042, but still a steady one-way bleed → burn #3). Options −$8.19 (~48 closed) — noise.
+
+**Per-lane — Futures (n=150):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 59 | 15% | **−$1,303.19** | 6.24 | 35.37 | 5.1m |
+| FUT_DONCHIAN_100X | 20 | 10% | −$729.71 | 6.55 | 29.41 | 2.1m |
+| FUT_EMA_CONF | 35 | 14% | −$522.70 | 2.25 | 9.36 | 8.6m |
+| FUT_DONCHIAN_CONF | 17 | 24% | −$377.89 | 5.26 | 29.41 | 10.3m |
+| FUT_DONCHIAN_50X | 19 | 21% | −$322.05 | 6.41 | 35.89 | 8.0m |
+
+Best lane (least-bad): **FUT_DONCHIAN_50X −$322**. Worst: **FUT_MOMENTUM_CONF −$1,303** (40% of all futures losses; worst lane 11th straight run). This hour's bleed was MOMENTUM_CONF (+12 closed, −$226) and EMA_CONF (+9 closed, −$118); the 50×/100× Donchian lanes did not trade (throttled/quiet).
+
+**Per-lane — Options SELL (n=92):** OPT_SELL_PUT_FAR −$8.30 (8% win), OPT_SELL_PUT −$7.40 (14%), OPT_SELL_NEUTRAL −$4.39 (18%), OPT_SELL_CALL −$2.33 (55%), OPT_SELL_CALL_FAR −$1.94 (31%). Net −$24.58 (≈−$0.27/trade). Flat noise, sample doubled with no edge emerging.
+
+**Key findings — exit-reason breakdown holds firm (n=150):**
+
+| Exit reason | Closed | Net | Avg peak% | Avg lev |
+|---|---|---|---|---|
+| **paper_stop** | 89 | **−$3,094.40** | **+1.26** | 58.7× |
+| paper_trail | 46 | −$99.93 | +13.47 | 66.3× |
+| ema21_lost | 4 | −$56.62 | +1.91 | 25.0× |
+| ema21_reclaimed | 3 | −$36.65 | +2.11 | 25.0× |
+| donchian_mid_revert | 1 | −$12.72 | +4.93 | 25.0× |
+| restart_orphan | 6 | −$2.45 | +1.82 | 37.5× |
+| paper_max_hold | 1 | +$47.23 | +27.42 | 50.0× |
+
+1. **95% of the entire futures loss (−$3,094 of −$3,256) is `paper_stop`, avg peak only +1.26%.** Re-confirmed and slightly sharper than last hour (+1.31%). These entries go against almost immediately and never reach the money — **wrong-direction entries with no edge, amplified by 58.7× avg leverage.**
+2. **`paper_trail` cohort still near-breakeven** — 46 trades, avg peak +13.47%, net only −$99.93. When direction is right the trailing exit banks it. **Exit logic works; entries do not.** Same conclusion three hours running.
+3. **STRATEGY verdict (not engine bug).** Fees/sizing/holds all sane; the defect is entry quality × leverage. The structural fix is unchanged and now backed by n=150.
+4. **Options:** clean non-result at n=92, −$24.58 — no lane with edge.
+
+**What to change (single highest-leverage move):**
+1. **Attack entries, not exits.** Require a pullback/retest confirmation before breakout entry (stop chasing) and cap leverage ≤10× so a wrong entry costs ~−2% not −8%. Throttle/kill FUT_MOMENTUM_CONF (40% of loss) + FUT_DONCHIAN_100X.
+2. Carry-over: defined-risk spreads on options.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (now **3 full-bankroll burns**); #6 (OTM selling) **⚠️ break-even** (n=92, no signal); #5 dead. The +1.26% avg-peak `paper_stop` signal continues to point the fix squarely at entry quality + leverage cap.
+
 ### 2026-06-06 17:10 UTC — first check-in after the reset `[updated by: Cowork]`
 
 **What's happening:** Bot is live and trading both new labs. SELL options lanes: 52 closed + 8 open. Sane-leverage futures: 58 closed + 8 open since 06-05.
