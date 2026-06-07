@@ -33,6 +33,58 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-07 03:39 UTC — paper_stop bleed crosses n=100 (+1.27% avg peak); same fix unimplemented for 10th run `[updated by: Cowork]`
+
+**Live OFF** (`is_paused=true`, `pause_reason="PAPER-ONLY mode (no live trading)"`; **0 `options_scalp` trades last hour**). Locks: none. Tree clean.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Options (SELL) | $1,000 | −$31.02 | **$968.98** | 0× | — |
+| Futures (aggressive) | $4,000* | −$3,700.93 | **$299.07** | **3×** | 0 |
+
+*\*$1,000 seed + 3×$1,000 refills. No burn this hour — balance $299.07 > $50 floor, no refill fired.*
+
+**Hour-over-hour:** Futures $744.45 (post burn-#3 refill last hour) → **$299.07** — this hour closed **21 futures for −$440.57**, burning ~60% of the fresh buffer. Pace (−$441/hr) matches last hour (−$341) — steady bleed, no new burn yet (~$249 buffer ⇒ burn #4 likely within ~1hr if unchanged). Options −$6.44 (drift, noise).
+
+**Per-lane — Futures (n=172):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Avg lev |
+|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 66 | 15% | **−$1,478.70** | 6.39 | 65.9× |
+| FUT_DONCHIAN_100X | 22 | 9% | −$843.22 | 5.96 | 100× |
+| FUT_EMA_CONF | 44 | 23% | −$533.29 | 3.49 | 30.7× |
+| FUT_DONCHIAN_CONF | 19 | 21% | −$459.73 | 4.70 | 55.3× |
+| FUT_DONCHIAN_50X | 21 | 19% | −$384.12 | 5.92 | 50× |
+
+Best (least-bad): **FUT_DONCHIAN_50X −$384**. Worst: **FUT_MOMENTUM_CONF −$1,479** (40% of all futures loss; worst lane for the 11th straight run, avg lev 66×).
+
+**Per-lane — Options SELL (n=109):** PUT_FAR −$14.06, PUT −$7.01, NEUTRAL −$5.65, CALL −$2.33, CALL_FAR −$1.94. Net −$31.02 (≈−$0.28/trade). Flat noise, no lane with edge.
+
+**Key findings — exit-reason split, now n=100 on paper_stop:**
+
+| Exit reason | Closed | Net | Avg peak% | Avg realized% |
+|---|---|---|---|---|
+| **paper_stop** | 100 | **−$3,556.47** | **+1.27** | **−8.23** |
+| paper_trail | 56 | −$78.43 | +13.13 | **+5.69** |
+| ema21_lost | 4 | −$56.62 | +1.91 | −3.16 |
+| ema21_reclaimed | 3 | −$36.65 | +2.11 | −2.39 |
+| paper_max_hold | 1 | +$47.23 | +27.42 | +23.89 |
+
+1. **96% of all futures loss = `paper_stop` (n=100, −$3,556), avg PEAK only +1.27%.** Diagnosis identical to the last 3 hours, now with a clean 100-trade sample: these entries go **against immediately**, never reach the money, and exit at −8.23% under 30–100× leverage. **Wrong-direction entries, not give-back.**
+2. **`paper_trail` cohort remains profitable on a %-basis** — n=56, avg peak +13.13%, **avg realized +5.69%**, net only −$78. Exit logic banks ~43% of peak when a trade works. **Exits are fine; entries have no edge.**
+3. **STRATEGY verdict, not engine bug** (re-confirmed). Stop is correctly capping losers; the −8% stop at 66× leverage = a 0.12% adverse price move, i.e. the stop fires inside pure noise → high leverage *manufactures* the loss. Fees/sizing/liq/holds all sane.
+4. **Options is a settled non-result** — n=109, −$31, no lane with edge. Thesis (flat; needs defined-risk spreads) holds.
+
+**What to change (single highest-leverage move):**
+1. **The fix is identified and UNCHANGED for 10 runs — it just needs implementing in engine code (out of this monitor's read-only scope): (a) require a pullback/retest before breakout entry; (b) cap leverage ≤10× so a wrong entry costs ~−2% not −8%; (c) kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (63% of the loss, both 66–100× lev).** The profitable paper_trail winners prove the exit side already works. Re-running the lab without this change only re-confirms the same number and burns more bankroll.
+2. Carry-over: defined-risk spreads on options.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (3 full-bankroll burns); #6 (OTM selling) **⚠️ break-even** (n=109, no signal); #5 still dead. No new signal — this hour is a high-confidence re-confirmation, not a discovery.
+
+---
+
 ### 2026-06-07 02:39 UTC — BURN #3 fired; paper_stop bleed re-confirmed at +1.26% avg peak `[updated by: Cowork]`
 
 **Live OFF** (`is_paused=true`; **0 `options_scalp` trades last hour**). Locks: none. Tree clean.
