@@ -33,6 +33,60 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-07 06:40 UTC — bleed continues (−$427/hr, no burn #5; bal $548.85); paper_trail cohort grows to +$194 (n=76) → exits profitable; paper_stop = 101% of loss (−$4,511, n=127); verdict unchanged 13th run `[updated by: Cowork]`
+
+**Live OFF** (`bot_status.is_paused=true`, `is_running=true`, latest row 06:37 UTC; **0 live `options_scalp` trades last hour** — engine paused). Real account `capital`=$27.08. Locks: none. Tree clean.
+
+**No refill:** futures balance **$548.85 > $50** floor — no burn this hour (last burn #4 at 05:40). Bleed pace would put next burn ~1h out if unchanged.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Futures | $5,000* | −$4,451.15 (n=214) | **$548.85** | **4** | 2 |
+| Options | $1,000 | −$52.67 (n=111) | **$947.33** | 0 | 5 |
+
+*\*$1,000 seed + 4× $1,000 burn refills.*
+
+**Hour-over-hour:** Futures closed for **−$427.41** (22 opened) — bleed re-accelerated from last hour's −$98 calm, back into the −$200–$440 band. Options drift −$9 noise.
+
+**Per-lane — Futures (n=214):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold | Avg lev |
+|---|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 85 | 15.3% | **−$1,927.22** | 6.91 | 53.20 | 4.8m | 67× |
+| FUT_DONCHIAN_100X | 27 | 11.1% | −$966.35 | 7.18 | 57.90 | 2.0m | 100× |
+| FUT_EMA_CONF | 53 | 30.2% | −$555.26 | 4.81 | 24.45 | 10.3m | 31× |
+| FUT_DONCHIAN_50X | 26 | 19.2% | −$497.72 | 6.00 | 35.89 | 7.0m | 50× |
+| FUT_DONCHIAN_CONF | 24 | 25.0% | −$479.79 | 6.02 | 29.41 | 8.8m | 55× |
+
+**Per-lane — Options SELL (n=111):** OPT_SELL_PUT_FAR −$19.02 (2.6% win), OPT_SELL_PUT −$12.57 (9.1%), OPT_SELL_NEUTRAL −$10.33 (6.9%), OPT_SELL_CALL −$6.30 (20%), OPT_SELL_CALL_FAR −$4.45 (20%). Net −$52.67 (≈−$0.47/trade) — flat noise, no lane with edge; near-zero avg peak (≤1.2%) = premium sells almost never reach profit, but tiny sizing keeps it harmless.
+
+Best lane: **FUT_DONCHIAN_CONF −$480** (least-bad). Worst: **FUT_MOMENTUM_CONF −$1,927** (43% of all futures losses; worst lane 13th straight run). MOMENTUM_CONF + DONCHIAN_100X = −$2,894 = **65%** of futures loss.
+
+**Key findings — exit/entry split unchanged (n=214):**
+
+| Exit reason | Closed | Net | Avg peak% |
+|---|---|---|---|
+| **paper_stop** | 127 | **−$4,510.86** | **+1.20** |
+| ema21_lost | 7 | −$107.66 | +2.13 |
+| ema21_reclaimed | 3 | −$36.65 | +2.11 |
+| donchian_mid_revert | 1 | −$12.72 | +4.93 |
+| paper_max_hold | 1 | +$47.23 | +27.42 |
+| **paper_trail** | 76 | **+$194.33** | **+14.88** |
+
+1. **`paper_trail` cohort keeps growing positive: +$194.33 over 76 trades at +14.88% avg peak.** The exit/trailing logic is profitable when the entry is correct — strongest proof yet the exit side works.
+2. **`paper_stop` is 101% of the loss: −$4,510.86 over 127 trades at avg peak only +1.20%.** Wrong-direction entries that never reach the money before the leveraged stop. The entire lab loss is entry quality.
+3. **STRATEGY verdict re-confirmed (not engine bug), 13th run.** Fees/sizing/liq/holds all sane; defect is entry quality amplified by 25–100× leverage.
+4. **Options clean non-result** at n=111, −$52.67 — no lane with edge.
+
+**What to change (single highest-leverage move) — UNCHANGED for the 13th run:**
+1. **Fix entries, not exits.** Require a pullback/retest before breakout entry (stop chasing) and cap leverage ≤10× so a wrong entry costs ~−2% not −8%. The profitable `paper_trail` cohort proves the exit side already makes money — fix entries and the lab flips green.
+2. **Kill/throttle FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X** (together −$2,894 = 65% of the futures loss).
+3. Carry-over: defined-risk spreads on options.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (4 full-bankroll burns); #6 (OTM selling) **⚠️ break-even** (n=111, no signal); #5 dead. Continuing signal: **paper_trail net positive (+$194)** — the fix is entry-side only.
+
 ### 2026-06-07 05:40 UTC — BURN #4 (futures hit $1.07, refilled); paper_trail cohort flips NET POSITIVE (+$142, n=69) → exits profitable, 100% of damage is paper_stop wrong entries, 12th run `[updated by: Cowork]`
 
 **Live OFF** (`bot_status.is_paused=true`, `bot_state=paused`, latest row 05:39 UTC; **0 live `options_scalp` trades** — engine paused). Locks: none. Tree clean.
