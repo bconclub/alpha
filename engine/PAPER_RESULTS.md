@@ -80,20 +80,20 @@ Takeaway: **loss scales directly with leverage** (5× ≈ flat, 61× momentum = 
 - Hypotheses: (1) selling harvests the theta buying bled; (2) Donchian/trend entries pay at 3–5× without option drag.
 - The 2-hourly routine ranks all lanes. Crown a winner only after a real sample (hundreds of trades).
 
-## Live snapshot — 2026-06-07 03:39 UTC (post-burn-#3, engine running)
-Balances: Options **$968.98** (−$31.02, n=109, 0 open) · Futures **$299.07** (−$3,700.93 closed, n=172, 0 open). Burns: Options 0× · Futures **3×** (funded $4,000 = $1,000 seed + 3 refills). Lowest $299.07 > $50 floor → no refill this hour. Live OFF. **Burn #4 likely within ~1hr (~$249 buffer, −$441/hr).**
+## Live snapshot — 2026-06-07 05:40 UTC (post-burn-#4, engine paused)
+Balances: Options **$956.85** (−$43.15, n=92, 0 open) · Futures **$1,001.07** post-refill (−$3,998.93 closed, n=194, 0 open). Burns: Options 0× · Futures **4×** (funded $5,000 = $1,000 seed + 4 refills). Pre-refill futures $1.07 ≤ $50 → **AUTO-REFILL burn #4 fired** (id 6). Live OFF (`is_paused=true`, `bot_state=paused`).
 
-| Lane | Closed | Win% | Net | Avg peak% | Avg lev |
-|---|---|---|---|---|---|
-| OPT_SELL_CALL_FAR | 13 | — | −$1.94 | — | — |
-| OPT_SELL_CALL | 11 | — | −$2.33 | — | — |
-| OPT_SELL_NEUTRAL | 25 | — | −$5.65 | — | — |
-| OPT_SELL_PUT | 25 | — | −$7.01 | — | — |
-| OPT_SELL_PUT_FAR | 35 | — | −$14.06 | — | — |
-| FUT_DONCHIAN_50X | 21 | 19% | −$384.12 | 5.9 | 50× |
-| FUT_DONCHIAN_CONF | 19 | 21% | −$459.73 | 4.7 | 55× |
-| FUT_EMA_CONF | 44 | 23% | −$533.29 | 3.5 | 31× |
-| FUT_DONCHIAN_100X | 22 | 9% | −$843.22 | 6.0 | 100× |
-| FUT_MOMENTUM_CONF | 66 | 15% | −$1,478.70 | 6.4 | 66× |
+| Lane | Closed | Win% | Net | Avg peak% |
+|---|---|---|---|---|
+| OPT_SELL_CALL_FAR | 4 | 25% | −$3.63 | — |
+| OPT_SELL_CALL | 4 | 25% | −$4.98 | — |
+| OPT_SELL_NEUTRAL | 22 | 9% | −$7.57 | — |
+| OPT_SELL_PUT | 25 | 12% | −$8.85 | — |
+| OPT_SELL_PUT_FAR | 37 | 3% | −$18.11 | — |
+| FUT_DONCHIAN_50X | 24 | 21% | −$411.92 | 6.4 |
+| FUT_DONCHIAN_CONF | 22 | 27% | −$446.09 | 6.0 |
+| FUT_EMA_CONF | 46 | 28% | −$531.52 | 4.4 |
+| FUT_DONCHIAN_100X | 25 | 12% | −$870.64 | 7.6 |
+| FUT_MOMENTUM_CONF | 77 | 16% | −$1,738.75 | 7.0 |
 
-Read: options flat/noise at n=109 (no lane with edge, −$0.28/trade). Futures bleed across ALL lanes — MOMENTUM_CONF worst (−$1,479, 40% of loss, 66× lev). **Exit-reason split, n=100 on paper_stop: −$3,556 of the loss is paper_stop at avg peak just +1.27% (entries never reach the money); paper_trail cohort (n=56) is +5.69% realized.** Settled diagnosis = wrong entries × high leverage, NOT exits. Need (engine code): pullback/retest entry filter + cap leverage ≤10× + kill MOMENTUM_CONF/DONCHIAN_100X. Options: defined-risk spreads. See LEARNINGS check-in log for detail.
+Read: options flat/noise at n=92 (no lane with edge, −$0.47/trade). Futures bleed across ALL lanes — MOMENTUM_CONF worst (−$1,739, 43% of loss). **Exit-reason split (n=194): paper_stop −$4,046.73 over 114 trades at avg peak just +1.23% (entries never reach the money); paper_trail cohort (n=69) now NET POSITIVE +$142.00 at +14.76% avg peak.** Settled diagnosis = wrong entries × high leverage, NOT exits — paper_trail being profitable proves exits make money. Need (engine code): pullback/retest entry filter + cap leverage ≤10× + kill MOMENTUM_CONF/DONCHIAN_100X. Options: defined-risk spreads. See LEARNINGS check-in log for detail.

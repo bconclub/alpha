@@ -33,7 +33,61 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
-### 2026-06-07 04:39 UTC — bleed slows (−$98/hr, calmest in 5h); paper_stop n=103 −$3,636 @ +1.31% avg peak = same wrong-entry verdict, 11th run `[updated by: Cowork]`
+### 2026-06-07 05:40 UTC — BURN #4 (futures hit $1.07, refilled); paper_trail cohort flips NET POSITIVE (+$142, n=69) → exits profitable, 100% of damage is paper_stop wrong entries, 12th run `[updated by: Cowork]`
+
+**Live OFF** (`bot_status.is_paused=true`, `bot_state=paused`, latest row 05:39 UTC; **0 live `options_scalp` trades** — engine paused). Locks: none. Tree clean.
+
+**AUTO-REFILL fired:** futures pre-refill balance **$1.07 ≤ $50 → burn #4** (`paper_deposits` id 6, note `auto-refill burn #4 2026-06-07 05:40 UTC`). Funded $4,000 → **$5,000**, balance restored to ≈**$1,001.07**.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Futures | $5,000* | −$3,998.93 (n=194) | **$1,001.07** (post-refill) | **4** | 0 |
+| Options | $1,000 | −$43.15 (n=92) | **$956.85** | 0 | — |
+
+*\*$1,000 seed + 4× $1,000 burn refills.*
+
+**Hour-over-hour:** Futures closed 24 trades for **−$206.82** (21 opened, 0 open now) — bleed **re-accelerated** from last hour's −$98 calm (back toward the −$200–$440 band). That last $206 was enough to cross the $50 floor and trigger burn #4.
+
+**Per-lane — Futures (n=194):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 77 | 16% | **−$1,738.75** | 6.99 | 53.20 | 5.0m |
+| FUT_DONCHIAN_100X | 25 | 12% | −$870.64 | 7.56 | 57.90 | 2.1m |
+| FUT_EMA_CONF | 46 | 28% | −$531.52 | 4.35 | 15.61 | 10.5m |
+| FUT_DONCHIAN_CONF | 22 | 27% | −$446.09 | 6.02 | 29.41 | 9.6m |
+| FUT_DONCHIAN_50X | 24 | 21% | −$411.92 | 6.37 | 35.89 | 7.2m |
+
+**Per-lane — Options SELL (n=92):** OPT_SELL_PUT_FAR −$18.11 (3% win), OPT_SELL_PUT −$8.85 (12%), OPT_SELL_NEUTRAL −$7.57 (9%), OPT_SELL_CALL −$4.98 (25%), OPT_SELL_CALL_FAR −$3.63 (25%). Net −$43.15 (≈−$0.47/trade) — flat noise, no lane with edge.
+
+Best lane: **FUT_DONCHIAN_50X −$412** (least-bad). Worst: **FUT_MOMENTUM_CONF −$1,739** (43% of all futures losses; worst lane for the 12th straight run).
+
+**Key findings — paper_trail cohort is now NET POSITIVE (n=194):**
+
+| Exit reason | Closed | Net | Avg peak% |
+|---|---|---|---|
+| **paper_stop** | 114 | **−$4,046.73** | **+1.23** |
+| ema21_lost | 6 | −$92.06 | +2.49 |
+| ema21_reclaimed | 3 | −$36.65 | +2.11 |
+| donchian_mid_revert | 1 | −$12.72 | +4.93 |
+| paper_max_hold | 1 | +$47.23 | +27.42 |
+| **paper_trail** | 69 | **+$142.00** | **+14.76** |
+
+1. **`paper_trail` has crossed into net-positive territory: +$142.00 over 69 trades at +14.76% avg peak.** The exit/trailing logic is not just "fine" — it is **profitable** on the trades where the entry is correct. This is the cleanest proof yet that the exit side works.
+2. **`paper_stop` is 100%+ of the loss: −$4,046.73 over 114 trades at avg peak only +1.23%.** These entries go against immediately and never reach the money before the leveraged stop. The entire lab loss is wrong-direction entries; everything else nets out positive.
+3. **STRATEGY verdict re-confirmed (not engine bug), 12th run.** Fees/sizing/liq/holds all sane; the defect is entry quality amplified by 25–100× leverage.
+4. **Options clean non-result** at n=92, −$43.15 — no lane with edge.
+
+**What to change (single highest-leverage move) — UNCHANGED for the 12th run:**
+1. **Fix entries, not exits.** Require a pullback/retest before breakout entry (stop chasing) and cap leverage ≤10× so a wrong entry costs ~−2% not −8%. The now-profitable `paper_trail` cohort proves the exit side already makes money — fix entries and the lab flips green.
+2. **Kill/throttle FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X** (together −$2,609 = 65% of the futures loss).
+3. Carry-over: defined-risk spreads on options.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (now **4 full-bankroll burns**); #6 (OTM selling) **⚠️ break-even** (n=92, no signal); #5 dead. New signal this run: **paper_trail net positive (+$142)** — the strongest evidence the fix is entry-side only.
+
+
 
 **Live OFF** (`is_paused=true`; **0 `options_scalp` trades last hour**). Locks: none. Tree clean. No refill (futures $207.89 > $50).
 
