@@ -33,6 +33,46 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-07 11:39 UTC — **BURN #6** (futures hit −$298.36 ≤ $50 → auto-refilled, funded now $7k); bleed eases to −$410/hr (was −$559); cohort split holds: paper_stop = 105% of loss (−$6,631, n=188, +1.36% avg peak) = wrong entries, vs paper_trail+max_hold NET POSITIVE +$542 (n=120) but gave back ~$41 this hr; verdict unchanged 18th run `[updated by: Cowork]`
+
+**Live OFF** (`is_paused` reads false but `bot_status` is **stale — last write 2026-03-11**, ~3 months silent; **0 `options_scalp` trades last hour**). Paper engine active (18 futures closed last hour). Tree left clean.
+
+**Balances:** Futures FUNDED $7,000 (orig $1k + **6 refills**), closed PnL −$6,298.36 → **BALANCE pre-refill −$298.36 → refill #6 → +$701.64**. Options FUNDED $1,000, closed PnL −$87.69 → BALANCE **$912.31** (0 burns).
+
+**Hour-over-hour:** Futures closed 18 for **−$410.23** (bleed slows from last hour's −$559). Balance ran from +$111.87 through zero → burn #6. Options flat (n=173 cum, −$87.69).
+
+**Per-lane — Futures (cumulative, n=323):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 129 | 15% | **−$2,694.96** | 7.40 | 108.44 | 4.8m |
+| FUT_DONCHIAN_100X | 42 | 10% | −$1,503.97 | 7.48 | 57.90 | 2.3m |
+| FUT_EMA_CONF | 75 | 31% | −$785.44 | 4.47 | 24.45 | 11.2m |
+| FUT_DONCHIAN_50X | 39 | 18% | −$706.51 | 6.11 | 35.89 | 6.6m |
+| FUT_DONCHIAN_CONF | 38 | 24% | −$607.49 | 7.82 | 72.75 | 7.8m |
+
+Worst: **FUT_MOMENTUM_CONF −$2,695 (43% of all futures losses; worst lane 18th straight run)**. MOMENTUM_CONF + DONCHIAN_100X = **−$4,199 = 67% of the loss**. Least-bad by win-rate: **FUT_EMA_CONF (31% win, capped peaks at 24×, noise-stopped)**.
+
+**Exit-reason breakdown (cumulative, n=323) — the bleed is entries, not exits:**
+
+| Exit reason | Closed | Net | Avg peak% |
+|---|---|---|---|
+| **paper_stop** | 188 | **−$6,631.28** | **+1.36** |
+| paper_trail | 118 | **+$252.13** | +14.56 |
+| paper_max_hold | 2 | **+$290.25** | +67.93 |
+| ema21_lost | 9 | −$127.76 | +1.66 |
+| ema21_reclaimed | 5 | −$68.97 | +1.98 |
+| donchian_mid_revert | 1 | −$12.72 | +4.93 |
+
+1. **`paper_stop` = 105% of the entire futures loss** (188 trades, −$6,631, avg PEAK only +1.36%). Entries go wrong almost immediately and never reach the money — leveraged wrong-direction entries with no edge.
+2. **`paper_trail` + `paper_max_hold` remain NET POSITIVE +$542** (n=120, avg peak +14.56% / +67.93%). Exits bank winners cleanly. The split is unbroken across 18 runs: **exit logic works, entry filter does not.** This hour the positive cohort gave back ~$41 (minor), all fresh damage still paper_stop.
+3. **STRATEGY verdict (not engine bug)** — fees/sizing/liq/holds sane; defect is the entry filter (breakouts chopped on crypto noise) amplified by 25–100× leverage.
+4. **Options** clean non-result (n=173, −$87.69) — no lane with edge.
+
+**What to change (unchanged, 18th run):** Attack entries — require a pullback/retest before breakout entry and **cap leverage ≤10×** so a wrong entry costs ~−2% not −8%. Kill **FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X** (67% of loss). The profitable paper_trail/max_hold cohort proves the exit side already works.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (now **6 full-bankroll burns**); #6 (OTM selling) **⚠️ flat** (n=173, no signal); #5 dead.
+
 ### 2026-06-07 10:39 UTC — bleed RE-ACCELERATES (−$559/hr, worst hour since burn #5; no burn #6, bal $111.87); the split is now starkest yet: ALL the damage is fresh `paper_stop` wrong entries while the profitable cohort STALLED — paper_stop = 107% of loss (−$6,277, n=177) vs paper_trail+max_hold NET POSITIVE +$583 (n=114, +$0 this hr); verdict unchanged 17th run `[updated by: Cowork]`
 
 **Live OFF** (`is_paused` reads false but the entire `bot_status` row is **stale — last write 2026-03-11**, i.e. the live engine has not reported in ~3 months; **0 `options_scalp` trades last hour** confirms no live activity). Paper engine active (21 futures closed last hour). Open positions checked via lanes only. Tree left clean.
