@@ -33,6 +33,56 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-07 04:39 UTC — bleed slows (−$98/hr, calmest in 5h); paper_stop n=103 −$3,636 @ +1.31% avg peak = same wrong-entry verdict, 11th run `[updated by: Cowork]`
+
+**Live OFF** (`is_paused=true`; **0 `options_scalp` trades last hour**). Locks: none. Tree clean. No refill (futures $207.89 > $50).
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Futures | $4,000* | −$3,792.11 (n=170) | **$207.89** | 3 | 3 |
+| Options | $1,000 | −$27.28 (n=68) | **$972.72** | 0 | — |
+
+*\*$1,000 original + 3× $1,000 burn refills.*
+
+**Hour-over-hour:** Futures closed 5 trades for **−$98.44** — the calmest hour in the last five (vs −$441, −$341, −$1,042, −$477 prior). Still bleeding, just slower with little activity. Options flat (no new closes of note). No burn #4 this hour; ~$158 buffer above the $50 refill line.
+
+**Per-lane — Futures (n=170):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 67 | 13% | **−$1,552.41** | 6.50 | 35.37 | 4.9m |
+| FUT_DONCHIAN_100X | 22 | 9% | −$843.22 | 5.96 | 29.41 | 2.0m |
+| FUT_EMA_CONF | 41 | 22% | −$552.62 | 3.74 | 13.23 | 11.0m |
+| FUT_DONCHIAN_CONF | 19 | 21% | −$459.73 | 4.70 | 29.41 | 9.3m |
+| FUT_DONCHIAN_50X | 21 | 19% | −$384.12 | 5.92 | 35.89 | 7.4m |
+
+Worst: **FUT_MOMENTUM_CONF −$1,552** (41% of all futures losses; worst lane for the 11th straight run). FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X together = **−$2,396 (63% of the loss)**.
+
+**Key findings — exit-reason split (n=170), the verdict is now ironclad:**
+
+| Exit reason | Closed | Net | Avg peak% | Avg lev |
+|---|---|---|---|---|
+| **paper_stop** | 103 | **−$3,635.84** | **+1.31** | 59.7× |
+| paper_trail | 57 | −$79.93 | +13.12 | 62.3× |
+| ema21_lost | 5 | −$74.19 | +2.41 | 25.0× |
+| ema21_reclaimed | 3 | −$36.65 | +2.11 | 25.0× |
+| donchian_mid_revert | 1 | −$12.72 | +4.93 | 25.0× |
+| paper_max_hold | 1 | +$47.23 | +27.42 | 50.0× |
+
+1. **`paper_stop` is the ENTIRE loss: 103 trades, −$3,636, avg peak only +1.31% at ~60× leverage.** Entries go adverse almost immediately and never reach the money — wrong-direction entries with no edge, not winners round-tripping.
+2. **`paper_trail` cohort is breakeven (−$79.93 on n=57, avg peak +13.12%).** When a trade goes the right way the trailing exit banks it. **Exit logic works; entries do not** — same as last 5 runs, now at n=170.
+3. **STRATEGY verdict (not engine bug).** Fees/sizing/liq/holds sane. Defect = entry filter (breakouts chopped on crypto noise) amplified by 25–100× leverage.
+4. **Options clean non-result** at n=68, −$27.28 — no lane with edge.
+
+**What to change (unchanged, 11th run):**
+1. **Attack entries, not exits.** Require a pullback/retest before breakout entry (stop chasing) and cap leverage ≤10× so a wrong entry costs ~−2% not −8%. The paper_trail winners prove the exit side already works.
+2. **Kill/throttle FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X** (63% of the loss).
+3. Carry-over: defined-risk spreads on options.
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD** (3 full-bankroll burns); #6 (OTM selling) **⚠️ break-even** (n=68, no signal); #5 dead. The fix is fully specified and remains un-implemented — engine code is owner-gated for this monitor.
+
 ### 2026-06-07 03:39 UTC — paper_stop bleed crosses n=100 (+1.27% avg peak); same fix unimplemented for 10th run `[updated by: Cowork]`
 
 **Live OFF** (`is_paused=true`, `pause_reason="PAPER-ONLY mode (no live trading)"`; **0 `options_scalp` trades last hour**). Locks: none. Tree clean.
