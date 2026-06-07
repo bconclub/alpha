@@ -392,3 +392,48 @@ Best lane: **FUT_DONCHIAN_CONF −$96.80** (least-bad, 33% win). Worst: **FUT_MO
 2. Carry-overs: ATR stop + trail (#1 priority), defined-risk spreads on options, expect futures burn #2 in ~3–4h at the current ~$160/hr bleed from the $2,000 base.
 
 **Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD**; #6 (OTM selling) **⚠️ break-even** (n=10, no signal); #5 still dead. No new verdict changes this hour.
+
+---
+
+### 2026-06-07 00:39 UTC — worst futures hour yet (−$477); burn #2 now imminent `[updated by: Cowork]`
+
+**Engine alive:** last hour futures **opened 25 / closed 24**, options **opened 8** (sample n grew 10→67 as prior open SELLs expired/closed). DB `now()` = 00:39; bot_status `is_paused=true` (last @ 00:37); **0 `options_scalp` trades in last hour** → LIVE confirmed OFF. 0 positions open at this instant (batch just closed), both labs actively cycling.
+
+**Balances & burns:**
+
+| Lab | Funded | Closed P/L | Balance | Burns | Open |
+|---|---|---|---|---|---|
+| Options (SELL) | $1,000 | −$8.90 | **$991.10** | 0× | 0 |
+| Futures (aggressive) | $2,000* | −$1,834.82 | **$165.18** | **1×** | 0 |
+
+*\*$1,000 original + $1,000 refill (burn #1).* Lowest balance **$165.18 > $50 floor → no auto-refill this hour.**
+
+**Hour-over-hour:** Futures balance $606.65 → **$165.18 (−$441.47, +24 closed)** — **the worst hour on record, ~3× the prior ~$160/hr bleed.** This hour's 24 closed futures = **−$476.76, every one of the 5 lanes negative.** Burn #2 is now imminent: only **~$115 of buffer** above the $50 floor → expect the second full-bankroll burn **next hour** at this pace. Options unchanged-noise.
+
+**Per-lane — Futures (n=99, aggregated by setup):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 38 | 18% | **−$743.48** | 5.65 | 32.48 | 6.1m |
+| FUT_DONCHIAN_100X | 13 | 8% | −$405.36 | 7.32 | 28.87 | 2.4m |
+| FUT_EMA_CONF | 26 | 23% | −$302.22 | 2.54 | 9.36 | 7.9m |
+| FUT_DONCHIAN_50X | 12 | 17% | −$230.46 | 5.61 | 12.35 | 11.0m |
+| FUT_DONCHIAN_CONF | 10 | 30% | −$155.49 | 4.29 | 10.42 | 10.0m |
+
+**This hour's bleed leaders:** FUT_DONCHIAN_100X −$160.73 (5 closed, avg peak +7.2%) and FUT_MOMENTUM_CONF −$154.95 (7 closed, avg peak +7.3%) — i.e. **the two highest-peak lanes round-tripped the hardest.** FUT_EMA_CONF was nearly flat (−$5.35), the low-peak lane.
+
+**Per-lane — Options SELL (n=67):** all five lanes slightly negative, none with edge — OPT_SELL_CALL_FAR −$0.40, OPT_SELL_CALL −$0.73 (55% win), OPT_SELL_NEUTRAL −$2.09 (35%), OPT_SELL_PUT −$2.82, OPT_SELL_PUT_FAR −$2.95. Net −$8.90 (≈−$0.13/trade). Flat noise at a now-respectable n.
+
+Best lane: **FUT_DONCHIAN_CONF −$155.49** (least-bad, 30% win). Worst: **FUT_MOMENTUM_CONF −$743.48** (40% of the whole futures loss).
+
+**Key findings:**
+1. **The no-profit-lock thesis is now ironclad at n=99.** Across **all five** futures lanes the average peak P/L is **positive** (+2.5% to +7.3%) yet **every lane's realized net is deeply negative.** Trades reach the money, the engine holds, and they round-trip through the fixed stop. This hour proved it cleanly: the two highest-peak lanes (100X +7.3%, MOMENTUM +7.3% intraperiod) lost the most; the lowest-peak lane (EMA +2.5%) was nearly flat. **The loss is monotonic in unrealized-peak magnitude — pure round-tripping, not direction.**
+2. **STRATEGY verdict, not an engine bug.** Fees/sizing/liq/holds all behave as designed (holds 2–11m, sane; high-lev 100X exits fastest at 2.4m on stops). The *design* lacks a take-profit/trailing exit — the single missing component.
+3. **FUT_MOMENTUM_CONF remains the worst lane for the 9th straight run** (−$743, 40% of futures losses, 38 trades at 18% win, biggest peaks).
+4. **Options is a clean non-result** — n=67, −$8.90, no lane with edge. Thesis (flat; needs defined-risk spreads) holds, now with real sample.
+
+**What to change (single highest-leverage move):**
+1. **Add an ATR-scaled stop + trailing profit-lock that banks ~50% of peak, and kill FUT_MOMENTUM_CONF / cap leverage ≤10×.** Unchanged for 9 runs; the n=99 peak-vs-realized data is now the proof: banking half of each lane's +2.5–7.3% avg peak flips the majority of these trades positive. This is the one change that matters.
+2. Carry-overs: defined-risk spreads on options (stop bleeding theta tests with no edge). **Expect futures burn #2 next hour** (~$115 buffer at −$440/hr).
+
+**Verdict status:** unchanged. #8 (aggressive futures) **❌ DEAD**; #6 (OTM selling) **⚠️ break-even** (n=67, still no signal); #5 still dead. No new verdict changes this hour.

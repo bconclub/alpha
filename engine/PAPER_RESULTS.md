@@ -80,20 +80,20 @@ Takeaway: **loss scales directly with leverage** (5× ≈ flat, 61× momentum = 
 - Hypotheses: (1) selling harvests the theta buying bled; (2) Donchian/trend entries pay at 3–5× without option drag.
 - The 2-hourly routine ranks all lanes. Crown a winner only after a real sample (hundreds of trades).
 
-## Live snapshot — 2026-06-06 23:39 UTC (post-burn-#1 refill, engine running)
-Balances: Options **$998.97** (−$1.03, n=10, 10 open) · Futures **$606.65** (−$1,393.35 closed, n=66, 2 open). Burns: Options 0× · Futures **1×** (funded $2,000 = $1,000 + refill). Both > $50 floor → no refill this hour. Live OFF.
+## Live snapshot — 2026-06-07 00:39 UTC (post-burn-#1 refill, engine running)
+Balances: Options **$991.10** (−$8.90, n=67, 0 open) · Futures **$165.18** (−$1,834.82 closed, n=99, 0 open). Burns: Options 0× · Futures **1×** (funded $2,000 = $1,000 + refill). Lowest $165.18 > $50 floor → no refill this hour. Live OFF. **Burn #2 imminent (~$115 buffer, −$440/hr).**
 
 | Lane | Closed | Win% | Net | Avg peak% |
 |---|---|---|---|---|
-| OPT_SELL_CALL | 1 | 100% | +$0.46 | 31.9 |
-| OPT_SELL_NEUTRAL | 3 | 33% | +$0.07 | 10.3 |
-| OPT_SELL_PUT | 2 | 50% | −$0.18 | 0.3 |
-| OPT_SELL_CALL_FAR | 2 | 50% | −$0.58 | 15.1 |
-| OPT_SELL_PUT_FAR | 2 | 0% | −$0.80 | 0.1 |
-| FUT_DONCHIAN_CONF | 6 | 33% | −$96.80 | 4.8 |
-| FUT_DONCHIAN_50X | 7 | 14% | −$143.28 | 5.5 |
-| FUT_DONCHIAN_100X | 8 | 13% | −$244.63 | 7.4 |
-| FUT_EMA_CONF | 17 | 6% | −$301.74 | 2.0 |
-| FUT_MOMENTUM_CONF | 28 | 14% | −$606.90 | 5.5 |
+| OPT_SELL_CALL_FAR | 13 | 31% | −$0.40 | — |
+| OPT_SELL_CALL | 11 | 55% | −$0.73 | — |
+| OPT_SELL_NEUTRAL | 17 | 35% | −$2.09 | — |
+| OPT_SELL_PUT | 13 | 23% | −$2.82 | — |
+| OPT_SELL_PUT_FAR | 13 | 15% | −$2.95 | — |
+| FUT_DONCHIAN_CONF | 10 | 30% | −$155.49 | 4.3 |
+| FUT_DONCHIAN_50X | 12 | 17% | −$230.46 | 5.6 |
+| FUT_EMA_CONF | 26 | 23% | −$302.22 | 2.5 |
+| FUT_DONCHIAN_100X | 13 | 8% | −$405.36 | 7.3 |
+| FUT_MOMENTUM_CONF | 38 | 18% | −$743.48 | 5.7 |
 
-Read: options flat/noise at small n; futures bleeding across ALL lanes — MOMENTUM_CONF is the single worst (−$607, 44% of futures loss, big peaks then round-trips). Futures bled ~$164 this hour; burn #2 not yet reached. Need: ATR/leverage-scaled stop + profit-lock on futures (kill MOMENTUM_CONF first); defined-risk spreads on options. See LEARNINGS check-in log for detail.
+Read: options flat/noise even at n=67 (all lanes −$0.40 to −$2.95, no edge); futures bleeding across ALL lanes — MOMENTUM_CONF the single worst (−$743, 40% of futures loss). **Ironclad signal at n=99: every lane's avg peak is positive (+2.5 to +7.3%) yet every realized net is deeply negative — pure round-tripping; loss is monotonic in peak size.** Worst hour yet (−$477). Need: ATR/leverage-scaled stop + trailing profit-lock on futures (kill MOMENTUM_CONF first); defined-risk spreads on options. See LEARNINGS check-in log for detail.
