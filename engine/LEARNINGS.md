@@ -33,6 +33,43 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-08 21:38 UTC — FIRST POSITIVE FUTURES HOUR (+$72); profit cohort outran noise-stops `[updated by: alpha-paper-lab-monitor]`
+**Futures balance ROSE this hour — $334.19 → $406.64 (+$72.45 net, 16 closes) — the first net-green hour in the lab's history. Not fewer wrong entries: the profit cohort (trail+max_hold = +$376) simply caught real moves and outran the noise-stops (−$268). Cleanest proof yet that exits work and entries are the whole problem. No new burn (bal > $50, burns still 18). Live OFF, bot_status FRESH (21:37 UTC, ~1.3 min old). Verdict unchanged, 27th run.**
+
+- **Live/cadence:** `is_paused=true`, `bot_state="paused"`, `scalp_enabled`/`options_scalp_enabled=true` but **0 scalp trades last hour** (futures & options) → paper-only confirmed. Status fresh (21:37:05 UTC, ~1.3 min before db now). Cadence normal (~58 min since 20:40).
+- **Balances:** Futures **$406.64** (= $19,000 funded − $18,593.36 closed net; 18 burns; thin but > $50, **no auto-refill**). Options **$704.97** (funded $1,000, 0 burns, closed n=543, net −$295.03).
+- **Per-lane — Futures (n=1005):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 433 | 13% | **−$8,172** | 8.91 | 326.56 | 5m |
+| FUT_DONCHIAN_100X | 115 | 16% | −$4,089 | 9.62 | 88.37 | 2m |
+| FUT_DONCHIAN_CONF | 109 | 24% | −$2,278 | 7.81 | 78.60 | 6m |
+| FUT_DONCHIAN_50X | 110 | 20% | −$2,066 | 6.77 | 43.16 | 5m |
+| FUT_EMA_CONF | 238 | 33% | −$1,989 | 5.76 | 133.43 | 10m |
+
+  Worst: **MOMENTUM_CONF = 44% of all futures loss; MOMENTUM_CONF + DONCHIAN_100X = −$12,261 = 66%** (shape unchanged, 27th run). Least-bad: **EMA_CONF (33% win, lowest lev).**
+- **Per-lane — Options SELL (n=543):** OPT_SELL_PUT_FAR 145/7%/−$80, OPT_SELL_PUT 141/16%/−$65, OPT_SELL_CALL 90/13%/−$63, OPT_SELL_NEUTRAL 116/18%/−$50, OPT_SELL_CALL_FAR 51/16%/−$38. Flat fee-bound noise, no lane with edge.
+- **This hour's split (16 closes, +$72.45):** the green came entirely from the **profit cohort** — `paper_max_hold` +$217 (2 MOMENTUM_CONF, peak 117.80%), `paper_trail` +$159 (DONCHIAN_100X +$100 @ 88% peak, DONCHIAN_50X +$51, DONCHIAN_CONF +$8). Against them, `paper_stop` wrongs lost **−$268** (DONCHIAN_CONF −$144 @ **1.07% avg peak** = never-in-money noise stops; EMA/MOMENTUM/50X/100X stops the rest) + one donchian_mid_revert −$14. Winners ($376) > stops+revert (−$282) → first green hour. **Same lanes that bleed on wrong entries make the money when an entry lands and the trail/max_hold exit lets it run.**
+- **The new thing:** a positive hour does NOT change the verdict — it's the strongest confirmation of it. The lab didn't get better entries; it got a handful of entries that happened to be right, and the exit logic banked them cleanly (peaks 88–118% realized via trail/max_hold). Fix the entry hit-rate and every hour looks like this one.
+- **What to change (unchanged, 27th run):** attack ENTRIES not exits — require pullback/retest before breakout entry and **cap leverage ≤10×** (a wrong entry then costs ~−2% not −8.7%). **Kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (66% of loss).** Keep EMA_CONF as the template. Options: defined-risk spreads to escape the fee drag.
+- **Verdict:** #8 (aggressive 25–100× futures) **❌ DEAD** (18 burns / −$18.6k closed). #6 (OTM selling) **⚠️ break-even/dead** (n=543, fee-bound, no edge). #5 dead. No strategy verdict change without a clean entry-filter + leverage-cap rebuild.
+
+### 2026-06-08 20:40 UTC — check-in `[updated by: Cowork]`
+**Same hour as the monitor's 20:39 entry; my independent queries corroborate it exactly. Lab STABLE for a full hour post-refill — no insolvency, no new burn. Futures balance ≈ $334.19, bled −$279 this hour at the normal ~−$280/hr rate. Verdict unchanged, 26th run. Adds the engine-bug status check the 20:39 entry skipped.**
+
+- **What's happening:** `bot_status` last write **2026-06-08 20:39:05 UTC** (~1.7 min before db now 20:40:51, FRESH), `is_paused=true`, `is_running=true`, `bot_state="paused"`, `pause_reason="PAPER-ONLY mode (no live trading)"`, **market_regime=TRENDING_DOWN** (flipped back from SIDEWAYS at 19:40). 30 status writes last hour, 0 live `options_scalp` → paper-only. Open: **futures 3, options 9.** Lanes active: 5 FUT_* + 5 OPT_SELL_*.
+- **What happened since last check (19:40/19:42, ~60 min):**
+  - **Futures:** funded **$19,000 (18 burns, NO new burn #19)**. Closed 979 → **989 (+10)**. Net −$18,386.63 → **−$18,665.81 (−$279.18; ~−$280/hr, normal)**. Balance **$612.88 → $334.19** (thin but > $50). Last-1h 16 closes −$279; last-24h **487 closes −$9,765** (the gap bleed still in the trailing window).
+  - **Options (SELL):** funded $1,000. Net −$290.39 → **−$287.47 (+$2.92, flat)**. Balance **$712.53**. Closed count reads 531 vs the 564 logged at 19:40 — a counting/reclass artifact (net is unchanged), not new closes.
+  - Per-lane futures (n=989): **FUT_MOMENTUM_CONF** 429cl/13.1%/**−$8,340.70**/67.3×/4.7m; **FUT_DONCHIAN_100X** 112/14.3%/−$4,142.94/100×/2.2m; **FUT_DONCHIAN_CONF** 104/24.0%/−$2,127.94/56.3×/5.5m; **FUT_DONCHIAN_50X** 107/18.7%/−$2,085.09/50×/4.9m; **FUT_EMA_CONF** 237/33.3%/−$1,969.14/29.9×/9.8m. Worst: **MOMENTUM_CONF = 44.7% of futures loss; MOMENTUM_CONF + DONCHIAN_100X = −$12,483.64 = 66.9%** (shape unchanged, 26th run). Least-bad: **EMA_CONF (33.3% win, lowest lev 29.9×).**
+  - Options per-lane: OPT_SELL_PUT_FAR 142/7.0%/−$78.38, OPT_SELL_PUT 137/15.3%/−$63.57, OPT_SELL_CALL 89/13.5%/−$60.69, OPT_SELL_NEUTRAL 113/18.6%/−$48.72, OPT_SELL_CALL_FAR 50/16.0%/−$36.10. Avg fees $0.57–0.59, avg peak 0.15–0.79%.
+- **The new thing:** stability held a second consecutive read (monitor's 20:39 + this 20:40). The operational fire is out; the refill loop works via the scheduled task. Only remaining item is strategy. `paper_stop` cohort widened to **−$20,359.57 (552 trades, 109% of net loss, avg peak +1.52%)** while the profitable `paper_trail`+`paper_max_hold` cohort held **+$2,166.10** (n=396) — the entry/exit split is the cleanest and most stable signal in the lab, intact 26 runs.
+- **What we should change:**
+  1. **Strategy (unchanged):** attack ENTRIES not exits — pullback/retest before breakout entry and **cap leverage ≤10×** (wrong entry then costs ~−2% not ~−8.7%). **Kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (66.9% of loss).** Keep EMA_CONF as template. Options: defined-risk spreads to escape fee drag.
+  2. **Known-bug status (vs 06-06):** (a) **option-sell fee-on-notional — STILL PRESENT:** avg fee $0.58 ≈ the entire per-trade loss (net −$287.47 / 531 ≈ −$0.54), so ~100% of options PnL is fees. (b) **`sell_breached` 15–25m exit — not separately queried this run**, but options avg peak 0.15–0.79% confirms sells almost never reach profit (consistent with the bug). (c) **futures `paper_max_hold` ~30m clip — not the driver:** max_hold cohort only 16 trades but +$1,495 @ +49.45% peak, holds avg 2–10m, so the cap rarely binds; `paper_stop` (entries) remains the structural killer. None of the three appear fixed.
+- **Verdict:** #8 (aggressive 25–100× futures) **❌ DEAD** (−$18.7k closed across 18 burns); #6 (OTM selling) **⚠️ break-even/dead, fee-bound** (n=531, no lane with edge); #5 dead. No strategy verdict change without a clean entry-filter + leverage-cap rebuild.
+
 ### 2026-06-08 20:39 UTC — first stable post-refill hour, NO new burn `[updated by: alpha-paper-lab-monitor]`
 **The 11-burn catch-up at 19:42 held. Futures balance sits at ≈ $334.19 (funded $19,000, 18 burns, closed net −$18,665.81) — bled only −$282 this hour (16 closes), no burn #19. First non-insolvent, non-refill check-in in three runs. Live OFF, bot_status FRESH (20:37 UTC, 1.7 min old). Verdict unchanged, 25th run.**
 
