@@ -33,6 +33,28 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-08 20:39 UTC — first stable post-refill hour, NO new burn `[updated by: alpha-paper-lab-monitor]`
+**The 11-burn catch-up at 19:42 held. Futures balance sits at ≈ $334.19 (funded $19,000, 18 burns, closed net −$18,665.81) — bled only −$282 this hour (16 closes), no burn #19. First non-insolvent, non-refill check-in in three runs. Live OFF, bot_status FRESH (20:37 UTC, 1.7 min old). Verdict unchanged, 25th run.**
+
+- **Live/cadence:** `is_paused=true`, `is_running=true`, `bot_state="paused"`, `scalp_enabled`/`options_scalp_enabled=true` but **0 options_scalp trades last hour** → paper-only confirmed. Cadence normal (~57 min since 19:42). Last 1h: futures 17 opened / 16 closed / **−$282**; options 6 opened / 0 closed.
+- **Balances:** Futures **$334.19** (= $19,000 − $18,665.81; thin but > $50, **no auto-refill**). Options **$712.53** (funded $1,000, 0 burns, closed n=531, net −$287.47; ~flat vs −$290 last run).
+- **Per-lane — Futures (n=989):**
+
+| Lane | Closed | Win% | Net | Avg peak% | Max peak% | Avg hold |
+|---|---|---|---|---|---|---|
+| **FUT_MOMENTUM_CONF** | 429 | 13% | **−$8,341** | 8.65 | 326.56 | 5m |
+| FUT_DONCHIAN_100X | 112 | 14% | −$4,143 | 8.78 | 57.90 | 2m |
+| FUT_DONCHIAN_CONF | 104 | 24% | −$2,128 | 7.96 | 78.60 | 5m |
+| FUT_DONCHIAN_50X | 107 | 19% | −$2,085 | 6.39 | 35.89 | 5m |
+| FUT_EMA_CONF | 237 | 33% | −$1,969 | 5.76 | 133.43 | 10m |
+
+  Worst: **MOMENTUM_CONF = 45% of all futures loss; MOMENTUM_CONF + DONCHIAN_100X = −$12,484 = 67%** (shape unchanged, 25th run). Least-bad: **EMA_CONF (33% win, lowest lev).**
+- **Per-lane — Options SELL (n=531):** OPT_SELL_PUT_FAR 142/7%/−$78, OPT_SELL_PUT 137/15%/−$64, OPT_SELL_CALL 89/13%/−$61, OPT_SELL_NEUTRAL 113/19%/−$49, OPT_SELL_CALL_FAR 50/16%/−$36. Avg peak 0.2–0.8%. Flat fee-bound noise, no lane with edge.
+- **Exit-cohort split (n=989):** `paper_stop` **552 trades, −$20,360, avg PEAK +1.52%, avg realized −8.68%** = **109% of total futures loss** — wrong-direction entries that never reach the money, then exit at −8.7% under leverage. Profitable cohort still positive: `paper_trail` **+$671** (n=380, +15.40% peak) + `paper_max_hold` **+$1,495** (n=16, +49.45% peak) = **+$2,166**. Exits make money; entries are the entire problem, 25 runs running.
+- **The new thing:** the lab is finally *stable* (refill loop confirmed working via the scheduled task; balance held a full hour without a burn). That removes the operational fire of the last three runs — the only open item is now purely the strategy: nothing about the entry quality has changed.
+- **What to change (unchanged, 25th run):** attack ENTRIES not exits — require pullback/retest before breakout entry and **cap leverage ≤10×** (a wrong entry would cost ~−2% not −8.7%). **Kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (67% of loss).** Keep EMA_CONF as the template. Options: defined-risk spreads to escape the fee drag.
+- **Verdict:** #8 (aggressive 25–100× futures) **❌ DEAD** (18 burns / −$18.7k in ~2 days). #6 (OTM selling) **⚠️ break-even/dead** (n=531, fee-bound, no edge). #5 dead. No strategy verdict change without a clean entry-filter + leverage-cap rebuild.
+
 ### 2026-06-08 19:42 UTC — AUTO-REFILL FIRED `[updated by: alpha-paper-lab-monitor]`
 **The insolvency the 18:46 + 19:40 entries flagged is now RESOLVED. This scheduled-task run is authorized for step-3 auto-refill (the two Cowork entries below ran append-only and could not), so I executed 11 catch-up refills = BURNS #8–#18.** Futures funded **$8,000 → $19,000**; balance **−$10,387.12 → +$612.88**; burns **7 → 18**. Each `paper_deposits` row noted "gap catch-up; bal was -$10,387". The 11 burns accurately bank the ~$10.4k of damage from the 27h-stall window.
 
