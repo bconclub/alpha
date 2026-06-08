@@ -33,6 +33,60 @@ Keep the 2-hourly routine ranking everything. Crown a winner only after a real s
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-08 19:42 UTC — AUTO-REFILL FIRED `[updated by: alpha-paper-lab-monitor]`
+**The insolvency the 18:46 + 19:40 entries flagged is now RESOLVED. This scheduled-task run is authorized for step-3 auto-refill (the two Cowork entries below ran append-only and could not), so I executed 11 catch-up refills = BURNS #8–#18.** Futures funded **$8,000 → $19,000**; balance **−$10,387.12 → +$612.88**; burns **7 → 18**. Each `paper_deposits` row noted "gap catch-up; bal was -$10,387". The 11 burns accurately bank the ~$10.4k of damage from the 27h-stall window.
+
+- **Data is the same hour as the 19:40 entry** (futures closed n≈981, net −$18,387.12; options n=573, net −$290.68 — full lane tables in the 19:40 entry below, unchanged shape). Last 1h futures: 12 trades −$215; last 24h: 488 trades **−$9,801** (the gap bleed). Live OFF: `is_paused=true`, `pause_reason=PAPER-ONLY`, 0 `options_scalp`/hr, bot_status fresh 19:39 UTC.
+- **Diagnosis unchanged (24th run):** `paper_stop` 546/0% win/**−$20,168** @ +1.52% avg peak = 110% of loss (entries noise-stopped before reaching money); profitable `paper_trail`+`paper_max_hold` = +$2,215. MOMENTUM_CONF + DONCHIAN_100X = 67% of loss.
+- **Change:** attack ENTRIES (pullback/retest), **cap leverage ≤10×**, kill MOMENTUM_CONF + DONCHIAN_100X, keep EMA_CONF as template. Operationally: refill now confirmed working via this task; the open issue is just scheduler reliability (don't let runs stall 27h).
+- **Verdict:** #8 (aggressive 25–100× futures) **❌ DEAD** — 18 burns / −$18.4k in ~2 days is definitive (confirms #5). #6 (OTM selling) **⚠️ break-even/dead**, fee-bound.
+
+### 2026-06-08 19:40 UTC — check-in `[updated by: Cowork]`
+**Hourly cadence RESTORED (54 min since last check vs the prior 27h gap). Bleed back to a normal ~−$240/hr, not the gap-rate. Futures lab STILL INSOLVENT at ≈ −$10,387 balance — no refill fired again (append-only scope; flagging for owner). market_regime flipped TRENDING_DOWN → SIDEWAYS. Verdict unchanged, 24th run.**
+
+- **What's happening:** `bot_status` last write **2026-06-08 19:39:04 UTC** (~1 min old, FRESH), `is_paused=true`, `bot_state="paused"`, `pause_reason="PAPER-ONLY mode (no live trading)"`, `market_regime=SIDEWAYS`. Live engine off (paper only). Open: **futures 2** (down from 10), **options 9**. Lanes active: 5 FUT_* + 5 OPT_SELL_*.
+
+- **What happened since last check (~54 min):**
+  - **Futures:** funded still **$8,000 (no new refill, last 06-07 15:39)**. Closed 961 → **979 (+18)**. Net −$18,168.79 → **−$18,386.63 (−$217.84; ≈−$240/hr — normal hourly rate, gap is over)**. Balance **≈ −$10,386.63 (insolvent, status unchanged)**. The +18 closes were only MOMENTUM_CONF (+8) and EMA_CONF (+10); the three DONCHIAN lanes idle this hour.
+  - **Options (SELL):** funded $1,000. Closed 518 → **564 (+46)**. Net −$281.78 → **−$290.39 (−$8.61)**. Balance **≈ $709.61**.
+  - Per-lane futures (n=979): **FUT_MOMENTUM_CONF** 425cl/13.4%/**−$8,188.08**/67.4×/4.6m; **FUT_DONCHIAN_100X** 110/14.5%/−$4,083.07/100×/2.2m; **FUT_DONCHIAN_CONF** 104/24.0%/−$2,127.94/56.3×/5.5m; **FUT_DONCHIAN_50X** 105/19.0%/−$2,078.17/50×/4.9m; **FUT_EMA_CONF** 235/33.6%/−$1,909.37/29.9×/9.7m. Worst: **MOMENTUM_CONF = 44.5% of all futures loss; MOMENTUM_CONF + DONCHIAN_100X = −$12,271 = 66.7%** (shape unchanged, 24th run). Best/least-bad: **EMA_CONF (33.6% win, lowest lev 29.9×)**.
+  - Options per-lane: OPT_SELL_PUT_FAR 148cl/6.8%/−$79.61, OPT_SELL_PUT 143/14.7%/−$65.95, OPT_SELL_CALL 92/17.4%/−$57.67, OPT_SELL_NEUTRAL 123/18.7%/−$51.04, OPT_SELL_CALL_FAR 58/17.2%/−$36.13. Avg fees $0.57–0.59/trade; avg peak 0.19–2.89%.
+
+- **The new thing:**
+  1. **Cadence fixed but refill still not firing.** The 27h-gap problem is gone (hourly run resumed, bleed normalized to ~−$240/hr), but the futures lab has now sat insolvent (≈ −$10.4k) across two consecutive checks with no auto-refill. So the prior stall was the *scheduler*; refill itself appears separately broken or disabled. Operational flag stands.
+  2. **Exit-cohort split intact (n=979):** `paper_stop` **546 trades, −$20,168.46 (110% of total futures loss), avg PEAK +1.52%** — wrong-direction entries that never reach the money. Profitable cohort still positive: `paper_trail` **+$708.58** (n=374, +15.52% peak) + `paper_max_hold` **+$1,506.11** (n=15, +52.54% peak) = **+$2,214.69**, though it gave back ~$17 this hour (a trail exit round-tripped). Entries remain the entire problem, 24 runs.
+  3. **Regime shift to SIDEWAYS** is the worst tape for these breakout/momentum lanes — expect paper_stop to keep dominating until an entry filter lands.
+
+- **What we should change:**
+  1. **Operational:** the refill loop is the active bug now (not cadence). Decouple/repair auto-refill so the lab can't run insolvent indefinitely. (Did NOT refill — append-only scope.)
+  2. **Strategy (unchanged, 24th run):** attack ENTRIES not exits — require pullback/retest before breakout entry and **cap leverage ≤10×**. **Kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (66.7% of loss).** Keep EMA_CONF as template. More urgent now that regime = SIDEWAYS.
+  3. **Known-bug status (vs 06-06):** (a) option-sell fee-on-notional — **STILL PRESENT** (avg fee $0.58 ≈ per-trade loss $0.515, ~100% of options PnL is fees); (b) `sell_breached` 15–25m exit — not separately queried this run, but options avg peak 0.19–2.89% confirms sells almost never reach profit; (c) futures `paper_max_hold` ~30m clip — max_hold cohort only 15 trades but +$1,506 @ +52.54% peak, avg holds 2–10m, so most exits are stop/trail before the cap; clipping plausibly present but not the driver. **paper_stop (entries) remains the structural killer.**
+
+- **Verdict:** #8 (aggressive futures) **❌ DEAD** (≈ −$10.4k insolvent, refill not firing); #6 (OTM selling) **⚠️ break-even/dead** (n=564, no lane with edge, fee-bound); #5 dead. No strategy verdict change without a clean entry-filter + leverage-cap rebuild.
+
+### 2026-06-08 18:46 UTC — check-in `[updated by: Cowork]`
+**27-HOUR GAP since last check (06-07 15:39) — routine did not run in between. NO auto-refill fired in that window, so the futures lab ran unattended into deep negative: balance now ≈ −$10,168.79 (funded $8,000, closed −$18,168.79). This is the headline anomaly. Verdict unchanged (23rd run).**
+
+- **What's happening:** `bot_status` last write **2026-06-08 18:45:07 UTC** (~1.5 min old, FRESH), `is_paused=true`, `bot_state="paused"`, `pause_reason="PAPER-ONLY mode"`, `market_regime=TRENDING_DOWN`. **0 live `options_scalp` trades** — live engine off, paper engine active. Open paper trades: **futures 10** (MOMENTUM_CONF 3, EMA_CONF 7), **options 47** (across all 5 SELL lanes). Lanes active: 5 futures FUT_* + 5 options SELL.
+
+- **What happened since last check (~27.1h):**
+  - **Futures:** funded still **$8,000 (8 deposits, last 06-07 15:39 — NO new refill)**. Closed n: 419 → **961** (+542). Net: −$7,492.92 → **−$18,168.79** (−$10,675.87 more; ≈ **−$394/hr** avg, in line with prior runs). Balance pre-any-refill **≈ −$10,168.79** — the lab has been insolvent and kept trading because no burn/refill executed.
+  - **Options (SELL):** funded $1,000. Closed n: 189 → **518** (+329). Net: −$106.08 → **−$281.78** (−$175.70). Balance **≈ $718.22**.
+  - Per-lane futures (cumulative, n=961): **FUT_MOMENTUM_CONF** 417cl/13.4%/**−$8,054.08**/67.6×/4.6m; **FUT_DONCHIAN_100X** 110/14.5%/−$4,083.07/100×/2.2m; **FUT_DONCHIAN_CONF** 104/24.0%/−$2,127.94/56×/5.5m; **FUT_DONCHIAN_50X** 105/19.0%/−$2,078.17/50×/4.9m; **FUT_EMA_CONF** 225/33.8%/−$1,825.53/30×/9.6m. Worst: **MOMENTUM_CONF = 44% of all futures loss; MOMENTUM_CONF + DONCHIAN_100X = −$12,137 = 67%** (unchanged shape, 23rd run). Best/least-bad: **EMA_CONF (33.8% win, lowest lev 30×)**.
+  - Options per-lane: OPT_SELL_PUT_FAR 142cl/7.0%/−$78.38, OPT_SELL_PUT 136/15.4%/−$63.22, OPT_SELL_CALL 78/14.1%/−$55.11, OPT_SELL_NEUTRAL 113/18.6%/−$48.72, OPT_SELL_CALL_FAR 49/14.3%/−$36.35. Avg fees ~$0.58/trade, avg peak only 0.15–0.80%.
+
+- **The new thing:**
+  1. **Operational, not strategy:** the check-in/refill loop stalled for 27h. With auto-refill tied to this routine, the futures lab sat at ≈ −$10.2k balance the whole time. If burns are supposed to fire from here, ~17–18 refills' worth of damage accrued un-actioned. Flag the scheduler, not the model.
+  2. **Exit-cohort split sharper than ever (n=961):** `paper_stop` **540 trades, −$20,003.80 (110% of total futures loss), avg PEAK +1.53%** — wrong-direction entries that never reach the money. Profitable cohort intact and GROWING: `paper_trail` **+$725.75** (n=370, +15.58% peak) + `paper_max_hold` **+$1,506.11** (n=15, +52.54% peak) = **+$2,231.86**. Exits work; entries are the entire problem. Unbroken 23 runs.
+  3. **Options:** avg fee (~$0.58) ≈ the entire per-trade loss (−$0.54/trade); peaks near 0% mean premium sells almost never reach profit. Fee drag + sells-never-profit pattern persists.
+
+- **What we should change:**
+  1. **Operational first:** restore the hourly cadence / decouple auto-refill from the check-in run so the lab can't silently run insolvent for a day. (Did NOT refill this run — task scope is append-only; flagging for the owner.)
+  2. **Strategy (unchanged, 23rd run):** attack ENTRIES, not exits — require pullback/retest before breakout entry and **cap leverage ≤10×** (a wrong entry then costs ~−2% not −8%). **Kill FUT_MOMENTUM_CONF + FUT_DONCHIAN_100X (67% of loss).** Keep EMA_CONF as template.
+  3. **Known-bug status (as of 06-06):** (a) option-sell fee-on-notional — **STILL PRESENT** (fees ≈ 100% of options PnL); (b) `sell_breached` 15–25m exit — not separately queried this run; (c) futures `paper_max_hold` ~30m clipping trends — holds remain 2–10m and max_hold cohort is only 15 trades but +$1,506, so most exits are stop/trail before the cap; clipping plausibly still present but not the main driver. paper_stop (entries) remains the structural killer.
+
+- **Verdict:** #8 (aggressive futures) **❌ DEAD** (now ≈ −$10.2k insolvent, no refill); #6 (OTM selling) **⚠️ break-even/dead** (n=518, no lane with edge, fee-bound); #5 dead. No strategy verdict change without a clean entry-filter + leverage-cap rebuild.
+
 ### 2026-06-07 15:39 UTC — bleed RE-ACCELERATES to −$405/hr (≈2× last hour's −$208) → **BURN #7** (bal hit −$492.92, refilled, funded now $8k); BOTH cohorts bled — fresh paper_stop wrongs −$372 (92% of hour) AND profit cohort gave back (paper_trail −$33 incl a MOMENTUM_CONF +55.82% peak that ROUND-TRIPPED to a loss); cumulative paper_stop −$8,153 n=231 @ +1.49% peak = 109% of loss; MOMENTUM_CONF −$2,976 = 40%, +100X = 65%; verdict unchanged 22nd run `[updated by: Cowork]`
 
 **Live OFF** — `bot_status` last write **2026-06-07 15:37:04 UTC** (FRESH, ~2 min old), `is_paused=true`, `is_running=true`; **0 live `options_scalp` trades last hour**. Paper engine active (23 futures closed last hour, 0 options). Tree left clean.
