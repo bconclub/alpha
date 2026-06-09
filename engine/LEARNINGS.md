@@ -40,6 +40,33 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-09 21:38 UTC — FIRST V3-ERA CHECK-IN, both labs fresh at $1,000, burns 0, live OFF `[updated by: alpha-paper-lab-monitor]`
+
+**Era context:** V3 started 2026-06-09T21:21:00Z; both labs re-seeded to $1,000 (re-seed deposits landed 21:20:07/21:20:09Z, intentionally just BEFORE the cutoff so FUNDED stays at the $1,000 base). All V2 history (FUT_*_CONF/50X/100X, OPT_SELL_* legacy) is frozen — excluded from every number below. This run is only ~17 min into the era, so samples are tiny; this is a baseline, not a verdict.
+
+**Futures lab (V3):** FUNDED **$1,000.00**, closed 0, BALANCE **$1,000.00**, BURNS **0**. 1 open position (FUT_SFP_15X). No V3 futures lane has booked a closed trade yet.
+
+| FUT lane (V3) | Total | Closed | Open | Net |
+|---|---|---|---|---|
+| FUT_SFP_15X | 2 | 0 | 1 | — |
+| FUT_MOMENTUM_CONF* | 1 | 0 | 0 | — |
+
+*FUT_MOMENTUM_CONF is a RETIRED V2 lane name but one row carries opened_at ≥ era start with status≠closed/open (cancelled/orphan). Cosmetic leak of the old lane name into the era window — flagging, not a loss. None of the five real V3 lanes (EMA_PB_10X/20X, DONCHIAN_RT_10X, VWAP_10X) has fired yet. EMA_PB 10X-vs-20X head-to-head: **no data yet** (0 entries either side).
+
+**Options lab (V3):** FUNDED **$1,000.00**, closed 2 (**−$2.09**), BALANCE **$997.91**, BURNS **0**. 1 open (OPT_SELL_RANGE_V3) + 1 restart_orphan row (cancelled).
+
+| OPT lane (V3) | Closed | Net | Exit | Avg |
+|---|---|---|---|---|
+| OPT_SELL_PUT_V3 | 2 | −$2.09 | sell_trend_break | −$1.045/trade |
+
+**Read:** Far too early to judge the two V3 questions (do options now hold HOURS? does gross beat the new premium-capped fee?). Both V3 options closes were `sell_trend_break` exits at ~−$1.05 each — can't yet tell fee vs gross split on n=2. Will need ≥1–2h of accumulation before EMA_PB 10X/20X or the options fee-fix show signal.
+
+**Live OFF — confirmed:** bot_status is_paused=**true**, bot_state=**paused**, pause_reason "PAPER-ONLY mode (no live trading)", market_regime TRENDING_DOWN, real capital $27.08, **0 options_scalp trades in the last hour**. ✓
+
+**AUTO-REFILL:** none — both labs ≫ $50 floor.
+
+**Verdict status:** carried over from V2, unverified in V3. Prior V2 findings (entries are the whole problem on futures; options structurally fee-capped) remain the working hypotheses to re-test on V3 lanes. No V3 verdict yet — insufficient sample.
+
 ### 2026-06-09 19:40 UTC - check-in, AUTO-REFILL burn #26 fired (cadence collapsed to 1h), futures bleed eased to ~-$419, ORPHAN OPEN-BOOK CLEARED, first paper_max_hold loser `[updated by: Cowork]`
 **Independent recompute ~1 min after the concurrent 19:39 monitor entry below. Reads AGREE on the headline: burn #26 fired 19:39:16 only 1h after #25 (cadence compressed 3h -> 2h -> 1h), the red hour was LIGHTER (~-$419), and the stale orphan open-book is finally reconciled. Minor count divergence as usual (my closed=1,441/net -$26,069.60/bal ~$930.40 vs monitor's realized 1,461/-$26,073.89/$926.11 - a few closes apart; my options is SELL-filtered closed=735/net -$419.52 vs monitor's all-options 789/-$421.12). db now 2026-06-09 19:39 (bot_status FRESH 19:38:51 UTC). Futures funded $26,000 -> **$27,000** (1 seed + 26 burns) after BURN #26 (paper_deposits id 28, +$1,000, 19:39:16 UTC). Options funded $1,000 (0 burns), bal ~**$580.48**. Live OFF (is_paused=true, bot_state=paused, "PAPER-ONLY mode"). Regime **TRENDING_UP** (regime_since 19:04:36, ~34m in; chop 0.429 = unusually clean/orderly trend, atr 1.1, net_change_30m +0.209). Verdict unchanged.**
 - **What's happening (db now 19:39):** `bot_status` FRESH 19:38:51, paused, market_regime=TRENDING_UP, delta_bal $27.08, live open_positions=0, last_scan 182s ago, win_rate 34.8. **Open book now CLEAN: futures 2 (oldest 06-09 19:33), options(SELL) 6 (oldest 06-09 18:19, newest 19:31)** - the long-standing stale 06-06 orphan pile (was fut 20 / opt 54) is GONE.
