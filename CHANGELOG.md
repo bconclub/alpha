@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-07 · Options selling scaled up (moderate-aggressive)
+
+- Options selling was too timid (~$150 margin / ~7× → small noise while futures raged). Scaled to **$250 margin / ~8× leverage** per short (~$2,000 notional) so it commits real, meaningful size and generates a cleaner edge signal (still slower-burn than the 25–100× futures).
+- `paper_options.py`: `SELL_MARGIN_USD` 150 → 250, `SELL_MARGIN_RATE` 0.15 → 0.125.
+- No reset (per policy); deploy restart auto-cancels open old-size sells.
+- `(SHA on commit)`
+
 ## 2026-06-07 · Deterministic Telegram pulse (engine-formatted, always clean)
 
 - **Problem:** the hourly routine wrote the Telegram text freehand each run, so it kept drifting into dense walls of text. Only hand-formatted one-offs looked clean.

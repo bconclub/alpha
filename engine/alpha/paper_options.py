@@ -296,8 +296,8 @@ class BasePaperOptions:
     SELL_OTM_STEPS = 3              # sell well OTM (lower delta = higher prob of profit)
     SELL_TP_PCT = 30.0             # bank earlier — data showed peaks ~46% then reversing past the old +50% TP
     SELL_SL_PCT = -80.0           # cut a bit sooner too (premium up 80%) to cap the naked-short tail
-    SELL_MARGIN_USD = 150.0        # real money committed per short (so "money in" is meaningful, not a $3 credit)
-    SELL_MARGIN_RATE = 0.15        # margin ≈ 15% of notional → notional ≈ margin / rate (~$1,000)
+    SELL_MARGIN_USD = 250.0        # money committed per short (moderate-aggressive: real, meaningful size)
+    SELL_MARGIN_RATE = 0.125       # ~8× leverage: $250 margin → ~$2,000 notional
     SELL_STRIKE_BUFFER = 0.001     # breach when spot reaches ~0.1% past the short strike
     NOTIONAL_CAP_MULT = 20.0       # cap a trade's underlying notional at 20x the stake (no $80→$312k)
     # Fee model: 0.03% of underlying notional per side, capped at 2.5% of premium/stake (gentle so
