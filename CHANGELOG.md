@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-07 · Deep-research synthesis → LIVE_STRATEGY_PLAN.md (ready on approval)
+
+- Mined all data (≈2,800 live + ≈2,100 paper trades). Findings: options dead both ways (selling profit factor 0.07–0.20); futures is a trend system whose money is in the fat tail — trades reaching 25%+ peak are 91–97% win, but 1,036 junk entries (<10% peak) amplified by leverage cause the −$20k loss; confidence predicts the tail (80+ reaches 10%+ 31% vs 15%) but is shackled to high leverage that stops it on noise.
+- `engine/LIVE_STRATEGY_PLAN.md` (new): the evidence-based spec — **futures only, EMA-trend entries, conf≥75, fixed 3–5× leverage (decoupled from conviction), ATR stop, ride winners to the tail; risk 1–2%/trade on the real $50.** Options dropped from live.
+- Honest gate: nothing is yet net-positive (all configs were over-leveraged). Plan = paper-validate this exact spec → require PF>1 over ~200 trades → then go live tiny. NOT live yet (PAPER_ONLY stays on).
+- `(SHA on commit)`
+
 ## 2026-06-07 · Options selling scaled up (moderate-aggressive)
 
 - Options selling was too timid (~$150 margin / ~7× → small noise while futures raged). Scaled to **$250 margin / ~8× leverage** per short (~$2,000 notional) so it commits real, meaningful size and generates a cleaner edge signal (still slower-burn than the 25–100× futures).
