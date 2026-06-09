@@ -362,6 +362,7 @@ export default function PaperLabPage() {
           <div>
             <div className={`font-mono text-4xl font-bold leading-none ${stats.paperBalance < 0 ? 'text-red-300' : 'text-white'}`}>{money2(stats.paperBalance)}</div>
             <div className="mt-1 font-mono text-xs text-zinc-500">
+              <span className="mr-2 rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300" title="Fresh $1,000 start 2026-06-10 · V2 history preserved in engine/PAPER_RESULTS.md">V3</span>
               Funded {money2(stats.funded)} · ₹{(stats.paperBalance * inr).toFixed(0)}
               {stats.burns > 0 && <span className="ml-2 rounded bg-red-500/15 px-1.5 py-0.5 text-red-300">🔥 burned {stats.burns}×</span>}
             </div>

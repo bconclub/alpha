@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-10 03:45 IST · V3 era cutover — dashboard + Telegram show the fresh $1,000 start only
+
+- Dashboard API (`paper-futures/route.ts`): all trade queries and the deposit ledger now era-scoped from 2026-06-09 21:21 UTC; funded = $1,000 seed + era refills. Burns reset to 0 for the era. Response carries `era` metadata.
+- Paper page: green **V3** badge on the balance card (tooltip: fresh start date + where V2 history lives).
+- Engine `_build_paper_pulse`: same era scoping — Telegram pulses now report $1,000-based balances and era burns.
+- Routine SKILL: balance/burn formulas rewritten to era math so check-ins agree with the dashboard.
+- User-facing: Options and Futures cards both show $1,000 starts; no more $27.9k/$1.4k lifetime funded numbers. V2 history preserved in DB + `engine/PAPER_RESULTS.md`.
+- `(SHA on commit)`
+
 ## 2026-06-10 03:15 IST · V3 PAPER RESET — rebuild both labs on everything 4,900 trades taught us
 
 - **Futures lab rebuilt (`engine/alpha/paper_futures.py`)**: V2's 25–100× lanes retired (−$26.7k, 26 burns — the definitive sample). V3 = 5 lanes: FUT_EMA_PB_10X + FUT_EMA_PB_20X (clean leverage A/B on identical pullback entries), FUT_DONCHIAN_RT_10X (fresh breakouts only, no chasing), FUT_VWAP_10X (institutional VWAP bounce), FUT_SFP_15X (liquidity-sweep reversal with structural stop).

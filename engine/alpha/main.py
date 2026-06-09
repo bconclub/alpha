@@ -173,20 +173,27 @@ class AlphaBot:
         'learned' / 'next' lines come from the routine via params.
         """
         loop = asyncio.get_running_loop()
+        # V3 era cutover: both labs re-seeded to exactly $1,000 at this moment.
+        # The pulse reports the CURRENT era only; V2 history stays in the DB
+        # and engine/PAPER_RESULTS.md.
+        era_start = "2026-06-09T21:21:00Z"
+        era_seed = 1000.0
 
-        def fetch(table: str, cols: str) -> list[dict[str, Any]]:
+        def fetch(table: str, cols: str, time_col: str) -> list[dict[str, Any]]:
             try:
-                return self.db.client.table(table).select(cols).limit(2000).execute().data or []
+                return (
+                    self.db.client.table(table).select(cols)
+                    .gte(time_col, era_start).limit(2000).execute().data or []
+                )
             except Exception:
                 return []
 
-        opt = await loop.run_in_executor(None, lambda: fetch("paper_options_trades", "setup_type,status,pnl_usd"))
-        fut = await loop.run_in_executor(None, lambda: fetch("paper_futures_trades", "setup_type,status,pnl_usd"))
-        dep = await loop.run_in_executor(None, lambda: fetch("paper_deposits", "lab,amount,kind"))
+        opt = await loop.run_in_executor(None, lambda: fetch("paper_options_trades", "setup_type,status,pnl_usd", "opened_at"))
+        fut = await loop.run_in_executor(None, lambda: fetch("paper_futures_trades", "setup_type,status,pnl_usd", "opened_at"))
+        dep = await loop.run_in_executor(None, lambda: fetch("paper_deposits", "lab,amount,kind", "created_at"))
 
         def funded(lab: str) -> float:
-            s = sum(float(d.get("amount") or 0) for d in dep if d.get("lab") == lab)
-            return s if s else 1000.0
+            return era_seed + sum(float(d.get("amount") or 0) for d in dep if d.get("lab") == lab)
 
         def burns(lab: str) -> int:
             return sum(1 for d in dep if d.get("lab") == lab and d.get("kind") == "refill")
