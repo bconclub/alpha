@@ -38,6 +38,28 @@ def _ema(values: list[float], period: int) -> float:
     return ema
 
 
+def _atr_rows(rows: list[list[float]], period: int = 14) -> float:
+    """Average true range of the last `period` closed bars."""
+    if len(rows) < period + 1:
+        return 0.0
+    trs: list[float] = []
+    for i in range(1, len(rows)):
+        h, l, pc = rows[i][2], rows[i][3], rows[i - 1][4]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    return sum(trs[-period:]) / period
+
+
+def _vwap_rows(rows: list[list[float]]) -> float:
+    """Rolling volume-weighted average price over the supplied bars."""
+    pv = 0.0
+    vol = 0.0
+    for r in rows:
+        typical = (r[2] + r[3] + r[4]) / 3.0
+        pv += typical * r[5]
+        vol += r[5]
+    return pv / vol if vol > 0 else 0.0
+
+
 def _pct_move(start: float, end: float) -> float:
     if start <= 0:
         return 0.0
@@ -80,16 +102,24 @@ class BasePaperFutures:
     TIMEFRAME = "5m"
     CHECK_INTERVAL_SEC = 30
     PAPER_ACCOUNT_USD = 1000.0
-    ALLOC_PCT = 0.25
-    BASE_LEVERAGE = 5.0
-    MAX_LEVERAGE = 100.0
-    FIXED_LEVERAGE: float | None = None   # when set, ignore the confidence ladder (sane-leverage test)
+    MARGIN_USD = 100.0              # money-in per trade (V3: fixed $100, real-account scale)
+    BASE_LEVERAGE = 10.0
+    FIXED_LEVERAGE: float | None = 10.0
     FEE_RATE = 0.0005
-    MAX_HOLD_SEC = 4 * 60 * 60      # ride winners (was 45m — too short, turned trend into scalping)
-    STOP_PCT = -6.0
-    TRAIL_ARM_PCT = 5.0             # arm the trail early
-    TRAIL_RETRACE_PCT = 0.30        # bank ~70% of the peak — capture it, don't give it back
-    COOLDOWN_SEC = 0               # aggressive: take every opportunity, re-enter immediately
+    MIN_CONFIDENCE = 70.0           # V3: entry gate — conf 80+ reached the 10%+ tail 31% vs 15%
+    MAX_HOLD_SEC = 24 * 60 * 60     # let winners run; only 1 of 1,468 V2 trades ever held >1h
+    # ── V3 exits live in ATR PRICE space, not leveraged-PnL space ──────────
+    # V2 lesson: a -6% PnL stop at 67x = a 0.09% price wiggle → 828 noise-stops,
+    # 0% win, -$30k (113% of all losses). Stop distance must be independent of
+    # leverage: leverage only scales the payoff, never the survival of the idea.
+    STOP_ATR_MULT = 1.6             # initial stop: entry ∓ 1.6×ATR(14)
+    BREAKEVEN_ATR = 1.2             # once +1.2×ATR in profit, stop jumps to entry (exit with profit)
+    TRAIL_ARM_ATR = 1.0             # arm the chandelier after +1×ATR favorable excursion
+    TRAIL_ATR_MULT = 1.8            # then trail 1.8×ATR behind the peak price
+    STAGNATION_SEC = 2 * 60 * 60    # don't get stuck: flat for 2h within ±0.5×ATR → exit
+    STAGNATION_ATR = 0.5
+    LIQUIDATION_PCT = -90.0         # margin gone — modeled liquidation
+    COOLDOWN_SEC = 0                # aggressive: take every opportunity, re-enter immediately
 
     def __init__(
         self,
@@ -118,6 +148,11 @@ class BasePaperFutures:
         self._last_signal_key: str | None = None
         self._last_close_mono = 0.0
         self._last_exposure_skip_mono = 0.0
+        # V3 price-space exit state
+        self._entry_atr = 0.0
+        self._stop_price = 0.0
+        self._peak_price = 0.0
+        self._breakeven_locked = False
 
     async def start(self) -> None:
         if self.is_active:
@@ -173,6 +208,8 @@ class BasePaperFutures:
         direction, signal_key, metadata = decision
         if self._last_signal_key == signal_key:
             return
+        if float(metadata.get("confidence_score") or 0.0) < self.MIN_CONFIDENCE:
+            return
         if not self.position_book.can_open(self.pair):
             active = self.position_book.get(self.pair) or {}
             now = asyncio.get_running_loop().time()
@@ -188,6 +225,7 @@ class BasePaperFutures:
                 )
                 self._last_exposure_skip_mono = now
             return
+        metadata.setdefault("atr", _atr_rows(rows[:-1] if rows else []))
         await self._open(direction, mark, signal_key, metadata)
 
     async def _fetch_rows(self) -> list[list[float]]:
@@ -210,14 +248,34 @@ class BasePaperFutures:
         raise NotImplementedError
 
     def _exit_reason(self, mark: float, rows: list[list[float]]) -> str:
-        pnl_pct = self._pnl_pct(mark)
+        """V3 exit engine — all distances in underlying PRICE (ATR units).
+
+        Order: liquidation guard → hard ATR stop (ratcheted to breakeven once
+        in profit) → chandelier trail behind the peak → stagnation purge →
+        max-hold. Leverage never changes WHERE we exit, only what it pays.
+        """
         age = asyncio.get_running_loop().time() - self._opened_mono
-        if pnl_pct <= self.STOP_PCT:
-            return "paper_stop"
-        if self._peak_pnl_pct >= self.TRAIL_ARM_PCT:
-            floor = self._peak_pnl_pct * (1.0 - self.TRAIL_RETRACE_PCT)
-            if pnl_pct <= floor:
-                return "paper_trail"
+        if self._pnl_pct(mark) <= self.LIQUIDATION_PCT:
+            return "liquidated"
+        long = self._direction == "long"
+        atr = self._entry_atr
+        if self._stop_price > 0:
+            if (long and mark <= self._stop_price) or (not long and mark >= self._stop_price):
+                return "breakeven_stop" if self._breakeven_locked else "paper_stop"
+        if atr > 0:
+            peak_fav = (self._peak_price - self._entry_price) if long else (self._entry_price - self._peak_price)
+            # ratchet: once the trade has paid 1.2×ATR, never let it go red again
+            if not self._breakeven_locked and peak_fav >= self.BREAKEVEN_ATR * atr:
+                fee_buffer = self._entry_price * self.FEE_RATE * 2
+                self._stop_price = self._entry_price + fee_buffer if long else self._entry_price - fee_buffer
+                self._breakeven_locked = True
+            if peak_fav >= self.TRAIL_ARM_ATR * atr:
+                trail = self._peak_price - self.TRAIL_ATR_MULT * atr if long else self._peak_price + self.TRAIL_ATR_MULT * atr
+                if (long and mark <= trail) or (not long and mark >= trail):
+                    return "paper_trail"
+            # don't get stuck: dead-flat trades release the lane for a live one
+            if age >= self.STAGNATION_SEC and abs(mark - self._entry_price) < self.STAGNATION_ATR * atr:
+                return "stagnant_exit"
         if age >= self.MAX_HOLD_SEC:
             return "paper_max_hold"
         return ""
@@ -236,8 +294,17 @@ class BasePaperFutures:
             return
         confidence = _clamp(float(metadata.get("confidence_score") or 55.0), 0.0, 100.0)
         leverage = self._leverage_for_confidence(confidence)
-        margin = self.PAPER_ACCOUNT_USD * self.ALLOC_PCT
+        margin = self.MARGIN_USD
         notional = margin * leverage
+        atr = float(metadata.get("atr") or 0.0)
+        long = direction == "long"
+        stop_override = float(metadata.get("stop_price") or 0.0)
+        if stop_override > 0:
+            stop_price = stop_override
+        elif atr > 0:
+            stop_price = entry_price - self.STOP_ATR_MULT * atr if long else entry_price + self.STOP_ATR_MULT * atr
+        else:
+            stop_price = entry_price * (0.99 if long else 1.01)   # ATR unavailable: 1% emergency stop
         now_iso = datetime.now(timezone.utc).isoformat()
         row = {
             "pair": self.pair,
@@ -258,7 +325,8 @@ class BasePaperFutures:
                 "strategy": self.SETUP_TYPE,
                 "signal_key": signal_key,
                 "confidence_score": round(confidence, 1),
-                "leverage_model": "confidence_ladder_v1",
+                "leverage_model": "fixed_v3_atr_stop",
+                "stop_price": round(stop_price, 4),
                 **metadata,
             },
         }
@@ -276,12 +344,17 @@ class BasePaperFutures:
         self._entry_price = entry_price
         self._leverage = leverage
         self._peak_pnl_pct = 0.0
+        self._entry_atr = atr
+        self._stop_price = stop_price
+        self._peak_price = entry_price
+        self._breakeven_locked = False
         self._entry_metadata = {
             "source": "independent_paper_strategy",
             "strategy": self.SETUP_TYPE,
             "signal_key": signal_key,
             "confidence_score": round(confidence, 1),
-            "leverage_model": "confidence_ladder_v1",
+            "leverage_model": "fixed_v3_atr_stop",
+            "stop_price": round(stop_price, 4),
             **metadata,
         }
         self._opened_mono = asyncio.get_running_loop().time()
@@ -298,23 +371,14 @@ class BasePaperFutures:
         )
 
     def _leverage_for_confidence(self, confidence: float) -> float:
-        """Map setup quality to modeled futures leverage.
+        """V3: leverage is FIXED per lane and decoupled from conviction.
 
-        This deliberately uses broad buckets so paper results reveal whether
-        higher leverage improves edge or just amplifies noise.
+        The V2 confidence ladder (25–100×) was the single biggest destroyer of
+        capital: win rate decayed 34%@25× → 14%@67× → 16%@100×, and it chained
+        the BEST setups to the WORST leverage. Confidence now gates entries
+        (MIN_CONFIDENCE); it never sizes them.
         """
-        if self.FIXED_LEVERAGE is not None:
-            return self.FIXED_LEVERAGE
-        # Aggressive confidence ladder (user request): higher confidence → more leverage.
-        if confidence >= 90:
-            return min(100.0, self.MAX_LEVERAGE)
-        if confidence >= 80:
-            return min(75.0, self.MAX_LEVERAGE)
-        if confidence >= 70:
-            return min(50.0, self.MAX_LEVERAGE)
-        if confidence >= 60:
-            return min(25.0, self.MAX_LEVERAGE)
-        return 10.0
+        return self.FIXED_LEVERAGE if self.FIXED_LEVERAGE is not None else self.BASE_LEVERAGE
 
     def _pnl_pct(self, price: float) -> float:
         if self._entry_price <= 0:
@@ -327,7 +391,11 @@ class BasePaperFutures:
             return
         pnl_pct = self._pnl_pct(price)
         self._peak_pnl_pct = max(self._peak_pnl_pct, pnl_pct)
-        margin = self.PAPER_ACCOUNT_USD * self.ALLOC_PCT
+        if self._direction == "long":
+            self._peak_price = max(self._peak_price, price)
+        else:
+            self._peak_price = min(self._peak_price, price) if self._peak_price > 0 else price
+        margin = self.MARGIN_USD
         await self.db.update_paper_futures_trade(
             self._trade_id,
             {
@@ -343,7 +411,7 @@ class BasePaperFutures:
         if not self._trade_id:
             return
         pnl_pct = self._pnl_pct(exit_price)
-        margin = self.PAPER_ACCOUNT_USD * self.ALLOC_PCT
+        margin = self.MARGIN_USD
         notional = margin * self._leverage
         gross = margin * pnl_pct / 100.0
         fees = notional * self.FEE_RATE * 2
@@ -388,6 +456,10 @@ class BasePaperFutures:
         self._peak_pnl_pct = 0.0
         self._entry_metadata = {}
         self._opened_mono = 0.0
+        self._entry_atr = 0.0
+        self._stop_price = 0.0
+        self._peak_price = 0.0
+        self._breakeven_locked = False
         self._last_close_mono = asyncio.get_running_loop().time()
 
 
@@ -688,32 +760,230 @@ class SignalMixPaperFutures(BasePaperFutures):
         return ""
 
 
+# ── V3 lanes: pullback/retest entries, chop filters, ATR price-space exits ──
+# Built from the V2 evidence (1,468 closed trades, −$26.7k, 26 burns):
+#  * the ONLY profitable cohorts were trades that survived 10+ minutes (51% win,
+#    +$1,788) and trades reaching a 25%+ peak (91–97% win, +$5.2k);
+#  * 828 trades noise-stopped at 0% win because the stop lived in leveraged-PnL
+#    space; 65% of all loss came from 1m momentum + the 100× lane.
+# V3 therefore: fixed 10–20× leverage, ATR price stops, breakeven ratchet,
+# conf-gated pullback entries, and a 20× lane as an A/B against identical 10×
+# entries so leverage's marginal effect is finally measured cleanly.
+
+
+class EmaPullbackV3(BasePaperFutures):
+    """EMA 8/21 trend + pullback-to-EMA8 + follow-through, with a chop filter.
+
+    The best V2 entry (34.7% win, least-bad lane) — now gated so the flat-tape
+    junk that produced the <2%-peak graveyard is skipped entirely.
+    """
+
+    SETUP_TYPE = "FUT_EMA_PB"
+    TIMEFRAME = "5m"
+    MIN_TREND_GAP_PCT = 0.06     # EMA8 vs EMA21 separation — flat tape = no trade
+    MIN_FOLLOW_PCT = 0.04        # the bounce candle must actually move
+
+    def __init__(self, pair: str, exchange: Any, db: Database, position_book: PaperFuturesPositionBook) -> None:
+        super().__init__(
+            pair, exchange, db,
+            logger_name=f"paper.ema_pb_v3.{pair.replace('/', '')}",
+            position_book=position_book,
+        )
+
+    def _entry_decision(self, rows, mark):
+        if len(rows) < 35:
+            return None
+        closed = rows[:-1]
+        closes = [float(r[4]) for r in closed]
+        lows = [float(r[3]) for r in closed]
+        highs = [float(r[2]) for r in closed]
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        close, prev = closes[-1], closes[-2]
+        ts = int(closed[-1][0])
+        gap = _pct_move(ema21, ema8)
+        ft = abs(_pct_move(prev, close))
+        if abs(gap) < self.MIN_TREND_GAP_PCT or ft < self.MIN_FOLLOW_PCT:
+            return None
+        meta = {
+            "timeframe": self.TIMEFRAME,
+            "ema8": ema8, "ema21": ema21,
+            "trend_gap_pct": gap, "follow_through_pct": ft,
+            "confidence_score": _clamp(70.0 + abs(gap) * 60.0 + ft * 40.0, 70.0, 95.0),
+        }
+        if gap > 0 and close > ema21 and lows[-1] <= ema8 and close > prev:
+            return "long", f"{ts}:long", meta
+        if gap < 0 and close < ema21 and highs[-1] >= ema8 and close < prev:
+            return "short", f"{ts}:short", meta
+        return None
+
+
+class DonchianRetestV3(BasePaperFutures):
+    """FRESH Donchian-20 breakout only — never chase an extended one.
+
+    V2 entered on every bar that closed beyond the channel (including bar 10 of
+    a move, the top). V3 requires the PREVIOUS bar inside the channel (first
+    close beyond) and refuses breakouts already stretched past 0.4%.
+    """
+
+    SETUP_TYPE = "FUT_DONCHIAN_RT"
+    TIMEFRAME = "5m"
+    CHANNEL_LEN = 20
+    MAX_CHASE_PCT = 0.40         # skip if close is already this far past the band
+    MIN_WIDTH_PCT = 0.30         # a meaningful channel, not a flat-tape ribbon
+
+    def __init__(self, pair: str, exchange: Any, db: Database, position_book: PaperFuturesPositionBook) -> None:
+        super().__init__(
+            pair, exchange, db,
+            logger_name=f"paper.donchian_rt_v3.{pair.replace('/', '')}",
+            position_book=position_book,
+        )
+
+    def _entry_decision(self, rows, mark):
+        if len(rows) < self.CHANNEL_LEN + 3:
+            return None
+        closed = rows[:-1]
+        history = closed[-(self.CHANNEL_LEN + 1):-1]
+        upper = max(float(r[2]) for r in history)
+        lower = min(float(r[3]) for r in history)
+        close = float(closed[-1][4])
+        prev_close = float(closed[-2][4])
+        ts = int(closed[-1][0])
+        width = _pct_move(lower, upper) if lower > 0 else 0.0
+        if width < self.MIN_WIDTH_PCT:
+            return None
+        meta = {
+            "timeframe": self.TIMEFRAME, "channel_len": self.CHANNEL_LEN,
+            "upper": upper, "lower": lower, "channel_width_pct": width,
+        }
+        if close > upper and prev_close <= upper:
+            bp = _pct_move(upper, close)
+            if bp > self.MAX_CHASE_PCT:
+                return None
+            meta.update({"breakout_pct": bp, "confidence_score": _clamp(71.0 + width * 8.0 + bp * 20.0, 70.0, 92.0)})
+            return "long", f"{ts}:long", meta
+        if close < lower and prev_close >= lower:
+            bp = abs(_pct_move(lower, close))
+            if bp > self.MAX_CHASE_PCT:
+                return None
+            meta.update({"breakout_pct": bp, "confidence_score": _clamp(71.0 + width * 8.0 + bp * 20.0, 70.0, 92.0)})
+            return "short", f"{ts}:short", meta
+        return None
+
+
+class VwapBounceV3(BasePaperFutures):
+    """Institutional VWAP pullback: with the trend, enter the bounce off VWAP."""
+
+    SETUP_TYPE = "FUT_VWAP"
+    TIMEFRAME = "5m"
+    VWAP_BARS = 60
+    TOUCH_PCT = 0.0008           # the bar must have actually tagged VWAP (±0.08%)
+    MAX_DIST_PCT = 0.35          # and closed back with the trend, not run away
+
+    def __init__(self, pair: str, exchange: Any, db: Database, position_book: PaperFuturesPositionBook) -> None:
+        super().__init__(
+            pair, exchange, db,
+            logger_name=f"paper.vwap_v3.{pair.replace('/', '')}",
+            position_book=position_book,
+        )
+
+    def _entry_decision(self, rows, mark):
+        if len(rows) < self.VWAP_BARS + 2:
+            return None
+        closed = rows[:-1]
+        closes = [float(r[4]) for r in closed]
+        vwap = _vwap_rows(closed[-self.VWAP_BARS:])
+        if vwap <= 0:
+            return None
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        close, prev = closes[-1], closes[-2]
+        low, high = float(closed[-1][3]), float(closed[-1][2])
+        ts = int(closed[-1][0])
+        gap = _pct_move(ema21, ema8)
+        dist = (close - vwap) / vwap * 100.0
+        meta = {"timeframe": self.TIMEFRAME, "vwap": vwap, "dist_pct": dist, "trend_gap_pct": gap}
+        if gap > 0.05 and low <= vwap * (1 + self.TOUCH_PCT) and 0.0 < dist < self.MAX_DIST_PCT and close > prev:
+            meta["confidence_score"] = _clamp(72.0 + gap * 50.0, 70.0, 92.0)
+            return "long", f"{ts}:long", meta
+        if gap < -0.05 and high >= vwap * (1 - self.TOUCH_PCT) and -self.MAX_DIST_PCT < dist < 0.0 and close < prev:
+            meta["confidence_score"] = _clamp(72.0 + abs(gap) * 50.0, 70.0, 92.0)
+            return "short", f"{ts}:short", meta
+        return None
+
+
+class SfpReversalV3(BasePaperFutures):
+    """Liquidity sweep / swing-failure: price spikes through an obvious swing
+    level (stop hunt), then closes back inside — enter the reclaim with the
+    stop just beyond the sweep wick (tight, STRUCTURAL, not noise)."""
+
+    SETUP_TYPE = "FUT_SFP"
+    TIMEFRAME = "5m"
+    SWING_BARS = 12
+    STOP_PAD_ATR = 0.25          # stop sits just past the swept extreme
+
+    def __init__(self, pair: str, exchange: Any, db: Database, position_book: PaperFuturesPositionBook) -> None:
+        super().__init__(
+            pair, exchange, db,
+            logger_name=f"paper.sfp_v3.{pair.replace('/', '')}",
+            position_book=position_book,
+        )
+
+    def _entry_decision(self, rows, mark):
+        if len(rows) < self.SWING_BARS + 4:
+            return None
+        closed = rows[:-1]
+        sig = closed[-1]
+        prior = closed[-(self.SWING_BARS + 1):-1]
+        swing_low = min(float(r[3]) for r in prior)
+        swing_high = max(float(r[2]) for r in prior)
+        low, high, close = float(sig[3]), float(sig[2]), float(sig[4])
+        ts = int(sig[0])
+        atr = _atr_rows(closed)
+        if atr <= 0:
+            return None
+        if low < swing_low and close > swing_low:
+            reclaim = (close - swing_low) / atr
+            return "long", f"{ts}:long", {
+                "timeframe": self.TIMEFRAME, "swing_low": swing_low, "sweep_low": low,
+                "reclaim_atr": reclaim, "stop_price": low - self.STOP_PAD_ATR * atr,
+                "confidence_score": _clamp(72.0 + reclaim * 10.0, 70.0, 92.0),
+            }
+        if high > swing_high and close < swing_high:
+            reclaim = (swing_high - close) / atr
+            return "short", f"{ts}:short", {
+                "timeframe": self.TIMEFRAME, "swing_high": swing_high, "sweep_high": high,
+                "reclaim_atr": reclaim, "stop_price": high + self.STOP_PAD_ATR * atr,
+                "confidence_score": _clamp(72.0 + reclaim * 10.0, 70.0, 92.0),
+            }
+        return None
+
+
 def build_paper_futures_strategies(
     pair: str,
     exchange: Any,
     db: Database,
     scalp_strategy: Any | None = None,
 ) -> list[PaperFuturesStrategy]:
-    """Sane-leverage trend/breakout futures test for one pair.
+    """V3 round — apply EVERYTHING the first 1,468 trades taught us.
 
-    AGGRESSIVE round (user request): trend/breakout entries on the confidence
-    leverage ladder (25–100× by setup quality) plus explicit 50× and 100× lanes.
-    Each lane runs independently (own position book) so leverages compare side by
-    side. NOTE: prior data shows leverage amplifies a negative-edge entry — this
-    tests whether high leverage on the *entry* ever pays. Paper only.
+    Fixed 10–20× leverage (user wants leverage; the data caps how much survives),
+    pullback/retest entries with chop filters, conf≥70 gate, ATR price stops,
+    breakeven ratchet at +1.2 ATR, chandelier trail, stagnation purge, 24h max
+    hold. FUT_EMA_PB runs at BOTH 10× and 20× on identical entries — the clean
+    leverage A/B the ladder never gave us. Paper only; never places real orders.
     """
-    def mk(cls, setup: str, lev: float | None = None) -> PaperFuturesStrategy:
+    def mk(cls, setup: str, lev: float) -> PaperFuturesStrategy:
         s = cls(pair, exchange, db, PaperFuturesPositionBook())
-        if lev is not None:
-            s.FIXED_LEVERAGE = lev   # else uses the confidence ladder (25–100×)
+        s.FIXED_LEVERAGE = lev
         s.SETUP_TYPE = setup
         s.setup_type = setup
         return s
 
     return [
-        mk(DonchianPaperFutures, "FUT_DONCHIAN_CONF"),     # confidence ladder up to 100×
-        mk(EmaPullbackPaperFutures, "FUT_EMA_CONF"),
-        mk(MomentumImpulsePaperFutures, "FUT_MOMENTUM_CONF"),
-        mk(DonchianPaperFutures, "FUT_DONCHIAN_50X", 50.0),
-        mk(DonchianPaperFutures, "FUT_DONCHIAN_100X", 100.0),
+        mk(EmaPullbackV3, "FUT_EMA_PB_10X", 10.0),
+        mk(EmaPullbackV3, "FUT_EMA_PB_20X", 20.0),     # leverage A/B vs identical entries
+        mk(DonchianRetestV3, "FUT_DONCHIAN_RT_10X", 10.0),
+        mk(VwapBounceV3, "FUT_VWAP_10X", 10.0),
+        mk(SfpReversalV3, "FUT_SFP_15X", 15.0),        # tight structural stop earns extra lev
     ]

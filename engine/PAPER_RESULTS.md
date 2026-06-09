@@ -4,6 +4,40 @@
 > up anytime. Pairs with `LEARNINGS.md` (verdicts/principles). Regenerate by
 > re-querying `paper_options_trades` / `paper_futures_trades` and updating below.
 
+## FINAL Snapshot — 2026-06-09 21:00 UTC (end of ERA 2: aggressive 25–100× futures + $250 selling)
+
+Both labs re-seeded to $1,000 for V3 via additive `paper_deposits` rows — **no rows deleted, full history preserved.** Era totals below are the permanent record.
+
+### Futures — confidence-ladder / fixed high leverage (n=1,468 closed, −$26,742, 26 burns, $27k funded)
+| Lane | Closed | Win% | Net | Avg lev | Avg peak | Avg hold |
+|---|---|---|---|---|---|---|
+| FUT_MOMENTUM_CONF | 620 | 14.2% | −$11,587 | 67.6× | 8.9% | 4.9m |
+| FUT_DONCHIAN_100X | 174 | 16.1% | −$5,812 | 100× | 9.6% | 2.2m |
+| FUT_DONCHIAN_CONF | 166 | 22.9% | −$3,496 | 56.2× | 7.2% | 5.4m |
+| FUT_DONCHIAN_50X | 165 | 21.2% | −$3,028 | 50× | 6.9% | 4.8m |
+| FUT_EMA_CONF | 343 | 34.7% | −$2,819 | 29.7× | 5.6% | 10.3m |
+
+**The three tables that define V3:**
+- **Exit cohorts:** paper_stop 828/0%/−$29,999 @ +1.45% avg peak (= 112% of ALL loss) · paper_trail 550/51.5%/+$1,559 · paper_max_hold 29/82.8%/+$2,437 @ +47.4% peak. Exits printed money; entries+leverage burned it.
+- **Peak buckets:** <2%: 635/0%/−$22,456 · 2–10%: 498/18%/−$9,401 · 10–25%: 243/55%/−$75 · 25–50%: 58/**91%**/+$1,470 · 50%+: 34/**97%**/+$3,719.
+- **Hold buckets:** <10min: 1,226/15%/−$28,518 · 10–60min: 241/**51%**/+$1,788 · >1h: **1 trade in the entire era.**
+
+### Options — naked OTM selling, $250 margin (n=742 closed, −$421, fees $448 → GROSS +$27 = breakeven)
+| Lane | Closed | Win% | Net | Fees | Avg peak |
+|---|---|---|---|---|---|
+| OPT_SELL_PUT_FAR | 176 | 7.4% | −$99.88 | $106.41 | 0.14% |
+| OPT_SELL_CALL | 148 | 14.9% | −$96.53 | $87.88 | 0.45% |
+| OPT_SELL_PUT | 183 | 13.7% | −$92.57 | $110.47 | 0.22% |
+| OPT_SELL_NEUTRAL | 160 | 15.6% | −$75.00 | $97.30 | 0.42% |
+| OPT_SELL_CALL_FAR | 75 | 13.3% | −$57.15 | $45.96 | 0.59% |
+
+Read: **selling lost to churn + fees, not direction.** ~10-min average holds collected dust credits that real(istic) fees fully consumed. V3 sells closer strikes (credit ≥$2), signals on 15m, cools down 15min between trades, holds for hours of actual decay, and uses the true Delta fee model.
+
+### V3 lanes now running (fresh $1,000 each, $100 margin/trade)
+Futures: FUT_EMA_PB_10X · FUT_EMA_PB_20X (leverage A/B on identical entries) · FUT_DONCHIAN_RT_10X · FUT_VWAP_10X · FUT_SFP_15X — ATR price stops, breakeven ratchet, chandelier trail, stagnation purge, conf≥70, 24h max hold.
+Options: OPT_SELL_PUT_V3 · OPT_SELL_CALL_V3 · OPT_SELL_RANGE_V3.
+Gate to live ($50 real): profit factor >1.0 over ~200 trades in a lane.
+
 ## Snapshot — 2026-06-06 (selling + sane-futures round, pre-reset #2)
 
 Both labs reset to $1,000 and ran OPTION SELLING + SANE-LEVERAGE (3–5×) futures. **Both lost.**

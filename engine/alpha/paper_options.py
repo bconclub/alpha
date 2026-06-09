@@ -163,7 +163,9 @@ class PaperMarketData:
 # How close to expiry we force-close (options settle; this is a contract reality).
 PRE_EXPIRY_CLOSE_SEC = 30 * 60
 # Skip strikes whose nearest expiry is sooner than this when opening.
-MIN_EXPIRY_HOURS_FOR_ENTRY = 2.0
+# V3: sellers need a real decay runway — 742 V2 trades held ~10 min and were
+# 100% fee-bound (gross +$27, fees $448). Theta pays by the HOUR, not minute.
+MIN_EXPIRY_HOURS_FOR_ENTRY = 4.0
 
 
 class PaperOptionChain:
@@ -292,18 +294,26 @@ class BasePaperOptions:
     TRAIL_ARM_PCT = 18.0            # arm the trail early so mid-size peaks aren't given back
     TRAIL_RETRACE_PCT = 0.45        # exit if premium gives back this fraction of the peak
     # SELL mode (theta harvest): collect premium, profit as it decays.
+    # V3 redesign from 742 closed sells: gross was +$27 (breakeven!) and fees
+    # -$448 — selling died of CHURN, not direction. So: closer strikes (real
+    # credit), 15m signals (fewer trades), a minimum-credit gate (no dust), a
+    # re-entry cooldown, and holds measured in hours so theta actually accrues.
     SELL = False                    # when True this lane WRITES options instead of buying
-    SELL_OTM_STEPS = 3              # sell well OTM (lower delta = higher prob of profit)
-    SELL_TP_PCT = 30.0             # bank earlier — data showed peaks ~46% then reversing past the old +50% TP
-    SELL_SL_PCT = -80.0           # cut a bit sooner too (premium up 80%) to cap the naked-short tail
-    SELL_MARGIN_USD = 250.0        # money committed per short (moderate-aggressive: real, meaningful size)
-    SELL_MARGIN_RATE = 0.125       # ~8× leverage: $250 margin → ~$2,000 notional
-    SELL_STRIKE_BUFFER = 0.001     # breach when spot reaches ~0.1% past the short strike
+    SELL_OTM_STEPS = 2              # closer OTM = meaningful credit (far-OTM credit < fees)
+    SELL_TP_PCT = 50.0              # with hours-long holds, let decay do real work
+    SELL_SL_PCT = -150.0            # premium 2.5×: thesis dead (breach exit usually fires first)
+    SELL_MARGIN_USD = 100.0         # money committed per short (real-account scale, user max $100)
+    SELL_MARGIN_RATE = 0.10         # ~10× : $100 margin → ~$1,000 notional
+    SELL_STRIKE_BUFFER = 0.0015     # breach when spot reaches ~0.15% from the short strike
+    SELL_MIN_CREDIT_USD = 2.0       # skip dust: fee floor makes credits under ~$2 unwinnable
+    SELL_REENTRY_SEC = 15 * 60      # churn killer: one close per lane per 15 min max
     NOTIONAL_CAP_MULT = 20.0       # cap a trade's underlying notional at 20x the stake (no $80→$312k)
-    # Fee model: 0.03% of underlying notional per side, capped at 2.5% of premium/stake (gentle so
-    # fees don't dominate the test — the breach + churn bug, not fees, was the real killer).
+    # Fee model (real Delta India): 0.03% of underlying notional per side,
+    # capped at 10% of the premium value, +18% GST. No more gentle fictions —
+    # if a lane can't beat REAL fees it must die in paper, not live.
     FEE_NOTIONAL_RATE = 0.0003
-    FEE_PREMIUM_CAP = 0.025
+    FEE_PREMIUM_CAP_RATE = 0.10
+    FEE_GST_MULT = 1.18
 
     def __init__(
         self,
@@ -351,6 +361,7 @@ class BasePaperOptions:
         self._peak_pnl_pct = 0.0
         self._entry_metadata: dict[str, Any] = {}
         self._last_signal_key: str | None = None
+        self._last_close_mono = 0.0
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -402,6 +413,8 @@ class BasePaperOptions:
                     await self._close(premium, reason)
             return
 
+        if self.SELL and asyncio.get_running_loop().time() - self._last_close_mono < self.SELL_REENTRY_SEC:
+            return
         decision = self._entry_decision(rows, spot)
         if decision is None:
             return
@@ -515,14 +528,17 @@ class BasePaperOptions:
             return "pre_expiry"
         pnl = self._premium_pnl_pct(premium)
         if self.SELL:
-            # theta harvest: take 50% of credit; cut if premium doubles; or if
-            # the underlying breaks against the short (option going ITM).
+            # theta harvest: take profit on real decay; cut on premium blowout,
+            # strike approach (going ITM), or the trend that justified the short
+            # breaking against it.
             if pnl >= self.SELL_TP_PCT:
                 return "sell_take_profit"
             if pnl <= self.SELL_SL_PCT:
                 return "sell_stop"
             if self._sell_strike_breached(spot):
                 return "sell_breached"
+            if self._underlying_reversed(rows, spot):
+                return "sell_trend_break"
             return ""
         # BUY: ride-the-wave
         # 2) catastrophic stop (thesis dead)
@@ -570,7 +586,9 @@ class BasePaperOptions:
             contracts = max(1.0, float(int(target_notional / (spot * self.multiplier))))
             notional = contracts * spot * self.multiplier
             stake = self.SELL_MARGIN_USD                      # money in = margin
-            credit = entry_premium * contracts * self.multiplier   # premium collected (bonus)
+            credit = entry_premium * contracts * self.multiplier   # premium collected (the max win)
+            if credit < self.SELL_MIN_CREDIT_USD:
+                return   # dust credit can't clear the fee floor — not a trade
         else:
             per_contract_usd = entry_premium * self.multiplier
             if per_contract_usd <= 0:
@@ -673,8 +691,11 @@ class BasePaperOptions:
         )
 
     def _fees(self, notional: float) -> float:
-        per_side = min(self.FEE_PREMIUM_CAP * self._stake, self.FEE_NOTIONAL_RATE * notional)
-        return per_side * 2.0
+        """Real Delta India option fees: 0.03% of notional per side, capped at
+        10% of the premium value, +18% GST, both sides."""
+        premium_value = self._entry_premium * self._contracts * self.multiplier
+        per_side = min(self.FEE_NOTIONAL_RATE * notional, self.FEE_PREMIUM_CAP_RATE * premium_value)
+        return per_side * self.FEE_GST_MULT * 2.0
 
     async def _close(self, exit_premium: float, reason: str) -> None:
         if not self._trade_id:
@@ -715,6 +736,7 @@ class BasePaperOptions:
         self._stake = 0.0
         self._peak_pnl_pct = 0.0
         self._entry_metadata = {}
+        self._last_close_mono = asyncio.get_running_loop().time()
 
 
 # ── strategy lanes (price-action on the underlying → buy call/put) ─────────
@@ -1129,16 +1151,17 @@ def build_paper_options_strategies(
     chain = PaperOptionChain(options_exchange, base)
     data = PaperMarketData(futures_exchange, pair)
 
-    def mk(cls, name, **kw):
-        return cls(pair, options_exchange, futures_exchange, db, chain,
-                   logger_name=f"paper.opt.{name}.{base}", data=data, **kw)
+    def mk(cls, name, *, tf="15m", **kw):
+        s = cls(pair, options_exchange, futures_exchange, db, chain,
+                logger_name=f"paper.opt.{name}.{base}", data=data, **kw)
+        s.TIMEFRAME = tf   # V3 sellers signal on 15m — fewer, better trades
+        return s
 
+    # V3 (from 742 closed sells): gross was BREAKEVEN, fees were 100%+ of the
+    # loss. So: 3 lanes only, 2-OTM strikes (real credit ≥$2), 15m signals,
+    # 15-min re-entry cooldown, real Delta fees, hours-long decay holds.
     return [
-        # trend-aligned OTM premium selling (3 strikes OTM default)
-        mk(SellPutTrendOptions, "sell_put"),
-        mk(SellCallTrendOptions, "sell_call"),
-        mk(SellPremiumNeutralOptions, "sell_neutral"),
-        # further-OTM variants (lower delta = higher win prob, smaller credit)
-        mk(SellPutTrendOptions, "sell_put_far", setup_override="OPT_SELL_PUT_FAR", otm_steps=5),
-        mk(SellCallTrendOptions, "sell_call_far", setup_override="OPT_SELL_CALL_FAR", otm_steps=5),
+        mk(SellPutTrendOptions, "sell_put", setup_override="OPT_SELL_PUT_V3", otm_steps=2),
+        mk(SellCallTrendOptions, "sell_call", setup_override="OPT_SELL_CALL_V3", otm_steps=2),
+        mk(SellPremiumNeutralOptions, "sell_range", setup_override="OPT_SELL_RANGE_V3", otm_steps=3),
     ]

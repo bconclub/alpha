@@ -610,25 +610,26 @@ class TradeExecutor:
         bybit_pairs: list[str] | None = None, kraken_pairs: list[str] | None = None,
     ) -> None:
         """Pre-load minimum order sizes for all tracked pairs on each exchange."""
-        # Binance spot
-        try:
-            await self.exchange.load_markets()
-            for pair in pairs:
-                market = self.exchange.markets.get(pair)
-                if market:
-                    limits = market.get("limits", {})
-                    cost_limits = limits.get("cost", {})
-                    amount_limits = limits.get("amount", {})
-                    self._min_notional[pair] = cost_limits.get("min", 0) or 0
-                    self._min_amount[pair] = amount_limits.get("min", 0) or 0
-                    logger.debug(
-                        "[%s] min notional=$%.2f, min amount=%.8f",
-                        pair, self._min_notional[pair], self._min_amount[pair],
-                    )
-                else:
-                    logger.warning("Market info not found for %s on Binance", pair)
-        except Exception:
-            logger.exception("Failed to load Binance market limits")
+        # Binance spot (absent in paper-only / Delta-only runs)
+        if self.exchange:
+            try:
+                await self.exchange.load_markets()
+                for pair in pairs:
+                    market = self.exchange.markets.get(pair)
+                    if market:
+                        limits = market.get("limits", {})
+                        cost_limits = limits.get("cost", {})
+                        amount_limits = limits.get("amount", {})
+                        self._min_notional[pair] = cost_limits.get("min", 0) or 0
+                        self._min_amount[pair] = amount_limits.get("min", 0) or 0
+                        logger.debug(
+                            "[%s] min notional=$%.2f, min amount=%.8f",
+                            pair, self._min_notional[pair], self._min_amount[pair],
+                        )
+                    else:
+                        logger.warning("Market info not found for %s on Binance", pair)
+            except Exception:
+                logger.exception("Failed to load Binance market limits")
 
         # Delta futures
         if self.delta_exchange and delta_pairs:

@@ -14,7 +14,9 @@
 | 5 | **High leverage on negative edge** (paper futures 25–100×) | 265 paper trades | −$119 → blew the account; higher lev = bigger loss | ❌ Leverage amplifies noise; never scale a negative-edge system. |
 | 6 | **OTM option SELLING (naked)** | 52 paper trades | **0% realized win**, −$1,450; peaks +34–46% then reversed to the −100% stop | ❌ Naked selling = tail-risk death in fast crypto. Theta works but one adverse move wipes the credit. Fixes: take profit at ~+30% (not +50%), and use DEFINED-RISK SPREADS. |
 | 7 | **Futures at SANE leverage (3–5×) on trend** | 58 paper trades | 0–17% win, −$171; tiny peaks (3–7%) | ❌ Trend entries don't follow through in chop; sane leverage just loses slowly. Entry edge still missing. |
-| 8 | **Futures at HIGH leverage (confidence ladder 25–100×)** | — | not yet (this round) | 🧪 TESTING — user wants aggressive leverage. Prior data (#5) says leverage amplifies a negative-edge entry → expect bigger losses. Proving in paper. |
+| 8 | **Futures at HIGH leverage (confidence ladder 25–100×)** | 1,468 paper trades, 26 burns ($26k refilled) | −$26.7k closed; win decays 34%@~30× → 14%@67× → 16%@100×; 828 noise-stops at 0% win = 113% of all loss; burn cadence compressed 3h→1h | ❌ **DEAD — the definitive sample.** Leverage was the loss engine, not the entries: stops lived in leveraged-PnL space so a 0.09% wiggle killed every trade at 67×. MOMENTUM_CONF + DONCHIAN_100X alone = 65% of the loss. |
+| 9 | **OTM option SELLING at scale (5 lanes, $250 margin)** | 742 paper closes | net −$421 but **gross +$27 (BREAKEVEN)** — fees were $448, > 100% of the loss; avg hold ~10 min, avg peak 0.1–0.6% | ❌ as built — selling died of **CHURN + fees**, not direction. 10-minute holds can't harvest theta. Re-testable only with: real credit (closer strikes), hours-long holds, fewer trades, real fee model. → V3. |
+| 10 | **The fat tail is the only proven money-maker** | full 1,468-trade futures sample | peak <2%: 635 trades 0% win −$22.5k · peak 25–50%: 91% win +$1,470 · peak 50%+: **97% win +$3,719** · hold <10min: 15% win −$28.5k · hold 10–60min: **51% win +$1,788** · held >1h: **exactly 1 trade ever** | 🟢 **THE EDGE.** Winners exist and are huge — the system just never let trades live long enough to find them. Survive the first 10 minutes → coin flips into profit. V3 is built to maximize survival. |
 
 ## Hard-won principles
 - **Win rate ≠ profit.** Trend lanes hit 60%+ win but still lost — the exits gave back the ~34% avg peaks while losers ran. Risk/reward and exit quality matter more than hit rate.
@@ -23,11 +25,16 @@
 - **Scaling bankroll ≠ edge.** The $100→$1,000 bump just lost 10× faster. Find edge first, size second.
 - **Regime matters.** Trend strategies need trending tape; they get shredded in chop. ~most BTC/ETH intraday windows here have been choppy.
 - **Always verify the deploy CONCLUSION** (not just "completed") — the VPS deploy fails intermittently and silently serves the old build.
+- **Stops must live in PRICE space, not leveraged-PnL space.** A fixed −6% PnL stop at 67× is a 0.09% price wiggle — that single design error produced 828 stop-outs at 0% win (113% of all futures loss). Stop distance = f(ATR), never f(leverage). Leverage scales the payoff; it must never decide where the exit is.
+- **Exits were NEVER the problem.** Across every era: paper_trail +$1.6k (51% win), paper_max_hold +$2.4k (83% win @ +47% peak). All loss came from entries dying before the trade was ever in the money. Attack entries, keep exits.
+- **Survival time IS the edge.** <10 min hold = 15% win, −$28.5k. 10–60 min = 51% win, +$1,788. Only 1 trade in 1,468 ever held >1h — the "ride the wave" thesis was never actually tested until V3.
+- **Fees are a strategy filter.** Selling gross was breakeven; fees made it a loser. Any lane that can't beat REAL exchange fees (Delta: 0.03% notional capped at 10% premium, +18% GST) must die in paper, not live.
+- **Confidence is a valid GATE, never a SIZER.** Conf 80+ reached the 10%+ peak tail 31% vs 15% for conf<70 — real signal. But laddering leverage onto it (V2) chained the best setups to the worst leverage. Gate entries at conf≥70, size flat.
 
-## Current direction
-Options: switch entirely from BUYING to **OTM SELLING** (theta harvest), fresh paper bankroll.
-Futures: test **trend/breakout entries at 3–5× leverage** (sane), no option drag.
-Keep the 2-hourly routine ranking everything. Crown a winner only after a real sample.
+## Current direction — V3 (started 2026-06-09, fresh $1,000 each, history preserved)
+**Futures (5 lanes):** pullback/retest entries only (EMA-PB at 10× AND 20× as a clean leverage A/B, Donchian fresh-break-no-chase 10×, VWAP bounce 10×, liquidity-sweep SFP 15×). Fixed leverage, conf≥70 gate, chop filters, **ATR price stops (1.6×)**, breakeven ratchet at +1.2 ATR, chandelier trail (1.8 ATR), stagnation purge (2h flat), 24h max hold, $100 margin/trade.
+**Options (3 lanes):** premium selling rebuilt anti-churn — 2-OTM strikes (credit ≥$2 or skip), 15m signals, 15-min re-entry cooldown, ≥4h expiry runway, REAL Delta fees, TP +50% decay / breach / trend-break exits, $100 margin/trade.
+**Gate to live (real ~$50):** a lane needs profit factor >1.0 over ~200 trades. Then live tiny at 1–2% risk/trade. Live stays OFF until explicitly approved.
 
 ---
 

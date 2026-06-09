@@ -208,8 +208,14 @@ class AlphaBot:
         working = f"{best[0]} +${best[1]:,.0f}" if best[0] and best[1] > 0 else "nothing yet"
         losing = f"{worst[0]} −${abs(worst[1]):,.0f}" if worst[0] and worst[1] < 0 else "—"
 
-        learned = (str(params.get("learned") or "").strip()) or "gathering data"
-        nxt = (str(params.get("next") or "").strip()) or "keep the labs running"
+        # The message is sent with HTML parse mode — free text MUST be escaped
+        # or strings like "lev <=10x" kill the send (Telegram: unsupported tag).
+        from html import escape
+
+        working = escape(working)
+        losing = escape(losing)
+        learned = escape((str(params.get("learned") or "").strip()) or "gathering data")
+        nxt = escape((str(params.get("next") or "").strip()) or "keep the labs running")
 
         def line(label: str, bal: float, n: float) -> str:
             dot = "🟢" if n >= 0 else "🔴"
@@ -1572,7 +1578,13 @@ class AlphaBot:
                 # uses this to push its check-in summary to the user's chat.
                 text = (params.get("text") or "").strip()
                 if text:
-                    await self.alerts._send(text, allow_in_quiet=True)
+                    try:
+                        await self.alerts._send(text, allow_in_quiet=True)
+                    except Exception:
+                        # HTML parse failure (e.g. a literal "<=") — resend escaped
+                        from html import escape
+
+                        await self.alerts._send(escape(text), allow_in_quiet=True)
                     result_msg = f"Notify sent ({len(text)} chars)"
                 else:
                     result_msg = "Notify skipped — empty text"

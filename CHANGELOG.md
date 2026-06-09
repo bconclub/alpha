@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-06-10 03:15 IST · V3 PAPER RESET — rebuild both labs on everything 4,900 trades taught us
+
+- **Futures lab rebuilt (`engine/alpha/paper_futures.py`)**: V2's 25–100× lanes retired (−$26.7k, 26 burns — the definitive sample). V3 = 5 lanes: FUT_EMA_PB_10X + FUT_EMA_PB_20X (clean leverage A/B on identical pullback entries), FUT_DONCHIAN_RT_10X (fresh breakouts only, no chasing), FUT_VWAP_10X (institutional VWAP bounce), FUT_SFP_15X (liquidity-sweep reversal with structural stop).
+- **The structural fix**: stops moved from leveraged-PnL space into **ATR price space** (1.6×ATR), with a breakeven ratchet at +1.2 ATR ("exit with profit"), chandelier trail (1.8 ATR behind peak), 2h stagnation purge ("don't get stuck"), 24h max hold, conf≥70 entry gate, $100 margin/trade.
+- **Options selling rebuilt (`engine/alpha/paper_options.py`)**: V2 was gross-breakeven but fee-dead (gross +$27, fees $448 over 742 trades). V3 = 3 lanes (SELL_PUT/CALL/RANGE_V3), 2-OTM strikes with credit≥$2 gate, 15m signals + 15-min re-entry cooldown (churn killer), ≥4h expiry runway, **real Delta India fee model** (0.03% notional capped 10% premium, +18% GST), new sell_trend_break exit, $100 margin/trade.
+- **Bug fixes**: Telegram pulses no longer die on "<=" (HTML-escape learned/next + notify fallback); Binance load_markets startup traceback guarded in paper-only runs.
+- **Bankrolls re-seeded to exactly $1,000 each via additive paper_deposits rows — zero rows deleted, full V2 history preserved.** LEARNINGS.md: verdicts #8–#10 finalized + 5 new principles (price-space stops, survival-time edge, fees-as-filter, conf gates not sizes, exits-were-never-the-problem). PAPER_RESULTS.md: permanent era-2 final snapshot.
+- User-facing: dashboard now shows the V3 lanes; Telegram pulses resume cleanly; routine updated to rank V3 lanes, use [skip ci] on check-in commits (no more engine restarts per check-in), and verify its pushes land.
+- `(SHA on commit)`
+
 ## 2026-06-07 · Deep-research synthesis → LIVE_STRATEGY_PLAN.md (ready on approval)
 
 - Mined all data (≈2,800 live + ≈2,100 paper trades). Findings: options dead both ways (selling profit factor 0.07–0.20); futures is a trend system whose money is in the fat tail — trades reaching 25%+ peak are 91–97% win, but 1,036 junk entries (<10% peak) amplified by leverage cause the −$20k loss; confidence predicts the tail (80+ reaches 10%+ 31% vs 15%) but is shackled to high leverage that stops it on noise.
