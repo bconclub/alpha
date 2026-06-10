@@ -2264,3 +2264,24 @@ _Co-work entry above is accurate and already era-scoped (its "sane-lev cohort" =
 **EMA_PB leverage A/B (identical entries, 10× vs 20×):** 10X −$38.47 vs 20X −$80.98 → **20X loses 2.10× the 10X for zero upside — 6th consecutive run the 10X wins.** Recommendation: **retire FUT_EMA_PB_20X**; it is a pure variance tax on the same signal the 10X lane already trades.
 
 **Single next change:** retire EMA_PB_20X, then attack `paper_stop` (118% of the futures bleed, peak +1.41% before −8% realized = wrong-direction entries) by raising the conf gate above 70 or widening the ATR stop. Exits are sound (paper_trail is the only green exit at +$55.72); the problem is entry quality, not the engine.
+
+### 2026-06-10 12:40 UTC — monitor addendum (era-scoped, ~15.3h in)
+
+**Refill / live check:** burns **0** both labs (no `paper_deposits` since era start 2026-06-09T21:21:00Z). Live **OFF** confirmed — `is_paused=true`, 0 `options_scalp` closes last hour. No refill needed.
+
+| Lab (V3 era) | Funded | Closed net | Balance | Burns |
+|---|---|---|---|---|
+| FUTURES | $1,000 | −$300.18 (n=102) | **≈ $699.82** | 0 |
+| OPTIONS | $1,000 | −$37.97 (n=24) | **≈ $962.03** | 0 |
+
+**The hour in one line:** the entire futures book is one bad exit — `paper_stop` is **51 closes / −$332.57** (111% of the −$300 net loss), while `paper_trail` (**28 / +$46.72**) is the *only* green exit reason. breakeven_stop −$5.01, stagnant_exit −$5.51, no_traction fired once (−$3.81). Entries die at the stop before the trail can engage → entry quality, not exits.
+
+**Per-lane profit factor (gross W / gross L) — live gate is PF>1.0; nothing close:**
+- Futures: SFP_15X **0.36** (best PF but 29 closes, only 48% survive >10m = chop), VWAP_10X **0.30** (least-bad net −$24, **100% survive >10m**), DONCHIAN_RT_10X 0.18, EMA_PB_10X 0.12, EMA_PB_20X **0.10** (worst).
+- Options gross (net+fees): CALL_V3 **−$5.55** (n=13), PUT_V3 −$6.29 (n=4, 0 wins), RANGE_V3 −$10.94 (n=7).
+
+**EMA_PB leverage A/B (identical entries, 10× vs 20×):** 10X −$53.90 vs 20X −$115.45 → **20X loses 2.14× the 10X for zero upside — 7th consecutive run the 10X wins.** EMA_PB_20X is still live and printing (21 closes this era); the retire recommendation has stood unactioned for 7 runs. **Retire it.**
+
+**Options decay flag:** CALL_V3 gross **worsened to −$5.55** (was −$1.24 at 11:41, −$1.24→−$5.55). The lone "near-breakeven watch" lane is sliding gross-negative, not converging — 3rd straight gross-negative window. No options edge emerging; holds are now genuinely hours (RANGE 83m, CALL 63m) but signal is the problem.
+
+**Verdict status:** unchanged. No strategy crowned. paper_stop is the dominant bleed every run; VWAP_10X (100% survive, least-bad) is the only futures lane worth preserving while entries get fixed. **Single next change:** actually retire EMA_PB_20X, and raise conf gate >70 / widen ATR stop so trades reach paper_trail instead of paper_stop.
