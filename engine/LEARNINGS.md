@@ -40,6 +40,27 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-10 22:39 UTC — V3 ~25.3h in: futures −$439.59 (n=145 closed), options −$40.58 (n=46 closed), burns 0, live OFF; **VERIFICATION HOUR 3 — the gate produced its first clean GREEN hour: net IMPROVED −$444.59 → −$439.59 (+$5.00), entirely from 2 HTF-aligned paper_trail wins.** The 2 trades that closed this hour: **FUT_DONCHIAN_RT_10X short, htf=−1, paper_trail +$3.72, held 81min** and **FUT_EMA_PB_10X short, htf=−1, paper_trail +$1.29, held 65min** — both shorts in a 1h downtrend (aligned), both trailed into profit, both held >1h. This is the exact behavior the 1h-HTF gate was built for. Note the sign-flip vs last hour: HOUR 2's 2 aligned trades both LOST (−$11.88); HOUR 3's 2 aligned trades both WON (+$5.00) — still n=2 = pure noise, but directionally it's the designed outcome. **paper_stop COUNT FROZEN at 68/−$517.67 for the 3rd straight hour** (zero new stops since the gate) — the durable real signal; its 118% share (517.67/439.59) is a denominator artifact (loss shrank, stops frozen), watch the COUNT. **Gate now throttling to a near-halt: 0 futures opened in 70min** (vs 3 last hr, ~12–15/hr pre-gate) — extremely tight, the only realized PnL is trailing exits of earlier-opened aligned shorts. **20X retirement sticking: last FUT_EMA_PB_20X closed 19:10Z (htf=null, pre-gate), 0 new.** Trade health solid: median hold 32.9min, 83% survive >10min. Options −$40.58 (RANGE −17.26 worst, CALL −12.21, PUT −11.11 least-bad) + 2 open CALL_V3 −0.38 MTM; DK strangle **still 0 fills** (next window 06-11 07:30–11:18Z, ~9h out). `[updated by: alpha-paper-lab-monitor]`
+**Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true**, **0** `options_scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (futures ≈$560, options ≈$959, both ≫ $50 floor).
+
+**Balances (era, closed-only realized):** FUNDED $1,000 each. Futures BALANCE = 1000 − 439.59 = **$560.41**. Options BALANCE = 1000 − 40.58 = **$959.42**.
+
+**Futures lanes (era, closed-only):**
+
+| Lane | n | win% | net | PF | note |
+|---|---|---|---|---|---|
+| FUT_EMA_PB_20X | 31 | 16 | −137.58 | 0.26 | RETIRED, frozen (last close 19:10Z) |
+| FUT_SFP_15X | 39 | 21 | −129.74 | 0.19 | worst active lane, worst PF |
+| FUT_EMA_PB_10X | 35 | 23 | −87.47 | 0.24 | +1 gated paper_trail win this hr (+1.29) |
+| FUT_DONCHIAN_RT_10X | 25 | 24 | −50.97 | 0.38 | best PF; +1 paper_trail win this hr (+3.72) |
+| FUT_VWAP_10X | 15 | 27 | −33.84 | 0.24 | least-bad net, best win% |
+
+**Futures exit-reason (era, closed-only):** paper_stop 68/−517.67 (FROZEN 3 hrs) · paper_trail **39/+116.74** (+2/+5.01 this hr) · breakeven_stop 28/−17.27 · stagnant_exit 8/−11.17 · no_traction 2/−10.23. The only movement this hour was on the GREEN side (paper_trail) — stops, BEs, stagnant all unchanged.
+
+**Options lanes (era, closed-only):** OPT_SELL_RANGE_V3 12/25%/−17.26 (worst) · OPT_SELL_CALL_V3 21/38%/−12.21 · OPT_SELL_PUT_V3 13/31%/−11.11 (least-bad). 2 open CALL_V3 (−0.38 MTM). DK lanes: 0 settlements to date.
+
+**Verdict unchanged:** No live gate met (no lane PF>1.0 over ~200 trades; best PF still DONCHIAN 0.38 on n=25). No engine bug — all numbers reconcile, gate mechanically sound. Next 1–2h test: does paper_stop stay frozen and do aligned-trail greens keep accumulating, or was +$5.00 just noise.
+
 ### 2026-06-10 21:38 UTC — V3 ~24.3h in: futures −$444.59 (n=143 closed), options −$39.93 (n=44 closed), burns 0, live OFF; **VERIFICATION HOUR 2 — gate froze new paper_stops again, and the apparent −$22 "worsening" is a REPORTING PHANTOM, not new losses.** The headline reconciled the prior-run count drift: last hour's "n=169 / −$422" **included 27 `restart_orphan` trades that are `status='cancelled'` (+$22.55), not `closed`.** Counting closed-only: 169 − 27 cancelled + 1 new breakeven = **143**, and removing the +$22.55 phantom green is the entire −$422→−$444.59 move. **Genuine new damage this hour ≈ −$0.04** (one FUT_EMA_PB_10X breakeven_stop) + −$2.94 open MTM on 2 live shorts — essentially flat. **paper_stop COUNT FROZEN at 68/−$517.67 for the 2nd straight hour** (zero new stops since the gate) — this is the real signal the 1h-HTF gate is preventing new big stops, far cleaner than the ratio (517.67/444.59 = 116%, mechanically inflated by phantom removal). **Gate still throttling hard:** only 3 futures opened in 70min, ALL `htf=−1` (downtrend) → all shorts, **zero counter-trend leakage** (DONCHIAN short open −0.68, EMA_PB short open −3.49, EMA_PB short BE −0.04). **20X retirement sticking: 0 new FUT_EMA_PB_20X since 19:33Z.** Options −$39.93 (RANGE −15.40 worst, CALL −13.41, PUT −11.11); 3 open sells; DK strangle **still 0 fills** (next window 06-11 07:30–11:18Z). `[updated by: alpha-paper-lab-monitor]`
 **Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** (latest 21:38:21Z), **0** `options_scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (futures ≈$555, options ≈$960, both ≫ $50 floor).
 
