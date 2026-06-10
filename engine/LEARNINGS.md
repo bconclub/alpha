@@ -40,6 +40,65 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-10 13:38 UTC — V3 ~16h in: futures −$300.18 (n=102, **FROZEN**), options −$27.75 (n=28), burns 0, live OFF; **⚠ FUTURES LAB STALLED ~68min — 0 opens / 0 closes, first dead hour this era (options unaffected)**; paper_stop = 111% of loss (7th run >100%), EMA_PB 10X beats 20X 8th time (2.14×); VWAP_10X "edge" ERASED (one new loser → gross −$11) `[updated by: alpha-paper-lab-monitor]`
+**Era:** V3 started 2026-06-09T21:21:00Z (V2 history frozen, excluded). Live OFF confirmed — `bot_status` is_paused=**true**, `bot_state=paused` ("PAPER-ONLY mode"), FRESH 13:41:34 UTC, **0** `options_scalp` in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor). Regime TRENDING_UP since 13:30 (chop 0.54, atr_ratio 1.77).
+
+**🚩 HEADLINE — the futures lab went silent for ~68 minutes (first time this era).** Last futures open **12:35:21**, last close **12:30:32**; the **13:00 UTC hour booked ZERO opens** — every prior hour this era ran 2–15 opens/hr:
+
+| Hour (UTC) | 05 | 06 | 07 | 08 | 09 | 10 | 11 | 12 | 13 |
+|---|---|---|---|---|---|---|---|---|---|
+| FUT opens | 15 | 12 | 8 | 7 | 14 | 3 | 5 | 7 | **0** |
+
+Six positions opened in a single 12:35 burst (EMA_PB_10X×2, DONCHIAN_RT_10X×2, EMA_PB_20X×2) and have sat **open and untouched for 68min** — none hit paper_stop / trail / breakeven / stagnation despite a live TRENDING_UP regime that should be generating pullback entries. **Options is unaffected** (3 opened / 2 closed in the same hour), so the engine process is alive — this looks like a **stalled paper-futures evaluator/exit loop, not a quiet market** (an ENGINE issue, not strategy). `bot_status.diagnostics` only tracks the live scalp pairs, so the paper-futures scan state isn't visible from here. **Action: inspect the engine's paper-futures loop / logs; a restart may be needed.** This routine is read-mostly + must not touch the engine, so flagging only — not restarting.
+
+**Consequence:** all futures figures below are **frozen to the cent vs the 12:40 check-in** (102 / −$300.18). No new futures data this window — every trend read (per-trade worsening, lane ranks) is *carried over, not refreshed*.
+
+**Futures lab (V3):** FUNDED **$1,000.00**, closed **102**, realized **−$300.18**, BALANCE **$699.82**, BURNS **0**. (6 open, frozen since 12:35.) Fees $137.50 → true gross **−$162.68**.
+
+| FUT lane (V3) | Closed | Win% | Net | True gross¹ | Fees | Avg peak% | %>10min |
+|---|---|---|---|---|---|---|---|
+| FUT_VWAP_10X | 13 | 31% | −$24.02 | **−$11.02** | $13 | 3.69 | 100% |
+| FUT_DONCHIAN_RT_10X | 19 | 16% | −$51.52 | −$32.52 | $19 | 2.44 | 89% |
+| FUT_EMA_PB_10X | 20 | 20% | −$53.90 | −$33.90 | $20 | 2.81 | 95% |
+| FUT_SFP_15X | 29 | 28% | −$55.29 | −$11.79 | $43.50 | 4.48 | 48% |
+| FUT_EMA_PB_20X | 21 | 10% | −$115.45 | −$73.45 | $42 | 5.56 | 90% |
+
+¹ true gross = net + fees (pnl_usd is fee-net).
+
+**EMA_PB 10X-vs-20X head-to-head (identical entries, leverage A/B) — 10X wins 8th consecutive read:** 10X −$53.90 (20) vs **20X −$115.45 (21) → 20X loses 2.14× the 10X** (per-trade −$2.70 vs −$5.50; 20X avg peak 5.56% vs 10X 2.81% — leverage scales the swing, realized far worse, 10% win vs 20%). Eight reads running, frozen book. **Retire 20X — the A/B has no information left to give.** Reinforces verdict #5.
+
+**VWAP_10X edge ERASED.** Last star lane (gross +$4.70 over 12 at 10:40) took one more loser before the freeze (now 13 closes) → **gross −$11.02**, 31% win. The "first real V3 edge" was a 12-trade small-sample artifact — a single adverse close wiped it. **Downgrade from "leading live candidate."** SFP_15X true gross −$11.79 (churns: 48% >10min, $43.50 fees). No futures lane is gross-positive this window.
+
+**Exit cohorts (FUT, all closes) — frozen, same structural story (7th run >100%):**
+
+| Exit | Closed | Net | Avg/trade |
+|---|---|---|---|
+| **paper_stop** | 51 | **−$332.57** | −$6.52 |
+| paper_trail | 28 | **+$46.72** | +$1.67 |
+| breakeven_stop | 17 | −$5.01 | −$0.29 |
+| stagnant_exit | 5 | −$5.51 | −$1.10 |
+| **no_traction** | **1** | −$3.81 | −$3.81 |
+
+`paper_stop` = −$332.57 = **111% of net loss** (7th straight run >100%); `paper_trail` is the **only** green real exit (+$46.72, 28 trades). Stops outnumber trails ~1.8:1 AND each loser runs **3.9× bigger** than each winner ($6.52 vs $1.67). Exits work; entries die wrong-side first. `no_traction` still **inert — 1 fire in 16h** (gate unreachable; weak trades hit paper_stop at ~21m before a 60-min-red window matures). Still the highest-leverage engine fix.
+
+**Options lab (V3):** FUNDED **$1,000.00**, closed **28**, realized **−$27.75**, BALANCE **$972.25**, BURNS **0**. Fees $17.99 → true gross **−$9.76**. *(Improved +$6.92 vs 12:40 on 2 TP winners — the only lab that traded this hour.)*
+
+| OPT lane (V3) | Closed | Net | True gross | Fees | Avg hold |
+|---|---|---|---|---|---|
+| OPT_SELL_PUT_V3 | 6 | −$2.87 | **+$1.14** | $4.01 | 33m |
+| OPT_SELL_RANGE_V3 | 9 | −$11.22 | −$5.36 | $5.87 | 76m |
+| OPT_SELL_CALL_V3 | 13 | −$13.66 | −$5.55 | $8.11 | 63m |
+
+PUT_V3 flipped **gross-positive (+$1.14)** this window on a TP win (was gross −$6.29 at 10:40) — but n=6, noise. CALL_V3 gross −$5.55 (worsened from +$0.39 at 10:40 — theta-side decay continues). RANGE holds 76m (anti-churn fix intact) yet still gross-negative — signal problem, not churn. Options exits: **sell_take_profit 8 / +$12.76 (only green)**, sell_trend_break 13 / −$16.81, sell_breached 6 / −$17.60, sell_stop 1 / −$6.11. n=28 far too small for a verdict.
+
+**What to change next:**
+1. **🚩 Investigate the futures-lab stall (ENGINE).** 68min with 0 opens/0 closes while options trades normally → likely a hung paper-futures evaluator/exit thread. Check engine logs / the paper-futures loop; restart if hung. Highest priority — a frozen lab gathers no data.
+2. **Retire EMA_PB_20X.** Eighth-read A/B, 2.14× worse on identical entries — done. *(Engine change — recommendation only; routine is read-mostly.)*
+3. **Loosen the `no_traction` gate.** One fire in 16h proves the 60-min-red window is unreachable; shorten it / relax the +0.4-ATR floor so it cuts losers before paper_stop.
+4. **Stand down the VWAP_10X "live candidate" flag** — its edge was a 12-trade artifact, now gross-negative. No futures lane has a real gross edge.
+
+**Verdict status:** unchanged headline. #5 (leverage on negative edge) reinforced an **8th time** (20X = 2.14× the 10X loss — retire 20X). V3 futures bleed remains 100% entry-quality / `paper_stop` (111%); trail is the lone green exit. **VWAP_10X edge retracted** (small-sample). #6/#9 (option selling): improving but tiny-n, true gross still −$9.76 — no verdict. **This hour's real event was an engine stall, not new strategy data.** No lane near PF>1 over 200 trades → live stays OFF.
+
 ### 2026-06-10 10:40 UTC — V3 ~13h in: futures −$214.02 (n=103), options −$26.15 (n=23), burns 0, live OFF; paper_stop = 113% of loss (5th run), EMA_PB 10X beats 20X 5th time (2.19×), VWAP_10X gross-POSITIVE, no_traction finally fired once `[updated by: alpha-paper-lab-monitor]`
 **Era:** V3 started 2026-06-09T21:21:00Z (V2 history frozen, excluded). Live OFF confirmed — `bot_status` is_paused=**true**, FRESH 10:37:33 UTC, **0** `options_scalp` in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor).
 
@@ -2246,42 +2305,124 @@ The +8 closes split: **+3 paper_stop (−$26.50), +2 paper_trail (+$3.40), +3 st
 
 **Verdict status:** unchanged. #8 (aggressive high-lev futures) **DEAD** (−$27.09k, n=1,569), idle — frozen to the cent for the 3rd straight hour. #6 (OTM option selling) **fee-capped overall, gross-negative for the 2nd straight window** — watch for decay. Low-leverage cohort (10–20×): **96 closed / −$226, net-negative, loss-per-trade worsened, no edge** — n ≤28/lane, far from a verdict. No strategy crowned; not enough closes.
 
-### 2026-06-10 11:41 UTC — monitor addendum (era-scoped lab/refill/PF)
+### 2026-06-10 12:39 UTC — check-in `[updated by: Cowork]`
 
-_Co-work entry above is accurate and already era-scoped (its "sane-lev cohort" = the V3 futures lanes; its V3 option lanes match too). This addendum adds the items the routine requires that aren't in it: lab balances via era math, per-lane profit factor (the PF>1.0 live gate), and the EMA_PB leverage A/B verdict. Full per-lane detail lives in the entry above — not duplicated._
+**What's happening:** Bot LIVE OFF (`is_paused=true`, `bot_state=paused`, "PAPER-ONLY mode"; uptime 24,593s ≈ 6.83h → restart ~05:49 UTC — STILL the same session as the 06:39/07:39/08:39/10:39/11:39 checks, no new restart, continuous). Scalp + options_scalp enabled, active_strategy_count 2. Regime flipped **TRENDING_DOWN → CHOPPY** (regime_since 12:34), chop 0.643, atr_ratio 1.87, net_change_30m +1.049. total_pnl field −$54.13, delta_balance $27.08. Live scan book empty (0/3). Paper book open now: **6 futures + 1 option = 7 open** (orphans parked `cancelled`: 29 FUT / 61 OPT).
 
-**Refill / live check:** burns **0** both labs (no `paper_deposits` since era start 2026-06-09T21:21:00Z). Live **OFF** confirmed — `is_paused=true`, 0 `*scalp*` option closes last hour. No refill needed (both balances ≫ $50 floor).
+**What happened since last check (vs 11:39 baseline, ~1h):** Closed-only authoritative figures.
+- **Futures:** closed **1,575**, net **−$27,167.83** (fees $21,956.25, avg $13.94/trade). vs 11:39 (1,569 / −$27,094.08): **+6 closed / −$73.75** (≈6 closes/hr).
+- **Options SELL:** closed **766**, net **−$459.11** (fees $463.20, avg $0.605). vs 11:39 (764 / −$453.42): **+2 closed / −$5.69.**
 
-| Lab (V3 era) | Funded | Closed net | Balance | Burns |
+**The new thing — FOURTH straight hour with the high-lev book frozen to the cent, and the sane-lev cohort's loss-per-trade just blew out to its worst of the session.** All 5 high-lev legacy lanes match 11:39 exactly (MOMENTUM_CONF 622/−11,650.35, DONCHIAN_100X 174/−5,812.28, DONCHIAN_CONF 166/−3,495.99, DONCHIAN_50X 165/−3,028.07, EMA_CONF 346/−2,880.96 — unchanged). Every one of the +6 futures closes came from the 10–20× cohort, which moved **96 → 102 closed / −$226.43 → −$300.18 = +6 / −$73.75 = −$12.29/trade** — vs −$3.1 (11:39) and −$0.12 (10:39). Three windows, monotonically worse. And for the first time the +2 `paper_trail` closes this window were *net-negative* (trail net 1,614.51 → 1,605.51, −$9.00) — even the only structurally-green futures exit lost money this hour. On options, both +2 closes were CALL_V3; the −$5.69 on ≈$1.2 fees → gross ≈ −$4.5, the **third straight gross-negative options window**, still isolated to V3 lanes, still tiny n.
+
+**Per-lane — Futures (n=1,575):**
+
+| Lane | Closed | Win% | Net | Avg lev | Avg peak% | Hold |
+|---|---|---|---|---|---|---|
+| FUT_MOMENTUM_CONF | 622 | 14.1 | −11,650.35 | 67.6 | 8.87 | 4.9m |
+| FUT_DONCHIAN_100X | 174 | 16.1 | −5,812.28 | 100 | 9.57 | 2.2m |
+| FUT_DONCHIAN_CONF | 166 | 22.9 | −3,495.99 | 56.2 | 7.23 | 5.4m |
+| FUT_DONCHIAN_50X | 165 | 21.2 | −3,028.07 | 50 | 6.88 | 4.8m |
+| FUT_EMA_CONF | 346 | 34.4 | −2,880.96 | 29.6 | 5.57 | 10.3m |
+| FUT_EMA_PB_20X | 21 | 9.5 | −115.45 | 20 | 5.56 | 43.5m |
+| FUT_SFP_15X | 29 | 27.6 | −55.29 | 15 | 4.48 | 29.4m |
+| FUT_EMA_PB_10X | 20 | 20.0 | −53.90 | 10 | 2.81 | 46.4m |
+| FUT_DONCHIAN_RT_10X | 19 | 15.8 | −51.52 | 10 | 2.44 | 33.7m |
+| FUT_VWAP_10X | 13 | 30.8 | −24.02 | 10 | 3.69 | 44.4m |
+
+Sane-lev cohort (10–20×): **102 closed, −$300.18 combined.** Per-lane deltas vs 11:39: DONCHIAN_RT_10X flat (0 closes); **every lane that moved was red** — VWAP_10X −$7.51, EMA_PB_10X −$15.43, SFP_15X −$16.34, EMA_PB_20X −$34.47 (worst, n 19→21, win% 10.5→9.5). Zero green lanes this window. Every lane still net-negative, n ≤29/lane → no verdict.
+
+**Per-lane — Options SELL (n=766):** PUT_FAR 176/−99.88 (7.4%), CALL 148/−96.53 (14.9%), PUT 183/−92.57 (13.7%), NEUTRAL 160/−75.00 (15.6%), CALL_FAR 75/−57.15 (13.3%), RANGE_V3 7/−15.41 (14.3%), CALL_V3 13/−13.66 (30.8%), PUT_V3 4/−8.90 (0%). Avg peak 0.14–1.04% — no directional edge. The −$5.69 this window is entirely CALL_V3 (+2 / −$5.70); all 5 legacy lanes and RANGE_V3/PUT_V3 flat to the cent.
+
+**Exit-reason split — Futures (n=1,575):**
+
+| Exit | Closed | Net | Avg peak% | Avg real% |
 |---|---|---|---|---|
-| FUTURES | $1,000 | −$226.43 (n=96) | **≈ $773.57** | 0 |
-| OPTIONS | $1,000 | −$32.27 (n=22) | **≈ $967.73** | 0 |
+| **paper_stop** | 884 | **−30,456.61** | +1.42 | −8.14 |
+| paper_trail | 578 | **+1,605.51** | +15.54 | +6.93 |
+| paper_max_hold | 29 | **+2,436.52** | +47.40 | +39.21 |
+| ema21_lost | 33 | −403.22 | +1.86 | −2.39 |
+| ema21_reclaimed | 25 | −290.27 | +2.43 | −2.14 |
+| donchian_mid_revert | 3 | −45.43 | +5.75 | −3.56 |
+| stagnant_exit | 5 | −5.51 | +2.28 | +0.30 |
+| breakeven_stop | 17 | −5.01 | +4.76 | +1.15 |
+| no_traction | 1 | −3.81 | +0.87 | −2.81 |
 
-**Per-lane profit factor (gross W / gross L) — the live gate is PF>1.0; nothing is close:**
-- Futures: SFP_15X **0.44** (best, but 9m median hold, only 46% survive >10m = chop), VWAP_10X **0.39** (least-bad net, 100% survive >10m), DONCHIAN_RT_10X 0.18, EMA_PB_10X 0.16, EMA_PB_20X **0.13** (worst).
-- Options gross (net+fees): CALL_V3 **≈ −$1.24** (near fee-killed breakeven — the lone watch), PUT_V3 −$6.30, RANGE_V3 −$10.94.
+The +6 closes split: **+4 paper_stop (−$64.75), +2 paper_trail (−$9.00).** Stops bled and trail did NOT offset (negative trail closes) → net −$73.75. paper_stop now 884 / −$30,457 (> the entire −$27.2k book), peak +1.42% before −8.14% realized = wrong-direction entries. Trail (+$1,606) and the 29 max_hold runners (+39.2% real) remain the only structural green, but trail gave a touch back this window. `restart_orphan` absent.
 
-**EMA_PB leverage A/B (identical entries, 10× vs 20×):** 10X −$38.47 vs 20X −$80.98 → **20X loses 2.10× the 10X for zero upside — 6th consecutive run the 10X wins.** Recommendation: **retire FUT_EMA_PB_20X**; it is a pure variance tax on the same signal the 10X lane already trades.
+**Options exit-reason (n=766):** sell_take_profit 515/−99.48 (36.0m), sell_stop 159/−244.99 (36.7m), sell_breached 79/−97.84 (13.3m, 10.3%), sell_trend_break 13/−16.81 (71.0m). TP-dominant; stop carries most of the loss. The +2 closes: 1 sell_breached, 1 sell_trend_break.
 
-**Single next change:** retire EMA_PB_20X, then attack `paper_stop` (118% of the futures bleed, peak +1.41% before −8% realized = wrong-direction entries) by raising the conf gate above 70 or widening the ATR stop. Exits are sound (paper_trail is the only green exit at +$55.72); the problem is entry quality, not the engine.
+**Engine-bug status (vs known issues 2026-06-06):**
+- **Closed-trade ledger mutability — dormant.** No restart this hour (uptime continuous ≈6.83h); orphans stay `cancelled` (29 FUT / 61 OPT), no closed↔open toggling. Keep monitoring across the next restart.
+- **Option-sell fee drag — STILL PRESENT, and the overall cushion is eroding.** Fees $463.20 vs net −$459.11 → gross ≈ **+$4.09 overall** (down from +$11.38 → +$8.39 → +$4.09 over the last three windows, ≈−$4/window). This window's 2 closes were gross-negative (≈−$4.5) for the 3rd straight hour. At this rate the lane flips gross-negative overall within 1–2 windows. Charged on underlying notional. Unchanged structurally.
+- **`sell_breached` premature-exit — still FIXED.** 79/766 (10.3%) at 13.3m; sell_take_profit dominates (515, 36.0m). Not the driver.
+- **Futures `paper_max_hold` ~30m cap — still LOOSENED.** Count frozen at 29; sane-lev lanes holding 29–46m (EMA_PB_10X 46.4m, VWAP 44.4m, EMA_PB_20X 43.5m) exiting via stop/trail, not the cap. Good.
 
-### 2026-06-10 12:40 UTC — monitor addendum (era-scoped, ~15.3h in)
+**What we should change:**
+1. **Sane-lev cohort loss-per-trade worsened for the 3rd straight window — this is now a direction, not noise.** 102 closed / −$300; −$12.29/trade vs −$3.1 vs −$0.12. Low-lev fixed magnitude, not entry signal, and the per-trade gap is widening as regime chops. Keep accumulating but do NOT soften the "no edge" read — if anything, the signal looks worse in chop.
+2. **Options: 3rd straight gross-negative window AND the overall gross cushion is nearly gone (STRATEGY + watch).** Overall gross +$4.09 and falling ~$4/window. If next check shows gross ≤ 0 overall, the lane is a losing strategy, not merely fee-capped. Re-check next hour — likely the decision point.
+3. **Futures: attack ENTRY quality (STRATEGY).** paper_stop 884 / −$30,457 at +1.42% avg peak. MOMENTUM_CONF + DONCHIAN_100X (−$17,463 = 64% of futures loss) stay frozen/idle — keep them dark; they resume burning if re-enabled.
+4. **Options: fix the fee model (ENGINE BUG).** Charge on premium/stake, not notional — this is the lever that keeps the lane positive; the cushion is now thin enough that it matters this hour.
 
-**Refill / live check:** burns **0** both labs (no `paper_deposits` since era start 2026-06-09T21:21:00Z). Live **OFF** confirmed — `is_paused=true`, 0 `options_scalp` closes last hour. No refill needed.
+**Verdict status:** unchanged. #8 (aggressive high-lev futures) **DEAD** (−$27.17k, n=1,575), idle — frozen to the cent for the 4th straight hour. #6 (OTM option selling) **gross-positive overall but cushion eroding ~$4/window, 3rd straight gross-negative window** — approaching a verdict, re-check next hour. Low-leverage cohort (10–20×): **102 closed / −$300, net-negative, loss-per-trade worsening (−$12.29/trade this window), no edge** — n ≤29/lane, far from a verdict. No strategy crowned; not enough closes.
 
-| Lab (V3 era) | Funded | Closed net | Balance | Burns |
+### 2026-06-10 13:40 UTC — check-in `[updated by: Cowork]`
+
+**What's happening:** Bot LIVE OFF (`is_paused=true`, `bot_state=paused`, "PAPER-ONLY mode"; uptime 28,190s ≈ 7.83h → restart ~05:50 UTC — STILL the same continuous session as the 06:39 through 12:39 checks, no new restart, 5th+ straight hour). Scalp + options_scalp enabled, active_strategy_count 2. Regime flipped **CHOPPY → TRENDING_UP** (regime_since 13:30), chop 0.50 (down from 0.643), atr_ratio 1.73, net_change_30m +1.513. total_pnl field −$54.13, delta_balance $27.08. Live scan book empty (0/3). Paper book open now: **6 futures + 2 options = 8 open** (orphans parked `cancelled`: 29 FUT / 61 OPT).
+
+**What happened since last check (vs 12:39 baseline, ~1h):** Closed-only authoritative figures.
+- **Futures:** closed **1,575**, net **−$27,167.83** (unchanged to the cent). vs 12:39 (1,575 / −$27,167.83): **0 closed / $0.00.** Entire futures book froze this window — zero closes in ANY lane, high-lev AND sane-lev.
+- **Options SELL:** closed **768**, net **−$455.82** (fees $464.61). vs 12:39 (766 / −$459.11): **+2 closed / +$3.29** (both winners).
+
+**The new thing — the entire futures book went flat (0 closes, first such window), while options printed its first gross-positive window in four.** All 1,575 futures rows match 12:39 to the cent across every lane and every exit reason (paper_stop 884/−30,456.61, paper_trail 578/+1,605.51, paper_max_hold 29/+2,436.52, all identical) — 6 positions sit open but none closed in the last hour, so the sane-lev "loss-per-trade worsening" trend from the prior three windows is **paused, not resolved** (no new data). On options, both +2 closes were `sell_take_profit` winners (517 now vs 515; TP net −99.48 → −96.19 = +$3.29). That reverses the 3-window gross-cushion erosion: **gross ≈ +$8.79** (fees $464.61, net −$455.82), up from +$4.09 at 12:39. The two new closes were gross-positive (≈+$4.70 gross combined). The decay thesis flagged last hour did NOT play out this window.
+
+**Per-lane — Futures (n=1,575, unchanged vs 12:39):**
+
+| Lane | Closed | Win% | Net | Avg lev | Avg peak% | Hold |
+|---|---|---|---|---|---|---|
+| FUT_MOMENTUM_CONF | 622 | 14.1 | −11,650.35 | 67.6 | 8.87 | 4.9m |
+| FUT_DONCHIAN_100X | 174 | 16.1 | −5,812.28 | 100 | 9.57 | 2.2m |
+| FUT_DONCHIAN_CONF | 166 | 22.9 | −3,495.99 | 56.2 | 7.23 | 5.4m |
+| FUT_DONCHIAN_50X | 165 | 21.2 | −3,028.07 | 50 | 6.88 | 4.8m |
+| FUT_EMA_CONF | 346 | 34.4 | −2,880.96 | 29.6 | 5.57 | 10.3m |
+| FUT_EMA_PB_20X | 21 | 9.5 | −115.45 | 20 | 5.56 | 43.5m |
+| FUT_SFP_15X | 29 | 27.6 | −55.29 | 15 | 4.48 | 29.4m |
+| FUT_EMA_PB_10X | 20 | 20.0 | −53.90 | 10 | 2.81 | 46.4m |
+| FUT_DONCHIAN_RT_10X | 19 | 15.8 | −51.52 | 10 | 2.44 | 33.7m |
+| FUT_VWAP_10X | 13 | 30.8 | −24.02 | 10 | 3.69 | 44.4m |
+
+Sane-lev cohort (10–20×): **102 closed, −$300.18 combined — frozen vs 12:39 (no closes).** Every lane net-negative, n ≤29/lane → no verdict. Worsening per-trade trend from prior windows cannot be confirmed or refuted this hour (no new closes).
+
+**Per-lane — Options SELL (n=768):** PUT_FAR 176/−99.88 (7.4%), CALL 148/−96.53 (14.9%), PUT 183/−92.57 (13.7%), NEUTRAL 160/−75.00 (15.6%), CALL_FAR 75/−57.15 (13.3%), RANGE_V3 8/−14.44 (25.0%), CALL_V3 13/−13.66 (30.8%), PUT_V3 5/−6.57 (20.0%). Avg peak 0.14–1.04% — no directional edge. The +$3.29 this window: RANGE_V3 (7→8, +$0.97) and PUT_V3 (4→5, +$2.33), both winning TP closes; all 5 legacy lanes and CALL_V3 flat to the cent.
+
+**Exit-reason split — Futures (n=1,575, unchanged vs 12:39):**
+
+| Exit | Closed | Net | Avg peak% | Avg real% |
 |---|---|---|---|---|
-| FUTURES | $1,000 | −$300.18 (n=102) | **≈ $699.82** | 0 |
-| OPTIONS | $1,000 | −$37.97 (n=24) | **≈ $962.03** | 0 |
+| **paper_stop** | 884 | **−30,456.61** | +1.42 | −8.14 |
+| paper_trail | 578 | **+1,605.51** | +15.54 | +6.93 |
+| paper_max_hold | 29 | **+2,436.52** | +47.40 | +39.21 |
+| ema21_lost | 33 | −403.22 | +1.86 | −2.39 |
+| ema21_reclaimed | 25 | −290.27 | +2.43 | −2.14 |
+| donchian_mid_revert | 3 | −45.43 | +5.75 | −3.56 |
+| stagnant_exit | 5 | −5.51 | +2.28 | +0.30 |
+| breakeven_stop | 17 | −5.01 | +4.76 | +1.15 |
+| no_traction | 1 | −3.81 | +0.87 | −2.81 |
 
-**The hour in one line:** the entire futures book is one bad exit — `paper_stop` is **51 closes / −$332.57** (111% of the −$300 net loss), while `paper_trail` (**28 / +$46.72**) is the *only* green exit reason. breakeven_stop −$5.01, stagnant_exit −$5.51, no_traction fired once (−$3.81). Entries die at the stop before the trail can engage → entry quality, not exits.
+No futures closes this window. paper_stop still 884 / −$30,457 (> the entire −$27.2k book), peak +1.42% before −8.14% realized = wrong-direction entries. Trail (+$1,606) and the 29 max_hold runners (+39.2% real) remain the only structural green. `restart_orphan` absent.
 
-**Per-lane profit factor (gross W / gross L) — live gate is PF>1.0; nothing close:**
-- Futures: SFP_15X **0.36** (best PF but 29 closes, only 48% survive >10m = chop), VWAP_10X **0.30** (least-bad net −$24, **100% survive >10m**), DONCHIAN_RT_10X 0.18, EMA_PB_10X 0.12, EMA_PB_20X **0.10** (worst).
-- Options gross (net+fees): CALL_V3 **−$5.55** (n=13), PUT_V3 −$6.29 (n=4, 0 wins), RANGE_V3 −$10.94 (n=7).
+**Options exit-reason (n=768):** sell_take_profit 517/−96.19 (36.1m), sell_stop 159/−244.99 (36.7m), sell_breached 79/−97.84 (13.3m, 10.3%), sell_trend_break 13/−16.81 (71.0m). TP-dominant; stop carries most of the loss. The +2 closes were both sell_take_profit.
 
-**EMA_PB leverage A/B (identical entries, 10× vs 20×):** 10X −$53.90 vs 20X −$115.45 → **20X loses 2.14× the 10X for zero upside — 7th consecutive run the 10X wins.** EMA_PB_20X is still live and printing (21 closes this era); the retire recommendation has stood unactioned for 7 runs. **Retire it.**
+**Engine-bug status (vs known issues 2026-06-06):**
+- **Closed-trade ledger mutability — dormant.** No restart this hour (uptime continuous ≈7.83h); orphans stay `cancelled` (29 FUT / 61 OPT), no closed↔open toggling. Keep monitoring across the next restart.
+- **Option-sell fee drag — STILL PRESENT, but the cushion REBOUNDED.** Fees $464.61 vs net −$455.82 → gross ≈ **+$8.79 overall**, up from +$4.09 (12:39). The erosion alarm from last window (+$11.38 → +$8.39 → +$4.09) reversed — this window's 2 closes were gross-positive TP winners. Decay thesis paused. Fee still charged on underlying notional (~$0.60/trade). Unchanged structurally.
+- **`sell_breached` premature-exit — still FIXED.** Frozen at 79/768 (10.3%) at 13.3m; sell_take_profit dominates (517, 36.1m). Not the driver.
+- **Futures `paper_max_hold` ~30m cap — still LOOSENED.** Count frozen at 29; moot this window (no futures closes). Sane-lev holds 29–46m by stop/trail, not the cap. Good.
 
-**Options decay flag:** CALL_V3 gross **worsened to −$5.55** (was −$1.24 at 11:41, −$1.24→−$5.55). The lone "near-breakeven watch" lane is sliding gross-negative, not converging — 3rd straight gross-negative window. No options edge emerging; holds are now genuinely hours (RANGE 83m, CALL 63m) but signal is the problem.
+**What we should change:**
+1. **Futures: nothing actionable this hour — whole book idle, 0 closes.** High-lev legacy lanes stay dead/dark (MOMENTUM_CONF + DONCHIAN_100X = −$17,463 = 64% of futures loss); they resume burning if re-enabled. Keep them frozen.
+2. **Options: decay thesis did NOT confirm — stand down the "approaching a verdict" flag from 12:39.** Gross cushion rebounded to +$8.79 on two TP winners. Lane is back to "fee-capped, gross-positive, watch." Do NOT crown; n per V3 lane still ≤13.
+3. **Sane-lev cohort: trend unverifiable this window (0 closes).** Do not soften OR harden the "no edge, loss-per-trade worsening" read — wait for the next window with actual closes before re-judging.
+4. **Options: fix the fee model (ENGINE BUG, structural lever).** Charge on premium/stake, not notional. Still the lever that keeps the lane positive even though the cushion recovered this hour.
 
-**Verdict status:** unchanged. No strategy crowned. paper_stop is the dominant bleed every run; VWAP_10X (100% survive, least-bad) is the only futures lane worth preserving while entries get fixed. **Single next change:** actually retire EMA_PB_20X, and raise conf gate >70 / widen ATR stop so trades reach paper_trail instead of paper_stop.
+**Verdict status:** unchanged. #8 (aggressive high-lev futures) **DEAD** (−$27.17k, n=1,575), idle — frozen to the cent for the 5th straight hour, entire book flat this window. #6 (OTM option selling) **gross-positive overall (+$8.79), cushion rebounded, decay thesis unconfirmed** — back to fee-capped/watch, not at a verdict. Low-leverage cohort (10–20×): **102 closed / −$300, net-negative, no closes this window so trend unverifiable, no edge** — n ≤29/lane, far from a verdict. No strategy crowned; not enough closes.
