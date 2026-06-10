@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-10 11:30 IST · Pull out sooner: no-traction exit + faster stagnation purge
+
+- User observed V3 holding losers too long. Data agreed: flat trades sat the full 2h stagnation window, and red drifters took 40–55 min to reach the ATR stop with no early abandon.
+- `paper_futures.py`: new `no_traction` exit — red after 60 min AND never reached +0.4 ATR favorable → exit (winners announce themselves early). Stagnation purge tightened 2h → 75 min.
+- User-facing: fewer long-held red positions on the paper page; new `no_traction` exit reason in trade history.
+- `(SHA on commit)`
+
 ## 2026-06-10 03:45 IST · V3 era cutover — dashboard + Telegram show the fresh $1,000 start only
 
 - Dashboard API (`paper-futures/route.ts`): all trade queries and the deposit ledger now era-scoped from 2026-06-09 21:21 UTC; funded = $1,000 seed + era refills. Burns reset to 0 for the era. Response carries `era` metadata.

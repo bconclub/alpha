@@ -116,8 +116,10 @@ class BasePaperFutures:
     BREAKEVEN_ATR = 1.2             # once +1.2×ATR in profit, stop jumps to entry (exit with profit)
     TRAIL_ARM_ATR = 1.0             # arm the chandelier after +1×ATR favorable excursion
     TRAIL_ATR_MULT = 1.8            # then trail 1.8×ATR behind the peak price
-    STAGNATION_SEC = 2 * 60 * 60    # don't get stuck: flat for 2h within ±0.5×ATR → exit
+    STAGNATION_SEC = 75 * 60        # don't get stuck: flat for 75min within ±0.5×ATR → exit
     STAGNATION_ATR = 0.5
+    NO_TRACTION_SEC = 60 * 60       # pull out early: red after 60min, never showed +0.4 ATR → not our trade
+    NO_TRACTION_ATR = 0.4
     LIQUIDATION_PCT = -90.0         # margin gone — modeled liquidation
     COOLDOWN_SEC = 0                # aggressive: take every opportunity, re-enter immediately
 
@@ -276,6 +278,12 @@ class BasePaperFutures:
             # don't get stuck: dead-flat trades release the lane for a live one
             if age >= self.STAGNATION_SEC and abs(mark - self._entry_price) < self.STAGNATION_ATR * atr:
                 return "stagnant_exit"
+            # pull out when it's needed: red for an hour and the trade NEVER
+            # showed traction (+0.4 ATR) — winners announce themselves early;
+            # don't ride a dead thesis all the way down to the full ATR stop
+            fav_now = (mark - self._entry_price) if long else (self._entry_price - mark)
+            if age >= self.NO_TRACTION_SEC and fav_now < 0 and peak_fav < self.NO_TRACTION_ATR * atr:
+                return "no_traction"
         if age >= self.MAX_HOLD_SEC:
             return "paper_max_hold"
         return ""
