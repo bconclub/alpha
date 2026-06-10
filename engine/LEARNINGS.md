@@ -1947,48 +1947,106 @@ FUT (n=1,031):
 
 ### 2026-06-10 05:33 UTC — check-in `[updated by: Cowork]`
 
-**What's happening:** Bot LIVE OFF (`is_paused=true`, "PAPER-ONLY mode"; `bot_state=paused`, uptime ~7.96h → restarted right around last check). 2 active strategies (scalp + options_scalp), delta balance $27.08, regime TRENDING_DOWN, chop 0.607. Open now: **25 futures**, **61 options SELL**. Legacy high-lev FUT lanes show open positions but logged **zero new closes** this gap (see below).
+**What's happening:** Bot LIVE OFF (`is_paused=true`, "PAPER-ONLY mode"; `bot_state=paused`, uptime ~7.96h → restarted right around last check). 2 act
+### 2026-06-10 06:39 UTC — check-in `[updated by: Cowork]`
 
-**What happened since last check (gap ~7.9h since 06-09 21:39):** Very quiet, no burn.
-- **Futures:** +48 closed, **−$27.59** (n=1,473→**1,521**; net −$26,867.65→**−$26,895.24**).
-- **Options SELL:** +11 closed, **−$8.43** (n=744→**755**; net −$423.24→**−$431.67**; ≈−$0.57/trade, still flat noise).
+**What's happening:** Bot LIVE OFF (`is_paused=true`, `bot_state=paused`, "PAPER-ONLY mode"; uptime ~49.8 min → **restarted ~05:49 UTC**, right after last check). 2 active strategies (scalp + options_scalp), delta balance $27.08, regime TRENDING_DOWN, chop 0.50. Open now: **3 futures** (2 SFP_15X, 1 VWAP_10X), **1 option** (OPT_SELL_CALL_V3). Total_pnl field −$54.28.
 
-**Per-lane — Futures (n=1,521):**
+**What happened since last check (gap ~1.1h since 06-10 05:33):** A restart, not real trading. The numbers are dominated by an orphan flush.
+- **Futures:** +40 closed, **−$56.41** (n=1,521→**1,561**; net −$26,895.24→**−$26,951.65**).
+- **Options SELL:** +61 closed, **−$0.22** (n=755→**816**; net −$431.67→**−$431.89**; basically flat).
+
+**The new thing — this hour is a restart-orphan flush, not strategy PnL.**
+- Options: the +61 new closes **exactly equal** the `restart_orphan` count (61, avg hold 138.6m). Every new option close this gap is the ~05:49 restart flushing open positions at ~$0 — hence net moved −$0.22.
+- Futures: +40 closes = ~29 `restart_orphan` (+$81.03 net, avg real +1.25%) + ~10–11 `paper_stop` (−$62). The big legacy lanes confirm it: MOMENTUM_CONF (−11,581.42), DONCHIAN_100X (−5,812.28), DONCHIAN_50X (−3,028.07) all show **identical net to the cent** as last check despite +2 to +7 new closes each → those new closes carried ~$0 (orphan flushes), not live exits. **No real burn this hour; the high-lev book did not genuinely re-engage.**
+
+**Per-lane — Futures (n=1,561):**
 
 | Lane | Closed | Win% | Net | Avg lev | Avg peak% | Hold |
 |---|---|---|---|---|---|---|
-| FUT_MOMENTUM_CONF | 622 | 14.6 | −11,581.42 | 67.6 | 8.83 | 4.9m |
-| FUT_DONCHIAN_100X | 174 | 16.1 | −5,812.28 | 100 | 9.46 | 2.2m |
-| FUT_DONCHIAN_CONF | 166 | 23.5 | −3,493.84 | 56.1 | 7.15 | 5.4m |
-| FUT_DONCHIAN_50X | 165 | 21.2 | −3,028.07 | 50 | 6.80 | 4.7m |
-| FUT_EMA_CONF | 346 | 35.3 | −2,877.24 | 29.5 | 5.47 | 15.6m |
-| FUT_DONCHIAN_RT_10X | 9 | 11.1 | −37.37 | 10 | 1.79 | 33.8m |
-| FUT_EMA_PB_20X | 8 | 12.5 | −29.31 | 20 | 7.11 | 50.4m |
-| FUT_SFP_15X | 17 | 29.4 | −15.58 | 15 | 4.57 | 31.4m |
-| FUT_EMA_PB_10X | 8 | 25.0 | −14.10 | 10 | 3.59 | 49.8m |
-| FUT_VWAP_10X | 6 | 50.0 | −6.04 | 10 | 3.88 | 45.8m |
+| FUT_MOMENTUM_CONF | 629 | 14.5 | −11,581.42 | 67.6 | 8.83 | 4.9m |
+| FUT_DONCHIAN_100X | 176 | 15.9 | −5,812.28 | 100 | 9.46 | 2.2m |
+| FUT_DONCHIAN_CONF | 168 | 23.2 | −3,493.84 | 56.1 | 7.15 | 5.4m |
+| FUT_DONCHIAN_50X | 167 | 21.0 | −3,028.07 | 50 | 6.80 | 4.7m |
+| FUT_EMA_CONF | 355 | 34.4 | −2,877.24 | 29.5 | 5.47 | 15.6m |
+| FUT_EMA_PB_20X | 13 | 23.1 | −56.73 | 20 | 4.56 | 37.0m |
+| FUT_DONCHIAN_RT_10X | 12 | 8.3 | −45.44 | 10 | 1.51 | 30.7m |
+| FUT_EMA_PB_10X | 13 | 30.8 | −26.73 | 10 | 2.33 | 36.5m |
+| FUT_SFP_15X | 20 | 25.0 | −20.57 | 15 | 4.02 | 30.5m |
+| FUT_VWAP_10X | 8 | 37.5 | −9.34 | 10 | 3.04 | 52.7m |
 
-**The new thing — the high-leverage book has gone dark; only sane-lev lanes are trading.** Every one of the five legacy lanes (MOMENTUM_CONF, DONCHIAN_100X/CONF/50X, EMA_CONF) has the **exact same closed count as last check** — 0 new closes in 7.9h. All ~48 new FUT closes landed in the low-leverage cohort: SFP_15X +16, DONCHIAN_RT_10X +9, EMA_PB_20X +8, EMA_PB_10X +8, VWAP_10X +6. Two brand-new lanes appeared this gap (FUT_VWAP_10X, FUT_EMA_PB_10X/20X). The sane-lev lanes are all 10–20× and bleeding only pennies (−$6 to −$37 each; combined ≈ −$102, vs the high-lev book's −$26.8k). **This is exactly the leverage-cap fix prior check-ins demanded — it appears deployed.** n still tiny (6–17 per lane) → no verdict, but the bleed has effectively stopped at source.
+Sane-lev cohort (10–20×) combined ≈ **−$159** across 66 closed — still pennies vs the −$26.8k high-lev book. n per lane still 8–20 → no verdict.
 
-**Engine-bug status (vs known issues 2026-06-06):**
-- **Futures `paper_max_hold` ~30m cap — APPEARS LOOSENED.** `paper_max_hold` count is **frozen at 29** (same as last check) yet the new lanes are holding **30–50 min** (EMA_PB_20X 50.4m, EMA_PB_10X 49.8m, VWAP_10X 45.8m, RT_10X 33.8m) and exiting via stop/trail, not the cap. EMA_CONF avg hold also rose 10.3m→15.6m. The 30-min clip that was turning trend lanes into scalps looks raised/removed for these lanes. Good.
-- **Option-sell fee drag — STILL PRESENT.** Avg fee $0.604 × 755 ≈ **$456 in fees** vs net −$431.67 → **gross ≈ +$24 (slightly positive)**. Fees remain >100% of the loss; the lane is purely fee-killed, not signal-dead. Charged on underlying notional. Unchanged.
-- **`sell_breached` premature-exit — still FIXED.** 76/755 (10.1%); `sell_take_profit` dominates (515). Not the driver.
+**Per-lane — Options SELL (n=816):** PUT_FAR −101.48 (8.1%), PUT −96.97 (14.0%), CALL −92.40 (19.4%), NEUTRAL −77.58 (16.2%), CALL_FAR −55.38 (19.1%), CALL_V3 −3.12 (n=9, 55.6%), RANGE_V3 −2.87 (n=4), PUT_V3 −2.09 (n=2). V3 lanes still near-zero n.
 
-**Exit-reason split — entry-quality thesis still ironclad (FUT, n=1,521):**
+**Exit-reason split — entry-quality thesis still ironclad (FUT, n=1,561):**
 
 | Exit | Closed | Net | Avg peak% | Avg real% |
 |---|---|---|---|---|
-| **paper_stop** | 857 | **−30,257.28** | +1.42 | −8.21 |
+| **paper_stop** | 867 | **−30,319.21** | +1.41 | −8.17 |
 | paper_trail | 565 | **+1,595.50** | +15.71 | +7.04 |
 | paper_max_hold | 29 | **+2,436.52** | +47.40 | +39.21 |
+| restart_orphan | 29 | +81.03 | +2.20 | +1.25 |
 | ema21_lost/reclaimed | 58 | −693.49 | ~2.1 | ~−2.3 |
 
-`paper_stop` = 857 trades / −$30,257 (bigger than the whole −$26.9k book). Stopped trades avg peak just **+1.42%** before dying −8.21% realized under leverage = wrong-direction entries. Exit logic is fine (trail banks ~45% of peak; the 29 max_hold runners avg +39% realized). Entries are the problem.
+`paper_stop` = 867 / −$30,319 (still larger than the whole book). Stopped trades avg peak just **+1.41%** before dying −8.17% realized = wrong-direction entries under leverage. Trail (+$1,596) and max_hold (29 runners, +39.2% real) remain the only green. Exit logic fine; entries are the problem.
+
+**Engine-bug status (vs known issues 2026-06-06):**
+- **Option-sell fee drag — STILL PRESENT.** Avg fee $0.604 × 816 ≈ **$493 in fees** vs net −$431.89 → **gross ≈ +$61 (positive).** Fees remain >100% of the loss; lane is fee-killed, not signal-dead. Charged on underlying notional. Unchanged.
+- **`sell_breached` premature-exit — still FIXED.** 76/816 (9.3%), 11.3m avg hold; `sell_take_profit` dominates (515, 36.0m). Not the driver.
+- **Futures `paper_max_hold` ~30m cap — still APPEARS LOOSENED.** Count frozen at 29; new sane-lev lanes holding 30–53 min (VWAP_10X 52.7m, EMA_PB_20X 37.0m, EMA_PB_10X 36.5m) and exiting via stop/trail, not the cap. Good.
 
 **What we should change:**
-1. **Let the new sane-lev lanes accumulate — this is the right move.** High-lev legacy lanes have stopped closing; keep them dark. Need hundreds of closed low-lev trades before any verdict, but direction is correct.
-2. **Options: fix the fee model (ENGINE BUG).** Charge on premium/stake, not notional. Gross is now ~breakeven-to-slightly-positive; fees alone are killing it.
-3. **`paper_max_hold` loosening looks live — confirm it's intentional** and not just the new lanes carrying a different cap. The 29 max-hold runners still avg +39%, so longer holds are wanted.
+1. **Investigate the restart cadence (possible ENGINE/OPS issue).** Bot has now restarted at ~05:49 after a 05:33 check that already noted a ~7.96h uptime restart — frequent restarts flush open positions as `restart_orphan` and pollute the closed-trade stream (122 orphan closes total across both books). Confirm restarts are intentional, not a crash loop.
+2. **Options: fix the fee model (ENGINE BUG).** Charge on premium/stake, not notional. Gross is now slightly positive; fees alone kill it.
+3. **Let sane-lev lanes accumulate; keep high-lev legacy dark.** No genuine high-lev closes this gap (net unchanged to the cent). Need hundreds of low-lev closes before any verdict.
 
-**Verdict status:** #8 (aggressive high-lev futures) **DEAD** (−$26.9k, n=1,521) but **now appears throttled/off** — no new closes this gap. #6 (OTM option selling) **fee-capped, gross ~flat** — engine fee bug, not no-edge. New low-leverage cohort (10–20×: SFP_15X, VWAP_10X, EMA_PB_10X/20X, DONCHIAN_RT_10X) is live and bleeding only pennies — too few closes (≤17 each) for any verdict, but it's the structural fix prior check-ins called for.
+**Verdict status:** unchanged. #8 (aggressive high-lev futures) **DEAD** (−$26.95k, n=1,561), effectively idle — no real closes this gap. #6 (OTM option selling) **fee-capped, gross ~flat-to-slightly-positive** — engine fee bug. Low-leverage cohort (10–20×) live, bleeding only pennies (n ≤20/lane) — too few closes for a verdict. This hour = restart-orphan flush, no new signal.
+
+### 2026-06-10 07:39 UTC — check-in `[updated by: Cowork]`
+
+**What's happening:** Bot **LIVE OFF** confirmed (freshest `bot_status` age 2 min: `is_paused=true`, `bot_state=paused`, "PAPER-ONLY mode"). 0 `options_scalp` trades in last hour. Burns **0/0** both labs. Open book: **37 futures, 61 options** (all V3 lanes). No refill needed.
+
+**Era-scoped balances (V3, since 2026-06-09 21:21 UTC — V2 history excluded):**
+- **Futures:** funded $1,000, closed PnL **−$173.68** (n=64) → **BALANCE $826.32**.
+- **Options:** funded $1,000, closed PnL **−$9.46** (n=14) → **BALANCE $990.54**.
+- Since last check (06:39, futures −$165/n=59, options −$8/n=13): +5 futures closes −$8.68, +1 option close −$1.46. Slow continued bleed, no acceleration.
+
+**Per-lane — Futures V3 (n=64):**
+
+| Lane | Closed | Win% | Net | PF (gw/gl) | AvgPeak% | Hold | %>10min |
+|---|---|---|---|---|---|---|---|
+| FUT_VWAP_10X | 7 | 29 | −13.14 | 0.29 | 3.04 | 41m | 100 |
+| FUT_SFP_15X | 21 | 24 | −27.71 | 0.49 | 4.35 | 30m | 48 |
+| FUT_EMA_PB_10X | 12 | 17 | −28.55 | 0.17 | 2.61 | 40m | 100 |
+| FUT_DONCHIAN_RT_10X | 12 | 8 | −45.30 | 0.04 | 1.59 | 30m | 92 |
+| FUT_EMA_PB_20X | 12 | 8 | −58.98 | 0.16 | 5.25 | 41m | 100 |
+
+Best (least bad): **VWAP_10X** PF 0.29. Worst: **EMA_PB_20X** −$58.98. Every lane PF<1; none near the 200-trade live gate.
+
+**EMA_PB leverage A/B (identical entries) — 10X beats 20X, 3rd consecutive read:** 10X −$28.55 (PF 0.17) vs 20X −$58.98 (PF 0.16). 20X loses **2.07×** more on the same signals. 20X avg peak 5.25% vs 10X 2.61% (leverage scales the swing) but realized net far worse — leverage purely amplifies the loss. Consistent with the all-time "higher lev = bigger loss" verdict (#5).
+
+**Exit-reason split (FUT V3, n=64) — entry-quality thesis holds at V3 scale:**
+
+| Exit | Closed | Net |
+|---|---|---|
+| **paper_stop** | 36 | **−203.08** |
+| paper_trail | 15 | **+36.71** |
+| breakeven_stop | 11 | −3.47 |
+| stagnant_exit | 2 | −3.83 |
+
+`paper_stop` = **117% of the net loss** (−$203 vs −$174 net, offset by the only green exit, `paper_trail` +$36.71 over 15 trades). Same shape as the 4,900-trade V2 evidence: trail catches runners, stops catch bad entries. **`no_traction` exit (added 06-10 in commit 114e0f8 to pull out sooner) has STILL not fired once** — its gate ("red 60min AND never +0.4 ATR") is too strict; weak trades reach the full ATR `paper_stop` before it can trigger.
+
+**Per-lane — Options V3 (n=14):** CALL_V3 −4.33 (n=9, 44%, 44m hold), RANGE_V3 −3.04 (n=3, 33%, **103m hold**), PUT_V3 −2.09 (n=2, 0%, 8m). Holds for RANGE/CALL are finally **tens of minutes to hours**, not the V2 sub-minute churn — the structural fix is sticking; n still far too small for a verdict.
+
+**Engine-bug / ops status:**
+- No restart-orphan flush this hour (no `restart_orphan` in the V3 exit split) — cleaner gap than 06:39.
+- `no_traction` non-firing is the actionable engine finding (gate too tight, see above).
+- Live OFF and burns 0 — sandbox behaving.
+
+**What we should change next:**
+1. **Loosen the `no_traction` gate so it fires before `paper_stop`.** Relax the "+0.4 ATR never reached" floor or shorten the 60-min red window — the entire futures bleed is `paper_stop` on weak entries, and the sooner-exit logic added to cut exactly this is never triggering.
+2. **Keep EMA_PB at 10X, retire 20X** — 3rd consecutive head-to-head loss on identical entries; the A/B has answered.
+3. Let lanes accumulate; no lane is near PF>1 or 200 trades, so no live gate.
+
+**Verdict status:** unchanged. #5 (high leverage on negative edge) reinforced — EMA_PB 20X 2× worse than 10X on identical entries. #8/#6 carried over. V3 futures bleed is 100% an entry-quality / stop problem; trail is the only green exit. No lane qualifies for live.
