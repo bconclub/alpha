@@ -40,6 +40,61 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-10 15:40 UTC — V3 ~18.3h in: futures −$274.97 (n=113), options −$27.76 (n=28), burns 0, live OFF; paper_stop = **131% of futures loss** (9th run >100%), EMA_PB 10X beats 20X **10th straight** (2.18×), DK strangle **still 0 fills this era** `[updated by: alpha-paper-lab-monitor]`
+**Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** (ts 15:37:51Z), **0** futures `scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor).
+
+**Balances (era math):**
+- **Futures lab:** FUNDED $1,000 + closed P&L −$274.97 = **BALANCE $725.03** (n=113 closed, 3 open). Burns 0.
+- **Options lab:** FUNDED $1,000 + closed P&L −$27.76 = **BALANCE $972.24** (n=28 closed, 2 open SELL_PUT_V3 @14:14Z). Burns 0.
+
+**Lab is ALIVE** — futures 4 opens / 5 closes in last hour (last open 15:20Z, last close 15:22Z). No stall this window (contrast 13:38 dead hour). Options last close was pre-window; only the 2 open PUT_V3 legs sit idle.
+
+**Count reconciliation (NOT a purge):** prior 14:39 run logged futures n=121 / options n=34; this run logs 113 / 28. The deltas (−8 fut, −6 opt) equal that run's *open* positions — the 14:39 entry counted open+closed, this run counts **closed only** per era math. Both `opened_at` and `closed_at` era filters independently return 113 closed futures → no row loss. Methodology drift, not data loss.
+
+**Per-lane — Futures (era, closed only):**
+
+| Lane | Closed | Win% | Net | Gross W | Gross L | PF | Avg peak% | Hold |
+|---|---|---|---|---|---|---|---|---|
+| FUT_VWAP_10X | 13 | 31 | **−24.02** | 10.45 | −34.47 | 0.30 | 3.7 | 44m |
+| FUT_DONCHIAN_RT_10X | 21 | 24 | −35.91 | 26.97 | −62.88 | 0.43 | 3.7 | 38m |
+| FUT_EMA_PB_10X | 24 | 25 | −48.53 | 23.33 | −71.86 | 0.32 | 3.8 | 48m |
+| FUT_SFP_15X | 30 | 27 | −60.68 | 31.13 | −91.81 | 0.34 | 4.5 | 29m |
+| **FUT_EMA_PB_20X** | 25 | 16 | **−105.83** | 42.28 | −148.11 | 0.29 | 7.6 | 47m |
+
+Every lane net-negative, every PF < 0.5, win% 16–31%. Best (least-bad) = VWAP_10X −$24; worst = **EMA_PB_20X −$105.83**, the only sub-20% win lane.
+
+**EMA_PB 10X vs 20X head-to-head (10th straight win for 10X):** identical entries, 10X −$48.53 vs 20X −$105.83 → 20X loses **2.18×** more on the *same signals*. 20X also has the worst win% (16%) and biggest avg-peak (7.6%, i.e. it rides further into noise before stopping). 10X has beaten 20X every single check-in this era. **20X remains LIVE — it is the single largest drag on the futures book and should be retired.** (Flagged 10 runs running; no engine change made per read-only mandate — escalating to user via pulse.)
+
+**Exit-reason split — Futures (era, n=113):**
+
+| Exit | Closed | Net | Avg |
+|---|---|---|---|
+| **paper_stop** | 53 | **−361.45** | −6.82 |
+| breakeven_stop | 19 | −6.89 | −0.36 |
+| stagnant_exit | 5 | −5.51 | −1.10 |
+| no_traction | 1 | −3.81 | −3.81 |
+| **paper_trail** | 35 | **+102.69** | +2.93 |
+
+Same story, 9th run: **paper_stop alone (−$361.45) is 131% of the total futures loss** (−$274.97); paper_trail is the *only* green exit (+$102.69 on 35 trades, avg +2.93). breakeven_stop is near-flat (−$0.36 avg, doing its protective job). The engine catches and trails real trends profitably — the bleed is entirely entry-noise getting stopped (53 stops at −6.82 avg, avg-peak only ~3.7% before reversing = wrong-direction / too-tight). Structural fix would be a higher conf gate or wider stop, but that's an engine change (not made).
+
+**Per-lane — Options SELL_V3 (era, closed only):**
+
+| Lane | Closed | Win% | Net | Gross | Hold |
+|---|---|---|---|---|---|
+| OPT_SELL_PUT_V3 | 6 | 33 | −2.87 | **+1.14** | 33m |
+| OPT_SELL_RANGE_V3 | 9 | 33 | −11.22 | −5.36 | 76m |
+| OPT_SELL_CALL_V3 | 13 | 31 | −13.66 | −5.55 | 63m |
+
+PUT_V3 is the only gross-positive lane (+$1.14, fee-eaten to −$2.87). CALL_V3 gross stayed −$5.55 (flat vs 14:39 — no new closes). All n ≤13 → no verdict. Fee drag on premium/notional still the structural lever.
+
+**DK harvest/strangle cohort:** **0 trades exist this era** — neither DK_V3 (trend-pick) nor the DK_PUT/DK_CALL strangle has fired a single fill. The lanes were deployed after today's 07:30–11:18 UTC entry window (0.7–4.5h pre-12:00Z settle), so first real chance is **tomorrow's window**. Combined-daily-strangle headline number: still N/A (n=0).
+
+**What to change next:**
+1. **RETIRE FUT_EMA_PB_20X (loud, 10th ask).** −$105.83 = 38% of the futures loss, 16% win, loses 2.18× to its own 10X twin on identical entries. Pure leverage-amplified noise. This is the one concrete, evidence-backed lever and it needs a user/engine action — the monitor cannot flip it (read-only).
+2. **Futures structural:** bleed is 100% entry-quality (paper_stop −$361 vs paper_trail +$103). No lane near PF 1.0; nowhere close to the live gate. Hold all futures dark for live.
+3. **Options:** PUT_V3 only gross-green lane but n=6; keep watching, no crown. Fee-on-notional still the eroder.
+4. **DK:** nothing to judge until tomorrow's 07:30–11:18Z window produces the first settlements; verify the lanes actually arm at the window open.
+
 ### 2026-06-10 14:39 UTC — V3 ~17.3h in: futures −$235.59 (n=121), options −$26.66 (n=34), burns 0, live OFF; **✅ futures stall RESOLVED — lab opening normally again**; paper_stop = **141% of futures loss** (8th run >100%), EMA_PB 10X beats 20X **9th straight** (2.27×), DK strangle lanes **0 fills this era** `[updated by: alpha-paper-lab-monitor]`
 **Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true**, **0** `options_scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor).
 
