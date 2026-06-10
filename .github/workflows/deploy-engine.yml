@@ -13,53 +13,42 @@ jobs:
 
     steps:
       - name: Deploy to VPS
+        id: deploy
+        continue-on-error: true
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: root
           key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 60s
+          command_timeout: 12m
           script: |
             set -e
-
-            # First-time setup: clone if repo doesn't exist yet
             if [ ! -d /root/alpha ]; then
-              echo ">>> First deploy — cloning repo..."
               git clone https://github.com/bconclub/alpha.git /root/alpha
             fi
-
-            echo ">>> Pulling latest code..."
             cd /root/alpha
             git fetch origin main
             git reset --hard origin/main
+            bash engine/deploy-vps.sh
 
-            echo ">>> Version on VPS:"
-            cat engine/VERSION
-            echo ""
-
-            echo ">>> Installing dependencies..."
-            cd engine
-            pip3 install -r requirements.txt --break-system-packages --quiet
-
-            # Install systemd service if not already present
-            if [ ! -f /etc/systemd/system/alpha-bot.service ]; then
-              echo ">>> Installing systemd service..."
-              cp alpha-bot.service /etc/systemd/system/alpha-bot.service
-              systemctl daemon-reload
-              systemctl enable alpha-bot
+      # The SSH step fails intermittently (connection flake) — one retry fixes
+      # the vast majority. A genuinely broken deploy fails twice and stays red.
+      - name: Retry deploy (SSH flake)
+        if: steps.deploy.outcome == 'failure'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 60s
+          command_timeout: 12m
+          script: |
+            set -e
+            if [ ! -d /root/alpha ]; then
+              git clone https://github.com/bconclub/alpha.git /root/alpha
             fi
-
-            echo ">>> Restarting alpha-bot service..."
-            systemctl restart alpha-bot
-
-            echo ">>> Waiting 5s for startup..."
-            sleep 5
-
-            echo ">>> Checking service status..."
-            systemctl status alpha-bot --no-pager
-
-            echo ">>> Verifying fixes deployed..."
-            echo "mom_direction occurrences: $(grep -c 'mom_direction' /root/alpha/engine/alpha/strategies/scalp.py)"
-            echo "_PROTECTED_EXIT_TYPES: $(grep -c '_PROTECTED_EXIT_TYPES' /root/alpha/engine/alpha/strategies/scalp.py)"
-            echo "DIRECTION BLOCK: $(grep -c 'DIRECTION BLOCK' /root/alpha/engine/alpha/strategies/scalp.py)"
-
-            echo ">>> Deploy complete."
+            cd /root/alpha
+            git fetch origin main
+            git reset --hard origin/main
+            bash engine/deploy-vps.sh

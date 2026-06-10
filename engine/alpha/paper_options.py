@@ -366,6 +366,7 @@ class BasePaperOptions:
         self._last_signal_key: str | None = None
         self._last_close_mono = 0.0
         self._expiry_dt: datetime | None = None
+        self._last_premium = 0.0
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -377,6 +378,13 @@ class BasePaperOptions:
 
     async def stop(self) -> None:
         self.is_active = False
+        # Graceful restart: realize the open short at its last mark instead of
+        # letting the next boot cancel it as an orphan.
+        if self._trade_id and self._last_premium > 0:
+            try:
+                await self._close(self._last_premium, "engine_restart")
+            except Exception:
+                self.logger.exception("engine_restart close failed")
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -692,6 +700,7 @@ class BasePaperOptions:
     async def _mark_open(self, premium: float) -> None:
         if not self._trade_id:
             return
+        self._last_premium = premium
         gross = self._gross_usd(premium)
         ret = self._return_pct(premium)
         self._peak_pnl_pct = max(self._peak_pnl_pct, ret)

@@ -115,7 +115,13 @@ class BasePaperFutures:
     STOP_ATR_MULT = 1.6             # initial stop: entry ∓ 1.6×ATR(14)
     BREAKEVEN_ATR = 1.2             # once +1.2×ATR in profit, stop jumps to entry (exit with profit)
     TRAIL_ARM_ATR = 1.0             # arm the chandelier after +1×ATR favorable excursion
-    TRAIL_ATR_MULT = 1.8            # then trail 1.8×ATR behind the peak price
+    TRAIL_ATR_MULT = 1.8            # then trail 1.8×ATR behind the peak price...
+    # ...and TIGHTEN as the win grows — a +23% peak must be BANKED, not allowed
+    # to breathe a third of itself back (user call, 06-10):
+    TRAIL_TIGHT_1_PEAK = 15.0       # peak pnl ≥ +15% → trail 1.2×ATR
+    TRAIL_TIGHT_1_MULT = 1.2
+    TRAIL_TIGHT_2_PEAK = 30.0       # peak pnl ≥ +30% → trail 0.8×ATR (lock the fat tail)
+    TRAIL_TIGHT_2_MULT = 0.8
     STAGNATION_SEC = 75 * 60        # don't get stuck: flat for 75min within ±0.5×ATR → exit
     STAGNATION_ATR = 0.5
     NO_TRACTION_SEC = 60 * 60       # pull out early: red after 60min, never showed +0.4 ATR → not our trade
@@ -155,6 +161,7 @@ class BasePaperFutures:
         self._stop_price = 0.0
         self._peak_price = 0.0
         self._breakeven_locked = False
+        self._last_mark = 0.0
 
     async def start(self) -> None:
         if self.is_active:
@@ -170,6 +177,14 @@ class BasePaperFutures:
 
     async def stop(self) -> None:
         self.is_active = False
+        # Graceful restart: CLOSE the open paper position at its last mark
+        # (real realized P&L) instead of letting the next boot cancel it as an
+        # orphan — a deploy must never throw away a winning open trade.
+        if self._trade_id and self._last_mark > 0:
+            try:
+                await self._close(self._last_mark, "engine_restart")
+            except Exception:
+                self.logger.exception("engine_restart close failed")
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -272,7 +287,8 @@ class BasePaperFutures:
                 self._stop_price = self._entry_price + fee_buffer if long else self._entry_price - fee_buffer
                 self._breakeven_locked = True
             if peak_fav >= self.TRAIL_ARM_ATR * atr:
-                trail = self._peak_price - self.TRAIL_ATR_MULT * atr if long else self._peak_price + self.TRAIL_ATR_MULT * atr
+                mult = self._trail_mult()
+                trail = self._peak_price - mult * atr if long else self._peak_price + mult * atr
                 if (long and mark <= trail) or (not long and mark >= trail):
                     return "paper_trail"
             # don't get stuck: dead-flat trades release the lane for a live one
@@ -388,6 +404,14 @@ class BasePaperFutures:
         """
         return self.FIXED_LEVERAGE if self.FIXED_LEVERAGE is not None else self.BASE_LEVERAGE
 
+    def _trail_mult(self) -> float:
+        """Chandelier distance shrinks as the win grows — bank big peaks."""
+        if self._peak_pnl_pct >= self.TRAIL_TIGHT_2_PEAK:
+            return self.TRAIL_TIGHT_2_MULT
+        if self._peak_pnl_pct >= self.TRAIL_TIGHT_1_PEAK:
+            return self.TRAIL_TIGHT_1_MULT
+        return self.TRAIL_ATR_MULT
+
     def _pnl_pct(self, price: float) -> float:
         if self._entry_price <= 0:
             return 0.0
@@ -398,12 +422,24 @@ class BasePaperFutures:
         if not self._trade_id:
             return
         pnl_pct = self._pnl_pct(price)
+        self._last_mark = price
         self._peak_pnl_pct = max(self._peak_pnl_pct, pnl_pct)
-        if self._direction == "long":
+        long = self._direction == "long"
+        if long:
             self._peak_price = max(self._peak_price, price)
         else:
             self._peak_price = min(self._peak_price, price) if self._peak_price > 0 else price
         margin = self.MARGIN_USD
+        # The EFFECTIVE protection level right now (hard/breakeven stop vs the
+        # tightening trail, whichever is closer) — written to the row so the
+        # dashboard always shows where this trade gets pulled.
+        live_stop = self._stop_price
+        atr = self._entry_atr
+        if atr > 0:
+            peak_fav = (self._peak_price - self._entry_price) if long else (self._entry_price - self._peak_price)
+            if peak_fav >= self.TRAIL_ARM_ATR * atr:
+                trail = self._peak_price - self._trail_mult() * atr if long else self._peak_price + self._trail_mult() * atr
+                live_stop = max(live_stop, trail) if long else (min(live_stop, trail) if live_stop > 0 else trail)
         await self.db.update_paper_futures_trade(
             self._trade_id,
             {
@@ -412,6 +448,11 @@ class BasePaperFutures:
                 "pnl_usd": round(margin * pnl_pct / 100.0, 8),
                 "peak_pnl_pct": round(self._peak_pnl_pct, 4),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
+                "metadata": {
+                    **self._entry_metadata,
+                    "stop_price": round(live_stop, 4),
+                    "be_locked": self._breakeven_locked,
+                },
             },
         )
 

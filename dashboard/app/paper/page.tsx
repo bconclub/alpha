@@ -39,6 +39,8 @@ interface URow {
   moneyness?: string | null;
   optionType?: string | null;
   strike?: number | null;
+  stopPrice?: number | null;   // live protection level (engine-maintained: ATR stop → breakeven → trail)
+  beLocked?: boolean;          // true once the stop has ratcheted to breakeven — trade can't go red
 }
 
 const WINDOW_LABELS: Record<WindowKey, string> = {
@@ -56,6 +58,10 @@ const SETUP_LABELS: Record<string, string> = {
   FUT_DONCHIAN_3X: 'Donchian 3x', FUT_DONCHIAN_5X: 'Donchian 5x', FUT_EMA_4X: 'EMA 4x', FUT_MOMENTUM_4X: 'Momentum 4x',
   FUT_DONCHIAN_CONF: 'Donchian (conf lev)', FUT_EMA_CONF: 'EMA (conf lev)', FUT_MOMENTUM_CONF: 'Momentum (conf lev)',
   FUT_DONCHIAN_50X: 'Donchian 50x', FUT_DONCHIAN_100X: 'Donchian 100x',
+  FUT_EMA_PB_10X: 'EMA Pullback 10x', FUT_EMA_PB_20X: 'EMA Pullback 20x', FUT_DONCHIAN_RT_10X: 'Donchian Retest 10x',
+  FUT_VWAP_10X: 'VWAP Bounce 10x', FUT_SFP_15X: 'Liq Sweep 15x',
+  OPT_SELL_PUT_V3: 'Sell Put', OPT_SELL_CALL_V3: 'Sell Call', OPT_SELL_RANGE_V3: 'Sell Range',
+  OPT_SELL_DK_V3: 'DK Harvest', OPT_SELL_DK_PUT_V3: 'DK Strangle Put', OPT_SELL_DK_CALL_V3: 'DK Strangle Call',
 };
 
 const num = (v: unknown): number => {
@@ -113,6 +119,8 @@ function mapFutures(r: Record<string, any>): URow {
     gross: num(r.gross_pnl_usd), fees: num(r.fees_usd), net: num(r.pnl_usd),
     pnlPct: num(r.pnl_pct), peakPct: num(r.peak_pnl_pct), exit_reason: r.exit_reason,
     leverage: num(r.leverage), confidence: confFromMeta(r.metadata),
+    stopPrice: r.metadata?.stop_price != null && Number.isFinite(Number(r.metadata.stop_price)) ? Number(r.metadata.stop_price) : null,
+    beLocked: Boolean(r.metadata?.be_locked),
   };
 }
 function mapOptions(r: Record<string, any>): URow {
@@ -459,7 +467,7 @@ export default function PaperLabPage() {
                   <th className="px-3 py-3 text-right">{isOpt ? 'Mark $' : 'Mark'}</th>
                   <th className="px-3 py-3 text-right">{isOpt ? 'Stake' : 'Margin'}</th>
                   <th className="px-3 py-3 text-right">Notional</th>
-                  <th className="px-3 py-3 text-right">Liq</th>
+                  <th className="px-3 py-3 text-right">{isOpt ? 'Liq' : 'Stop'}</th>
                   <th className="px-3 py-3 text-right">Gross</th>
                   <th className="px-3 py-3 text-right">Fees</th>
                   <th className="px-3 py-3 text-right">Net</th>
@@ -506,7 +514,19 @@ export default function PaperLabPage() {
                       <td className="px-3 py-3 text-right font-mono">{row.mark === null ? '-' : num(row.mark).toFixed(entryDec)}</td>
                       <td className="px-3 py-3 text-right font-mono">${row.sizeUsd.toFixed(2)}</td>
                       <td className="px-3 py-3 text-right font-mono">${row.notional.toFixed(2)}</td>
-                      <td className="px-3 py-3 text-right font-mono text-orange-300">{liqPrice(row) === null ? '—' : liqPrice(row)!.toFixed(2)}</td>
+                      <td className="px-3 py-3 text-right font-mono">
+                        {isOpt ? (
+                          <span className="text-orange-300">{liqPrice(row) === null ? '—' : liqPrice(row)!.toFixed(2)}</span>
+                        ) : (
+                          <div>
+                            <span className={row.beLocked ? 'font-bold text-emerald-300' : 'text-red-300'}>
+                              {row.stopPrice == null ? '—' : row.stopPrice.toFixed(2)}
+                            </span>
+                            {row.beLocked && <span className="ml-1 rounded bg-emerald-500/15 px-1 text-[9px] font-bold text-emerald-300">BE🔒</span>}
+                            <div className="text-[10px] text-orange-300/70">liq {liqPrice(row) === null ? '—' : liqPrice(row)!.toFixed(0)}</div>
+                          </div>
+                        )}
+                      </td>
                       <td className={`px-3 py-3 text-right font-mono ${signedClass(row.gross)}`}>{money(row.gross)}</td>
                       <td className="px-3 py-3 text-right font-mono text-amber-300">{money(-row.fees)}</td>
                       <td className={`px-3 py-3 text-right font-mono font-bold ${signedClass(row.net)}`}>{money(row.net)}</td>
@@ -564,7 +584,13 @@ function MobileTradeCard({ row, isOpt, nowMs }: { row: URow; isOpt: boolean; now
         <Field label="Entry→Mark" value={`${row.entry.toFixed(isOpt ? 2 : 1)} → ${row.mark === null ? '-' : num(row.mark).toFixed(isOpt ? 2 : 1)}`} />
         {isOpt
           ? <Field label="Strike" value={`${row.strike ?? '-'} ${row.moneyness ?? ''}`} />
-          : <Field label={`Liq (${row.leverage.toFixed(0)}x)`} value={liq === null ? '—' : `${liq.toFixed(0)}${liqDist !== null ? ` (${liqDist.toFixed(1)}%)` : ''}`} cls={liqDist !== null && liqDist < 1.5 ? 'text-red-300' : 'text-orange-300'} />}
+          : <Field
+              label={`Stop${row.beLocked ? ' 🔒BE' : ''} (${row.leverage.toFixed(0)}x)`}
+              value={row.stopPrice == null
+                ? (liq === null ? '—' : `liq ${liq.toFixed(0)}${liqDist !== null ? ` (${liqDist.toFixed(1)}%)` : ''}`)
+                : `${row.stopPrice.toFixed(row.stopPrice > 5000 ? 0 : 1)}${liq !== null ? ` · liq ${liq.toFixed(0)}` : ''}`}
+              cls={row.beLocked ? 'text-emerald-300' : 'text-red-300'}
+            />}
         <Field label="Peak" value={pct(row.peakPct)} cls={peakClass(row.peakPct)} />
       </div>
     </div>

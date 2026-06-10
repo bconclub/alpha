@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-06-11 00:15 IST · Visible stops + profit-tightening trail + graceful restarts + deploy retry
+
+- User: "+23% and not exiting — where are the stop losses?" Answer shipped in four parts:
+- **Trail tightens as profit grows**: peak ≥ +15% → trail 1.2×ATR, peak ≥ +30% → 0.8×ATR (base 1.8×). A +23% peak now gives back ~2% before banking, not ~4%. Breakeven lock unchanged (≥ +1.2 ATR can never go red).
+- **Stops are now visible**: engine writes the LIVE protection level (hard stop → breakeven → trail, whichever is closest) to each open row every mark; dashboard futures table shows a Stop column (green + BE🔒 once profit-locked, red before) with liq beneath; mobile card shows Stop · liq.
+- **Graceful restarts**: on shutdown/deploy, every open paper trade is CLOSED at its last mark (`engine_restart`) instead of being cancelled as an orphan — deploys no longer throw away winning open positions.
+- **Deploy workflow hardened**: VPS steps factored into `engine/deploy-vps.sh`, automatic one-shot retry on the flaky SSH step (failed 2× today).
+- Dashboard: V3 + DK lane display names added.
+- `(SHA on commit)`
+
 ## 2026-06-10 19:55 IST · DK strangle: sell BOTH sides into settlement + 1h trend for the side call
 
 - `OPT_SELL_DK_PUT_V3` + `OPT_SELL_DK_CALL_V3` (BTC+ETH): the daily strangle — in the decay window both legs always sell 3-OTM and hold through settlement; price must travel 3 strikes one way in hours to hurt a leg, the other leg wins regardless. Head-to-head vs the trend-picked DK lane.
