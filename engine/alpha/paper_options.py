@@ -177,9 +177,10 @@ class PaperOptionChain:
 
     REFRESH_SEC = 120.0
 
-    def __init__(self, options_exchange: Any, base_asset: str) -> None:
+    def __init__(self, options_exchange: Any, base_asset: str, min_expiry_hours: float = MIN_EXPIRY_HOURS_FOR_ENTRY) -> None:
         self.options_exchange = options_exchange
         self.base_asset = base_asset
+        self.min_expiry_hours = min_expiry_hours
         self.logger = setup_logger(f"paper.optchain.{base_asset}")
         self._chain: list[dict[str, Any]] = []
         self._expiry: datetime | None = None
@@ -226,11 +227,11 @@ class PaperOptionChain:
             self._strikes = []
             self._symbol_lookup = {}
             return
-        # nearest expiry that is at least MIN_EXPIRY_HOURS away if possible
+        # nearest expiry that is at least min_expiry_hours away if possible
         expiries = sorted({c["expiry"] for c in chain})
         chosen = expiries[0]
         for exp in expiries:
-            if (exp - now_utc).total_seconds() / 3600.0 >= MIN_EXPIRY_HOURS_FOR_ENTRY:
+            if (exp - now_utc).total_seconds() / 3600.0 >= self.min_expiry_hours:
                 chosen = exp
                 break
         self._expiry = chosen
@@ -307,6 +308,8 @@ class BasePaperOptions:
     SELL_STRIKE_BUFFER = 0.0015     # breach when spot reaches ~0.15% from the short strike
     SELL_MIN_CREDIT_USD = 2.0       # skip dust: fee floor makes credits under ~$2 unwinnable
     SELL_REENTRY_SEC = 15 * 60      # churn killer: one close per lane per 15 min max
+    HOLD_TO_EXPIRY = False          # DK lanes: ride the short through settlement (full decay)
+    SELL_EXIT_ON_TREND_BREAK = True # protection only — and only fires when the position is RED
     NOTIONAL_CAP_MULT = 20.0       # cap a trade's underlying notional at 20x the stake (no $80→$312k)
     # Fee model (real Delta India): 0.03% of underlying notional per side,
     # capped at 10% of the premium value, +18% GST. No more gentle fictions —
@@ -362,6 +365,7 @@ class BasePaperOptions:
         self._entry_metadata: dict[str, Any] = {}
         self._last_signal_key: str | None = None
         self._last_close_mono = 0.0
+        self._expiry_dt: datetime | None = None
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -405,6 +409,15 @@ class BasePaperOptions:
             return
 
         if self._trade_id:
+            # DK lanes ride through settlement: at expiry the option is worth
+            # exactly its intrinsic value — book that, don't poll a dead ticker.
+            if self.HOLD_TO_EXPIRY and self._expiry_dt and datetime.now(timezone.utc) >= self._expiry_dt:
+                if self._option_type == "call":
+                    intrinsic = max(0.0, spot - self._strike)
+                else:
+                    intrinsic = max(0.0, self._strike - spot)
+                await self._close(intrinsic, "settled_otm" if intrinsic <= 0 else "settled_itm")
+                return
             premium = await self._fetch_premium(self._option_symbol, side="mark")
             if premium > 0:
                 await self._mark_open(premium)
@@ -523,21 +536,23 @@ class BasePaperOptions:
         return spot >= self._strike * (1.0 - buf)        # spot rose to the short call strike
 
     def _exit_reason(self, premium: float, rows: list[list[float]], spot: float) -> str:
-        # 1) contract reality: settle before expiry (sellers want this — full decay)
-        if self.chain.seconds_to_expiry() <= PRE_EXPIRY_CLOSE_SEC:
+        # 1) contract reality: settle before expiry — EXCEPT DK lanes, whose
+        # whole edge is holding through settlement for the full decay.
+        if self.chain.seconds_to_expiry() <= PRE_EXPIRY_CLOSE_SEC and not self.HOLD_TO_EXPIRY:
             return "pre_expiry"
         pnl = self._premium_pnl_pct(premium)
         if self.SELL:
-            # theta harvest: take profit on real decay; cut on premium blowout,
-            # strike approach (going ITM), or the trend that justified the short
-            # breaking against it.
+            # theta harvest: take profit on real decay; cut on premium blowout
+            # or strike approach (going ITM). Trend break is PROTECTION, not a
+            # churn exit: it only fires when the position is red (13 V3 trades
+            # proved exiting green positions on EMA wiggles just locks losses).
             if pnl >= self.SELL_TP_PCT:
                 return "sell_take_profit"
             if pnl <= self.SELL_SL_PCT:
                 return "sell_stop"
             if self._sell_strike_breached(spot):
                 return "sell_breached"
-            if self._underlying_reversed(rows, spot):
+            if self.SELL_EXIT_ON_TREND_BREAK and pnl < 0 and self._underlying_reversed(rows, spot):
                 return "sell_trend_break"
             return ""
         # BUY: ride-the-wave
@@ -650,6 +665,7 @@ class BasePaperOptions:
         self._option_type = option_type
         self._direction = direction
         self._strike = float(strike)
+        self._expiry_dt = self.chain.expiry
         self._entry_premium = entry_premium
         self._contracts = contracts
         self._stake = stake
@@ -1135,6 +1151,46 @@ class SellPremiumNeutralOptions(BasePaperOptions):
         return _rsi([r[4] for r in rows[:-1]], 14) < 35
 
 
+class SellExpiryDecayOptions(BasePaperOptions):
+    """DK harvest: sell OTM in the FINAL hours before the daily 12:00 UTC
+    settle and hold straight through settlement.
+
+    The V3 data's smoking gun: average entry was 18.5h from expiry and we
+    captured −7% decay — we never stood where the theta avalanche happens.
+    This lane only enters inside the decay window (~0.7–4.5h to expiry),
+    sells 2-OTM with the trend, and the position's natural end is the option
+    expiring WORTHLESS (settled_otm = keep the whole credit). Exits before
+    that only for real danger: strike breach or premium blowout.
+    """
+
+    SETUP_TYPE = "OPT_SELL_DK"
+    TIMEFRAME = "15m"
+    SELL = True
+    HOLD_TO_EXPIRY = True
+    SELL_EXIT_ON_TREND_BREAK = False   # decay is the thesis, not the 5m trend
+    SELL_OTM_STEPS = 2
+    SELL_TP_PCT = 60.0                 # decay accrues fast here; bank a fat chunk early if offered
+    SELL_MIN_CREDIT_USD = 0.75         # near-expiry premiums are smaller; fee cap (10% of premium) keeps this viable
+    DK_MIN_TTE_H = 0.7                 # don't open with less than ~40 min of runway
+    DK_MAX_TTE_H = 4.5                 # the decay window — before this, theta is a trickle
+
+    def _entry_decision(self, rows, spot):
+        tte_h = self.chain.seconds_to_expiry() / 3600.0
+        if not (self.DK_MIN_TTE_H <= tte_h <= self.DK_MAX_TTE_H):
+            return None
+        if len(rows) < 35:
+            return None
+        closes = [r[4] for r in rows[:-1]]
+        ema8 = _ema(closes[-34:], 8)
+        ema21 = _ema(closes[-55:], 21)
+        ts = int(rows[:-1][-1][0])
+        meta = {"timeframe": self.TIMEFRAME, "tte_h": round(tte_h, 2), "confidence_score": 72.0}
+        # Sell the side the market is drifting AWAY from.
+        if ema8 >= ema21:
+            return "long", f"{ts}:long", meta     # uptrend → short put below
+        return "short", f"{ts}:short", meta       # downtrend → short call above
+
+
 def build_paper_options_strategies(
     pair: str,
     options_exchange: Any,
@@ -1149,19 +1205,24 @@ def build_paper_options_strategies(
     """
     base = pair.split("/")[0]
     chain = PaperOptionChain(options_exchange, base)
+    # DK lane needs its OWN chain that stays on TODAY'S expiry instead of
+    # rolling to tomorrow once inside 4h — the decay window IS the trade.
+    chain_near = PaperOptionChain(options_exchange, base, min_expiry_hours=0.7)
     data = PaperMarketData(futures_exchange, pair)
 
-    def mk(cls, name, *, tf="15m", **kw):
-        s = cls(pair, options_exchange, futures_exchange, db, chain,
+    def mk(cls, name, *, tf="15m", use_chain=None, **kw):
+        s = cls(pair, options_exchange, futures_exchange, db, use_chain or chain,
                 logger_name=f"paper.opt.{name}.{base}", data=data, **kw)
         s.TIMEFRAME = tf   # V3 sellers signal on 15m — fewer, better trades
         return s
 
     # V3 (from 742 closed sells): gross was BREAKEVEN, fees were 100%+ of the
-    # loss. So: 3 lanes only, 2-OTM strikes (real credit ≥$2), 15m signals,
-    # 15-min re-entry cooldown, real Delta fees, hours-long decay holds.
+    # loss. So: 2-OTM strikes (real credit), 15m signals, 15-min re-entry
+    # cooldown, real Delta fees, hours-long decay holds — plus the DK lane
+    # that sells the final hours and holds through settlement.
     return [
         mk(SellPutTrendOptions, "sell_put", setup_override="OPT_SELL_PUT_V3", otm_steps=2),
         mk(SellCallTrendOptions, "sell_call", setup_override="OPT_SELL_CALL_V3", otm_steps=2),
         mk(SellPremiumNeutralOptions, "sell_range", setup_override="OPT_SELL_RANGE_V3", otm_steps=3),
+        mk(SellExpiryDecayOptions, "sell_dk", use_chain=chain_near, setup_override="OPT_SELL_DK_V3"),
     ]

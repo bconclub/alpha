@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-10 19:45 IST · DK harvest lane — sell the expiry window, hold through settlement
+
+- Data showed selling never stood where decay happens: avg entry 18.5h from expiry (min 6.2h), avg decay captured −7%, and the trend-break exit churned green positions (13 trades, 7.7% win).
+- New `OPT_SELL_DK_V3` (BTC+ETH): enters ONLY 0.7–4.5h before the 12:00 UTC daily settle, sells 2-OTM with the trend on its own near-expiry chain, and holds straight through settlement — `settled_otm` books the full credit; exits early only on breach/blowout/TP 60%.
+- Settlement modeling: at expiry an open short closes at intrinsic value (no dead-ticker polling). Chain supports per-instance `min_expiry_hours` so the DK chain stays on today's expiry while other lanes roll to tomorrow.
+- All sell lanes: `sell_trend_break` now fires only when the position is RED — protection, never churn.
+- User-facing: new DK lane on the paper page; first entries in tomorrow's pre-settle window (~13:00–16:50 IST).
+- `(SHA on commit)`
+
 ## 2026-06-10 11:30 IST · Pull out sooner: no-traction exit + faster stagnation purge
 
 - User observed V3 holding losers too long. Data agreed: flat trades sat the full 2h stagnation window, and red drifters took 40–55 min to reach the ATR stop with no early abandon.
