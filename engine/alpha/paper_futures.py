@@ -107,6 +107,13 @@ class BasePaperFutures:
     FIXED_LEVERAGE: float | None = 10.0
     FEE_RATE = 0.0005
     MIN_CONFIDENCE = 70.0           # V3: entry gate — conf 80+ reached the 10%+ tail 31% vs 15%
+    # Higher-timeframe alignment gate (V3.1): the 06-10 massacre was 15 straight
+    # LONG stop-outs while the 1h trend was down — 5m signals are blind to the
+    # hourly tape. Longs need a 1h uptrend, shorts a 1h downtrend; flat 1h = no trade.
+    HTF_GATE = True
+    HTF_TIMEFRAME = "1h"
+    HTF_MIN_GAP_PCT = 0.05          # EMA8/21 gap below this = flat hour, stand down
+    HTF_CACHE_SEC = 300.0
     MAX_HOLD_SEC = 24 * 60 * 60     # let winners run; only 1 of 1,468 V2 trades ever held >1h
     # ── V3 exits live in ATR PRICE space, not leveraged-PnL space ──────────
     # V2 lesson: a -6% PnL stop at 67x = a 0.09% price wiggle → 828 noise-stops,
@@ -162,6 +169,7 @@ class BasePaperFutures:
         self._peak_price = 0.0
         self._breakeven_locked = False
         self._last_mark = 0.0
+        self._htf_cache: tuple[float, int] = (0.0, 0)   # (mono_ts, dir: +1/-1/0)
 
     async def start(self) -> None:
         if self.is_active:
@@ -227,6 +235,11 @@ class BasePaperFutures:
             return
         if float(metadata.get("confidence_score") or 0.0) < self.MIN_CONFIDENCE:
             return
+        if self.HTF_GATE:
+            htf = await self._htf_trend()
+            if htf == 0 or (htf > 0) != (direction == "long"):
+                return   # against (or without) the hourly tape — not our trade
+            metadata["htf_trend"] = htf
         if not self.position_book.can_open(self.pair):
             active = self.position_book.get(self.pair) or {}
             now = asyncio.get_running_loop().time()
@@ -248,6 +261,24 @@ class BasePaperFutures:
     async def _fetch_rows(self) -> list[list[float]]:
         rows = await self.exchange.fetch_ohlcv(self.pair, self.TIMEFRAME, limit=80)
         return [[float(x) for x in row] for row in rows]
+
+    async def _htf_trend(self) -> int:
+        """Hourly EMA 8/21 drift: +1 up, -1 down, 0 flat/unknown. Cached 5 min."""
+        loop = asyncio.get_running_loop()
+        ts, cached = self._htf_cache
+        if loop.time() - ts < self.HTF_CACHE_SEC:
+            return cached
+        d = cached
+        try:
+            raw = await self.exchange.fetch_ohlcv(self.pair, self.HTF_TIMEFRAME, limit=60)
+            closes = [float(r[4]) for r in raw[:-1]]
+            if len(closes) >= 25:
+                gap = _pct_move(_ema(closes[-55:], 21), _ema(closes[-34:], 8))
+                d = 1 if gap >= self.HTF_MIN_GAP_PCT else (-1 if gap <= -self.HTF_MIN_GAP_PCT else 0)
+        except Exception:
+            pass   # keep last known on transient API failure
+        self._htf_cache = (loop.time(), d)
+        return d
 
     async def _fetch_mark(self, rows: list[list[float]]) -> float:
         ticker = await self.exchange.fetch_ticker(self.pair)
@@ -1029,9 +1060,12 @@ def build_paper_futures_strategies(
         s.setup_type = setup
         return s
 
+    # FUT_EMA_PB_20X RETIRED 2026-06-10 after a clean A/B: 13 consecutive
+    # check-ins it lost ~2.1× the identical-entry 10× lane at half the win
+    # rate (doubled fees ate small wins, doubled swing deepened losses).
+    # Question answered; its history stays in the DB.
     return [
         mk(EmaPullbackV3, "FUT_EMA_PB_10X", 10.0),
-        mk(EmaPullbackV3, "FUT_EMA_PB_20X", 20.0),     # leverage A/B vs identical entries
         mk(DonchianRetestV3, "FUT_DONCHIAN_RT_10X", 10.0),
         mk(VwapBounceV3, "FUT_VWAP_10X", 10.0),
         mk(SfpReversalV3, "FUT_SFP_15X", 15.0),        # tight structural stop earns extra lev

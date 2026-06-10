@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-11 01:30 IST · V3.1 entries: 1h trend gate + 20× lane retired
+
+- Root cause of the 06-10 evening bleed confirmed trade-by-trade: 15 consecutive LONG stop-outs (~−$170) while the 1h trend was down — 5m entries blind to the hourly tape. (Separately: the 00:00 IST deploy orphan-cancelled 9 open trades carrying ~+$25 — that restart bug was fixed in that same deploy; restarts now close at mark.)
+- **1h HTF gate on all futures entries**: longs require a 1h EMA8/21 uptrend, shorts a downtrend, flat hourly tape = no entries at all. Cached 5 min per lane; `htf_trend` stamped in metadata.
+- **FUT_EMA_PB_20X retired** after a clean 13-run A/B: ~2.1× the loss of the identical-entry 10× lane at half the win rate. History preserved.
+- User-facing: noticeably fewer (and hopefully far better) futures entries; 4 futures lanes per asset now.
+- `(SHA on commit)`
+
 ## 2026-06-11 00:15 IST · Visible stops + profit-tightening trail + graceful restarts + deploy retry
 
 - User: "+23% and not exiting — where are the stop losses?" Answer shipped in four parts:
