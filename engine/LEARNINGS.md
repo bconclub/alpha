@@ -40,6 +40,52 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-10 14:39 UTC — V3 ~17.3h in: futures −$235.59 (n=121), options −$26.66 (n=34), burns 0, live OFF; **✅ futures stall RESOLVED — lab opening normally again**; paper_stop = **141% of futures loss** (8th run >100%), EMA_PB 10X beats 20X **9th straight** (2.27×), DK strangle lanes **0 fills this era** `[updated by: alpha-paper-lab-monitor]`
+**Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true**, **0** `options_scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor).
+
+**✅ Futures stall resolved.** Last hour flagged a ~68-min dead window (13:00 hour booked 0 opens). This window the lab is **opening and closing normally** — last open **14:25:17**, last close **14:13:45**, 4 positions live (EMA_PB_10X×2, EMA_PB_20X×2, age ~15min). The freeze self-cleared (or the hung evaluator got picked back up); no engine restart was performed by this routine. Futures count advanced 102→**121** (+19 closes) so the loop is fully alive again. Watching for recurrence.
+
+**Futures lab (V3):** FUNDED **$1,000.00**, closed **121**, realized **−$235.59**, BALANCE **$764.41**, BURNS **0** (4 open).
+
+| FUT lane (V3) | Closed | Win% | Net | Gross win | Gross loss | PF | Avg hold |
+|---|---|---|---|---|---|---|---|
+| FUT_VWAP_10X | 14 | 36% | −$20.22 | $14.25 | $34.47 | **0.41** | 51m |
+| FUT_DONCHIAN_RT_10X | 22 | 23% | −$36.23 | $26.97 | $63.20 | 0.43 | 38m |
+| FUT_EMA_PB_10X | 26 | 31% | −$40.94 | $24.72 | $65.66 | 0.38 | 43m |
+| FUT_SFP_15X | 31 | 29% | −$45.37 | $41.82 | $87.19 | 0.48 | 28m |
+| FUT_EMA_PB_20X | 27 | 22% | **−$92.83** | $44.40 | $137.22 | **0.32** | 41m |
+
+(+1 FUT_MOMENTUM_CONF restart-orphan, $0.) Best lane VWAP_10X (least-bad), worst **EMA_PB_20X**. Every lane PF < 0.5 — entries still don't follow through.
+
+**Futures exit reasons — paper_stop is the entire drawdown again:**
+
+| Exit | Count | Net |
+|---|---|---|
+| **paper_stop** | 51 | **−$332.57** |
+| paper_trail | 34 | **+$108.08** |
+| breakeven_stop | 17 | −$5.01 |
+| restart_orphan | 13 | +$3.23 |
+| stagnant_exit | 5 | −$5.51 |
+| no_traction | 1 | −$3.81 |
+
+paper_stop alone (−$332.57) = **141% of the lab's net loss** — 8th consecutive run it exceeds 100%. 51 of 121 trades (42%) stop out; only **paper_trail is green** (+$108, 34 trades, avg +$3.18/win vs −$6.52/stop). breakeven_stop is ~neutral. Same signal every hour: **the stop is the bleed, the trail is the edge** — survivors that reach the trail print.
+
+**EMA_PB 10× vs 20× (identical entries, leverage A/B):** 10X −$40.94 vs 20X **−$92.83** = 20X loses **2.27×** more. 9th straight run 10X wins; 20X has zero independent thesis — it only amplifies the same losing edge (consistent with Verdict #5/#8). **Retire FUT_EMA_PB_20X** (standing recommendation, still live).
+
+**Options lab (V3):** FUNDED **$1,000.00**, closed **34**, realized **−$26.66**, BALANCE **$973.34**, BURNS **0** (2 open, PUT_V3).
+
+| OPT lane (V3) | Closed | Win% | Net | Gross win | Gross loss | PF | Avg hold |
+|---|---|---|---|---|---|---|---|
+| OPT_SELL_PUT_V3 | 10 | 50% | **−$2.61** | $6.95 | $9.56 | **0.73** | 23m |
+| OPT_SELL_RANGE_V3 | 10 | 40% | −$11.06 | $4.55 | $15.61 | 0.29 | 69m |
+| OPT_SELL_CALL_V3 | 14 | 36% | −$12.99 | $3.23 | $16.21 | **0.20** | 63m |
+
+PUT_V3 best (near-breakeven, PF 0.73). CALL_V3 worst (PF 0.20) — put-selling continues to beat call-selling, consistent with up-biased tape. Options exits: sell_take_profit +$12.76 (8), sell_trend_break −$16.81 (13, the protection exit cuts at a loss), sell_breached −$17.60 (6), sell_stop −$6.11 (1).
+
+**🚩 DK window lanes: 0 fills this era.** No OPT_SELL_DK_V3 / DK_PUT / DK_CALL trades exist (open or closed) since era start. The DK strangle was committed today (c638467, 113d9eb) but the entry window is **~07:30–11:18 UTC** (0.7–4.5h before the 12:00 settle) — the code almost certainly deployed *after* today's window closed. **Next chance: tomorrow ~07:30–11:18 UTC.** Verify next run that the DK code is live and fires; until then the headline strangle P&L number is unavailable (n=0).
+
+**What to change next:** the futures stop is the whole loss — 51 stops bled $333 while the trail netted +$108. Widen/rework `paper_stop` (or pull it further from entry) so more trades survive into trail territory; and retire EMA_PB_20X (9th confirmation it strictly amplifies the losing edge).
+
 ### 2026-06-10 13:38 UTC — V3 ~16h in: futures −$300.18 (n=102, **FROZEN**), options −$27.75 (n=28), burns 0, live OFF; **⚠ FUTURES LAB STALLED ~68min — 0 opens / 0 closes, first dead hour this era (options unaffected)**; paper_stop = 111% of loss (7th run >100%), EMA_PB 10X beats 20X 8th time (2.14×); VWAP_10X "edge" ERASED (one new loser → gross −$11) `[updated by: alpha-paper-lab-monitor]`
 **Era:** V3 started 2026-06-09T21:21:00Z (V2 history frozen, excluded). Live OFF confirmed — `bot_status` is_paused=**true**, `bot_state=paused` ("PAPER-ONLY mode"), FRESH 13:41:34 UTC, **0** `options_scalp` in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor). Regime TRENDING_UP since 13:30 (chop 0.54, atr_ratio 1.77).
 
