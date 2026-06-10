@@ -40,6 +40,31 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-10 20:39 UTC — V3 ~23.3h in: futures −$422.00 (n=169), options −$37.14 (n=53), burns 0, live OFF; **V3.1 VERIFICATION HOUR — gate is mechanically working, but first 2 gated trades both lost.** Only **2 futures trades opened all hour** (vs ~12–15/hr pre-gate) — the 1h HTF-trend gate is throttling flow hard, exactly as designed ("expect fewer trades"). Both new trades passed the gate correctly: **FUT_SFP_15X short @ htf=−1** (breakeven_stop −$5.37, 42.8m) and **FUT_EMA_PB_10X short @ htf=−1** (paper_stop −$6.51, 12.7m) — i.e. both **shorts in a 1h downtrend = directionally aligned**, no counter-trend entries leaked through. **20X retirement is sticking: 0 new FUT_EMA_PB_20X since the 19:33Z deploy** (its 39 trades / −$139.26 are now frozen history). But the two aligned trades **still lost −$11.88 combined** — alignment did not produce a winner in this n=2 sample (far too small to judge edge; the tape may simply not have trended on the entry's timeframe). 0 open positions now. paper_stop = **68/−$517.67 = 123% of futures loss** (14th run >100%, +1 stop this hr); paper_trail frozen 37/+$111.73 (no new trail). Lanes: VWAP_10X still least-bad (−$25.84, PF 0.44, 33% win); EMA_PB 10X (−$90.43, PF 0.26) still ahead of retired 20X. Options +2 trades for −$1.14: CALL_V3 worst (−$15.18, 35% win), PUT_V3 frozen (−$10.85). DK strangle **still 0 fills** (next window 06-11 07:30–11:18Z). `[updated by: alpha-paper-lab-monitor]`
+**Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** (latest 20:38:24Z), **0** `options_scalp`/scalp opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (futures ≈$578, options ≈$963, both ≫ $50 floor).
+
+**Balances (era math):** FUNDED $1,000 each (0 deposits since era). Futures BALANCE = 1000 − 422.00 = **$578.00**. Options BALANCE = 1000 − 37.14 = **$962.86**.
+
+**Futures lanes (era):**
+
+| Lane | n | win% | net | PF | note |
+|---|---|---|---|---|---|
+| FUT_EMA_PB_20X | 39 | 21 | −139.26 | 0.32 | RETIRED 19:33Z, frozen |
+| FUT_SFP_15X | 44 | 25 | −109.53 | 0.32 | +1 gated short (BE stop) |
+| FUT_EMA_PB_10X | 41 | 24 | −90.43 | 0.26 | +1 gated short (paper_stop) |
+| FUT_DONCHIAN_RT_10X | 26 | 19 | −56.95 | 0.32 | frozen |
+| FUT_VWAP_10X | 18 | 33 | −25.84 | 0.44 | least-bad lane |
+
+**Futures exit-reason (era):** paper_stop 68/−517.67 · paper_trail 37/+111.73 · restart_orphan 27/+22.55 · breakeven_stop 27/−17.22 · stagnant_exit 8/−11.17 · no_traction 2/−10.23. paper_stop alone (−$517.67) still exceeds the entire net loss (−$422.00) at 123%; trail (+$111.73) + orphan-cleanup (+$22.55) are the only green.
+
+**Options lanes (era):** CALL_V3 23/−15.18 (35%) · RANGE_V3 13/−11.13 (38%) · PUT_V3 17/−10.85 (41%). DK lanes (OPT_SELL_DK_V3 / _PUT_V3 / _CALL_V3): **0 fills all era** — next entry window 06-11 07:30–11:18Z; strangle head-to-head still pending first settlement.
+
+**Engine-bug status:** No restart this hour (no new restart_orphan/engine_restart closes). HTF-gate metadata writing correctly (htf_trend non-null on both post-deploy trades). No new bugs surfaced; gate behaving to spec.
+
+**What to change:** Nothing to deploy — V3.1 just went live and is being verified. Keep gate running; the real test is whether **paper_stop's share of loss finally drops below ~100%** once a meaningful number of gated trades accumulate (n=2 so far is noise). Watch next 2–3 hours for gated-trade win% and paper_stop share. Do not touch engine. DK strangle verdict waits for the 07:30–11:18Z window.
+
+**Verdict status:** unchanged. No lane at a verdict. Futures still net-negative across every lane (PF ≤0.44), n far below the 200-trade live gate. 20X retirement confirmed sticking. Options fee-capped, DK cohort un-sampled. No strategy crowned.
+
 ### 2026-06-10 19:39 UTC — V3 ~22.3h in: futures −$410.12 (n=167), options −$36.13 (n=51), burns 0, live OFF; **V3.1 entries deployed 19:33 UTC — verification deferred to next hour.** The 1h HTF-trend gate + FUT_EMA_PB_20X retirement (`e1cf130`) and the engine_restart-close fix (`1d80584`) were committed/pushed only ~6 min before this snapshot (19:32–19:33Z), so all this hour's trades are still **pre-gate** (htf_trend=null, 20X still opening at 19:15) — *expected*, not a deploy gap. This hour was a **flat-tape grind**: zero new `paper_stop`, zero new `paper_trail` (both frozen to the cent 2nd straight hr) — the entire −$18.77 move came from low-conviction exits (5 restart_orphan −$5.72, 3 breakeven −$0.97, 3 stagnant −$5.66, 1 no_traction −$6.42). paper_stop = **125% of futures loss** (13th run >100%); EMA_PB 10X beats 20X **14th straight** (1.66×); VWAP_10X still best/least-bad (−$25.84, PF 0.44, 33% win); PUT_V3 gave back (−$8.80→−$10.85, win 44%→41%); DK strangle **still 0 fills** (next window 06-11 07:30–11:18Z) `[updated by: alpha-paper-lab-monitor]`
 **Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** (latest 19:38:23Z), **0** `options_scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor).
 
