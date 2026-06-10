@@ -40,6 +40,31 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-10 21:38 UTC — V3 ~24.3h in: futures −$444.59 (n=143 closed), options −$39.93 (n=44 closed), burns 0, live OFF; **VERIFICATION HOUR 2 — gate froze new paper_stops again, and the apparent −$22 "worsening" is a REPORTING PHANTOM, not new losses.** The headline reconciled the prior-run count drift: last hour's "n=169 / −$422" **included 27 `restart_orphan` trades that are `status='cancelled'` (+$22.55), not `closed`.** Counting closed-only: 169 − 27 cancelled + 1 new breakeven = **143**, and removing the +$22.55 phantom green is the entire −$422→−$444.59 move. **Genuine new damage this hour ≈ −$0.04** (one FUT_EMA_PB_10X breakeven_stop) + −$2.94 open MTM on 2 live shorts — essentially flat. **paper_stop COUNT FROZEN at 68/−$517.67 for the 2nd straight hour** (zero new stops since the gate) — this is the real signal the 1h-HTF gate is preventing new big stops, far cleaner than the ratio (517.67/444.59 = 116%, mechanically inflated by phantom removal). **Gate still throttling hard:** only 3 futures opened in 70min, ALL `htf=−1` (downtrend) → all shorts, **zero counter-trend leakage** (DONCHIAN short open −0.68, EMA_PB short open −3.49, EMA_PB short BE −0.04). **20X retirement sticking: 0 new FUT_EMA_PB_20X since 19:33Z.** Options −$39.93 (RANGE −15.40 worst, CALL −13.41, PUT −11.11); 3 open sells; DK strangle **still 0 fills** (next window 06-11 07:30–11:18Z). `[updated by: alpha-paper-lab-monitor]`
+**Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** (latest 21:38:21Z), **0** `options_scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (futures ≈$555, options ≈$960, both ≫ $50 floor).
+
+**Balances (era, closed-only realized):** FUNDED $1,000 each. Futures BALANCE = 1000 − 444.59 = **$555.41** (the +$22.55 cancelled-orphan green is a phantom — excluded). Options BALANCE = 1000 − 39.93 = **$960.07**.
+
+**Futures lanes (era, closed-only):**
+
+| Lane | n | win% | net | PF | note |
+|---|---|---|---|---|---|
+| FUT_EMA_PB_20X | 31 | 16 | −137.58 | 0.26 | RETIRED, frozen (0 new since 19:33Z) |
+| FUT_SFP_15X | 39 | 21 | −129.74 | 0.19 | worst active lane, worst PF |
+| FUT_EMA_PB_10X | 34 | 21 | −88.76 | 0.22 | +1 gated BE this hr; still beats retired 20X |
+| FUT_DONCHIAN_RT_10X | 24 | 21 | −54.69 | 0.33 | best PF |
+| FUT_VWAP_10X | 15 | 27 | −33.84 | 0.24 | least-bad net, best win% |
+
+(Lane n/net all fell vs last hour for the same reason — per-lane cancelled-orphans dropped out of the closed-only set; not new trading.)
+
+**Futures exit-reason (era, closed-only):** paper_stop 68/−517.67 · paper_trail 37/+111.73 · breakeven_stop 28/−17.27 · stagnant_exit 8/−11.17 · no_traction 2/−10.23. Plus **27 `restart_orphan` now `status='cancelled'` (+22.55) — excluded from realized.** paper_stop count unchanged for 2 hrs = gate is working; its 116% share is a denominator artifact, watch the COUNT not the ratio.
+
+**Options lanes (era):** RANGE_V3 11/−15.40 (27%) · CALL_V3 20/−13.41 (35%) · PUT_V3 13/−11.11 (31%). DK lanes: **0 fills all era** — next window 06-11 07:30–11:18Z; strangle head-to-head still pending first settlement.
+
+**Engine-bug / data status:** No live engine bug — the 27 restart_orphan trades have been `cancelled` all along; the issue is **prior check-ins counted cancelled trades as closed**, inflating the green by +$22.55. Going forward, headline = `status='closed'` only. HTF-gate metadata writing correctly (htf_trend=−1 on all 3 new trades). No restart this hour.
+
+**What to change:** (1) Reporting: **always filter `status='closed'` for realized PnL**; quote cancelled-orphan green separately, never in the headline. (2) Engine: nothing to deploy — keep the gate running; the clean verification metric is **paper_stop count staying frozen** as gated n grows (now 2 hrs frozen, n=3 gated trades = still noise on edge). (3) DK strangle verdict waits for the 07:30–11:18Z window.
+
 ### 2026-06-10 20:39 UTC — V3 ~23.3h in: futures −$422.00 (n=169), options −$37.14 (n=53), burns 0, live OFF; **V3.1 VERIFICATION HOUR — gate is mechanically working, but first 2 gated trades both lost.** Only **2 futures trades opened all hour** (vs ~12–15/hr pre-gate) — the 1h HTF-trend gate is throttling flow hard, exactly as designed ("expect fewer trades"). Both new trades passed the gate correctly: **FUT_SFP_15X short @ htf=−1** (breakeven_stop −$5.37, 42.8m) and **FUT_EMA_PB_10X short @ htf=−1** (paper_stop −$6.51, 12.7m) — i.e. both **shorts in a 1h downtrend = directionally aligned**, no counter-trend entries leaked through. **20X retirement is sticking: 0 new FUT_EMA_PB_20X since the 19:33Z deploy** (its 39 trades / −$139.26 are now frozen history). But the two aligned trades **still lost −$11.88 combined** — alignment did not produce a winner in this n=2 sample (far too small to judge edge; the tape may simply not have trended on the entry's timeframe). 0 open positions now. paper_stop = **68/−$517.67 = 123% of futures loss** (14th run >100%, +1 stop this hr); paper_trail frozen 37/+$111.73 (no new trail). Lanes: VWAP_10X still least-bad (−$25.84, PF 0.44, 33% win); EMA_PB 10X (−$90.43, PF 0.26) still ahead of retired 20X. Options +2 trades for −$1.14: CALL_V3 worst (−$15.18, 35% win), PUT_V3 frozen (−$10.85). DK strangle **still 0 fills** (next window 06-11 07:30–11:18Z). `[updated by: alpha-paper-lab-monitor]`
 **Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** (latest 20:38:24Z), **0** `options_scalp`/scalp opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (futures ≈$578, options ≈$963, both ≫ $50 floor).
 
