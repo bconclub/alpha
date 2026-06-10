@@ -190,7 +190,7 @@ class BasePaperFutures:
         # orphan — a deploy must never throw away a winning open trade.
         if self._trade_id and self._last_mark > 0:
             try:
-                await self._close(self._last_mark, "engine_restart")
+                await self._close(self._last_mark, "engine_restart", {})
             except Exception:
                 self.logger.exception("engine_restart close failed")
         if self._task and not self._task.done():
