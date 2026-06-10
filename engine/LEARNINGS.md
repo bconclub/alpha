@@ -40,6 +40,61 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-10 18:39 UTC — V3 ~21.3h in: futures −$391.36 (n=155), options −$32.81 (n=42), burns 0, live OFF; **first "green" hour of the era is a DEPLOY ARTIFACT, not edge** — the `8fdce1a` restart fired 22 `restart_orphan` cleanup closes (+$28.27 era-total; 9 of them +$25.05 in the last hour) which lifted futures −$418→−$391, but the real trade machinery (`paper_stop` frozen 67/−$511, `paper_trail` frozen 37/+$112) closed **zero** this hour → underlying bleed flat; paper_stop = **131% of futures loss** (12th run >100%); EMA_PB 10X beats 20X **13th straight** (1.66×, ~flat vs 1.68×); VWAP_10X reclaims best/least-bad lane (−$25.79, PF 0.44, 35% win); PUT_V3 recovered toward near-green (−9.06→−8.80, win 33%→44%); DK strangle **still 0 fills this era** `[updated by: alpha-paper-lab-monitor]`
+**Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** / `bot_state`=paused / pause_reason "PAPER-ONLY mode" (ts 18:37:33Z, last_scan 184s), **0** `options_scalp` opens in last hour. No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor).
+
+**Balances (era math):**
+- **Futures lab:** FUNDED $1,000 + closed P&L −$391.36 = **BALANCE $608.64** (n=155 closed). Burns 0.
+- **Options lab:** FUNDED $1,000 + closed P&L −$32.81 = **BALANCE $967.19** (n=42 closed). Burns 0.
+
+**The headline: a code deploy (`8fdce1a` "graceful restart closes"), not a strategy turn, made the era P&L improve for the first time.** Last ~70 min = **9 `restart_orphan` closes (+$25.05) + 1 breakeven_stop (−$1.21)** = +$23.84 — i.e. 100% orphan-cleanup, **zero genuine trade closes**. Across the era `restart_orphan` now totals **22 closes / +$28.27**. Strip those one-off cleanups and the "operating" futures loss is −$419.6 — **flat vs 17:39's −$418.42**, confirming the underlying bleed did not improve. `paper_stop` (67/−$511.16) and `paper_trail` (37/+$111.73) are both **frozen to the cent vs 17:39** (no new stops or trails closed while the engine re-warmed post-restart).
+
+**Per-lane — Futures (era, closed only):**
+
+| Lane | Closed | Win% | Net | Gross W | Gross L | PF | Hold |
+|---|---|---|---|---|---|---|---|
+| FUT_VWAP_10X | 17 | 35 | **−25.79** | 20.58 | −46.37 | 0.44 | 46m |
+| FUT_DONCHIAN_RT_10X | 26 | 19 | −56.95 | 26.97 | −83.91 | 0.32 | 37m |
+| FUT_EMA_PB_10X | 36 | 28 | −80.55 | 31.95 | −112.50 | 0.28 | 39m |
+| FUT_SFP_15X | 40 | 28 | −94.04 | 52.16 | −146.20 | 0.36 | 26m |
+| **FUT_EMA_PB_20X** | 35 | 23 | **−134.04** | 64.08 | −198.12 | 0.32 | 41m |
+
+Every lane net-negative, every PF ≤ 0.44, win% 19–35%. Best (least-bad) = **VWAP_10X −$25.79 (PF 0.44, highest win 35%)** — reclaimed the top after a +$8 cleanup gain (−33.79→−25.79); worst = **EMA_PB_20X −$134.04**. (A stray `FUT_MOMENTUM_CONF` closed 1 trade at $0.00 — V2 lane name, excluded from rankings.)
+
+**EMA_PB 10X vs 20X head-to-head (13th straight net win for 10X):** identical entries, 10X −$80.55 vs 20X −$134.04 → 20X loses **1.66×** more (≈flat vs last hour's 1.68×). Both lanes added +6 mostly-orphan closes this hour so net barely moved. Note **20X's PF (0.32) ≈ 10X's (0.28)** — leverage-neutral profit factor is identically broken (~0.3) on both; the 1.66× net gap is *pure leverage amplification* of the same edge-less entries. 20X is **34% of the futures loss at 23% win** — still the single largest drag.
+
+**Exit-reason split — Futures (era, n=155):**
+
+| Exit | Closed | Net | Avg |
+|---|---|---|---|
+| **paper_stop** | 67 | **−511.16** | −7.63 |
+| breakeven_stop | 23 | −10.89 | −0.47 |
+| stagnant_exit | 5 | −5.51 | −1.10 |
+| no_traction | 1 | −3.81 | −3.81 |
+| **restart_orphan** | 22 | **+28.27** | +1.29 |
+| **paper_trail** | 37 | **+111.73** | +3.02 |
+
+**12th straight run** with paper_stop > total futures loss: paper_stop alone (−$511.16) = **131% of the −$391.36 loss**. The two green exits are `paper_trail` (+$111.73, the only structural edge — frozen, no winners closed this hour) and the new one-off `restart_orphan` (+$28.27, deploy cleanup). 100% of the genuine bleed is still entries dying at the stop before traction. **Verdict: STRATEGY (no entry edge in chop), not an engine bug** — stop/trail/breakeven machinery all behave correctly; the restart cleanup is also behaving as designed.
+
+**Per-lane — Options SELL_V3 (era, closed only):**
+
+| Lane | Closed | Win% | Net |
+|---|---|---|---|
+| OPT_SELL_PUT_V3 | 16 | 44 | **−8.80** |
+| OPT_SELL_RANGE_V3 | 11 | 45 | −9.75 |
+| OPT_SELL_CALL_V3 | 15 | 33 | −14.26 |
+
+Options near-flat hour (+$0.04, 2 closes). PUT_V3 **recovered** (+4 closes: net −9.06→−8.80, win 33%→44%) back toward near-green; RANGE_V3 also best-win at 45% (−9.75). CALL_V3 the worst options lane (−14.26, 33%). All n ≤16 → no verdict; options stays the far-less-bad book (−$33 vs −$391).
+
+**DK harvest/strangle cohort:** **still 0 trades this era** — neither DK_V3 (trend-pick) nor the DK_PUT/DK_CALL strangle has fired. Entry window 07:30–11:18 UTC; today's window passed before the lanes had data, so first real chance is **tomorrow's (06-11) 07:30–11:18Z**. Combined-daily-strangle headline: N/A (n=0). Verify the lanes actually arm at window open tomorrow.
+
+**What to change next:**
+1. **Do NOT read this hour's +$24 as a turn — it is deploy cleanup (`restart_orphan` +$25), not edge.** The real engine (paper_stop/paper_trail) closed nothing; underlying loss is flat (−$419.6 ex-orphans vs −$418.4). Watch the next 1–2 hours of *genuine* closes post-restart before drawing any trend.
+2. **RETIRE FUT_EMA_PB_20X (loud, 13th ask).** −$134.04 = 34% of the futures loss, 23% win, loses 1.66× to its own 10X twin on identical entries; PF-neutral evidence (0.32 vs 0.28) proves the leverage is pure amplification of a dead edge. The single concrete lever; monitor is read-only and cannot flip it.
+3. **Futures structural:** bleed is 100% entry-quality (paper_stop −$511 vs paper_trail +$112). Attack entry selection (raise conf gate) — not the exits, which work. Hold all futures dark for live.
+4. **Options:** PUT_V3 regaining near-green (−$8.80, 44% win) but n ≤16 — no lane to crown yet. Safer book by far.
+5. **DK:** nothing to judge until tomorrow's 07:30–11:18Z window produces the first settlements; confirm the lanes arm.
+
 ### 2026-06-10 17:39 UTC — V3 ~20.3h in: futures −$418.42 (n=132), options −$33.94 (n=34), burns 0, live OFF; **worst futures hour of the era — 8/8 closes were stop-outs (−$88, ≈ −$11/trade), paper_trail frozen → zero green closes**; paper_stop = **122% of futures loss** (11th run >100%); EMA_PB 10X beats 20X **12th straight**, gap re-widened 1.57×→1.68× (20X bled 2× the 10X this hour); PUT_V3 gave back its near-green status (−1.21→−9.06); DK strangle **still 0 fills this era** `[updated by: alpha-paper-lab-monitor]`
 **Era:** V3 started 2026-06-09T21:21:00Z (V2 frozen, excluded). Live OFF confirmed — `bot_status.is_paused`=**true** / `bot_state`=paused (ts 17:37:54Z), **0** `options_scalp` opens in last hour (`options_scalp_enabled` flag is true but no live fills). No `paper_deposits` since era start → **burns 0/0**, no refill (both labs ≫ $50 floor).
 
