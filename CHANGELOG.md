@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-10 19:55 IST · DK strangle: sell BOTH sides into settlement + 1h trend for the side call
+
+- `OPT_SELL_DK_PUT_V3` + `OPT_SELL_DK_CALL_V3` (BTC+ETH): the daily strangle — in the decay window both legs always sell 3-OTM and hold through settlement; price must travel 3 strikes one way in hours to hurt a leg, the other leg wins regardless. Head-to-head vs the trend-picked DK lane.
+- `OPT_SELL_DK_V3` side decision moved 15m → 1h EMA (a short held for hours leans on the timeframe it lives on).
+- User-facing: 3 DK lanes per asset on the paper page from tomorrow's window (~13:00–16:50 IST).
+- `(SHA on commit)`
+
 ## 2026-06-10 19:45 IST · DK harvest lane — sell the expiry window, hold through settlement
 
 - Data showed selling never stood where decay happens: avg entry 18.5h from expiry (min 6.2h), avg decay captured −7%, and the trend-break exit churned green positions (13 trades, 7.7% win).

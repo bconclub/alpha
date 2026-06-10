@@ -1164,7 +1164,9 @@ class SellExpiryDecayOptions(BasePaperOptions):
     """
 
     SETUP_TYPE = "OPT_SELL_DK"
-    TIMEFRAME = "15m"
+    TIMEFRAME = "1h"                   # the SIDE decision comes from the hourly drift,
+                                       # not a twitchy 15m EMA — a short held for hours
+                                       # should lean on the timeframe it lives on
     SELL = True
     HOLD_TO_EXPIRY = True
     SELL_EXIT_ON_TREND_BREAK = False   # decay is the thesis, not the 5m trend
@@ -1189,6 +1191,40 @@ class SellExpiryDecayOptions(BasePaperOptions):
         if ema8 >= ema21:
             return "long", f"{ts}:long", meta     # uptrend → short put below
         return "short", f"{ts}:short", meta       # downtrend → short call above
+
+
+class SellDkStrangleLeg(SellExpiryDecayOptions):
+    """One leg of the daily DK strangle: ALWAYS sell this side in the decay
+    window, no trend opinion, one step further OTM (3) as the safety margin.
+
+    Run the put leg + call leg together and you're short a strangle into
+    settlement: price has to travel 3 strikes in a specific direction within
+    a few hours to hurt one leg — and the other leg wins regardless. The
+    purest version of "capture a lot of DK". Breach exit guards each leg.
+    """
+
+    SELL_OTM_STEPS = 3
+    LEG_SIDE = "long"   # long → sell put; short → sell call
+
+    def _entry_decision(self, rows, spot):
+        tte_h = self.chain.seconds_to_expiry() / 3600.0
+        if not (self.DK_MIN_TTE_H <= tte_h <= self.DK_MAX_TTE_H):
+            return None
+        if len(rows) < 2:
+            return None
+        ts = int(rows[:-1][-1][0])
+        meta = {"timeframe": self.TIMEFRAME, "tte_h": round(tte_h, 2), "confidence_score": 70.0}
+        return self.LEG_SIDE, f"{ts}:{self.LEG_SIDE}", meta
+
+
+class SellDkPutLeg(SellDkStrangleLeg):
+    SETUP_TYPE = "OPT_SELL_DK_PUT"
+    LEG_SIDE = "long"
+
+
+class SellDkCallLeg(SellDkStrangleLeg):
+    SETUP_TYPE = "OPT_SELL_DK_CALL"
+    LEG_SIDE = "short"
 
 
 def build_paper_options_strategies(
@@ -1224,5 +1260,8 @@ def build_paper_options_strategies(
         mk(SellPutTrendOptions, "sell_put", setup_override="OPT_SELL_PUT_V3", otm_steps=2),
         mk(SellCallTrendOptions, "sell_call", setup_override="OPT_SELL_CALL_V3", otm_steps=2),
         mk(SellPremiumNeutralOptions, "sell_range", setup_override="OPT_SELL_RANGE_V3", otm_steps=3),
-        mk(SellExpiryDecayOptions, "sell_dk", use_chain=chain_near, setup_override="OPT_SELL_DK_V3"),
+        mk(SellExpiryDecayOptions, "sell_dk", tf="1h", use_chain=chain_near, setup_override="OPT_SELL_DK_V3"),
+        # the daily strangle: both legs, always on in the window, settle-through
+        mk(SellDkPutLeg, "sell_dk_put", tf="1h", use_chain=chain_near, setup_override="OPT_SELL_DK_PUT_V3"),
+        mk(SellDkCallLeg, "sell_dk_call", tf="1h", use_chain=chain_near, setup_override="OPT_SELL_DK_CALL_V3"),
     ]
