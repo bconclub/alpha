@@ -64,3 +64,24 @@ Options (buy AND sell), leverage > ~5–8×, 1-minute momentum, mean-reversion /
 4. Scale only if the live sample stays green.
 
 When you say "go": I'll (a) reconfigure the paper futures lab to this exact spec to validate, then (b) on a green gate, flip `PAPER_ONLY=0` for futures only with the live sizing above. Live stays OFF until step 3.
+
+---
+
+## 6. SHIPPED 2026-06-11 — the LiveMirror (how live actually runs now)
+
+Built per user decision: tiny live validation IN PARALLEL with the paper lab
+("paper takes 10 trades, live takes the best 1"). Code: `engine/alpha/live_mirror.py`.
+
+- **Selection**: mirrors a paper lane entry only if conf ≥ 85 + 1h-trend-aligned
+  + from the lane with the best trailing-48h profit factor + no live position open.
+- **Sizing**: ~$5 margin @ 10× (1–3 Delta contracts), hard cap $8.
+- **Rails**: max 1 open · daily realized ≤ −$3 → stand down till UTC midnight ·
+  balance < $20 → kill switch + Telegram · exits = the validated V3 engine
+  (ATR stop → breakeven ratchet → tightening trail → stagnation/no-traction → 24h).
+- **Restarts re-attach** to the open live position (it's real; never auto-closed).
+- **Legacy live paths (scalp signal-mix, options buying) are hard-blocked**
+  unless `LIVE_MODE=legacy` (never planned).
+- **Flip procedure** (user-approved only): set `PAPER_ONLY=0` and
+  `LIVE_MODE=mirror` in `/root/alpha/engine/.env`, restart `alpha-bot`.
+  Telegram announces every live open/close. Dashboard home shows the Live
+  Mirror panel (balance, rails, live W/L, and the paper-lane scoreboard).

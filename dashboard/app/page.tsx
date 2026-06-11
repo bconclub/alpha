@@ -14,6 +14,7 @@ import {
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
+import LiveMirrorPanel from '@/components/LiveMirrorPanel';
 import { ExitChip } from '@/components/ui/ExitChip';
 import { ArrowUp, ArrowDown } from 'lucide-react';
 
@@ -248,10 +249,11 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
         </div>
       </div>
 
-      {/* 2. Signal strength bar */}
-      <div className="mb-4 rounded-xl bg-white/[0.03] p-3">
+      {/* 2. Signal strength bar — LEGACY feed: reference only, the old scalp
+          system no longer drives any trading (LiveMirror copies paper lanes) */}
+      <div className="mb-4 rounded-xl bg-white/[0.03] p-3 opacity-70">
         <div className="flex justify-between text-xs mb-2">
-          <span className="text-gray-400 uppercase tracking-[0.18em]">Signal Strength</span>
+          <span className="text-gray-400 uppercase tracking-[0.18em]">Signal Feed <span className="normal-case tracking-normal text-gray-600">(legacy · not trading)</span></span>
           <span className="font-mono text-white">{asset.confidence.toFixed(0)}%</span>
         </div>
         <div className="relative h-2 bg-gray-800 rounded-full overflow-hidden">
@@ -718,6 +720,12 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Live Mirror — the V3 live path: real-money status, rails, and the
+          paper-lane scoreboard it copies from */}
+      <div className="mb-4">
+        <LiveMirrorPanel />
       </div>
 
       {/* Live active positions */}

@@ -384,7 +384,13 @@ class AlphaBot:
         # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals
         # Options use Delta exchange, signals come from Delta scalp strategies
         # PAPER-ONLY: skip building live options entirely (proven net-negative bleeder).
-        if self.delta and self.delta_options and self._options_enabled and not self.paper_only:
+        # V3: legacy live strategies additionally require LIVE_MODE=legacy — the
+        # only supported live path is the LiveMirror (LIVE_MODE=mirror).
+        self._live_mode = os.getenv("LIVE_MODE", "off").strip().lower()
+        if (
+            self.delta and self.delta_options and self._options_enabled
+            and not self.paper_only and self._live_mode == "legacy"
+        ):
             for pair in config.delta.options_pairs:
                 # Map options pair to Delta scalp strategy (delta-prefixed keys)
                 base = pair.split("/")[0]
@@ -438,10 +444,32 @@ class AlphaBot:
 
         # PAPER-ONLY: hard-block every live entry path via the risk manager so a
         # restart can never resume real trading. Paper lanes ignore this flag.
+        # The legacy scalp/options live paths also stay blocked unless
+        # LIVE_MODE=legacy is set explicitly (the V3 live path is LiveMirror,
+        # which manages its own rails and ignores the risk-manager pause).
         if self.paper_only:
             self.risk_manager.is_paused = True
             self.risk_manager._pause_reason = "PAPER-ONLY mode (no live trading)"
             logger.warning("⚠️ PAPER-ONLY MODE — live trading disabled; only paper lab runs")
+        elif self._live_mode != "legacy":
+            self.risk_manager.is_paused = True
+            self.risk_manager._pause_reason = f"LIVE_MODE={self._live_mode or 'off'} (legacy live paths blocked)"
+            logger.warning("⚠️ Legacy live paths blocked (LIVE_MODE=%s) — only LiveMirror may trade", self._live_mode)
+
+        # LiveMirror — the V3 live path: mirrors the single best paper signal
+        # with tiny size and hard rails. Requires PAPER_ONLY=0 AND LIVE_MODE=mirror.
+        self.live_mirror = None
+        if self.delta and self._live_mode == "mirror" and not self.paper_only:
+            from alpha.live_mirror import LiveMirror
+
+            self.live_mirror = LiveMirror(
+                self.delta,
+                self.db,
+                self.alerts,
+                balance_fn=lambda: self._fetch_portfolio_usd(self.delta),
+            )
+        elif self._live_mode == "mirror":
+            logger.info("LiveMirror armed but INACTIVE (PAPER_ONLY is on)")
 
         # Inject restored position state into strategy instances
         await self._restore_strategy_state()
@@ -492,6 +520,9 @@ class AlphaBot:
                 paper_total,
                 ", ".join(self.paper_futures_pairs),
             )
+
+        if self.live_mirror:
+            await self.live_mirror.start()
 
         # Start paper OPTIONS lanes (buy-only, BTC/ETH)
         opt_started = 0
@@ -730,6 +761,10 @@ class AlphaBot:
             for lane in opt_lanes:
                 if lane.is_active:
                     stop_tasks.append(lane.stop())
+        if getattr(self, "live_mirror", None) and self.live_mirror.is_active:
+            # NOTE: does not close the live position — it's real and persists
+            # on the exchange; the mirror re-attaches to it on next boot.
+            stop_tasks.append(self.live_mirror.stop())
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
 
@@ -1528,6 +1563,8 @@ class AlphaBot:
             if command == "pause":
                 self.risk_manager.is_paused = True
                 self.risk_manager._pause_reason = params.get("reason", "Paused via dashboard")
+                if getattr(self, "live_mirror", None):
+                    self.live_mirror.user_paused = True   # no NEW live entries; open position still managed
                 # Stop all active strategies (scalp + options overlays + paper futures)
                 stop_tasks = []
                 for pair, scalp in self._scalp_strategies.items():
@@ -1566,6 +1603,15 @@ class AlphaBot:
                     self.risk_manager._pause_reason = "PAPER-ONLY mode (no live trading)"
                     await self.alerts.send_command_confirmation("resume")
                     result_msg = "Paper lab resumed (PAPER-ONLY: live stays off)"
+                elif getattr(self, "_live_mode", "off") != "legacy":
+                    # MIRROR mode: resume = let the LiveMirror take entries again.
+                    # Legacy scalp/options stay blocked; risk manager stays paused.
+                    self.risk_manager.is_paused = True
+                    self.risk_manager._pause_reason = f"LIVE_MODE={self._live_mode or 'off'} (legacy live paths blocked)"
+                    if getattr(self, "live_mirror", None):
+                        self.live_mirror.user_paused = False
+                    await self.alerts.send_command_confirmation("resume")
+                    result_msg = "Paper lab + LiveMirror resumed (legacy live stays off)"
                 else:
                     self.risk_manager.unpause(force=force)
                     await self._analysis_cycle()  # re-evaluate and start strategies

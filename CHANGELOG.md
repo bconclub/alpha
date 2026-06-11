@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-11 15:30 IST · LiveMirror — the real-money path (armed, OFF until flipped)
+
+- `engine/alpha/live_mirror.py` (new): mirrors the single best paper signal — conf ≥85, 1h-trend-aligned, best trailing-48h-PF lane, max 1 open — with ~$5 margin @ 10× on Delta perps (1–3 contracts, $8 hard cap). Exits run the validated V3 engine (ATR stop, breakeven ratchet, tightening trail, stagnation/no-traction, 24h max).
+- Hard rails: daily realized ≤ −$3 → no new entries till UTC midnight; balance < $20 → kill switch + Telegram; every open/close announced on Telegram; restarts RE-ATTACH to the open live position (real positions are never auto-closed).
+- `main.py`: `LIVE_MODE` env — `mirror` is the only supported live path; legacy scalp/options live trading now requires `LIVE_MODE=legacy` (blocked otherwise, even with PAPER_ONLY=0). Pause/resume commands govern mirror entries.
+- Dashboard: new **Live Mirror panel** on home (real Delta balance, rails, live W/L + net, open position with stop, and the paper-lane scoreboard with win rate + PF showing which lane the mirror copies). Legacy "Signal Strength" relabeled *Signal feed (legacy · not trading)*. New `/api/live` route.
+- User-facing: home page now leads with LIVE vs PAPER clearly; flip = `PAPER_ONLY=0` + `LIVE_MODE=mirror` on the VPS (user-approved only).
+- `(SHA on commit)`
+
 ## 2026-06-11 14:15 IST · Unblock the DK strangle + retire SFP
 
 - DK strangle legs never filled: 3-OTM credits at $1,000 notional ($0.50–0.60) sat under the $0.75 credit gate. Legs now sell 2-OTM with a $0.50 gate — deployed inside today's entry window so both legs can still fill before the 17:30 IST settle. DK_V3 trend-pick already holds the era's first DK trade into settlement.
