@@ -1207,12 +1207,16 @@ class SellDkStrangleLeg(SellExpiryDecayOptions):
     window, no trend opinion, one step further OTM (3) as the safety margin.
 
     Run the put leg + call leg together and you're short a strangle into
-    settlement: price has to travel 3 strikes in a specific direction within
+    settlement: price has to travel 2 strikes in a specific direction within
     a few hours to hurt one leg — and the other leg wins regardless. The
     purest version of "capture a lot of DK". Breach exit guards each leg.
+
+    (Was 3-OTM: at $1,000 notional those credits were $0.50–0.60 — under the
+    $0.75 credit gate, so the legs NEVER filled. 2-OTM credits clear it.)
     """
 
-    SELL_OTM_STEPS = 3
+    SELL_OTM_STEPS = 2
+    SELL_MIN_CREDIT_USD = 0.5
     LEG_SIDE = "long"   # long → sell put; short → sell call
 
     def _entry_decision(self, rows, spot):

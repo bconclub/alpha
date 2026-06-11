@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-11 14:15 IST · Unblock the DK strangle + retire SFP
+
+- DK strangle legs never filled: 3-OTM credits at $1,000 notional ($0.50–0.60) sat under the $0.75 credit gate. Legs now sell 2-OTM with a $0.50 gate — deployed inside today's entry window so both legs can still fill before the 17:30 IST settle. DK_V3 trend-pick already holds the era's first DK trade into settlement.
+- FUT_SFP_15X retired: era PF 0.15 (worst net and worst PF), 77% of post-gate futures loss at 5.6% win across 5 straight routine flags. Futures lanes now: EMA_PB_10X, DONCHIAN_RT_10X, VWAP_10X.
+- User-facing: 3 futures lanes; DK strangle should show fills today.
+- `(SHA on commit)`
+
 ## 2026-06-11 01:30 IST · V3.1 entries: 1h trend gate + 20× lane retired
 
 - Root cause of the 06-10 evening bleed confirmed trade-by-trade: 15 consecutive LONG stop-outs (~−$170) while the 1h trend was down — 5m entries blind to the hourly tape. (Separately: the 00:00 IST deploy orphan-cancelled 9 open trades carrying ~+$25 — that restart bug was fixed in that same deploy; restarts now close at mark.)

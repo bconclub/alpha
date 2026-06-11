@@ -1060,13 +1060,14 @@ def build_paper_futures_strategies(
         s.setup_type = setup
         return s
 
-    # FUT_EMA_PB_20X RETIRED 2026-06-10 after a clean A/B: 13 consecutive
-    # check-ins it lost ~2.1× the identical-entry 10× lane at half the win
-    # rate (doubled fees ate small wins, doubled swing deepened losses).
-    # Question answered; its history stays in the DB.
+    # RETIRED LANES (history stays in the DB):
+    # - FUT_EMA_PB_20X (2026-06-10): 13-run A/B — 2.1× the loss of identical
+    #   10× entries at half the win rate.
+    # - FUT_SFP_15X (2026-06-11): era PF 0.15, worst net AND worst PF; after
+    #   the 1h gate it was 77% of all futures loss at 5.6% win. The sweep
+    #   pattern needs more confirmation than a one-bar reclaim gives it.
     return [
         mk(EmaPullbackV3, "FUT_EMA_PB_10X", 10.0),
         mk(DonchianRetestV3, "FUT_DONCHIAN_RT_10X", 10.0),
         mk(VwapBounceV3, "FUT_VWAP_10X", 10.0),
-        mk(SfpReversalV3, "FUT_SFP_15X", 15.0),        # tight structural stop earns extra lev
     ]
