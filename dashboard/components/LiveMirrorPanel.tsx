@@ -75,9 +75,9 @@ export default function LiveMirrorPanel() {
     <div className="bg-[#141419] border border-red-500/20 rounded-xl p-4">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         <div className="flex items-center gap-2">
-          <span className={`h-2 w-2 rounded-full ${liveOn ? 'bg-red-500 animate-pulse' : 'bg-zinc-600'}`} />
+          <span className={`h-2 w-2 rounded-full ${liveOn ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
           <h3 className="text-sm font-bold uppercase tracking-wider text-gray-300">Live Mirror — real money</h3>
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${liveOn ? 'bg-red-500/15 text-red-300' : 'bg-zinc-700/40 text-zinc-400'}`}>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${liveOn ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-700/40 text-zinc-400'}`}>
             {liveOn ? 'LIVE ON' : 'LIVE OFF'}
           </span>
         </div>

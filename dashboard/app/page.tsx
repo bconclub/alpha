@@ -655,12 +655,12 @@ export default function DashboardPage() {
               <span className={cn(
                 'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold',
                 botState === 'live_mirror' || botState === 'running'
-                  ? 'bg-red-500/15 text-red-300'
+                  ? 'bg-emerald-500/15 text-emerald-300'
                   : 'bg-zinc-700/40 text-zinc-400'
               )}>
                 <span className={cn(
                   'h-1.5 w-1.5 rounded-full',
-                  botState === 'live_mirror' || botState === 'running' ? 'bg-red-400 animate-pulse' : 'bg-zinc-500'
+                  botState === 'live_mirror' || botState === 'running' ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'
                 )} />
                 LIVE {botState === 'live_mirror' || botState === 'running' ? 'ON' : 'OFF'}
               </span>

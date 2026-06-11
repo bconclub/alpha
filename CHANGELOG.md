@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-11 23:45 IST · INCIDENT FIX: mirror re-entry bug + DB constraint + green chips
+
+- **Incident (cost: $0.03)**: the mirror's first signal fired 4 duplicate BTC longs in 90s. Root cause chain: `trades_strategy_check` DB constraint rejected `strategy='live_mirror'` → insert returned None → the mirror's open-position gate keyed off the DB id → it believed it had no position and re-entered until margin ran out. The legacy orphan-protection reconciler auto-flattened all 4 contracts at market 2 minutes later. Account: $27.08 → $27.05.
+- **Fixes**: (1) migration extends the constraint to allow `live_mirror`; (2) position tracking now keys off an in-memory `_position_open` flag set the instant an order fills — never the DB; (3) failed inserts park the row and self-heal from the manage loop, with a Telegram warning; (4) the reconciler's "has open DB trade → don't close" branch now applies to mirror trades.
+- **UI**: anything ON is now GREEN — PAPER ON and LIVE ON chips both emerald (LIVE OFF gray); same for the mirror panel badge.
+- `(SHA on commit)`
+
 ## 2026-06-11 18:50 IST · Dead-simple status chips: ● PAPER ON · ● LIVE ON
 
 - User: the status text was confusing (and stale — said "Live OFF" after the flip). Replaced with two colored chips on the capital card: PAPER ON/OFF (green) and LIVE ON/OFF (red pulse when on, gray when off).

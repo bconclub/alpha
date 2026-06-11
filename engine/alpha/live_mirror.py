@@ -86,6 +86,13 @@ class LiveMirror:
         self._daily_date = ""
         self._pf_cache: tuple[float, dict[str, float]] = (0.0, {})
         # open position state
+        # CRITICAL: _position_open is the source of truth for "do we have a real
+        # position", set the instant an exchange order fills. It must NEVER
+        # depend on the DB write succeeding — on 06-11 a DB CHECK constraint
+        # rejected the insert, _row_id stayed None, and the mirror re-entered
+        # 4x before the margin ran out (orphan protection flattened it, -$0.03).
+        self._position_open = False
+        self._pending_row: dict[str, Any] | None = None   # row to retry-insert if log_trade failed
         self._row_id: int | None = None
         self._pair = ""
         self._direction = ""            # long | short
@@ -162,6 +169,7 @@ class LiveMirror:
             return
         r = rows[0]
         meta = r.get("metadata") or {}
+        self._position_open = True
         self._row_id = int(r["id"])
         self._pair = r["pair"]
         self._direction = r.get("position_type") or ("long" if r.get("side") == "buy" else "short")
@@ -190,7 +198,7 @@ class LiveMirror:
             self._daily_date = today
             self._daily_realized = 0.0
 
-        if self._row_id:
+        if self._position_open:
             await self._manage_position()
             return
 
@@ -364,7 +372,21 @@ class LiveMirror:
                 "be_locked": False,
             },
         }
+        # The exchange order is FILLED — we have a position no matter what the
+        # DB says. Mark it open first; the row insert may fail and be retried.
+        self._position_open = True
         self._row_id = await self.db.log_trade(row)
+        if not self._row_id:
+            self._pending_row = row
+            logger.error("LIVE trade opened but DB insert failed — position IS managed, insert will retry")
+            try:
+                await self.alerts._send(
+                    "⚠️ <b>Live trade opened but DB record failed</b> — the position is "
+                    "still fully managed in-memory; the record insert will retry.",
+                    allow_in_quiet=True,
+                )
+            except Exception:
+                pass
         self._pair = pair
         self._direction = direction
         self._contracts = contracts
@@ -401,6 +423,12 @@ class LiveMirror:
         return self.TRAIL_ATR_MULT
 
     async def _manage_position(self) -> None:
+        # Heal a failed open-insert so the dashboard/trade board see the position.
+        if self._row_id is None and self._pending_row is not None:
+            self._row_id = await self.db.log_trade(self._pending_row)
+            if self._row_id:
+                self._pending_row = None
+                logger.warning("LIVE trade DB record healed: id=%s", self._row_id)
         try:
             ticker = await self.exchange.fetch_ticker(self._pair)
             price = float(ticker.get("last") or 0)
@@ -510,6 +538,8 @@ class LiveMirror:
             )
         except Exception:
             pass
+        self._position_open = False
+        self._pending_row = None
         self._row_id = None
         self._pair = ""
         self._direction = ""
