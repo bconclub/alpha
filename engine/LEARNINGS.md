@@ -2866,3 +2866,40 @@ No futures closes this window. paper_stop still 884 / −$30,457 (> the entire �
 4. **Options: fix the fee model (ENGINE BUG, structural lever).** Charge on premium/stake, not notional. Still the lever that keeps the lane positive even though the cushion recovered this hour.
 
 **Verdict status:** unchanged. #8 (aggressive high-lev futures) **DEAD** (−$27.17k, n=1,575), idle — frozen to the cent for the 5th straight hour, entire book flat this window. #6 (OTM option selling) **gross-positive overall (+$8.79), cushion rebounded, decay thesis unconfirmed** — back to fee-capped/watch, not at a verdict. Low-leverage cohort (10–20×): **102 closed / −$300, net-negative, no closes this window so trend unverifiable, no edge** — n ≤29/lane, far from a verdict. No strategy crowned; not enough closes.
+
+> Note: the 06-10 19:00Z+ V3.1 hourly check-ins (HTF-gate era) live in the git commit log, not appended here. Resuming the in-file log below at 06-11 02:38Z.
+
+### 2026-06-11 02:38 UTC — V3.1 VERIFICATION HOUR 7 — check-in `[updated by: Cowork]`
+
+**Era state (V3 since 2026-06-09 21:21Z, ~29.3h):** Live **OFF** (`is_paused=true`, fresh rows 02:36/02:38Z; 0 `options_scalp` opens last hour ✓). Burns **0** (no refill rows this era). FUNDED $1,000/lab.
+- **Futures:** closed-only net **−$496.41** (n=159). BALANCE **$503.59**.
+- **Options:** closed-only net **−$43.29** (n=51). BALANCE **$956.71**.
+
+**This hour (vs 01:40 baseline −$487.05/n=156):** futures **−$9.36 / +3 closes**, reconciles to the cent. All 3 closes were **FUT_SFP_15X htf=−1 aligned shorts, ALL `paper_stop`** (−4.17 / −4.52 / −0.68 = −9.37). **2 more SFP_15X htf=−1 shorts opened** (only open positions in the book). **Options 0 closes / unchanged** (−$43.29).
+
+**The signal — now overwhelming, 3rd straight hour:** FUT_SFP_15X is the **ONLY lane traded** again. The HTF gate remains **mechanically flawless** — every close and every open this hour is an aligned htf=−1 short, zero counter-trend leakage (8th+ straight hour). But the gate is funneling **100% of throughput into the single worst lane.** SFP_15X is now **worst net AND worst PF** by a wide margin.
+
+**Per-lane — Futures (era, closed, worst→best net):**
+
+| Lane | n | Win% | Net | PF | Hold |
+|---|---|---|---|---|---|
+| **FUT_SFP_15X** | 52 | 15 | **−183.71** | **0.14** | 26.9m |
+| FUT_EMA_PB_20X *(RETIRED)* | 31 | 16 | −137.58 | 0.26 | 47.2m |
+| FUT_EMA_PB_10X | 36 | 22 | −90.32 | 0.23 | 43.4m |
+| FUT_DONCHIAN_RT_10X | 25 | 24 | −50.97 | **0.38** (best) | 39.5m |
+| FUT_VWAP_10X | 15 | 27 | −33.84 | 0.24 | 43.6m |
+
+FUT_EMA_PB_20X **retirement still sticking** — frozen 31/−137.58 (0 new). SFP_15X overtook it as worst net last hour and extended the gap this hour (−174.35 → −183.71, +9.36 = the entire hour's damage).
+
+**Exit reasons — Futures (era):** `paper_stop` **81 / −571.64** (51% count share; +2 since last snapshot, both SFP), `paper_trail` **40 / +113.89 — FROZEN 3rd straight hour** (gate routes everything into SFP stops; nothing reaches the trail), `breakeven_stop` 28/−17.27, `stagnant_exit` 8/−11.17, `no_traction` 2/−10.23. paper_trail is the ONLY net-green exit and it is starved.
+
+**Options lanes (era, closed):** RANGE_V3 13/−16.61 (PF 0.23, worst net), CALL_V3 24/−16.57 (PF 0.31), PUT_V3 14/−10.11 (**PF 0.51, least-bad**). **DK strangle (DK_PUT/DK_CALL/DK_V3): 0 fills the entire era** — next entry window 06-12 07:30–11:18Z. Headline strangle number still undefined (n=0).
+
+**Engine-bug status:** none. Closes reconcile to the cent (−9.37 ≈ −9.36 move), gate alignment perfect, stops sized correctly (−0.5 to −4.5 per 15× SFP short). The loss is **strategy, not mechanics** — SFP entry quality is the leak; HTF alignment is confirmed NOT to be edge (7 straight hours of aligned-SFP bleeding).
+
+**What we should change:**
+1. **URGENT (3rd hour recommending): retire FUT_SFP_15X**, mirroring the FUT_EMA_PB_20X retirement. It is the worst lane on both net (−183.71) and PF (0.14), it is the ONLY lane the gate is feeding, and it is still being traded → the retirement has **not yet been deployed.** A flawless gate cannot rescue a 0.14-PF entry; it just concentrates the bleed.
+2. **Leave the other 3 active lanes untouched** — DONCHIAN (best PF 0.38), VWAP (least-bad net), EMA_PB_10X — they're starved of fills but not the problem.
+3. **Options:** no action; flat hour, PUT_V3 remains least-bad (PF 0.51). Await DK strangle's first fills (06-12 window) before any options verdict.
+
+**Verdict status:** **HTF alignment is NOT edge — settled.** 7 straight hours of aligned htf=−1 SFP shorts stopping out proves the gate's directional filter works mechanically but adds no expectancy when entry quality is poor. FUT_SFP_15X = retire-now candidate (worst net −183.71, worst PF 0.14). FUT_EMA_PB_20X retirement holding (frozen −137.58). No lane near the PF>1.0 / n~200 live gate; no strategy crowned.
