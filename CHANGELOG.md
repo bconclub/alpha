@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-11 15:50 IST · Status label honesty: "Paused" → "Engine On · Paper Lab · Live OFF"
+
+- The Total Capital card said "Paused" — that's the LEGACY live system's risk gate, which is permanently locked in the V3 era (engine + paper lab run regardless; heartbeat was 45s old with 16 paper opens in 2h when reported). Label now states the actual mode instead of alarming.
+- User-facing: home status reads "Engine On · Paper Lab · Live OFF" (green) until the mirror is flipped.
+- `(SHA on commit)`
+
 ## 2026-06-11 15:30 IST · LiveMirror — the real-money path (armed, OFF until flipped)
 
 - `engine/alpha/live_mirror.py` (new): mirrors the single best paper signal — conf ≥85, 1h-trend-aligned, best trailing-48h-PF lane, max 1 open — with ~$5 margin @ 10× on Delta perps (1–3 contracts, $8 hard cap). Exits run the validated V3 engine (ATR stop, breakeven ratchet, tightening trail, stagnation/no-traction, 24h max).

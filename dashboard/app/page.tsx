@@ -642,9 +642,12 @@ export default function DashboardPage() {
           {capitalInr > 0 && <div className="text-xs text-gray-500 mt-1">₹{capitalInr.toLocaleString('en-IN')}</div>}
           <div className="mt-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className={cn('w-2 h-2 rounded-full', botState === 'running' ? 'bg-green-500' : 'bg-yellow-500')} />
-              <span className={cn('text-xs', botState === 'running' ? 'text-green-500' : 'text-yellow-500')}>
-                {botState === 'running' ? 'Running' : 'Paused'}
+              {/* bot_state 'paused' = the LEGACY live system's risk gate, which is
+                  permanently locked in the V3 era. The engine + paper lab run
+                  regardless; live exposure is governed by the LiveMirror panel. */}
+              <span className={cn('w-2 h-2 rounded-full', botState === 'running' ? 'bg-green-500' : 'bg-emerald-400')} />
+              <span className={cn('text-xs', botState === 'running' ? 'text-green-500' : 'text-emerald-300')}>
+                {botState === 'running' ? 'Running' : 'Engine On · Paper Lab · Live OFF'}
               </span>
               {uptimeSeconds > 0 && <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>}
             </div>
