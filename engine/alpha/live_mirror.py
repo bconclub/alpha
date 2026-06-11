@@ -110,6 +110,16 @@ class LiveMirror:
             "🔴 LiveMirror ACTIVE — real money. margin=$%.2f lev=%.0fx daily_stop=$%.2f kill=$%.2f",
             self.MARGIN_USD, self.LEVERAGE, self.DAILY_LOSS_STOP, self.KILL_BALANCE,
         )
+        try:
+            await self.alerts._send(
+                "🔴 <b>LIVE MIRROR ACTIVE — real money</b>\n"
+                f"${self.MARGIN_USD:.0f}/trade · {self.LEVERAGE:.0f}x · max 1 open\n"
+                f"Day stop −${abs(self.DAILY_LOSS_STOP):.0f} · kill switch &lt;${self.KILL_BALANCE:.0f}\n"
+                "Waiting for the next conf≥85 trend-aligned signal from the best lane.",
+                allow_in_quiet=True,
+            )
+        except Exception:
+            pass
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
