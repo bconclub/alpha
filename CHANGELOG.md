@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-12 00:40 IST · INCIDENT 2 FIX: legacy scalp closed the mirror's trade + trade board clarity
+
+- **Incident**: after the 23:32 restart, the orphan-RESTORE branch injected the mirror's open BTC long into the legacy scalp strategy; scalp's protective SL then sold it on the exchange 3 min later (the "SQUEEZE" ghost row). Mirror trade #3697 reconciled to its real exit (−$0.26); duplicate row #3698 cancelled.
+- **Engine fix**: both reconciler restore paths now refuse to hand a `live_mirror` position to scalp — the mirror owns its positions, full stop.
+- **Trade board (user asks)**: Setup chips now short human names (Donchian, EMA Pullback, VWAP, Liq Sweep — never raw lane ids); new **Market** column (Futures / Option Buy / Option Sell / Spot); new **Money In** column showing real $ committed (margin/premium); both also on mobile cards.
+- `(SHA on commit)`
+
 ## 2026-06-11 23:45 IST · INCIDENT FIX: mirror re-entry bug + DB constraint + green chips
 
 - **Incident (cost: $0.03)**: the mirror's first signal fired 4 duplicate BTC longs in 90s. Root cause chain: `trades_strategy_check` DB constraint rejected `strategy='live_mirror'` → insert returned None → the mirror's open-position gate keyed off the DB id → it believed it had no position and re-entered until margin ran out. The legacy orphan-protection reconciler auto-flattened all 4 contracts at market 2 minutes later. Account: $27.08 → $27.05.

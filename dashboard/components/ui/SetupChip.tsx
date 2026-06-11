@@ -7,6 +7,11 @@ const SETUP_STYLES: Record<string, { bg: string; text: string; ring: string }> =
   TREND_FLOW: { bg: "bg-emerald-500/15", text: "text-emerald-300", ring: "ring-emerald-500/30" },
   PREMIUM_WAVE: { bg: "bg-lime-500/15", text: "text-lime-300", ring: "ring-lime-500/30" },
   FVG_CHOCH: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
+  // V3 mirror lanes (short, human names — never the raw lane id)
+  DONCHIAN: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
+  EMA_PULLBACK: { bg: "bg-cyan-500/15", text: "text-cyan-300", ring: "ring-cyan-500/30" },
+  VWAP: { bg: "bg-amber-500/15", text: "text-amber-300", ring: "ring-amber-500/30" },
+  LIQ_SWEEP: { bg: "bg-rose-500/15", text: "text-rose-300", ring: "ring-rose-500/30" },
 };
 
 const FALLBACK = {
@@ -17,7 +22,15 @@ const FALLBACK = {
 
 // Map legacy names to canonical so old rows render too.
 function canonical(setup: string): string {
-  const u = setup.trim().toUpperCase();
+  let u = setup.trim().toUpperCase();
+  // Mirror/paper lane ids → short names: strip LIVE_ prefix and lane suffixes.
+  if (u.startsWith("LIVE_")) u = u.slice(5);
+  if (u.startsWith("FUT_")) {
+    if (u.includes("DONCHIAN")) return "DONCHIAN";
+    if (u.includes("EMA_PB") || u.includes("EMA_PULLBACK")) return "EMA_PULLBACK";
+    if (u.includes("VWAP")) return "VWAP";
+    if (u.includes("SFP")) return "LIQ_SWEEP";
+  }
   if (u === "BB_SQUEEZE" || u === "BB_SQUEEZE_BREAKOUT" || u === "SQUEEZE_BREAKOUT") {
     return "SQUEEZE";
   }
@@ -49,15 +62,17 @@ export function SetupChip({
   if (!setup) return <span className="text-zinc-600">—</span>;
   const key = canonical(setup);
   const style = SETUP_STYLES[key] || FALLBACK;
-  const label = key === "PULLBACK"
-    ? "Pullback"
-    : key === "TREND_FLOW"
-      ? "Trend Flow"
-      : key === "PREMIUM_WAVE"
-        ? "Premium Wave"
-        : key === "FVG_CHOCH"
-          ? "Zone Pullback"
-          : key.replace("_", " ");
+  const LABELS: Record<string, string> = {
+    PULLBACK: "Pullback",
+    TREND_FLOW: "Trend Flow",
+    PREMIUM_WAVE: "Premium Wave",
+    FVG_CHOCH: "Zone Pullback",
+    DONCHIAN: "Donchian",
+    EMA_PULLBACK: "EMA Pullback",
+    VWAP: "VWAP",
+    LIQ_SWEEP: "Liq Sweep",
+  };
+  const label = LABELS[key] ?? key.replace("_", " ");
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold tracking-wide ring-1 ring-inset ${style.bg} ${style.text} ${style.ring}`}

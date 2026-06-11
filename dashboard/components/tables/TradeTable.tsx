@@ -145,6 +145,8 @@ const COLUMNS: ColumnDef[] = [
   { key: 'timestamp', label: 'Date' },
   { key: 'exit_price', label: 'Exit', align: 'right' },
   { key: 'amount', label: 'Contracts', align: 'right' },
+  { key: 'market', label: 'Market' },
+  { key: 'money_in', label: 'Money In', align: 'right' },
   { key: 'setup_type', label: 'Setup' },
   { key: 'gross_pnl', label: 'Gross P&L', align: 'right' },
   { key: 'fees', label: 'Fees', align: 'right' },
@@ -167,6 +169,35 @@ const STICKY_COLS: Record<string, string> = {
   price: 'left-[292px]',
 };
 const LAST_STICKY_COL = 'price';
+
+/** What market is this trade in? Futures / Option / Spot — the user must never
+ *  have to decode it from a lane id. */
+function getMarketInfo(trade: Trade): { label: string; cls: string } {
+  if (isOptionTrade(trade)) {
+    const sideLabel = trade.position_type === 'short' || trade.side === 'sell' ? 'Option Sell' : 'Option Buy';
+    return { label: sideLabel, cls: 'bg-pink-500/15 text-pink-300 ring-pink-500/30' };
+  }
+  if (trade.exchange === 'delta') {
+    return { label: 'Futures', cls: 'bg-amber-500/15 text-amber-300 ring-amber-500/30' };
+  }
+  return { label: 'Spot', cls: 'bg-zinc-500/15 text-zinc-300 ring-zinc-500/30' };
+}
+
+/** Real money committed to the trade (margin for futures, premium/stake for options). */
+function getMoneyIn(trade: Trade): number | null {
+  const anyT = trade as unknown as Record<string, unknown>;
+  const direct = Number(anyT.collateral ?? anyT.cost ?? 0);
+  if (direct > 0) return direct;
+  const optRisk = getOptionRiskBasis(trade);
+  if (optRisk) return optRisk.stake;
+  // Delta futures fallback: notional / leverage
+  const cs = DELTA_CONTRACT_SIZE[trade.pair];
+  const ct = trade.contracts ?? trade.amount ?? 0;
+  if (cs && ct > 0 && trade.price > 0 && trade.leverage > 0) {
+    return (trade.price * ct * cs) / trade.leverage;
+  }
+  return null;
+}
 
 function inferSetupType(trade: Trade): string | undefined {
   if (trade.setup_type && trade.setup_type.trim()) {
@@ -705,7 +736,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'peak_info' || key === 'confidence' || key === 'risk_reward_ratio') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'peak_info' || key === 'confidence' || key === 'risk_reward_ratio' || key === 'market' || key === 'money_in') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -1068,12 +1099,19 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     {/* Details row */}
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
                       <span>{formatDate(trade.timestamp)}</span>
+                      <span className={cn('inline-flex rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset', getMarketInfo(trade).cls)}>
+                        {getMarketInfo(trade).label}
+                      </span>
                       {inferSetupType(trade) && (
                         <SetupChip setup={inferSetupType(trade)} secondEntry={isSecondEntryTrade(trade)} />
                       )}
                       {trade.leverage > 1 && (
                         <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
                       )}
+                      {(() => {
+                        const m = getMoneyIn(trade);
+                        return m != null ? <span className="font-mono text-amber-300">${m.toFixed(2)} in</span> : null;
+                      })()}
                       {display.pnlPct != null && (
                         <span className={cn('font-mono', getPnLColor(display.pnlPct))}>
                           {isOptionTrade(trade) && display.pnlPct < -100
@@ -1366,6 +1404,21 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               maximumFractionDigits: 6,
                             })
                           )}
+                        </td>
+
+                        {/* Market (Futures / Option Buy / Option Sell / Spot) */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          <span className={cn('inline-flex rounded-md px-2 py-0.5 text-xs font-semibold ring-1 ring-inset', getMarketInfo(trade).cls)}>
+                            {getMarketInfo(trade).label}
+                          </span>
+                        </td>
+
+                        {/* Money In (real $ committed) */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-amber-300">
+                          {(() => {
+                            const m = getMoneyIn(trade);
+                            return m != null ? `$${m.toFixed(2)}` : <span className="text-zinc-600">&mdash;</span>;
+                          })()}
                         </td>
 
                         {/* Setup Type */}

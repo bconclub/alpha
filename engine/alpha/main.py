@@ -4934,7 +4934,15 @@ class AlphaBot:
                     open_trade = await self.db.get_open_trade(
                         pair=pair, exchange="delta",
                     )
-                    if open_trade and open_trade.get("status") == "open":
+                    if open_trade and open_trade.get("status") == "open" and open_trade.get("strategy") == "live_mirror":
+                        # The LiveMirror owns this position. NEVER inject it into
+                        # the legacy scalp strategy — on 06-11 that restore handed
+                        # the mirror's long to scalp, whose protective SL then
+                        # sold it out from under the mirror 3 minutes later.
+                        self._position_first_seen.pop(f"delta:{pair}", None)
+                        restored = True
+                        logger.info("LiveMirror owns %s position — reconciler hands off", pair)
+                    elif open_trade and open_trade.get("status") == "open":
                         # DB knows about this position — restore into strategy
                         # Use DB entry_price (truth), exchange for size/side only
                         db_entry_price = float(open_trade.get("entry_price", 0) or 0)
@@ -5037,8 +5045,9 @@ class AlphaBot:
                             "ORPHAN SKIP: %s has open DB trade (id=%s) — NOT closing",
                             pair, any_open.get("order_id", "?"),
                         )
-                        # Try to restore into strategy if scalp exists
-                        if scalp:
+                        # Try to restore into strategy if scalp exists — but NEVER
+                        # hand a LiveMirror position to the legacy scalp strategy.
+                        if scalp and any_open.get("strategy") != "live_mirror":
                             db_price = float(any_open.get("entry_price", 0) or 0) or entry_px
                             scalp.in_position = True
                             scalp.position_side = side
