@@ -121,6 +121,9 @@ class BasePaperFutures:
     # leverage: leverage only scales the payoff, never the survival of the idea.
     STOP_ATR_MULT = 1.6             # initial stop: entry ∓ 1.6×ATR(14)
     BREAKEVEN_ATR = 1.2             # once +1.2×ATR in profit, stop jumps to entry (exit with profit)
+    PROFIT_LOCK_FRAC = 0.4          # ...and keeps ratcheting: lock 40% of the peak move.
+                                    # Closes the 4–15% dead zone where BE protected but the
+                                    # 1.8-ATR trail never harvested (live #3699: +6.6% peak → $0.00)
     TRAIL_ARM_ATR = 1.0             # arm the chandelier after +1×ATR favorable excursion
     TRAIL_ATR_MULT = 1.8            # then trail 1.8×ATR behind the peak price...
     # ...and TIGHTEN as the win grows — a +23% peak must be BANKED, not allowed
@@ -312,10 +315,15 @@ class BasePaperFutures:
                 return "breakeven_stop" if self._breakeven_locked else "paper_stop"
         if atr > 0:
             peak_fav = (self._peak_price - self._entry_price) if long else (self._entry_price - self._peak_price)
-            # ratchet: once the trade has paid 1.2×ATR, never let it go red again
-            if not self._breakeven_locked and peak_fav >= self.BREAKEVEN_ATR * atr:
+            # ratchet: once the trade has paid 1.2×ATR, never let it go red again —
+            # and keep climbing to lock PROFIT_LOCK_FRAC of the peak move (monotonic).
+            if peak_fav >= self.BREAKEVEN_ATR * atr:
                 fee_buffer = self._entry_price * self.FEE_RATE * 2
-                self._stop_price = self._entry_price + fee_buffer if long else self._entry_price - fee_buffer
+                locked = max(fee_buffer, self.PROFIT_LOCK_FRAC * peak_fav)
+                if long:
+                    self._stop_price = max(self._stop_price, self._entry_price + locked)
+                else:
+                    self._stop_price = min(self._stop_price, self._entry_price - locked)
                 self._breakeven_locked = True
             if peak_fav >= self.TRAIL_ARM_ATR * atr:
                 mult = self._trail_mult()

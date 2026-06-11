@@ -55,6 +55,7 @@ class LiveMirror:
     # V3 exit engine (identical constants to the validated paper lanes)
     STOP_ATR_MULT = 1.6
     BREAKEVEN_ATR = 1.2
+    PROFIT_LOCK_FRAC = 0.4          # lock 40% of the peak move once BE arms (mirrors paper lanes)
     TRAIL_ARM_ATR = 1.0
     TRAIL_ATR_MULT = 1.8
     TRAIL_TIGHT_1_PEAK = 15.0
@@ -445,9 +446,17 @@ class LiveMirror:
 
         atr = self._atr
         peak_fav = (self._peak_price - self._entry) if long else (self._entry - self._peak_price)
-        if not self._be_locked and atr > 0 and peak_fav >= self.BREAKEVEN_ATR * atr:
+        if atr > 0 and peak_fav >= self.BREAKEVEN_ATR * atr:
+            # breakeven first, then keep ratcheting: lock 40% of the peak move
+            # (monotonic — the stop only ever improves). Fix for live #3699:
+            # +6.6% peak fell back to $0.00 because BE protected but the
+            # 1.8-ATR trail never harvested sub-15% peaks.
             fee_buffer = self._entry * self.TAKER_FEE * 2
-            self._stop = self._entry + fee_buffer if long else self._entry - fee_buffer
+            locked = max(fee_buffer, self.PROFIT_LOCK_FRAC * peak_fav)
+            if long:
+                self._stop = max(self._stop, self._entry + locked)
+            else:
+                self._stop = min(self._stop, self._entry - locked)
             self._be_locked = True
 
         live_stop = self._stop

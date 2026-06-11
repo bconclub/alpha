@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-12 · Profit ratchet — close the 4–15% harvest dead zone
+
+- Live #3699 (first clean mirror trade) peaked +6.63% and exited at $0.00: BE lock protected it perfectly, but the 1.8-ATR trail is wider than any sub-15% peak and the tighten tiers start at +15% — peaks in the 4–15% band were protected, never harvested.
+- Fix (both LiveMirror AND paper lanes, kept identical): once the breakeven lock arms (+1.2 ATR), the stop keeps ratcheting up to lock **40% of the peak move** (monotonic). On #3699 this banks ~+2.6% instead of breakeven. Trail/tiers unchanged above +15% so the fat tail still runs.
+- `(SHA on commit)`
+
 ## 2026-06-12 00:40 IST · INCIDENT 2 FIX: legacy scalp closed the mirror's trade + trade board clarity
 
 - **Incident**: after the 23:32 restart, the orphan-RESTORE branch injected the mirror's open BTC long into the legacy scalp strategy; scalp's protective SL then sold it on the exchange 3 min later (the "SQUEEZE" ghost row). Mirror trade #3697 reconciled to its real exit (−$0.26); duplicate row #3698 cancelled.
