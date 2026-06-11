@@ -40,6 +40,30 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-11 06:38 UTC — V3 ~33.3h in: futures −$502.10 (n=168 closed), options −$41.16 (n=54 closed), burns 0, live OFF; **VERIFICATION HOUR 11 — quietest hour of the window; an engine restart cleanly closed the lone open long at a small win, validating the restart-close feature.** Futures **IMPROVED +$1.79** (−503.89 → −502.10) on a **single close**: the FUT_EMA_PB_10X long htf=+1 that was +0.79% MTM at 05:10 grew and closed via **`engine_restart` +$1.79** at 06:17 (new exit reason this era, 1/+1.79). This is the designed behavior — a restart now **closes open trades at mark** instead of orphan-cancelling them, and it booked a real win rather than a phantom. **After the restart, 2 fresh FUT_DONCHIAN_RT_10X longs (both htf=+1) opened 06:25**, both ~flat MTM (−0.21 / +0.02) — gate still routing into the best-PF lane as aligned longs in the up-tape. **Gate mechanically flawless 11th straight hour** (zero counter-trend leakage; the only close + both opens are correctly aligned longs). **paper_stop FROZEN** (82/−577.32, 2nd straight hour no new full stop) and **paper_trail FROZEN** (44/+115.15, 3rd straight hour no new trail win — only ~1 trade/hour is reaching any exit, so neither the bleed nor the green lane moved). **Zero SFP closes 4th straight hour** — FUT_SFP_15X frozen at 55/−186.24, PF **0.15**, still worst net AND worst PF, still spared only by the UP tape. **Broader truth holds: no futures lane has PF>1; the book is structurally negative.** DONCHIAN remains best PF (**0.38**) and holds both opens. **20X retirement still sticking: frozen 31/−137.58.** Options **flat, 0 closes** (−$41.16 unchanged); PUT_V3 still least-bad (16/−8.64, PF **0.58**). **DK strangle: still 0 fills / 0 settlements the entire era** — today's 06-11 window (~07:30–11:18Z) is the next chance; if it also yields 0, inspect the DK entry gate. No engine bug — the restart-close, trail, stops, gate, and fees all reconcile to the cent.
+
+**Balances:** Futures lab **$497.90**, Options lab **$958.84** — both ≫ $50, no refill. Burns **0**.
+
+**Per-lane — Futures (era, closed, worst→best net):**
+
+| Lane | n | Win% | Net | PF | Hold |
+|---|---|---|---|---|---|
+| **FUT_SFP_15X** | 55 | 16 | **−186.24** | **0.15** | 28.6m |
+| FUT_EMA_PB_20X *(RETIRED)* | 31 | 16 | −137.58 | 0.26 | 47.2m |
+| FUT_EMA_PB_10X | 40 | 25 | −92.63 | 0.25 | 43.2m |
+| FUT_DONCHIAN_RT_10X | 27 | 26 | −51.82 | **0.38** (best) | 41.6m |
+| FUT_VWAP_10X | 15 | 27 | −33.84 | 0.24 | 43.6m |
+
+**Exit reasons — Futures (era):** `paper_stop` **82 / −577.32 — FROZEN** (2nd straight hour), `paper_trail` **44 / +115.15 — FROZEN** (3rd straight hour, only net-green exit), `breakeven_stop` 30/−17.90, `stagnant_exit` 9/−13.59, `no_traction` 2/−10.23, `engine_restart` **1 / +1.79** (new this hour, a win).
+
+**Options lanes (era, closed):** CALL_V3 24/−16.57 (PF 0.31, worst net), RANGE_V3 14/−15.94 (PF 0.26, worst PF), PUT_V3 16/−8.64 (**PF 0.58, best, least-bad net**). DK strangle 0 fills entire era.
+
+**What we should change:**
+1. **URGENT (6th hour recommending): retire FUT_SFP_15X.** Worst net AND worst PF; spared 4 straight hours only by the up-tape, still not deployed.
+2. **Restart-close feature validated** — `engine_restart` closed the open long at mark for a real +1.79 win; keep it, the orphan-phantom risk is resolved.
+3. **Flag the DK strangle's persistent 0 fills** — multiple daily windows now passed with no entries; if today's ~07:30–11:18Z window also yields 0, inspect the DK entry condition for a config/gating bug.
+4. **"Regime longs are edge" still noise** — too few closes (1 win this hour) to credit edge; keep DONCHIAN/EMA_PB/VWAP active, no claim yet.
+
 ### 2026-06-11 05:38 UTC — V3 ~32.3h in: futures −$503.89 (n=167 closed), options −$41.16 (n=54 closed), burns 0, live OFF; **VERIFICATION HOUR 10 — the regime-change longs GAVE BACK: first losing-long hour after two green ones, so "longs pay in an uptrend" is not yet edge.** Futures **WORSENED −$8.29** (−495.59 → −503.89) on **3 closes, ALL htf=+1 LONGS, ALL losers** — FUT_EMA_PB_10X `breakeven_stop` −0.21 (18m), FUT_DONCHIAN_RT_10X `stagnant_exit` −2.42 (76m), FUT_EMA_PB_10X `paper_stop` −5.68 (48m) = −8.31, reconciles to the cent. **Over the 2-hour regime window the longs are net −$4.95 (2 win / 3 loss)** — last hour's +1.57/+1.79 trail wins were given back and then some this hour via the same paper_stop/stagnant exits that bleed every other lane. So the hour-9 "DONCHIAN/EMA_PB convert direction into profit" read is **tempered to noise**: the up-tape longs print sometimes and bleed sometimes, like everything else. **Gate still mechanically flawless** (10th straight hour zero counter-trend leakage; all 3 closes correctly aligned longs). **Zero SFP closes again** — FUT_SFP_15X frozen 3rd straight hour at 55/−186.24, PF **0.15**, still worst net AND worst PF, still only spared by the UP tape (refunnels the instant 1h flips DOWN). **paper_trail FROZE** this hour (44/+115.15, no new wins — the gate starved the green exit again), while **paper_stop UNFROZE +1** (82/−577.32, the EMA −5.68) — a single full stop, not the hours-5-7 carnage, but the freeze streak is broken. **One open: FUT_EMA_PB_10X long htf=+1, +0.79% MTM, opened 05:10.** Broader truth this hour reinforces: **no futures lane has PF>1 — the whole book is structurally negative; the gate prevents big stops but cannot manufacture edge from mediocre entries.** **20X retirement still sticking: frozen 31/−137.58.** Options **+$0.69, 1 close, a WIN** — OPT_SELL_PUT_V3 `sell_take_profit` +0.69; PUT now best lane (16/−8.64, PF **0.58**, least-bad net). **DK strangle: still 0 fills / 0 settlements the entire era** — at least one full daily window (06-10) has now passed with zero entries, worth a look if it persists; next window ~07:30–11:18Z today. No engine bug — trail/stops/gate/fees all reconcile.
 
 **Balances:** Futures lab **$496.11**, Options lab **$958.84** — both ≫ $50, no refill. Burns **0**.
