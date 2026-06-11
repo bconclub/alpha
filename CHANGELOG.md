@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-11 18:50 IST · Dead-simple status chips: ● PAPER ON · ● LIVE ON
+
+- User: the status text was confusing (and stale — said "Live OFF" after the flip). Replaced with two colored chips on the capital card: PAPER ON/OFF (green) and LIVE ON/OFF (red pulse when on, gray when off).
+- Engine now publishes the real mode in bot_state: `live_mirror` (paper + live) / `paper` (paper only) / error — the dashboard never guesses again.
+- Live Mirror panel badge: ACTIVE from the moment the mode is on (reads bot_state), labeled plainly LIVE ON / LIVE OFF.
+- `(SHA on commit)`
+
 ## 2026-06-11 15:50 IST · Status label honesty: "Paused" → "Engine On · Paper Lab · Live OFF"
 
 - The Total Capital card said "Paused" — that's the LEGACY live system's risk gate, which is permanently locked in the V3 era (engine + paper lab run regardless; heartbeat was 45s old with 16 paper opens in 2h when reported). Label now states the actual mode instead of alarming.

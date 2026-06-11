@@ -379,7 +379,8 @@ export default function DashboardPage() {
   }, []);
 
   // Bot state
-  const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
+  // engine publishes: live_mirror | paper | running | paused | error
+  const botState: string = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
   
   // Market regime
@@ -642,12 +643,26 @@ export default function DashboardPage() {
           {capitalInr > 0 && <div className="text-xs text-gray-500 mt-1">₹{capitalInr.toLocaleString('en-IN')}</div>}
           <div className="mt-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              {/* bot_state 'paused' = the LEGACY live system's risk gate, which is
-                  permanently locked in the V3 era. The engine + paper lab run
-                  regardless; live exposure is governed by the LiveMirror panel. */}
-              <span className={cn('w-2 h-2 rounded-full', botState === 'running' ? 'bg-green-500' : 'bg-emerald-400')} />
-              <span className={cn('text-xs', botState === 'running' ? 'text-green-500' : 'text-emerald-300')}>
-                {botState === 'running' ? 'Running' : 'Engine On · Paper Lab · Live OFF'}
+              {/* Two simple states, two chips. Engine publishes bot_state:
+                  live_mirror = paper + live | paper = paper only | error = down */}
+              <span className={cn(
+                'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold',
+                botState === 'error' ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'
+              )}>
+                <span className={cn('h-1.5 w-1.5 rounded-full', botState === 'error' ? 'bg-red-400' : 'bg-emerald-400')} />
+                PAPER {botState === 'error' ? 'OFF' : 'ON'}
+              </span>
+              <span className={cn(
+                'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold',
+                botState === 'live_mirror' || botState === 'running'
+                  ? 'bg-red-500/15 text-red-300'
+                  : 'bg-zinc-700/40 text-zinc-400'
+              )}>
+                <span className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  botState === 'live_mirror' || botState === 'running' ? 'bg-red-400 animate-pulse' : 'bg-zinc-500'
+                )} />
+                LIVE {botState === 'live_mirror' || botState === 'running' ? 'ON' : 'OFF'}
               </span>
               {uptimeSeconds > 0 && <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>}
             </div>

@@ -28,7 +28,7 @@ type LiveTrade = {
 };
 type LivePayload = {
   mirror: { marginUsd: number; leverage: number; minConfidence: number; dailyLossStop: number; killBalance: number; maxOpen: number };
-  botStatus: { is_paused?: boolean; delta_balance?: number | null } | null;
+  botStatus: { is_paused?: boolean; delta_balance?: number | null; bot_state?: string | null } | null;
   liveTrades: LiveTrade[];
   liveStats: { n: number; wins: number; winRate: number; net: number; open: number };
   paperLanes: LaneStat[];
@@ -66,7 +66,7 @@ export default function LiveMirrorPanel() {
   if (!data) return null;
 
   const bal = num(data.botStatus?.delta_balance);
-  const liveOn = data.liveStats.open > 0 || data.liveStats.n > 0;
+  const liveOn = data.botStatus?.bot_state === 'live_mirror' || data.liveStats.open > 0 || data.liveStats.n > 0;
   const open = data.liveTrades.filter((t) => t.status === 'open');
   const recent = data.liveTrades.filter((t) => t.status === 'closed').slice(0, 5);
   const activeLanes = data.paperLanes.filter((l) => !LANE_LABELS[l.lane]?.includes('retired'));
@@ -78,7 +78,7 @@ export default function LiveMirrorPanel() {
           <span className={`h-2 w-2 rounded-full ${liveOn ? 'bg-red-500 animate-pulse' : 'bg-zinc-600'}`} />
           <h3 className="text-sm font-bold uppercase tracking-wider text-gray-300">Live Mirror — real money</h3>
           <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${liveOn ? 'bg-red-500/15 text-red-300' : 'bg-zinc-700/40 text-zinc-400'}`}>
-            {liveOn ? 'ACTIVE' : 'ARMED · OFF'}
+            {liveOn ? 'LIVE ON' : 'LIVE OFF'}
           </span>
         </div>
         <div className="font-mono text-sm text-gray-300">

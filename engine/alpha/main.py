@@ -1378,11 +1378,19 @@ class AlphaBot:
             except Exception:
                 pass
 
-        # Determine bot state
-        if rm.is_paused:
-            bot_state = "paused"
+        # Determine bot state. In the V3 era rm.is_paused only describes the
+        # LEGACY live gate — the real states the dashboard needs are:
+        #   live_mirror  → paper lab running AND LiveMirror trading real money
+        #   paper        → paper lab running, live off
+        #   running/paused/error → legacy semantics
+        if getattr(self, "live_mirror", None) and self.live_mirror.is_active:
+            bot_state = "live_mirror"
         elif not self._running:
             bot_state = "error"
+        elif self.paper_only or getattr(self, "_live_mode", "off") != "legacy":
+            bot_state = "paper"
+        elif rm.is_paused:
+            bot_state = "paused"
         else:
             bot_state = "running"
 
