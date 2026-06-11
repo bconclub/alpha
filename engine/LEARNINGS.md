@@ -40,6 +40,30 @@
 
 ## Check-in log (2-hourly routine)
 
+### 2026-06-11 05:38 UTC — V3 ~32.3h in: futures −$503.89 (n=167 closed), options −$41.16 (n=54 closed), burns 0, live OFF; **VERIFICATION HOUR 10 — the regime-change longs GAVE BACK: first losing-long hour after two green ones, so "longs pay in an uptrend" is not yet edge.** Futures **WORSENED −$8.29** (−495.59 → −503.89) on **3 closes, ALL htf=+1 LONGS, ALL losers** — FUT_EMA_PB_10X `breakeven_stop` −0.21 (18m), FUT_DONCHIAN_RT_10X `stagnant_exit` −2.42 (76m), FUT_EMA_PB_10X `paper_stop` −5.68 (48m) = −8.31, reconciles to the cent. **Over the 2-hour regime window the longs are net −$4.95 (2 win / 3 loss)** — last hour's +1.57/+1.79 trail wins were given back and then some this hour via the same paper_stop/stagnant exits that bleed every other lane. So the hour-9 "DONCHIAN/EMA_PB convert direction into profit" read is **tempered to noise**: the up-tape longs print sometimes and bleed sometimes, like everything else. **Gate still mechanically flawless** (10th straight hour zero counter-trend leakage; all 3 closes correctly aligned longs). **Zero SFP closes again** — FUT_SFP_15X frozen 3rd straight hour at 55/−186.24, PF **0.15**, still worst net AND worst PF, still only spared by the UP tape (refunnels the instant 1h flips DOWN). **paper_trail FROZE** this hour (44/+115.15, no new wins — the gate starved the green exit again), while **paper_stop UNFROZE +1** (82/−577.32, the EMA −5.68) — a single full stop, not the hours-5-7 carnage, but the freeze streak is broken. **One open: FUT_EMA_PB_10X long htf=+1, +0.79% MTM, opened 05:10.** Broader truth this hour reinforces: **no futures lane has PF>1 — the whole book is structurally negative; the gate prevents big stops but cannot manufacture edge from mediocre entries.** **20X retirement still sticking: frozen 31/−137.58.** Options **+$0.69, 1 close, a WIN** — OPT_SELL_PUT_V3 `sell_take_profit` +0.69; PUT now best lane (16/−8.64, PF **0.58**, least-bad net). **DK strangle: still 0 fills / 0 settlements the entire era** — at least one full daily window (06-10) has now passed with zero entries, worth a look if it persists; next window ~07:30–11:18Z today. No engine bug — trail/stops/gate/fees all reconcile.
+
+**Balances:** Futures lab **$496.11**, Options lab **$958.84** — both ≫ $50, no refill. Burns **0**.
+
+**Per-lane — Futures (era, closed, worst→best net):**
+
+| Lane | n | Win% | Net | PF | Hold |
+|---|---|---|---|---|---|
+| **FUT_SFP_15X** | 55 | 16 | **−186.24** | **0.15** | 28.6m |
+| FUT_EMA_PB_20X *(RETIRED)* | 31 | 16 | −137.58 | 0.26 | 47.2m |
+| FUT_EMA_PB_10X | 39 | 23 | −94.42 | 0.23 | 43.2m |
+| FUT_DONCHIAN_RT_10X | 27 | 26 | −51.82 | **0.38** (best) | 41.6m |
+| FUT_VWAP_10X | 15 | 27 | −33.84 | 0.24 | 43.6m |
+
+**Exit reasons — Futures (era):** `paper_stop` **82 / −577.32** (+1 this hour, freeze streak broken but only one full stop), `paper_trail` **44 / +115.15 — FROZEN this hour** (the only net-green exit; gate starved it), `breakeven_stop` 30/−17.90, `stagnant_exit` 9/−13.59, `no_traction` 2/−10.23.
+
+**Options lanes (era, closed):** CALL_V3 24/−16.57 (PF 0.31, worst net), RANGE_V3 14/−15.94 (PF 0.26, worst PF), PUT_V3 16/−8.64 (**PF 0.58, best, least-bad net**). DK strangle 0 fills entire era.
+
+**What we should change:**
+1. **URGENT (5th hour recommending): retire FUT_SFP_15X.** Worst net AND worst PF; spared 3 straight hours only by the up-tape, not deployed yet.
+2. **Demote the "regime longs are edge" thesis to noise** — 2w/3L net −4.95 over two hours; keep DONCHIAN/EMA_PB/VWAP active but stop crediting them with edge until the sample is much larger.
+3. **Flag the DK strangle's persistent 0 fills** — ≥1 full daily window passed with no entries; if today's 07:30–11:18Z window also yields 0, inspect the DK entry condition for a config/gating bug.
+4. **Options:** no action; PUT_V3 quietly the least-bad book.
+
 ### 2026-06-11 04:38 UTC — V3 ~31.3h in: futures −$495.59 (n=164 closed), options −$41.85 (n=53 closed), burns 0, live OFF; **VERIFICATION HOUR 9 — the regime-change longs PAID: first all-green futures hour of the window where the green came from the NON-SFP lanes given direction.** Futures **IMPROVED +$3.36** (−498.93 → −495.59), only +2 closes, and **BOTH were the htf=+1 LONGS opened 03:35Z, both closed `paper_trail` WINS**: **FUT_DONCHIAN_RT_10X long +$1.57** (held 59.8m) and **FUT_EMA_PB_10X long +$1.79** (held 59.8m) — reconciles to the cent. These are exactly the two regime-change positions flagged last hour; the 1h HTF stayed UP, both longs rode the full ~60-min trail into profit. **Zero new `paper_stop` for the 2nd straight hour**, zero SFP closes, zero counter-trend leakage (9th straight hour the gate is mechanically flawless). **The thesis crystallizes:** the gate is fine — SFP *entry quality* was the leak. When the gate routes into the two best-PF lanes as LONGS in an uptrend, they print. **DONCHIAN is now unambiguously the best lane** (PF **0.40**, best net among the 10X, just won, AND holds the only open position — long htf=+1 opened 04:00, +0.39% MTM). **Verdict on SFP unchanged and still URGENT: retire FUT_SFP_15X** — still worst net (−$186.24, n=55) AND worst PF (**0.15**, 16% win). It only avoided trading this hour because the tape is UP; when the 1h flips back DOWN the gate will refunnel 100% into SFP shorts and bleed again unless it is retired. The DONCHIAN/EMA_PB green this hour is the contrast that proves the point: those lanes convert direction into profit, SFP does not. Caveat: n=2 winning longs is still noise-level for "edge," but it's the designed outcome two hours running (hour 8 booked a +$2.61 aligned trail; hour 9 both longs green). **20X retirement still sticking: frozen 31/−137.58, 0 new.** Options **flat, 0 closes** (−$41.85 unchanged; 1 PUT_V3 still open). **DK strangle: still 0 fills / 0 settlements this entire era** — next window 06-12 07:30–11:18Z; headline strangle number undefined (n=0). No engine bug — trail/stops/gate/fees all behaving as designed.
 
 **Balances:** Futures lab **$504.41**, Options lab **$958.15** — both ≫ $50, no refill. Burns **0**.
