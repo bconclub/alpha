@@ -3002,3 +3002,39 @@ FUT_EMA_PB_20X **retirement still sticking** — frozen 31/−137.58 (0 new). SF
 3. **Options:** no action; flat hour, PUT_V3 remains least-bad (PF 0.51). Await DK strangle's first fills (06-12 window) before any options verdict.
 
 **Verdict status:** **HTF alignment is NOT edge — settled.** 7 straight hours of aligned htf=−1 SFP shorts stopping out proves the gate's directional filter works mechanically but adds no expectancy when entry quality is poor. FUT_SFP_15X = retire-now candidate (worst net −183.71, worst PF 0.14). FUT_EMA_PB_20X retirement holding (frozen −137.58). No lane near the PF>1.0 / n~200 live gate; no strategy crowned.
+
+### 2026-06-11 19:39 UTC — V3.1 VERIFICATION HOUR ~24 — FLAT HOLD HOUR — check-in `[updated by: Cowork]`
+
+**Era state (V3 since 2026-06-09 21:21Z, ~46.3h):** Live legacy **OFF** (`is_paused=true`, fresh row 19:38Z; 0 `options_scalp` opens last hour ✓). Burns **0**. FUNDED $1,000/lab.
+- **Futures:** closed-only net **−$534.66** (n=193). BALANCE **$465.34**.
+- **Options:** closed-only net **−$60.20** (n=90). BALANCE **$939.80**.
+
+**This hour: FULLY FLAT — 0 closes, 0 new opens since 18:30Z.** Both books are byte-identical to the 18:40 baseline (futures −534.66/n=193, options −60.20/n=90). Engine is **NOT stalled** — `bot_status` heartbeat fresh (19:38Z, ~1 min before snapshot). After the 18:14Z restart-into-live_mirror burst (which opened the current 2 fut + 2 opt + 1 live), the book has simply held for ~70 min: HTF gate (htf=1 / 1h-uptrend longs only) + position caps = no new qualifying entries. This is the intended "fewer trades" behaviour, not a hang.
+
+**Open now (unchanged):** 2× FUT_EMA_PB_10X long htf=1 (18:15/18:30Z), 2× OPT_SELL_PUT_V3 (18:14Z), 1× LIVE mirror id3699 (below).
+
+**LIVE MIRROR (real Delta money):** id3699 **STILL OPEN** — BTC buy 10×, collateral **$6.345 ≤ $8 ✓**, entry $63,447, **+$0.27 MTM** (open since 18:15:31Z, ~1h25m). id3697 closed −0.259 (`closed_by_legacy_sl`). **Cumulative live: 1 closed 0W/1L −$0.26 + 1 open.** RAILS INTACT — collateral $6.345 ≤ $8, exactly 1 open (never >1, id3697 closed 18:05 before id3699 opened 18:15 — no overlap), daily net −$0.26 ≫ −$3, 0 scalp last hr. No rows in `trades` were modified (observe-only). `is_paused=true` while mirror trades is **EXPECTED** (legacy paths paused; mirror independent). Carry-over note: mirror is riding **EMA_PB_10X (PF 0.22)**, not best-PF DONCHIAN (PF 0.42) — best-PF selection still looks loose; nothing to act on while flat.
+
+**Per-lane — Futures (era, closed, worst→best net) — UNCHANGED:**
+
+| Lane | n | Win% | Net | PF | 
+|---|---|---|---|---|
+| FUT_SFP_15X *(RETIRED)* | 57 | 17.5 | −180.84 | 0.18 |
+| FUT_EMA_PB_20X *(RETIRED)* | 31 | 16.1 | −137.58 | 0.26 |
+| FUT_EMA_PB_10X | 47 | 23.4 | −106.28 | 0.22 |
+| **FUT_DONCHIAN_RT_10X** | 39 | 20.5 | −65.24 | **0.42 (best)** |
+| FUT_VWAP_10X | 19 | 26.3 | −44.73 | 0.19 |
+
+Both retirements **STICK** (SFP & EMA_PB_20X frozen, 0 new opens). No fut lane PF>1.
+
+**Exit reasons — Futures (era):** `paper_stop` **90 / −617.87** (dominant loss driver, ~93% of gross loss), `paper_trail` **48 / +129.02 (ONLY net-green exit)**, breakeven_stop 36/−19.42, stagnant_exit 9/−13.59, no_traction 2/−10.23, engine_restart 8/−2.58.
+
+**Per-lane — Options (era, closed) — UNCHANGED:** PUT_V3 31/−19.17 (**PF 0.41, least-bad**), CALL_V3 31/−20.31 (PF 0.37), RANGE_V3 22/−21.18 (PF 0.24, worst), DK cohort frozen n=2 each — DK_V3 +0.26, DK_PUT +0.21, DK_CALL −0.01 = **+0.46 combined over 6** (only PF>1 group but n far too small). **Options exit reasons:** sell_take_profit 26/+29.81 (only green), sell_trend_break 27/−41.38, sell_breached 14/−36.03, engine_restart 22/−6.49, sell_stop 1/−6.11. **settled_otm / settled_itm = EXACTLY 0 entire era** — no DK leg has ever held through a 12:00Z settle.
+
+**Engine-bug status:** none. Flat hour reconciles trivially (no closes). Heartbeat fresh, rails held, no closed↔open toggling, no orphan churn.
+
+**What we should change:**
+1. **STILL the only blocker (now ~8th hour recommending): ship the DK 60%-TP relax + freeze-deploys-in-hold-window fix.** Until a strangle can ride to a 12:00Z settle, `settled_otm` stays 0 forever and the strangle-vs-trend-pick headline test never starts. Cosmetic/incident commits keep shipping; this one does not.
+2. **Nothing else actionable** — flat book, retirements holding, no lane near the PF>1.0 / n~200 live gate. DONCHIAN (PF 0.42) remains the only fut lane worth watching; mirror should ideally track it, not EMA_PB_10X.
+
+**Verdict status:** unchanged. HTF alignment confirmed mechanically perfect but not edge. No fut lane PF>1 (DONCHIAN best 0.42). Options DK cohort PF>1 but n=6 — not a verdict. No strategy crowned; no lane near the live gate. Live mirror green-MTM but n=2 lifetime.
