@@ -1441,11 +1441,25 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           )}
                         </td>
 
-                        {/* Money In (real $ committed) */}
+                        {/* Money In (real $ committed) + exact liquidation for open futures */}
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-amber-300">
                           {(() => {
                             const m = getMoneyIn(trade);
                             return m != null ? `$${m.toFixed(2)}` : <span className="text-zinc-600">&mdash;</span>;
+                          })()}
+                          {trade.status === 'open' && !isOptionTrade(trade) && (() => {
+                            const meta = (trade.metadata || {}) as Record<string, unknown>;
+                            const exact = Number(meta.liq_price ?? 0);
+                            const liq = exact > 0
+                              ? exact
+                              : (trade.leverage > 1 && trade.price > 0
+                                  ? trade.price * (trade.position_type === 'long' ? 1 - 1 / trade.leverage : 1 + 1 / trade.leverage)
+                                  : 0);
+                            return liq > 0 ? (
+                              <div className="text-[10px] text-red-300/80" title={exact > 0 ? 'Exact liquidation price from the exchange' : 'Approximate liquidation'}>
+                                liq {liq.toFixed(1)}{exact > 0 ? '' : '≈'}
+                              </div>
+                            ) : null;
                           })()}
                         </td>
 

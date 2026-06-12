@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-13 · Manual trades: real leverage/margin/liq + "only cut near liquidation"
+
+- Money In / leverage were guesses (Delta doesn't report position leverage). Now derived from the exchange's real margin (open 30ct trade: $19.14 @ 100x — matches user's Delta screen) and the exact liquidation price is captured at adoption.
+- **Manual-trade stop policy per user**: downside exit sits just above the LIQUIDATION price (+0.2 ATR pad), not at a drawdown level — "if it goes really bad we cut, otherwise we don't." Profits still actively managed (BE lock → 40% ratchet → trail). Open trade #3705's stop widened 63,620 → 63,377 (liq 63,328).
+- Trade board: open futures rows show the exact liq price (red, under Money In); falls back to ≈formula when the exchange value is absent.
+- Adoption Telegram now shows liquidation + safety exit + the management philosophy.
+- `(SHA on commit)`
+
 ## 2026-06-12 · Dashboard restructure + colored exit pills + full fills backfill
 
 - **Home page**: Live Mirror panel REMOVED (user: bad UI). It now lives on the **Strategy page**, slimmed to a pure scoreboard (rails + live W/L + paper-lane win rates/PF) — positions and history belong to the Trades table.

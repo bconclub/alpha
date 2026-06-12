@@ -4820,6 +4820,7 @@ class AlphaBot:
                 # real money locked in the position (exchange truth — used so
                 # adopted manual trades show the actual Money In, not a guess)
                 "margin": float(pos.get("initialMargin") or _pinfo.get("margin") or 0),
+                "liquidation": float(pos.get("liquidationPrice") or _pinfo.get("liquidation_price") or 0),
             }
 
         # ── Step 1b: Normalize exchange symbols to ccxt unified format ──
@@ -5109,6 +5110,7 @@ class AlphaBot:
                             adopted = await mirror.adopt_manual(
                                 pair, side, contracts, entry_px, lev,
                                 margin=float(epos.get("margin") or 0) or None,
+                                liquidation=float(epos.get("liquidation") or 0) or None,
                             )
                         if not adopted:
                             note = (

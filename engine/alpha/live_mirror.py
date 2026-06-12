@@ -110,6 +110,7 @@ class LiveMirror:
         self._opened_mono = 0.0
         self._is_manual = False     # adopted user trade: manage exits, but no
                                     # impatience purges (stagnation/no-traction)
+        self._liq = 0.0             # exchange liquidation price (manual adopts)
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -186,6 +187,7 @@ class LiveMirror:
         self._peak_pnl_pct = float(r.get("peak_pnl") or 0)
         self._be_locked = bool(meta.get("be_locked"))
         self._is_manual = bool(meta.get("manual"))
+        self._liq = float(meta.get("liq_price") or 0)
         self._margin = float(r.get("collateral") or self.MARGIN_USD)
         self._opened_mono = asyncio.get_running_loop().time() - max(
             0.0,
@@ -236,9 +238,13 @@ class LiveMirror:
             await self._open(cand)
 
     # ── manual trade adoption ──────────────────────────────────────────
+    MANUAL_STOP_ATR = 3.0           # fallback stop width for manual trades (vs 1.6 for mirror's own)
+    MANUAL_LIQ_PAD_ATR = 0.2        # preferred: exit just before liquidation, not on drawdown
+
     async def adopt_manual(
         self, pair: str, side: str, contracts: float, entry_px: float,
         leverage: float | None = None, margin: float | None = None,
+        liquidation: float | None = None,
     ) -> bool:
         """Adopt a trade the user opened directly on Delta.
 
@@ -273,7 +279,16 @@ class LiveMirror:
         if atr <= 0:
             atr = entry_px * 0.003   # conservative fallback ≈ typical 5m ATR
         long = side == "long"
-        stop = entry_px - self.STOP_ATR_MULT * atr if long else entry_px + self.STOP_ATR_MULT * atr
+        # Manual-trade stop philosophy (user, 06-13): "if it goes REALLY bad we
+        # cut, otherwise we don't — don't be trigger-happy." Downside exit sits
+        # just before the LIQUIDATION price, not at a drawdown the user is
+        # willing to sit through. Profit side is still actively managed
+        # (breakeven lock → ratchet → trail).
+        if liquidation and liquidation > 0:
+            pad = self.MANUAL_LIQ_PAD_ATR * atr
+            stop = liquidation + pad if long else liquidation - pad
+        else:
+            stop = entry_px - self.MANUAL_STOP_ATR * atr if long else entry_px + self.MANUAL_STOP_ATR * atr
         notional = contracts * csize * entry_px
         if margin and margin > 0:
             lev = notional / margin   # exchange truth beats any reported leverage
@@ -306,10 +321,13 @@ class LiveMirror:
                 "contract_size": csize,
                 "peak_price": entry_px,
                 "be_locked": False,
+                "liq_price": round(liquidation, 4) if liquidation else None,
+                "leverage_actual": round(lev, 1),
             },
         }
         self._position_open = True
         self._is_manual = True
+        self._liq = float(liquidation or 0)
         self._row_id = await self.db.log_trade(row)
         if not self._row_id:
             self._pending_row = row
@@ -330,12 +348,14 @@ class LiveMirror:
             self._row_id, pair, side.upper(), contracts, entry_px, int(lev), margin, stop,
         )
         try:
+            liq_line = f"Liquidation {liquidation:,.2f} · safety exit {stop:,.2f}\n" if liquidation else f"Safety exit {stop:,.2f} (wide)\n"
             await self.alerts._send(
                 f"🤝 <b>YOUR TRADE — now managed</b>\n"
                 f"{base} {side.upper()} · {int(contracts)} contract(s) @ {entry_px:,.2f} · {int(lev)}x\n"
-                f"Money in ≈ ${margin:.2f} · stop {stop:,.2f}\n"
-                f"V3 exits active: ATR stop → breakeven lock → profit ratchet → trail. "
-                f"No impatience exits on manual trades.",
+                f"Money in ${margin:.2f}\n"
+                f"{liq_line}"
+                f"Profits managed (breakeven lock → ratchet → trail). "
+                f"Downside: only cut just before liquidation — your trade, your thesis.",
                 allow_in_quiet=True,
             )
         except Exception:
@@ -605,6 +625,7 @@ class LiveMirror:
                         "contract_size": self._csize,
                         "peak_price": self._peak_price,
                         "be_locked": self._be_locked,
+                        "liq_price": round(self._liq, 4) if self._liq else None,
                     },
                 },
             )
