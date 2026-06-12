@@ -239,7 +239,14 @@ class LiveMirror:
 
     # ── manual trade adoption ──────────────────────────────────────────
     MANUAL_STOP_ATR = 3.0           # fallback stop width for manual trades (vs 1.6 for mirror's own)
-    MANUAL_LIQ_PAD_ATR = 0.2        # preferred: exit just before liquidation, not on drawdown
+    MANUAL_LIQ_PAD_ATR = 0.2        # absolute floor: never ride into liquidation
+    MANUAL_DD_ATR = 2.0             # ...but also cut a deep drawdown before it gets there
+    # Manual PROFIT side (user, 06-13: "+$2 became −$6 — if it's up, take it"):
+    # bank much earlier than the mirror's own trades.
+    MANUAL_BE_ARM_ATR = 0.4         # breakeven locks after just +0.4 ATR
+    MANUAL_LOCK_FRAC = 0.5          # then keep 50% of the peak move
+    MANUAL_TRAIL_ARM_ATR = 0.6      # trail arms early...
+    MANUAL_TRAIL_MULT = 0.8         # ...and hugs the peak tightly
 
     async def adopt_manual(
         self, pair: str, side: str, contracts: float, entry_px: float,
@@ -284,11 +291,15 @@ class LiveMirror:
         # just before the LIQUIDATION price, not at a drawdown the user is
         # willing to sit through. Profit side is still actively managed
         # (breakeven lock → ratchet → trail).
+        dd_stop = entry_px - self.MANUAL_DD_ATR * atr if long else entry_px + self.MANUAL_DD_ATR * atr
         if liquidation and liquidation > 0:
             pad = self.MANUAL_LIQ_PAD_ATR * atr
-            stop = liquidation + pad if long else liquidation - pad
+            liq_stop = liquidation + pad if long else liquidation - pad
+            # whichever protects first: deep-drawdown cut or the liquidation floor
+            stop = max(liq_stop, dd_stop) if long else min(liq_stop, dd_stop)
         else:
             stop = entry_px - self.MANUAL_STOP_ATR * atr if long else entry_px + self.MANUAL_STOP_ATR * atr
+            stop = max(stop, dd_stop) if long else min(stop, dd_stop)
         notional = contracts * csize * entry_px
         if margin and margin > 0:
             lev = notional / margin   # exchange truth beats any reported leverage
@@ -354,8 +365,8 @@ class LiveMirror:
                 f"{base} {side.upper()} · {int(contracts)} contract(s) @ {entry_px:,.2f} · {int(lev)}x\n"
                 f"Money in ${margin:.2f}\n"
                 f"{liq_line}"
-                f"Profits managed (breakeven lock → ratchet → trail). "
-                f"Downside: only cut just before liquidation — your trade, your thesis.",
+                f"Up → I bank it early (breakeven from +0.4 ATR, then lock 50% of the peak). "
+                f"Down → I cut at a deep drawdown or just before liquidation, whichever comes first.",
                 allow_in_quiet=True,
             )
         except Exception:
@@ -577,13 +588,17 @@ class LiveMirror:
 
         atr = self._atr
         peak_fav = (self._peak_price - self._entry) if long else (self._entry - self._peak_price)
-        if atr > 0 and peak_fav >= self.BREAKEVEN_ATR * atr:
-            # breakeven first, then keep ratcheting: lock 40% of the peak move
-            # (monotonic — the stop only ever improves). Fix for live #3699:
-            # +6.6% peak fell back to $0.00 because BE protected but the
-            # 1.8-ATR trail never harvested sub-15% peaks.
+        # Manual trades bank profit much earlier (user: "+$2 became −$6 — if
+        # it's up, take it"); the mirror's own trades keep the looser V3 tuning.
+        be_arm = self.MANUAL_BE_ARM_ATR if self._is_manual else self.BREAKEVEN_ATR
+        lock_frac = self.MANUAL_LOCK_FRAC if self._is_manual else self.PROFIT_LOCK_FRAC
+        trail_arm = self.MANUAL_TRAIL_ARM_ATR if self._is_manual else self.TRAIL_ARM_ATR
+        trail_mult = min(self._trail_mult(), self.MANUAL_TRAIL_MULT) if self._is_manual else self._trail_mult()
+        if atr > 0 and peak_fav >= be_arm * atr:
+            # breakeven first, then keep ratcheting a fraction of the peak move
+            # (monotonic — the stop only ever improves).
             fee_buffer = self._entry * self.TAKER_FEE * 2
-            locked = max(fee_buffer, self.PROFIT_LOCK_FRAC * peak_fav)
+            locked = max(fee_buffer, lock_frac * peak_fav)
             if long:
                 self._stop = max(self._stop, self._entry + locked)
             else:
@@ -591,8 +606,8 @@ class LiveMirror:
             self._be_locked = True
 
         live_stop = self._stop
-        if atr > 0 and peak_fav >= self.TRAIL_ARM_ATR * atr:
-            trail = self._peak_price - self._trail_mult() * atr if long else self._peak_price + self._trail_mult() * atr
+        if atr > 0 and peak_fav >= trail_arm * atr:
+            trail = self._peak_price - trail_mult * atr if long else self._peak_price + trail_mult * atr
             live_stop = max(live_stop, trail) if long else min(live_stop, trail)
 
         reason = ""

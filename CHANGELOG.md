@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-13 · Manual trades get the full "mind": bank early up, cut deep down
+
+- User's open trade went +$2 → −$6; the profit lock armed too late (+1.2 ATR ≈ $9 at that size). Manual trades now bank MUCH earlier: breakeven from **+0.4 ATR**, then lock **50%** of the peak; trail arms at 0.6 ATR and hugs at 0.8 ATR.
+- Downside: cut at a **2-ATR drawdown OR just above liquidation — whichever protects first** (was liquidation-only). Mirror's own trades keep the validated V3 tuning.
+- Adoption Telegram explains the policy in one line each way.
+- `(SHA on commit)`
+
 ## 2026-06-13 · Manual trades: real leverage/margin/liq + "only cut near liquidation"
 
 - Money In / leverage were guesses (Delta doesn't report position leverage). Now derived from the exchange's real margin (open 30ct trade: $19.14 @ 100x — matches user's Delta screen) and the exact liquidation price is captured at adoption.
