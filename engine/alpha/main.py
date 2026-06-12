@@ -5080,97 +5080,50 @@ class AlphaBot:
 
                     # ── CASE 1: Untracked position → ADOPT it (manual trade) ──
                     # The user punches trades directly on Delta and leaves them
-                    # for the bot. NEVER auto-close: insert a DB row with
-                    # strategy="scalp" (the executor's exit path looks up open
-                    # trades by pair+exchange+strategy) and inject position
-                    # state into the scalp strategy so SL/trailing/TP manage it
-                    # like any bot-opened trade. Mirrors the startup discovery
-                    # path in _restore_positions_from_db.
+                    # for the bot. NEVER auto-close. Adoption goes to the
+                    # LiveMirror's V3 exit engine (ATR stop → breakeven lock →
+                    # profit ratchet → tightening trail, 24h max, NO impatience
+                    # exits) — NOT to legacy scalp, whose ±0.3% SL / 30-min cap
+                    # is exactly the churn the user rejected. If the mirror is
+                    # busy or inactive, the position is LEFT ALONE with one
+                    # loud alert.
                     fail_count = self._orphan_fail_count.get(fs_key, 0)
                     lev = int(epos.get("leverage") or 0) or int(config.delta.leverage or 20)
-                    logger.warning(
-                        "MANUAL_ADOPT: %s %s %.0f contracts @ $%.2f %dx — untracked "
-                        "position (manual trade) — adopting into bot management "
-                        "(attempt %d/%d)",
-                        pair, side, contracts, entry_px, lev,
-                        fail_count + 1, self.ORPHAN_MAX_RETRIES,
-                    )
+                    mirror = getattr(self, "live_mirror", None)
                     try:
-                        contract_size = DELTA_CONTRACT_SIZE.get(pair, 1.0)
-                        coin_qty = contracts * contract_size
-                        notional = entry_px * coin_qty
-                        collateral = round(notional / lev, 8) if lev > 1 else round(notional, 8)
-
-                        trade_id = None
-                        if self.db.is_connected:
-                            trade_id = await self.db.log_trade({
-                                "pair": pair,
-                                "side": "buy" if side == "long" else "sell",
-                                "entry_price": entry_px,
-                                "amount": contracts,
-                                "contracts": contracts,
-                                "cost": collateral,
-                                "collateral": collateral,
-                                "strategy": "scalp",
-                                "order_type": "market",
-                                "exchange": "delta",
-                                "status": "open",
-                                "reason": "MANUAL_ADOPT (user trade on Delta)",
-                                "leverage": lev,
-                                "position_type": side,
-                                "setup_type": "SQUEEZE",
-                            })
-
-                        if scalp and not scalp.in_position:
-                            scalp.in_position = True
-                            scalp.position_side = side
-                            scalp.entry_price = entry_px
-                            scalp.entry_amount = contracts
-                            scalp.entry_time = time.monotonic()
-                            scalp.highest_since_entry = entry_px
-                            scalp.lowest_since_entry = entry_px
-                            scalp._trade_leverage = lev
-                            scalp._phantom_cooldown_until = time.monotonic() + 120
-
-                            # Register with risk manager so position caps and
-                            # record_close stay consistent
-                            from alpha.strategies.base import Signal, StrategyName
-                            self.risk_manager.record_open(Signal(
-                                side="buy" if side == "long" else "sell",
-                                price=entry_px,
-                                amount=contracts,
-                                order_type="market",
-                                reason="manual trade adopted",
-                                strategy=StrategyName.SCALP,
-                                pair=pair,
-                                leverage=lev,
-                                position_type=side,
-                                exchange_id="delta",
-                            ))
-                            managed_note = "bot is now managing exits (SL/trail/TP)"
-                        else:
-                            managed_note = (
-                                "DB row created but NO scalp strategy for this pair — "
-                                "position stays open UNMANAGED, close it manually"
+                        adopted = False
+                        if mirror and mirror.is_active:
+                            adopted = await mirror.adopt_manual(pair, side, contracts, entry_px, lev)
+                        if not adopted:
+                            note = (
+                                "LiveMirror is busy with another position"
+                                if mirror and mirror.is_active
+                                else "LiveMirror inactive (PAPER_ONLY / LIVE_MODE off)"
                             )
                             logger.warning(
-                                "MANUAL_ADOPT: no scalp strategy for %s — DB row id=%s "
-                                "protects it from orphan close, but exits are NOT managed",
-                                pair, trade_id,
+                                "MANUAL_ADOPT SKIPPED: %s %s %.0f ct @ $%.2f — %s. "
+                                "Position LEFT OPEN on Delta — bot will NOT touch it.",
+                                pair, side, contracts, entry_px, note,
                             )
+                            if fs_key not in self._orphan_gave_up:
+                                self._orphan_gave_up.add(fs_key)  # alert once, then stay silent
+                                try:
+                                    await self.alerts.send_orphan_alert(
+                                        pair=pair, side=side, contracts=contracts,
+                                        action="LEFT OPEN — unmanaged",
+                                        detail=(
+                                            f"Manual trade @ ${entry_px:.2f} {lev}x NOT adopted ({note}). "
+                                            f"The bot will not close or manage it — handle it on Delta."
+                                        ),
+                                    )
+                                except Exception:
+                                    pass
+                            continue
 
                         logger.info(
-                            "MANUAL_ADOPT OK: %s %s %.0f ct @ $%.2f %dx (db id=%s) — %s",
-                            pair, side, contracts, entry_px, lev, trade_id, managed_note,
+                            "MANUAL_ADOPT OK: %s %s %.0f ct @ $%.2f %dx — LiveMirror managing (V3 exits)",
+                            pair, side, contracts, entry_px, lev,
                         )
-                        try:
-                            await self.alerts.send_orphan_alert(
-                                pair=pair, side=side, contracts=contracts,
-                                action="ADOPTED — bot managing",
-                                detail=f"Manual trade @ ${entry_px:.2f} {lev}x adopted. {managed_note}",
-                            )
-                        except Exception:
-                            pass
 
                         # ── Success: clean up all tracking ────────────
                         self._position_first_seen.pop(fs_key, None)

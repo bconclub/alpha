@@ -8,6 +8,7 @@ const SETUP_STYLES: Record<string, { bg: string; text: string; ring: string }> =
   PREMIUM_WAVE: { bg: "bg-lime-500/15", text: "text-lime-300", ring: "ring-lime-500/30" },
   FVG_CHOCH: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
   // V3 mirror lanes (short, human names — never the raw lane id)
+  MANUAL: { bg: "bg-violet-500/15", text: "text-violet-300", ring: "ring-violet-500/30" },
   DONCHIAN: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
   EMA_PULLBACK: { bg: "bg-cyan-500/15", text: "text-cyan-300", ring: "ring-cyan-500/30" },
   VWAP: { bg: "bg-amber-500/15", text: "text-amber-300", ring: "ring-amber-500/30" },
@@ -71,6 +72,7 @@ export function SetupChip({
     EMA_PULLBACK: "EMA Pullback",
     VWAP: "VWAP",
     LIQ_SWEEP: "Liq Sweep",
+    MANUAL: "Manual",
   };
   const label = LABELS[key] ?? key.replace("_", " ");
   return (

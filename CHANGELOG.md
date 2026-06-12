@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-12 · Manual trades: adopt into the V3 engine, never close, never scalp
+
+- User's manual Delta trades (36 ct + 33 ct BTC longs today) were auto-flattened by orphan protection — AND the running engine predated the earlier `bac1070` adopt patch (pulled but never restarted into). That patch also adopted into legacy scalp (±0.3% SL, 30-min cap = the greedy churn the user rejected).
+- Rewritten: untracked Delta positions are adopted by the **LiveMirror** — DB row (`LIVE_MANUAL`), full V3 exits (ATR stop → breakeven lock → 40% profit ratchet → tightening trail, 24h max), **no stagnation/no-traction purges on manual trades** (a human took it on purpose). Telegram "YOUR TRADE — now managed" on adoption.
+- If the mirror is busy/inactive: position is LEFT ALONE with one loud alert — the bot never closes a manual trade.
+- If the user closes their trade on Delta themselves, the mirror detects the flat position and finalizes the record (`closed_externally`) instead of retrying.
+- Dashboard: adopted trades show as Futures · **Manual** chip with money-in and live stop.
+- `(SHA on commit)`
+
 ## 2026-06-12 · Profit ratchet — close the 4–15% harvest dead zone
 
 - Live #3699 (first clean mirror trade) peaked +6.63% and exited at $0.00: BE lock protected it perfectly, but the 1.8-ATR trail is wider than any sub-15% peak and the tighten tiers start at +15% — peaks in the 4–15% band were protected, never harvested.

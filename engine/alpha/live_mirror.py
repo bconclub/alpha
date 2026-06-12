@@ -29,6 +29,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from alpha.paper_futures import _atr_rows
 from alpha.utils import setup_logger
 
 logger = setup_logger("live_mirror")
@@ -107,6 +108,8 @@ class LiveMirror:
         self._be_locked = False
         self._margin = 0.0
         self._opened_mono = 0.0
+        self._is_manual = False     # adopted user trade: manage exits, but no
+                                    # impatience purges (stagnation/no-traction)
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -182,6 +185,7 @@ class LiveMirror:
         self._peak_price = float(meta.get("peak_price") or self._entry)
         self._peak_pnl_pct = float(r.get("peak_pnl") or 0)
         self._be_locked = bool(meta.get("be_locked"))
+        self._is_manual = bool(meta.get("manual"))
         self._margin = float(r.get("collateral") or self.MARGIN_USD)
         self._opened_mono = asyncio.get_running_loop().time() - max(
             0.0,
@@ -230,6 +234,97 @@ class LiveMirror:
         cand = await self._best_candidate()
         if cand:
             await self._open(cand)
+
+    # ── manual trade adoption ──────────────────────────────────────────
+    async def adopt_manual(
+        self, pair: str, side: str, contracts: float, entry_px: float, leverage: float | None = None,
+    ) -> bool:
+        """Adopt a trade the user opened directly on Delta.
+
+        The position gets the full V3 exit engine (ATR stop → breakeven lock →
+        profit ratchet → tightening trail → 24h max) but NO impatience purges:
+        a human took this trade on purpose — manage it, don't second-guess it.
+        Returns False if the mirror is already managing a position.
+        """
+        if self._position_open:
+            return False
+        base = pair.split("/")[0]
+        csize = CONTRACT_SIZE.get(base)
+        if not csize or entry_px <= 0 or contracts <= 0:
+            return False
+        atr = 0.0
+        try:
+            raw = await self.exchange.fetch_ohlcv(pair, "5m", limit=80)
+            atr = _atr_rows([[float(x) for x in r] for r in raw[:-1]])
+        except Exception:
+            pass
+        if atr <= 0:
+            atr = entry_px * 0.003   # conservative fallback ≈ typical 5m ATR
+        long = side == "long"
+        stop = entry_px - self.STOP_ATR_MULT * atr if long else entry_px + self.STOP_ATR_MULT * atr
+        lev = float(leverage or self.LEVERAGE)
+        margin = contracts * csize * entry_px / lev if lev > 0 else contracts * csize * entry_px
+        now_iso = datetime.now(timezone.utc).isoformat()
+        row = {
+            "pair": pair,
+            "side": "buy" if long else "sell",
+            "position_type": side,
+            "entry_price": entry_px,
+            "amount": contracts,
+            "contracts": contracts,
+            "cost": round(margin, 4),
+            "collateral": round(margin, 4),
+            "leverage": lev,
+            "strategy": "live_mirror",
+            "setup_type": "LIVE_MANUAL",
+            "order_type": "market",
+            "exchange": "delta",
+            "status": "open",
+            "opened_at": now_iso,
+            "stop_loss": round(stop, 4),
+            "reason": "manual trade on Delta — adopted by LiveMirror",
+            "metadata": {
+                "source": "manual_adopt",
+                "manual": True,
+                "atr": atr,
+                "contract_size": csize,
+                "peak_price": entry_px,
+                "be_locked": False,
+            },
+        }
+        self._position_open = True
+        self._is_manual = True
+        self._row_id = await self.db.log_trade(row)
+        if not self._row_id:
+            self._pending_row = row
+        self._pair = pair
+        self._direction = side
+        self._contracts = contracts
+        self._csize = csize
+        self._entry = entry_px
+        self._atr = atr
+        self._stop = stop
+        self._peak_price = entry_px
+        self._peak_pnl_pct = 0.0
+        self._be_locked = False
+        self._margin = margin
+        self._opened_mono = asyncio.get_running_loop().time()
+        logger.warning(
+            "🤝 MANUAL ADOPTED id=%s %s %s %.0f ct @ %.2f %sx margin≈$%.2f stop=%.2f",
+            self._row_id, pair, side.upper(), contracts, entry_px, int(lev), margin, stop,
+        )
+        try:
+            await self.alerts._send(
+                f"🤝 <b>YOUR TRADE — now managed</b>\n"
+                f"{base} {side.upper()} · {int(contracts)} contract(s) @ {entry_px:,.2f} · {int(lev)}x\n"
+                f"Money in ≈ ${margin:.2f} · stop {stop:,.2f}\n"
+                f"V3 exits active: ATR stop → breakeven lock → profit ratchet → trail. "
+                f"No impatience exits on manual trades.",
+                allow_in_quiet=True,
+            )
+        except Exception:
+            pass
+        return True
 
     # ── candidate selection (the "1 in 10" brain) ──────────────────────
     async def _best_candidate(self) -> dict[str, Any] | None:
@@ -470,9 +565,9 @@ class LiveMirror:
                 reason = "trail_stop"
             else:
                 reason = "breakeven_stop" if self._be_locked else "hard_stop"
-        elif atr > 0 and age >= self.STAGNATION_SEC and abs(price - self._entry) < self.STAGNATION_ATR * atr:
+        elif (not self._is_manual) and atr > 0 and age >= self.STAGNATION_SEC and abs(price - self._entry) < self.STAGNATION_ATR * atr:
             reason = "stagnant_exit"
-        elif atr > 0 and age >= self.NO_TRACTION_SEC and pnl_usd < 0 and peak_fav < self.NO_TRACTION_ATR * atr:
+        elif (not self._is_manual) and atr > 0 and age >= self.NO_TRACTION_SEC and pnl_usd < 0 and peak_fav < self.NO_TRACTION_ATR * atr:
             reason = "no_traction"
         elif age >= self.MAX_HOLD_SEC:
             reason = "max_hold"
@@ -488,7 +583,8 @@ class LiveMirror:
                     "trail_stop_price": round(live_stop, 4),
                     "stop_loss": round(self._stop, 4),
                     "metadata": {
-                        "source": "live_mirror",
+                        "source": "manual_adopt" if self._is_manual else "live_mirror",
+                        "manual": self._is_manual,
                         "atr": atr,
                         "contract_size": self._csize,
                         "peak_price": self._peak_price,
@@ -501,15 +597,26 @@ class LiveMirror:
 
     async def _close(self, ref_price: float, reason: str) -> None:
         long = self._direction == "long"
+        fill = ref_price
         try:
             order = await self.exchange.create_order(
                 self._pair, "market", "sell" if long else "buy", self._contracts,
                 None, {"reduce_only": True},
             )
+            fill = float(order.get("average") or order.get("price") or ref_price)
         except Exception:
-            logger.exception("LIVE close order failed — will retry next tick")
-            return
-        fill = float(order.get("average") or order.get("price") or ref_price)
+            # Maybe the user already closed it on Delta themselves — check.
+            flat = False
+            try:
+                ps = await self.exchange.fetch_positions([self._pair])
+                flat = all(abs(float(p.get("contracts") or 0)) < 1e-9 for p in ps)
+            except Exception:
+                pass
+            if not flat:
+                logger.exception("LIVE close order failed — will retry next tick")
+                return
+            reason = "closed_externally"
+            logger.warning("Position %s already closed on the exchange — finalizing record", self._pair)
         gross = (fill - self._entry) * self._contracts * self._csize * (1 if long else -1)
         notional = self._contracts * self._csize * (self._entry + fill) / 2
         fees = notional * self.TAKER_FEE * 2
@@ -548,6 +655,7 @@ class LiveMirror:
         except Exception:
             pass
         self._position_open = False
+        self._is_manual = False
         self._pending_row = None
         self._row_id = None
         self._pair = ""
