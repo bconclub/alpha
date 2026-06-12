@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-12 · Any-pair adoption + Alpha/Manual badges + DOGE backfill
+
+- The user's DOGE trade (+$4.57 net) was invisible: adoption only knew BTC/ETH contract sizes, and the old engine orphan-closed the position at 3.6 min (luckily in profit). Backfilled into `trades` (#3704) from exchange fills.
+- Adoption + reconciler now read **contractSize from the exchange market spec** — any Delta pair the user trades manually (DOGE etc.) is adopted and managed; hardcoded map is fallback only.
+- Trade board: new **By** column — every trade tagged **Alpha** (emerald) or **Manual** (violet); mobile cards too.
+- `(SHA on commit)`
+
 ## 2026-06-12 · Manual trades: adopt into the V3 engine, never close, never scalp
 
 - User's manual Delta trades (36 ct + 33 ct BTC longs today) were auto-flattened by orphan protection — AND the running engine predated the earlier `bac1070` adopt patch (pulled but never restarted into). That patch also adopted into legacy scalp (±0.3% SL, 30-min cap = the greedy churn the user rejected).

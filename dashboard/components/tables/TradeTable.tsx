@@ -146,6 +146,7 @@ const COLUMNS: ColumnDef[] = [
   { key: 'exit_price', label: 'Exit', align: 'right' },
   { key: 'amount', label: 'Contracts', align: 'right' },
   { key: 'market', label: 'Market' },
+  { key: 'by', label: 'By' },
   { key: 'money_in', label: 'Money In', align: 'right' },
   { key: 'setup_type', label: 'Setup' },
   { key: 'gross_pnl', label: 'Gross P&L', align: 'right' },
@@ -181,6 +182,12 @@ function getMarketInfo(trade: Trade): { label: string; cls: string } {
     return { label: 'Futures', cls: 'bg-amber-500/15 text-amber-300 ring-amber-500/30' };
   }
   return { label: 'Spot', cls: 'bg-zinc-500/15 text-zinc-300 ring-zinc-500/30' };
+}
+
+/** Who took this trade: the user by hand on Delta, or the Alpha bot. */
+function isManualTrade(trade: Trade): boolean {
+  const meta = (trade.metadata || {}) as Record<string, unknown>;
+  return trade.setup_type === 'LIVE_MANUAL' || meta.manual === true;
 }
 
 /** Real money committed to the trade (margin for futures, premium/stake for options). */
@@ -736,7 +743,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
     (key: string) => {
-      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'peak_info' || key === 'confidence' || key === 'risk_reward_ratio' || key === 'market' || key === 'money_in') return; // Not sortable
+      if (key === 'exit_price' || key === 'id' || key === 'hold_time' || key === 'exit_reason' || key === 'fees' || key === 'gross_pnl' || key === 'setup_type' || key === 'peak_info' || key === 'confidence' || key === 'risk_reward_ratio' || key === 'market' || key === 'money_in' || key === 'by') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -1102,6 +1109,14 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       <span className={cn('inline-flex rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset', getMarketInfo(trade).cls)}>
                         {getMarketInfo(trade).label}
                       </span>
+                      <span className={cn(
+                        'inline-flex rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset',
+                        isManualTrade(trade)
+                          ? 'bg-violet-500/15 text-violet-300 ring-violet-500/30'
+                          : 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
+                      )}>
+                        {isManualTrade(trade) ? 'Manual' : 'Alpha'}
+                      </span>
                       {inferSetupType(trade) && (
                         <SetupChip setup={inferSetupType(trade)} secondEntry={isSecondEntryTrade(trade)} />
                       )}
@@ -1411,6 +1426,19 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           <span className={cn('inline-flex rounded-md px-2 py-0.5 text-xs font-semibold ring-1 ring-inset', getMarketInfo(trade).cls)}>
                             {getMarketInfo(trade).label}
                           </span>
+                        </td>
+
+                        {/* By: who took the trade */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          {isManualTrade(trade) ? (
+                            <span className="inline-flex rounded-md bg-violet-500/15 px-2 py-0.5 text-xs font-semibold text-violet-300 ring-1 ring-inset ring-violet-500/30">
+                              Manual
+                            </span>
+                          ) : (
+                            <span className="inline-flex rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-semibold text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
+                              Alpha
+                            </span>
+                          )}
                         </td>
 
                         {/* Money In (real $ committed) */}

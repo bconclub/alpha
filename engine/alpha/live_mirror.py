@@ -249,8 +249,19 @@ class LiveMirror:
         if self._position_open:
             return False
         base = pair.split("/")[0]
-        csize = CONTRACT_SIZE.get(base)
+        # Contract size from the exchange itself — the user trades ANY Delta
+        # pair manually (the $5 DOGE win was invisible because only BTC/ETH
+        # were mapped). Hardcoded map is just the fallback.
+        csize: float | None = None
+        try:
+            market = (getattr(self.exchange, "markets", None) or {}).get(pair) or {}
+            csize = float(market.get("contractSize") or 0) or None
+        except Exception:
+            pass
+        if not csize:
+            csize = CONTRACT_SIZE.get(base)
         if not csize or entry_px <= 0 or contracts <= 0:
+            logger.warning("adopt_manual: no contract size for %s — cannot adopt", pair)
             return False
         atr = 0.0
         try:

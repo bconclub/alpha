@@ -4787,14 +4787,23 @@ class AlphaBot:
             symbol = pos.get("symbol", "")
             side = "long" if contracts > 0 else "short"
             entry_px = float(pos.get("entryPrice", 0) or 0)
-            # Delta uses contract sizes, compute notional for dust check
-            contract_size = DELTA_CONTRACT_SIZE.get(symbol, 1.0)
-            # Also try ccxt symbol for contract size lookup
-            native = symbol.replace("/", "").replace(":USD", "")
-            for ccxt_p, cs in DELTA_CONTRACT_SIZE.items():
-                if ccxt_p.replace("/", "").replace(":USD", "") == native:
-                    contract_size = cs
-                    break
+            # Delta uses contract sizes, compute notional for dust check.
+            # Prefer the exchange's own contractSize (works for ANY pair the
+            # user trades manually — DOGE etc.); hardcoded map is fallback.
+            contract_size = 0.0
+            try:
+                _mkt = (getattr(self.delta, "markets", None) or {}).get(symbol) or {}
+                contract_size = float(_mkt.get("contractSize") or 0)
+            except Exception:
+                contract_size = 0.0
+            if contract_size <= 0:
+                contract_size = DELTA_CONTRACT_SIZE.get(symbol, 1.0)
+                # Also try ccxt symbol for contract size lookup
+                native = symbol.replace("/", "").replace(":USD", "")
+                for ccxt_p, cs in DELTA_CONTRACT_SIZE.items():
+                    if ccxt_p.replace("/", "").replace(":USD", "") == native:
+                        contract_size = cs
+                        break
             notional = abs(contracts) * contract_size * entry_px if entry_px > 0 else 0
             if entry_px <= 0 or notional < 1.0:
                 logger.debug("Skipping dust position %s: %.0f ct worth $%.4f", symbol, abs(contracts), notional)
