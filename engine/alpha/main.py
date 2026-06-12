@@ -5485,8 +5485,11 @@ class AlphaBot:
         if not open_trades:
             return
 
-        # Only close non-scalp, non-options_scalp positions
-        allowed_strategies = {"scalp", "options_scalp", ""}
+        # Only close positions from strategies that no longer exist.
+        # live_mirror is ALIVE (V3 live path — mirror + adopted manual trades);
+        # without it here this sweep market-closes the user's open position on
+        # every restart (it tried twice on #3705 and only an order error saved it).
+        allowed_strategies = {"scalp", "options_scalp", "live_mirror", ""}
         orphans = [
             t for t in open_trades
             if t.get("strategy", "") not in allowed_strategies
