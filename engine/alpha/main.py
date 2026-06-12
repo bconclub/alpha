@@ -4806,6 +4806,7 @@ class AlphaBot:
                 "side": side,
                 "contracts": abs(contracts),
                 "entry_price": entry_px,
+                "leverage": float(pos.get("leverage", 0) or 0),
             }
 
         # ── Step 1b: Normalize exchange symbols to ccxt unified format ──
@@ -5077,70 +5078,104 @@ class AlphaBot:
                         )
                         continue
 
-                    # ── CASE 1: True ORPHAN — no DB trade, close it ────────
+                    # ── CASE 1: Untracked position → ADOPT it (manual trade) ──
+                    # The user punches trades directly on Delta and leaves them
+                    # for the bot. NEVER auto-close: insert a DB row with
+                    # strategy="scalp" (the executor's exit path looks up open
+                    # trades by pair+exchange+strategy) and inject position
+                    # state into the scalp strategy so SL/trailing/TP manage it
+                    # like any bot-opened trade. Mirrors the startup discovery
+                    # path in _restore_positions_from_db.
                     fail_count = self._orphan_fail_count.get(fs_key, 0)
+                    lev = int(epos.get("leverage") or 0) or int(config.delta.leverage or 20)
                     logger.warning(
-                        "ORPHAN DETECTED: %s %s %.0f contracts @ $%.2f — "
-                        "NOT in bot memory, no DB trade! CLOSING (attempt %d/%d)",
-                        pair, side, contracts, entry_px,
+                        "MANUAL_ADOPT: %s %s %.0f contracts @ $%.2f %dx — untracked "
+                        "position (manual trade) — adopting into bot management "
+                        "(attempt %d/%d)",
+                        pair, side, contracts, entry_px, lev,
                         fail_count + 1, self.ORPHAN_MAX_RETRIES,
                     )
                     try:
-                        await self.alerts.send_orphan_alert(
-                            pair=pair, side=side, contracts=contracts,
-                            action="CLOSING AT MARKET",
-                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB (attempt {fail_count + 1}/{self.ORPHAN_MAX_RETRIES})",
-                        )
-                    except Exception:
-                        pass
+                        contract_size = DELTA_CONTRACT_SIZE.get(pair, 1.0)
+                        coin_qty = contracts * contract_size
+                        notional = entry_px * coin_qty
+                        collateral = round(notional / lev, 8) if lev > 1 else round(notional, 8)
 
-                    try:
-                        close_side = "sell" if side == "long" else "buy"
-                        await self.delta.create_order(
-                            pair, "market", close_side, int(contracts),
-                            params={"reduceOnly": True},
-                        )
+                        trade_id = None
+                        if self.db.is_connected:
+                            trade_id = await self.db.log_trade({
+                                "pair": pair,
+                                "side": "buy" if side == "long" else "sell",
+                                "entry_price": entry_px,
+                                "amount": contracts,
+                                "contracts": contracts,
+                                "cost": collateral,
+                                "collateral": collateral,
+                                "strategy": "scalp",
+                                "order_type": "market",
+                                "exchange": "delta",
+                                "status": "open",
+                                "reason": "MANUAL_ADOPT (user trade on Delta)",
+                                "leverage": lev,
+                                "position_type": side,
+                                "setup_type": "SQUEEZE",
+                            })
+
+                        if scalp and not scalp.in_position:
+                            scalp.in_position = True
+                            scalp.position_side = side
+                            scalp.entry_price = entry_px
+                            scalp.entry_amount = contracts
+                            scalp.entry_time = time.monotonic()
+                            scalp.highest_since_entry = entry_px
+                            scalp.lowest_since_entry = entry_px
+                            scalp._trade_leverage = lev
+                            scalp._phantom_cooldown_until = time.monotonic() + 120
+
+                            # Register with risk manager so position caps and
+                            # record_close stay consistent
+                            from alpha.strategies.base import Signal, StrategyName
+                            self.risk_manager.record_open(Signal(
+                                side="buy" if side == "long" else "sell",
+                                price=entry_px,
+                                amount=contracts,
+                                order_type="market",
+                                reason="manual trade adopted",
+                                strategy=StrategyName.SCALP,
+                                pair=pair,
+                                leverage=lev,
+                                position_type=side,
+                                exchange_id="delta",
+                            ))
+                            managed_note = "bot is now managing exits (SL/trail/TP)"
+                        else:
+                            managed_note = (
+                                "DB row created but NO scalp strategy for this pair — "
+                                "position stays open UNMANAGED, close it manually"
+                            )
+                            logger.warning(
+                                "MANUAL_ADOPT: no scalp strategy for %s — DB row id=%s "
+                                "protects it from orphan close, but exits are NOT managed",
+                                pair, trade_id,
+                            )
+
                         logger.info(
-                            "ORPHAN CLOSED: %s %s %.0f contracts at market",
-                            pair, side, contracts,
+                            "MANUAL_ADOPT OK: %s %s %.0f ct @ $%.2f %dx (db id=%s) — %s",
+                            pair, side, contracts, entry_px, lev, trade_id, managed_note,
                         )
+                        try:
+                            await self.alerts.send_orphan_alert(
+                                pair=pair, side=side, contracts=contracts,
+                                action="ADOPTED — bot managing",
+                                detail=f"Manual trade @ ${entry_px:.2f} {lev}x adopted. {managed_note}",
+                            )
+                        except Exception:
+                            pass
 
                         # ── Success: clean up all tracking ────────────
                         self._position_first_seen.pop(fs_key, None)
                         self._orphan_fail_count.pop(fs_key, None)
                         self._orphan_gave_up.discard(fs_key)
-
-                        # Also mark any stale DB trade as closed
-                        if self.db.is_connected:
-                            open_trade = await self.db.get_open_trade(
-                                pair=pair, exchange="delta",
-                            )
-                            if open_trade:
-                                try:
-                                    ticker = await self.delta.fetch_ticker(pair)
-                                    exit_price = float(ticker.get("last", 0) or 0) or entry_px
-                                except Exception:
-                                    exit_price = entry_px
-                                trade_lev = open_trade.get("leverage", config.delta.leverage) or 1
-                                _r = calc_pnl(
-                                    entry_px, exit_price, contracts,
-                                    side, trade_lev,
-                                    "delta", pair,
-                                    entry_fee_rate=config.delta.taker_fee_with_gst,
-                                    exit_fee_rate=config.delta.taker_fee_with_gst,
-                                )
-                                pnl, pnl_pct = _r.net_pnl, _r.pnl_pct
-                                order_id = open_trade.get("order_id", "")
-                                if order_id:
-                                    await self.db.close_trade(
-                                        order_id, exit_price, pnl, pnl_pct,
-                                        reason="orphan_closed",
-                                        exit_reason="ORPHAN",
-                                        gross_pnl=_r.gross_pnl,
-                                        entry_fee=_r.entry_fee,
-                                        exit_fee=_r.exit_fee,
-                                    )
-                                    logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
 
                     except Exception:
                         fail_count += 1
@@ -5150,30 +5185,23 @@ class AlphaBot:
                             self._orphan_gave_up.add(fs_key)
                             self._position_first_seen.pop(fs_key, None)
                             logger.error(
-                                "ORPHAN GAVE UP: %s failed %d times — silencing alerts. CLOSE MANUALLY!",
+                                "MANUAL_ADOPT GAVE UP: %s failed %d times — position stays "
+                                "open on Delta, MANAGE MANUALLY!",
                                 pair, fail_count,
                             )
                             try:
                                 await self.alerts.send_orphan_alert(
                                     pair=pair, side=side, contracts=contracts,
-                                    action=f"GIVING UP after {fail_count} failures",
-                                    detail=f"Auto-close failed {fail_count}x. Close {pair} manually on Delta! No more alerts for this position.",
+                                    action=f"ADOPT FAILED {fail_count}x — unmanaged",
+                                    detail=f"Could not adopt manual trade. Position stays open but bot is NOT managing it. Manage {pair} manually on Delta!",
                                 )
                             except Exception:
                                 pass
                         else:
                             logger.exception(
-                                "Failed to close orphan %s (attempt %d/%d) — will retry",
+                                "Failed to adopt manual trade %s (attempt %d/%d) — will retry",
                                 pair, fail_count, self.ORPHAN_MAX_RETRIES,
                             )
-                            try:
-                                await self.alerts.send_orphan_alert(
-                                    pair=pair, side=side, contracts=contracts,
-                                    action=f"CLOSE FAILED (attempt {fail_count}/{self.ORPHAN_MAX_RETRIES})",
-                                    detail=f"Auto-close failed. Will retry {self.ORPHAN_MAX_RETRIES - fail_count} more time(s).",
-                                )
-                            except Exception:
-                                pass
 
         # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
         now = time.monotonic()
