@@ -15,6 +15,7 @@ const COLOR_STYLES: Record<
   darkred:  { bg: "bg-rose-500/20",    text: "text-rose-300",    ring: "ring-rose-500/40" },
   green:    { bg: "bg-emerald-500/15", text: "text-emerald-400", ring: "ring-emerald-500/30" },
   yellow:   { bg: "bg-amber-500/15",   text: "text-amber-400",   ring: "ring-amber-500/30" },
+  violet:   { bg: "bg-violet-500/15",  text: "text-violet-300",  ring: "ring-violet-500/30" },
   gray:     { bg: "bg-zinc-500/15",    text: "text-zinc-400",    ring: "ring-zinc-500/30" },
 };
 

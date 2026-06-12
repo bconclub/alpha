@@ -237,7 +237,8 @@ class LiveMirror:
 
     # ── manual trade adoption ──────────────────────────────────────────
     async def adopt_manual(
-        self, pair: str, side: str, contracts: float, entry_px: float, leverage: float | None = None,
+        self, pair: str, side: str, contracts: float, entry_px: float,
+        leverage: float | None = None, margin: float | None = None,
     ) -> bool:
         """Adopt a trade the user opened directly on Delta.
 
@@ -273,8 +274,12 @@ class LiveMirror:
             atr = entry_px * 0.003   # conservative fallback ≈ typical 5m ATR
         long = side == "long"
         stop = entry_px - self.STOP_ATR_MULT * atr if long else entry_px + self.STOP_ATR_MULT * atr
-        lev = float(leverage or self.LEVERAGE)
-        margin = contracts * csize * entry_px / lev if lev > 0 else contracts * csize * entry_px
+        notional = contracts * csize * entry_px
+        if margin and margin > 0:
+            lev = notional / margin   # exchange truth beats any reported leverage
+        else:
+            lev = float(leverage or self.LEVERAGE)
+            margin = notional / lev if lev > 0 else notional
         now_iso = datetime.now(timezone.utc).isoformat()
         row = {
             "pair": pair,

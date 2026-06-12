@@ -14,7 +14,6 @@ import {
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
-import LiveMirrorPanel from '@/components/LiveMirrorPanel';
 import { ExitChip } from '@/components/ui/ExitChip';
 import { ArrowUp, ArrowDown } from 'lucide-react';
 
@@ -740,13 +739,8 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Live Mirror — the V3 live path: real-money status, rails, and the
-          paper-lane scoreboard it copies from */}
-      <div className="mb-4">
-        <LiveMirrorPanel />
-      </div>
-
-      {/* Live active positions */}
+      {/* Live active positions (full strategy detail lives on the Strategy page;
+          every trade — Alpha or Manual — is in the Trades table) */}
       <div className="mb-4">
         <LivePositions />
       </div>

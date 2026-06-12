@@ -5,6 +5,7 @@ import { RefreshCw } from 'lucide-react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { SetupChip } from '@/components/ui/SetupChip';
+import LiveMirrorPanel from '@/components/LiveMirrorPanel';
 import { cn, formatDate, formatDuration, formatPnL, getPnLColor } from '@/lib/utils';
 import type { SetupConfig, Trade } from '@/lib/types';
 
@@ -214,6 +215,10 @@ export default function StrategiesPage() {
 
   return (
     <div className="space-y-5">
+      {/* The live strategy: what the mirror trades, which paper lane it copies,
+          rails and live W/L. Belongs here — not on the home page. */}
+      <LiveMirrorPanel />
+
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-white">Strategy Performance</h1>

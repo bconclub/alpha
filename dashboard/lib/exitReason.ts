@@ -23,6 +23,19 @@ const SINGLE_PILL_MAP: Record<string, string> = {
   expired_worthless: "EXPIRED OTM",
   ticker_dropout: "TICKER DROPOUT",
   reconcile_gone: "RECONCILE GONE",
+  // V3 LiveMirror exits — short, human, colored
+  hard_stop: "STOP",
+  trail_stop: "TRAIL",
+  breakeven_stop: "BREAKEVEN",
+  stagnant_exit: "STAGNANT",
+  no_traction: "NO TRACTION",
+  max_hold: "MAX HOLD",
+  closed_manually: "YOU CLOSED",
+  closed_externally: "YOU CLOSED",
+  closed_by_legacy_sl: "OLD BOT",
+  orphan_close_legacy: "OLD BOT",
+  engine_restart: "RESTART",
+  liquidated: "LIQUIDATED",
 };
 
 export function parseExitReason(
@@ -53,10 +66,20 @@ export function parseExitReason(
 export function exitReasonColor(primary: string): string {
   switch (primary) {
     case "STOP":
+    case "LIQUIDATED":
       return "red";
     case "TRAIL":
       return "green";
     case "BREAKEVEN":
+      return "gray";
+    case "STAGNANT":
+    case "NO TRACTION":
+    case "MAX HOLD":
+      return "yellow";
+    case "YOU CLOSED":
+      return "violet";
+    case "OLD BOT":
+    case "RESTART":
       return "gray";
     case "DEAD":
       return "darkred";

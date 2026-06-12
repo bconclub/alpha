@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-12 · Dashboard restructure + colored exit pills + full fills backfill
+
+- **Home page**: Live Mirror panel REMOVED (user: bad UI). It now lives on the **Strategy page**, slimmed to a pure scoreboard (rails + live W/L + paper-lane win rates/PF) — positions and history belong to the Trades table.
+- **Exit pills are colored**: green TRAIL/PROFIT, red STOP/LIQUIDATED, amber STAGNANT/NO TRACTION/MAX HOLD, violet YOU CLOSED, gray OLD BOT/RESTART. Human words, no raw snake_case.
+- **Backfilled 7 unrecorded manual BTC scalps from exchange fills** (#3706–#3712, net ≈ −$9.4, $8.27 of it taker fees) — the dashboard now reconciles with the real balance. Adopted-trade Money In now uses the exchange's actual position margin (open 30ct trade corrected to $19.14 @ ~100x).
+- First manual adoption confirmed in production: 30ct BTC long adopted with 🤝 Telegram, stop 63,620.
+- `(SHA on commit)`
+
 ## 2026-06-12 · Any-pair adoption + Alpha/Manual badges + DOGE backfill
 
 - The user's DOGE trade (+$4.57 net) was invisible: adoption only knew BTC/ETH contract sizes, and the old engine orphan-closed the position at 3.6 min (luckily in profit). Backfilled into `trades` (#3704) from exchange fills.

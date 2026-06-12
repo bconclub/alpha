@@ -67,8 +67,6 @@ export default function LiveMirrorPanel() {
 
   const bal = num(data.botStatus?.delta_balance);
   const liveOn = data.botStatus?.bot_state === 'live_mirror' || data.liveStats.open > 0 || data.liveStats.n > 0;
-  const open = data.liveTrades.filter((t) => t.status === 'open');
-  const recent = data.liveTrades.filter((t) => t.status === 'closed').slice(0, 5);
   const activeLanes = data.paperLanes.filter((l) => !LANE_LABELS[l.lane]?.includes('retired'));
 
   return (
@@ -101,47 +99,9 @@ export default function LiveMirrorPanel() {
         <span className="rounded border border-white/10 px-1.5 py-0.5">kill &lt;${data.mirror.killBalance}</span>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* live positions / recent live trades */}
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Live positions & recent</div>
-          {open.length === 0 && recent.length === 0 ? (
-            <p className="text-xs text-gray-600 py-2">
-              No live trades yet — mirror fires on the next paper signal with conf ≥{data.mirror.minConfidence} from the best lane.
-            </p>
-          ) : (
-            <div className="space-y-1.5">
-              {open.map((t) => (
-                <div key={t.id} className="flex items-center justify-between rounded border border-red-500/30 bg-red-950/20 px-2 py-1.5 font-mono text-xs">
-                  <span>
-                    <span className="font-bold text-white">{t.pair?.replace('/USD:USD', '')}</span>{' '}
-                    <span className={t.position_type === 'long' ? 'text-green-400' : 'text-red-400'}>{(t.position_type || '').toUpperCase()}</span>{' '}
-                    <span className="text-gray-500">{(t.setup_type || '').replace('LIVE_', '')} · {num(t.leverage)}x · ${num(t.collateral).toFixed(2)} in</span>
-                  </span>
-                  <span>
-                    <span className={num(t.current_pnl) >= 0 ? 'text-green-400' : 'text-red-400'}>
-                      {num(t.current_pnl) >= 0 ? '+' : ''}${num(t.current_pnl).toFixed(2)}
-                    </span>
-                    <span className="ml-2 text-red-300">stop {num(t.trail_stop_price || t.stop_loss).toFixed(1)}</span>
-                  </span>
-                </div>
-              ))}
-              {recent.map((t) => (
-                <div key={t.id} className="flex items-center justify-between rounded border border-white/5 px-2 py-1 font-mono text-[11px] text-gray-400">
-                  <span>
-                    {t.pair?.replace('/USD:USD', '')} {(t.position_type || '').toUpperCase()}{' '}
-                    <span className="text-gray-600">{(t.exit_reason || '').replace(/_/g, ' ')}</span>
-                  </span>
-                  <span className={num(t.net_pnl ?? t.pnl) >= 0 ? 'text-green-400' : 'text-red-400'}>
-                    {num(t.net_pnl ?? t.pnl) >= 0 ? '+' : ''}${num(t.net_pnl ?? t.pnl).toFixed(3)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* paper lane scoreboard the mirror picks from */}
+      <div>
+        {/* paper lane scoreboard the mirror picks from — positions and history
+            live in the Trades table, not here */}
         <div>
           <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">
             Paper lanes (V3 era) — the mirror copies the best of these

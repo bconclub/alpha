@@ -4811,11 +4811,15 @@ class AlphaBot:
                 self._orphan_fail_count.pop(f"delta:{symbol}", None)
                 self._orphan_gave_up.discard(f"delta:{symbol}")
                 continue
+            _pinfo = pos.get("info") or {}
             exchange_positions[symbol] = {
                 "side": side,
                 "contracts": abs(contracts),
                 "entry_price": entry_px,
                 "leverage": float(pos.get("leverage", 0) or 0),
+                # real money locked in the position (exchange truth — used so
+                # adopted manual trades show the actual Money In, not a guess)
+                "margin": float(pos.get("initialMargin") or _pinfo.get("margin") or 0),
             }
 
         # ── Step 1b: Normalize exchange symbols to ccxt unified format ──
@@ -5102,7 +5106,10 @@ class AlphaBot:
                     try:
                         adopted = False
                         if mirror and mirror.is_active:
-                            adopted = await mirror.adopt_manual(pair, side, contracts, entry_px, lev)
+                            adopted = await mirror.adopt_manual(
+                                pair, side, contracts, entry_px, lev,
+                                margin=float(epos.get("margin") or 0) or None,
+                            )
                         if not adopted:
                             note = (
                                 "LiveMirror is busy with another position"
