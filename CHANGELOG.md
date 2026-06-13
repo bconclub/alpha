@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-13 15:13 IST · De-dupe home: drop top summary strip, consolidate into bottom panel
+
+- Removed the top **Total Capital / Today / Regime** strip and the Live Positions block — the home now **starts with Market Overview** (matches the reference).
+- The bottom panel absorbs the good bits with **no duplication**: a **LIVE chip + 24H/7D/14D/30D toggle** (drives Win Rate + Total P/L windows) and a **Today detail row** (P/L, W/L, trades, fees, last-10 squares) above the 5 KPI cards.
+- `(SHA on commit)`
+
+
 ## 2026-06-13 15:02 IST · Home matches reference: Market Sentiment chart + bottom KPI row
 
 - Added **Market Sentiment & Volatility** chart (recharts): BTC + ETH moves indexed to the window start + a volatility area (ATR%), with 1H/24H/7D/30D toggle. Sourced from strategy_log price/atr history.
