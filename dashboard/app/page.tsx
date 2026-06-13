@@ -13,6 +13,7 @@ import {
 } from '@/lib/pnl-utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
+import LiveSignalsPanel from '@/components/LiveSignalsPanel';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
 import { ExitChip } from '@/components/ui/ExitChip';
 import { ArrowUp, ArrowDown } from 'lucide-react';
@@ -248,21 +249,6 @@ function SqueezeCard({ asset }: { asset: SqueezeAsset }) {
         </div>
       </div>
 
-      {/* 2. Signal strength bar — LEGACY feed: reference only, the old scalp
-          system no longer drives any trading (LiveMirror copies paper lanes) */}
-      <div className="mb-4 rounded-xl bg-white/[0.03] p-3 opacity-70">
-        <div className="flex justify-between text-xs mb-2">
-          <span className="text-gray-400 uppercase tracking-[0.18em]">Signal Feed <span className="normal-case tracking-normal text-gray-600">(legacy · not trading)</span></span>
-          <span className="font-mono text-white">{asset.confidence.toFixed(0)}%</span>
-        </div>
-        <div className="relative h-2 bg-gray-800 rounded-full overflow-hidden">
-          <div 
-            className={cn("h-full rounded-full transition-all duration-500", getSignalColor(asset.confidence))}
-            style={{ width: `${Math.min(100, asset.confidence)}%` }}
-          />
-        </div>
-      </div>
-
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-xl bg-white/[0.03] p-3">
           <p className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Going After</p>
@@ -377,8 +363,7 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, []);
 
-  // Bot state
-  // engine publishes: live_mirror | paper | running | paused | error
+  // Bot state — one live path now. Engine publishes: running | paused | error
   const botState: string = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
   
@@ -642,26 +627,22 @@ export default function DashboardPage() {
           {capitalInr > 0 && <div className="text-xs text-gray-500 mt-1">₹{capitalInr.toLocaleString('en-IN')}</div>}
           <div className="mt-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              {/* Two simple states, two chips. Engine publishes bot_state:
-                  live_mirror = paper + live | paper = paper only | error = down */}
+              {/* One live path now (the autonomous trader). Engine publishes
+                  bot_state: running = live trading | paused = live off | error = down */}
               <span className={cn(
                 'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold',
-                botState === 'error' ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'
-              )}>
-                <span className={cn('h-1.5 w-1.5 rounded-full', botState === 'error' ? 'bg-red-400' : 'bg-emerald-400')} />
-                PAPER {botState === 'error' ? 'OFF' : 'ON'}
-              </span>
-              <span className={cn(
-                'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold',
-                botState === 'live_mirror' || botState === 'running'
-                  ? 'bg-emerald-500/15 text-emerald-300'
-                  : 'bg-zinc-700/40 text-zinc-400'
+                botState === 'error'
+                  ? 'bg-red-500/15 text-red-300'
+                  : botState === 'running'
+                    ? 'bg-emerald-500/15 text-emerald-300'
+                    : 'bg-zinc-700/40 text-zinc-400'
               )}>
                 <span className={cn(
                   'h-1.5 w-1.5 rounded-full',
-                  botState === 'live_mirror' || botState === 'running' ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'
+                  botState === 'error' ? 'bg-red-400'
+                    : botState === 'running' ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'
                 )} />
-                LIVE {botState === 'live_mirror' || botState === 'running' ? 'ON' : 'OFF'}
+                LIVE {botState === 'error' ? 'DOWN' : botState === 'running' ? 'ON' : 'OFF'}
               </span>
               {uptimeSeconds > 0 && <span className="text-xs text-gray-500">{formatUptime(uptimeSeconds)}</span>}
             </div>
@@ -737,6 +718,11 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Live signals — what the autonomous trader sees right now */}
+      <div className="mb-4">
+        <LiveSignalsPanel />
       </div>
 
       {/* Live active positions (full strategy detail lives on the Strategy page;

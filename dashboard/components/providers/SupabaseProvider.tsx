@@ -29,6 +29,7 @@ import type {
   SetupConfig,
   SignalState,
   Deposit,
+  LiveSignal,
 } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -141,6 +142,8 @@ interface SupabaseContextValue {
   pairConfigs: PairConfig[];
   setupConfigs: SetupConfig[];
   signalStates: SignalState[];
+  // Live V3 signal board (autonomous trader)
+  liveSignals: LiveSignal[];
   // Deposits
   deposits: Deposit[];
 }
@@ -169,6 +172,7 @@ const EMPTY_CONTEXT: SupabaseContextValue = {
   pairConfigs: [],
   setupConfigs: [],
   signalStates: [],
+  liveSignals: [],
   deposits: [],
 };
 
@@ -222,6 +226,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
   const [pairConfigs, setPairConfigs] = useState<PairConfig[]>([]);
   const [setupConfigs, setSetupConfigs] = useState<SetupConfig[]>([]);
   const [signalStates, setSignalStates] = useState<SignalState[]>([]);
+  const [liveSignals, setLiveSignals] = useState<LiveSignal[]>([]);
   const [deposits, setDeposits] = useState<Deposit[]>([]);
 
   const activityRef = useRef<ActivityEvent[]>([]);
@@ -280,6 +285,11 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       const res = await client.from('signal_state').select('*');
       if (res.data) setSignalStates(res.data as SignalState[]);
     } catch (e) { console.warn('[Alpha] signal_state fetch failed', e); }
+
+    try {
+      const res = await client.from('live_signals').select('*');
+      if (res.data) setLiveSignals(res.data as LiveSignal[]);
+    } catch (e) { /* live_signals table may not exist yet — silent */ }
 
     try {
       const res = await client.from('deposits').select('*').order('created_at', { ascending: false }).limit(100);
@@ -423,6 +433,16 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       } catch (e) { /* silent */ }
     }, 15_000);
 
+    // Poll the live V3 signal board every 12s (engine upserts at the same cadence)
+    const liveSignalsPoll = setInterval(async () => {
+      const c = getSupabase();
+      if (!c) return;
+      try {
+        const res = await c.from('live_signals').select('*');
+        if (res.data) setLiveSignals(res.data as LiveSignal[]);
+      } catch (e) { /* silent */ }
+    }, 12_000);
+
     // Poll options_state every 10s for live panel refresh (signal strength, breakout status, premiums)
     // Realtime subscription can silently disconnect; this ensures the panel stays fresh
     const optionsStatePoll = setInterval(async () => {
@@ -477,6 +497,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
     return () => {
       clearInterval(livePositionsPoll);
+      clearInterval(liveSignalsPoll);
       clearInterval(optionsStatePoll);
       clearInterval(pollInterval);
       document.removeEventListener('visibilitychange', onVisibility);
@@ -655,6 +676,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       pairConfigs,
       setupConfigs,
       signalStates,
+      liveSignals,
       deposits,
     }),
     [
@@ -662,7 +684,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       exchangeFilter, filteredTrades,
       openPositions, pnlByExchange, futuresPositions, dailyPnL, strategyPerformance,
       activityFeed, optionsLog, optionsState, setOptionsState, fetchViews,
-      pairConfigs, setupConfigs, signalStates, deposits,
+      pairConfigs, setupConfigs, signalStates, liveSignals, deposits,
     ],
   );
 

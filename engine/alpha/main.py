@@ -24,8 +24,6 @@ from alpha.db import Database
 from alpha.market_analyzer import MarketAnalyzer
 from alpha.price_feed import PriceFeed
 from alpha.risk_manager import RiskManager
-from alpha.paper_futures import PaperFuturesStrategy, build_paper_futures_strategies
-from alpha.paper_options import BasePaperOptions, build_paper_options_strategies
 from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
@@ -56,10 +54,11 @@ class AlphaBot:
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
         # Options overlay strategies: pair -> OptionsScalpStrategy
         self._options_strategies: dict[str, OptionsScalpStrategy] = {}
-        # Independent paper futures strategies: pair -> paper-only strategy lanes
-        self._paper_futures_strategies: dict[str, list[PaperFuturesStrategy]] = {}
-        # Independent paper OPTIONS strategies: pair -> buy-only option lanes
-        self._paper_options_strategies: dict[str, list[BasePaperOptions]] = {}
+        # Retired paper labs — kept as empty dicts so the legacy start/stop/pause
+        # loops are harmless no-ops (paper trading removed 06-13; the autonomous
+        # trader now runs the V3 signals live).
+        self._paper_futures_strategies: dict[str, list[Any]] = {}
+        self._paper_options_strategies: dict[str, list[Any]] = {}
         # Paper lab universe — BTC + ETH only.
         self.paper_pairs: list[str] = []
 
@@ -420,27 +419,9 @@ class AlphaBot:
         if self.delta:
             await self.db.cancel_orphan_paper_trades()
 
-        # Independent paper futures experiments. These never place exchange
-        # orders; they only write paper rows for comparing futures-style logic.
-        if self.delta:
-            for pair in self.paper_futures_pairs:
-                self._paper_futures_strategies[pair] = build_paper_futures_strategies(
-                    pair,
-                    self.delta,
-                    self.db,
-                    self._scalp_strategies.get(f"delta:{pair}"),
-                )
-
-        # Independent paper OPTIONS lab (buy-only, BTC/ETH). Reads the real
-        # Delta option chain + premiums; never places orders.
-        if self.delta and self.delta_options:
-            for pair in self.paper_pairs:
-                self._paper_options_strategies[pair] = build_paper_options_strategies(
-                    pair,
-                    self.delta_options,
-                    self.delta,
-                    self.db,
-                )
+        # Paper futures + paper options labs are RETIRED (06-13). The validated
+        # V3 signals now drive real orders directly via the AutonomousTrader.
+        # History stays in paper_futures_trades / paper_options_trades (read-off).
 
         # PAPER-ONLY: hard-block every live entry path via the risk manager so a
         # restart can never resume real trading. Paper lanes ignore this flag.
@@ -456,20 +437,27 @@ class AlphaBot:
             self.risk_manager._pause_reason = f"LIVE_MODE={self._live_mode or 'off'} (legacy live paths blocked)"
             logger.warning("⚠️ Legacy live paths blocked (LIVE_MODE=%s) — only LiveMirror may trade", self._live_mode)
 
-        # LiveMirror — the V3 live path: mirrors the single best paper signal
-        # with tiny size and hard rails. Requires PAPER_ONLY=0 AND LIVE_MODE=mirror.
+        # AutonomousTrader — the single live path: runs the V3 signal engine on
+        # live candles and places real Delta orders at 10/25/50x by confidence.
+        # Enabled by LIVE_TRADING=on (LIVE_MODE=mirror still accepted for
+        # back-compat) AND PAPER_ONLY=0. The attribute stays `self.live_mirror`
+        # and rows keep strategy='live_mirror' so the reconciler / dashboard /
+        # trade history all carry over unchanged.
+        _live_flag = os.getenv("LIVE_TRADING", "").strip().lower() in ("on", "1", "true", "yes")
+        self._live_on = (_live_flag or self._live_mode == "mirror") and not self.paper_only
         self.live_mirror = None
-        if self.delta and self._live_mode == "mirror" and not self.paper_only:
-            from alpha.live_mirror import LiveMirror
+        if self.delta and self._live_on:
+            from alpha.live_trader import AutonomousTrader
 
-            self.live_mirror = LiveMirror(
+            self.live_mirror = AutonomousTrader(
                 self.delta,
                 self.db,
                 self.alerts,
                 balance_fn=lambda: self._fetch_portfolio_usd(self.delta),
+                pairs=self.delta_pairs,
             )
-        elif self._live_mode == "mirror":
-            logger.info("LiveMirror armed but INACTIVE (PAPER_ONLY is on)")
+        elif _live_flag or self._live_mode == "mirror":
+            logger.info("AutonomousTrader armed but INACTIVE (PAPER_ONLY is on)")
 
         # Inject restored position state into strategy instances
         await self._restore_strategy_state()
@@ -1378,21 +1366,17 @@ class AlphaBot:
             except Exception:
                 pass
 
-        # Determine bot state. In the V3 era rm.is_paused only describes the
-        # LEGACY live gate — the real states the dashboard needs are:
-        #   live_mirror  → paper lab running AND LiveMirror trading real money
-        #   paper        → paper lab running, live off
-        #   running/paused/error → legacy semantics
-        if getattr(self, "live_mirror", None) and self.live_mirror.is_active:
-            bot_state = "live_mirror"
-        elif not self._running:
+        # Determine bot state. One live path now (the AutonomousTrader):
+        #   running → the live trader is active (trading real money)
+        #   error   → main loop is down
+        #   paused  → process up but the trader is not active (live off)
+        trader = getattr(self, "live_mirror", None)
+        if not self._running:
             bot_state = "error"
-        elif self.paper_only or getattr(self, "_live_mode", "off") != "legacy":
-            bot_state = "paper"
-        elif rm.is_paused:
-            bot_state = "paused"
-        else:
+        elif trader and trader.is_active and not getattr(trader, "user_paused", False):
             bot_state = "running"
+        else:
+            bot_state = "paused"
 
         # Query ACTUAL P&L from trades table (source of truth)
         # Never trust in-memory calculations for dashboard display

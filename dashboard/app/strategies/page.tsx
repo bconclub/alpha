@@ -5,7 +5,6 @@ import { RefreshCw } from 'lucide-react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { SetupChip } from '@/components/ui/SetupChip';
-import LiveMirrorPanel from '@/components/LiveMirrorPanel';
 import { cn, formatDate, formatDuration, formatPnL, getPnLColor } from '@/lib/utils';
 import type { SetupConfig, Trade } from '@/lib/types';
 
@@ -18,7 +17,8 @@ const TIME_WINDOWS: { key: TimeWindow; label: string }[] = [
   { key: '28d', label: '28 days' },
 ];
 
-const LIVE_SETUPS = ['SQUEEZE', 'MOM_BURST', 'PULLBACK', 'TREND_FLOW', 'PREMIUM_WAVE'] as const;
+// The autonomous trader's live setups (V3 lanes + adopted manual trades).
+const LIVE_SETUPS = ['EMA_PULLBACK', 'DONCHIAN', 'VWAP', 'MANUAL'] as const;
 const LIVE_SETUP_SET = new Set<string>(LIVE_SETUPS);
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
@@ -41,8 +41,18 @@ type SetupStats = {
 };
 
 function canonicalSetup(setup: string | null | undefined): string {
-  const raw = (setup || '').trim().toUpperCase();
+  let raw = (setup || '').trim().toUpperCase();
   if (!raw) return 'UNLABELED';
+  // Live trader rows: strip LIVE_ then fold the FUT_ lane ids to short names.
+  if (raw.startsWith('LIVE_')) raw = raw.slice(5);
+  if (raw === 'MANUAL') return 'MANUAL';
+  if (raw.startsWith('FUT_')) {
+    if (raw.includes('DONCHIAN')) return 'DONCHIAN';
+    if (raw.includes('EMA_PB') || raw.includes('EMA_PULLBACK')) return 'EMA_PULLBACK';
+    if (raw.includes('VWAP')) return 'VWAP';
+    if (raw.includes('SFP')) return 'LIQ_SWEEP';
+  }
+  // legacy options setups (history)
   if (raw === 'BB_SQUEEZE' || raw === 'BB_SQUEEZE_BREAKOUT' || raw === 'SQUEEZE_BREAKOUT') return 'SQUEEZE';
   if (raw === 'MOMENTUM_BURST' || raw === 'MOMENTUM_BURST_ENTRY') return 'MOM_BURST';
   if (raw === 'MOVE_PULLBACK' || raw === 'PULL_BACK') return 'PULLBACK';
@@ -87,6 +97,10 @@ function capturePct(trade: Trade): number | null {
 }
 
 function formatSetupName(setup: string): string {
+  if (setup === 'EMA_PULLBACK') return 'EMA Pullback';
+  if (setup === 'DONCHIAN') return 'Donchian Retest';
+  if (setup === 'VWAP') return 'VWAP Bounce';
+  if (setup === 'MANUAL') return 'Manual (yours)';
   if (setup === 'MOM_BURST') return 'Momentum Burst';
   if (setup === 'TREND_FLOW') return 'Trend Flow';
   if (setup === 'PREMIUM_WAVE') return 'Premium Wave';
@@ -215,10 +229,6 @@ export default function StrategiesPage() {
 
   return (
     <div className="space-y-5">
-      {/* The live strategy: what the mirror trades, which paper lane it copies,
-          rails and live W/L. Belongs here — not on the home page. */}
-      <LiveMirrorPanel />
-
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-white">Strategy Performance</h1>

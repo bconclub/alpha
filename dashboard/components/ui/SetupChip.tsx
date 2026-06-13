@@ -7,7 +7,7 @@ const SETUP_STYLES: Record<string, { bg: string; text: string; ring: string }> =
   TREND_FLOW: { bg: "bg-emerald-500/15", text: "text-emerald-300", ring: "ring-emerald-500/30" },
   PREMIUM_WAVE: { bg: "bg-lime-500/15", text: "text-lime-300", ring: "ring-lime-500/30" },
   FVG_CHOCH: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
-  // V3 mirror lanes (short, human names — never the raw lane id)
+  // V3 live setups (short, human names — never the raw lane id)
   MANUAL: { bg: "bg-violet-500/15", text: "text-violet-300", ring: "ring-violet-500/30" },
   DONCHIAN: { bg: "bg-sky-500/15", text: "text-sky-300", ring: "ring-sky-500/30" },
   EMA_PULLBACK: { bg: "bg-cyan-500/15", text: "text-cyan-300", ring: "ring-cyan-500/30" },
@@ -24,7 +24,7 @@ const FALLBACK = {
 // Map legacy names to canonical so old rows render too.
 function canonical(setup: string): string {
   let u = setup.trim().toUpperCase();
-  // Mirror/paper lane ids → short names: strip LIVE_ prefix and lane suffixes.
+  // Live lane ids → short names: strip LIVE_ prefix and lane suffixes.
   if (u.startsWith("LIVE_")) u = u.slice(5);
   if (u.startsWith("FUT_")) {
     if (u.includes("DONCHIAN")) return "DONCHIAN";

@@ -23,7 +23,7 @@ const SINGLE_PILL_MAP: Record<string, string> = {
   expired_worthless: "EXPIRED OTM",
   ticker_dropout: "TICKER DROPOUT",
   reconcile_gone: "RECONCILE GONE",
-  // V3 LiveMirror exits — short, human, colored
+  // V3 autonomous trader exits — short, human, colored
   hard_stop: "STOP",
   trail_stop: "TRAIL",
   breakeven_stop: "BREAKEVEN",

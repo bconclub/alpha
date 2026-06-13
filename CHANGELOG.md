@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-06-13 14:24 IST · ONE autonomous live trader — paper + mirror removed
+
+- **Engine rebuild.** Retired the paper lab (`paper_futures.py`, `paper_options.py`) and the mirror (`live_mirror.py`). The validated V3 brain now lives in `strategy_v3.py` (signals only) and drives real Delta orders directly via `live_trader.py` (`AutonomousTrader`). One loop, no paper account, no copy step.
+- **Leverage by confidence** (user call — never 100x): conf 85–91 → **10x**, 92–96 → **25x**, 97+ → **50x**, plus a liquidation safety guard that steps the tier down if the 1.6×ATR stop would sit outside liquidation.
+- **Rails**: $5 margin/trade, **max 2 open** (1 per asset, BTC+ETH), stand down under **$5** balance, daily −$3 stop. Manual Delta trades still adopted + managed (no impatience purges).
+- **Fee-aware breakeven fix** (live #3713: +$0.12 gross → −$0.14 net): the breakeven lock can no longer arm until the move clears round-trip fees (≥1.6× the ~0.1% BTC fee distance) and locks at ≥1.3× fees — no more booking sub-fee scraps that net negative.
+- **New `live_signals` table** — engine upserts per-pair signal (lane, direction, confidence, 1h trend, would-be leverage, in-position) every ~12s.
+- **Dashboard**: home shows one **LIVE** chip (running/paused/error) + a new **Live Signals** panel; **Strategy Performance** now reports the V3 live setups (EMA Pullback / Donchian / VWAP / Manual) instead of the legacy options setups. Removed the Paper page + nav (desktop & mobile), the LiveMirror panel, and the `/api/live`, `/api/paper-futures`, `/api/paper-summary` routes. Paper trade history retained in the DB (read-off, not dropped).
+- User-facing: paper lab is gone from the UI; all live trades surface under Strategy Performance; "live mirror / real money" framing removed.
+- `(SHA on commit)`
+
 ## 2026-06-13 · Manual trades get the full "mind": bank early up, cut deep down
 
 - User's open trade went +$2 → −$6; the profit lock armed too late (+1.2 ATR ≈ $9 at that size). Manual trades now bank MUCH earlier: breakeven from **+0.4 ATR**, then lock **50%** of the peak; trail arms at 0.6 ATR and hugs at 0.8 ATR.

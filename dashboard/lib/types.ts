@@ -69,35 +69,6 @@ export interface Trade {
   } | null;
 }
 
-export interface PaperFuturesTrade {
-  id: string;
-  created_at: string;
-  updated_at?: string;
-  option_trade_id?: number | null;
-  option_symbol?: string | null;
-  pair: string;
-  base_asset?: string | null;
-  setup_type?: string | null;
-  direction: 'long' | 'short';
-  status: 'open' | 'closed' | 'cancelled';
-  opened_at: string;
-  closed_at?: string | null;
-  entry_price: number;
-  current_price?: number | null;
-  exit_price?: number | null;
-  paper_account_usd: number;
-  margin_usd: number;
-  notional_usd: number;
-  leverage: number;
-  pnl_pct: number;
-  peak_pnl_pct: number;
-  gross_pnl_usd?: number;
-  fees_usd?: number;
-  pnl_usd: number;
-  exit_reason?: string | null;
-  metadata?: Record<string, unknown> | null;
-}
-
 export interface StrategyLog {
   id: string;
   created_at?: string;
@@ -551,4 +522,16 @@ export interface Deposit {
   amount: number;
   amount_inr?: number | null;
   notes?: string | null;
+}
+
+// Live V3 signal board — engine upserts one row per traded pair every ~12s.
+export interface LiveSignal {
+  pair: string;
+  lane: string | null;            // FUT_EMA_PB | FUT_DONCHIAN_RT | FUT_VWAP
+  direction: 'long' | 'short' | null;
+  confidence: number;             // 0–100
+  htf_trend: number | null;       // +1 up, -1 down, 0 flat
+  would_lev: number | null;       // leverage if taken now (10/25/50)
+  in_position: boolean;
+  updated_at: string;
 }
