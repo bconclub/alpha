@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-13 15:02 IST · Home matches reference: Market Sentiment chart + bottom KPI row
+
+- Added **Market Sentiment & Volatility** chart (recharts): BTC + ETH moves indexed to the window start + a volatility area (ATR%), with 1H/24H/7D/30D toggle. Sourced from strategy_log price/atr history.
+- Added the **bottom KPI row**: Portfolio Value (delta balance + spark), Open Positions (donut, winning vs rest), Win Rate (last 20 + rolling spark), Total P/L 24h (spark, red/green), Capital. From botStatus + trades + daily pnl.
+- Slotted both into the home to match the reference layout (overview → sentiment → recent trades, scanner right, KPIs bottom).
+- `(SHA on commit)`
+
+
 ## 2026-06-13 14:50 IST · Scanner readiness bars: red→green heat gauge
 
 - Bars were all one blue. Now each readiness bar is colored by how close the setup is: **red/amber when cold, sliding to green as it nears firing** (smooth HSL heat, glow on the fill, % colored to match).

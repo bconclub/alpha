@@ -14,6 +14,8 @@ import {
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
 import { StrategyScanner } from '@/components/dashboard/StrategyScanner';
+import { MarketSentiment } from '@/components/dashboard/MarketSentiment';
+import { BottomStats } from '@/components/dashboard/BottomStats';
 import { ExitChip } from '@/components/ui/ExitChip';
 import { ArrowUp, ArrowDown } from 'lucide-react';
 
@@ -729,6 +731,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 mt-4">
         <div className="lg:col-span-3 space-y-4">
           <MarketOverview />
+          <MarketSentiment />
           <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
             <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Recent Trades</h3>
             {recentTrades.length === 0 ? (
@@ -745,6 +748,11 @@ export default function DashboardPage() {
         <div className="lg:col-span-2">
           <StrategyScanner />
         </div>
+      </div>
+
+      {/* Bottom KPI row */}
+      <div className="mt-4">
+        <BottomStats />
       </div>
     </div>
   );
