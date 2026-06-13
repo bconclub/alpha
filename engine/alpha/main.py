@@ -130,6 +130,10 @@ class AlphaBot:
         # Orphan grace: first-seen time for untracked positions (key: "exchange:pair")
         self._position_first_seen: dict[str, float] = {}
         self.ORPHAN_GRACE_S = 120  # seconds before orphan close fires
+        # Manual adoption is non-destructive (the trader refuses to double-adopt
+        # a pair it already owns), so we adopt a manual trade FAST — no long
+        # unmanaged gap where the user thinks the bot abandoned their trade.
+        self.ADOPT_GRACE_S = 20
 
         # Orphan close retry tracking (key: "exchange:pair")
         self._orphan_fail_count: dict[str, int] = {}
@@ -3476,6 +3480,12 @@ class AlphaBot:
         }
 
         for symbol, pos in live_positions.items():
+            # Perps (e.g. BTC/USD:USD) are NOT options — they're owned by the
+            # AutonomousTrader's futures reconciler, which adopts them to the
+            # live trader. Skip them here so we don't false-alarm "ORPHAN_UNMANAGED
+            # — no strategy registered" on a manual futures trade mid-adoption.
+            if not is_option_symbol(symbol):
+                continue
             # Parse symbol: e.g. ETH/USD:USD-260331-2100-C
             base_asset = symbol.split("/")[0] if "/" in symbol else ""
             option_side = "call" if symbol.endswith("-C") else ("put" if symbol.endswith("-P") else "call")
@@ -5065,14 +5075,14 @@ class AlphaBot:
                     if fs_key in self._orphan_gave_up:
                         continue
 
-                    # ── Grace period: don't close newly-detected positions ──
+                    # ── Short grace before ADOPTING (non-destructive, so brief) ──
                     if fs_key not in self._position_first_seen:
                         self._position_first_seen[fs_key] = time.monotonic()
                     age = time.monotonic() - self._position_first_seen[fs_key]
-                    if age < self.ORPHAN_GRACE_S:
+                    if age < self.ADOPT_GRACE_S:
                         logger.info(
-                            "ORPHAN_GRACE: skipping %s (age %.0fs < %ds)",
-                            pair, age, self.ORPHAN_GRACE_S,
+                            "ADOPT_GRACE: %s (age %.0fs < %ds) — adopting shortly",
+                            pair, age, self.ADOPT_GRACE_S,
                         )
                         continue
 

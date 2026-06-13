@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-06-13 15:47 IST · Manual trades: ride to liquidation, let winners run, adopt fast
+
+- **Downside**: manual stop now sits just above LIQUIDATION (liq + 0.3 ATR), not a 2-ATR drawdown. #3715 stop widened 64,146 -> 63,137 (~0.16% -> 1.73% room). "Let it keep doing what it wants — only cut if it really goes bad."
+- **Upside**: dropped the breakeven ratchet + early trail for manual trades (they cut #3713/#3714 at breakeven for fee losses). Now only a LOOSE trail that arms after +3 ATR and trails 2.5 ATR behind the peak — winners run, real runs still banked.
+- **Boot re-attach** re-applies the ride-to-liq stop so an already-open manual trade gets the new policy.
+- **Faster adoption**: manual trades adopt after a 20s grace (was 120s), so no 2-3 min "unmanaged" gap.
+- **Fixed false alarm**: the options reconciler was logging "ORPHAN_UNMANAGED — no BTC strategy registered" on manual FUTURES trades; it now skips perps (the futures path adopts them).
+- `(SHA on commit)`
+
+
 ## 2026-06-13 15:13 IST · De-dupe home: drop top summary strip, consolidate into bottom panel
 
 - Removed the top **Total Capital / Today / Regime** strip and the Live Positions block — the home now **starts with Market Overview** (matches the reference).

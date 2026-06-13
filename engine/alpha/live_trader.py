@@ -105,15 +105,16 @@ class AutonomousTrader:
     # fee threshold, and lock at a level that clears fees WITH profit.
     BE_FEE_ARM_MULT = 1.6     # arm BE only once peak move ≥ 1.6× round-trip fee distance
     LOCK_FEE_FLOOR_MULT = 1.3 # locked stop always covers ≥ 1.3× fees (real net profit)
-    # manual-trade tuning (user, 06-13: "+$2 became −$6 — if it's up, take it";
-    # "if it goes REALLY bad we cut, otherwise we don't")
-    MANUAL_STOP_ATR = 3.0
-    MANUAL_LIQ_PAD_ATR = 0.2
-    MANUAL_DD_ATR = 2.0
-    MANUAL_BE_ARM_ATR = 0.4
-    MANUAL_LOCK_FRAC = 0.5
-    MANUAL_TRAIL_ARM_ATR = 0.6
-    MANUAL_TRAIL_MULT = 0.8
+    # manual-trade tuning (user, 06-13: "I take the trade — let it keep doing
+    # what it wants, don't be trigger-happy; only cut if it REALLY goes bad").
+    # → RIDE to near liquidation, LET WINNERS RUN. No breakeven cut, no early
+    #   trail. The only downside exit is the liquidation-pad stop; the trail
+    #   only arms after a genuine multi-ATR run and trails LOOSE so it protects
+    #   a real winner without ever cutting near breakeven.
+    MANUAL_STOP_ATR = 8.0          # wide fallback when exchange liq is unknown
+    MANUAL_LIQ_PAD_ATR = 0.3       # downside stop = liquidation + this pad
+    MANUAL_TRAIL_ARM_ATR = 3.0     # don't protect until +3 ATR in profit (a real winner)
+    MANUAL_TRAIL_MULT = 2.5        # then trail loosely, 2.5 ATR behind the peak
 
     def __init__(
         self,
@@ -225,6 +226,12 @@ class AutonomousTrader:
                 is_manual=bool(meta.get("manual")),
                 liq=float(meta.get("liq_price") or 0),
             )
+            # Manual trades: re-apply the current ride-to-liquidation policy on
+            # boot (a stale tight stop stored from an older policy would cut the
+            # trade early). Downside = liquidation + pad; let it ride otherwise.
+            if pos.is_manual and pos.liq > 0 and pos.atr > 0:
+                pad = self.MANUAL_LIQ_PAD_ATR * pos.atr
+                pos.stop = pos.liq + pad if pos.is_long else pos.liq - pad
             self._positions[pair] = pos
             logger.warning(
                 "Re-attached open position id=%s %s %s x%.0f entry=%.2f stop=%.2f%s",
@@ -443,14 +450,13 @@ class AutonomousTrader:
         if atr <= 0:
             atr = entry_px * 0.003
         long = side == "long"
-        dd_stop = entry_px - self.MANUAL_DD_ATR * atr if long else entry_px + self.MANUAL_DD_ATR * atr
+        # Downside = ride to JUST above liquidation (user: "let it keep doing what
+        # it wants, only cut if it really goes bad"). No 2-ATR drawdown cut.
         if liquidation and liquidation > 0:
             pad = self.MANUAL_LIQ_PAD_ATR * atr
-            liq_stop = liquidation + pad if long else liquidation - pad
-            stop = max(liq_stop, dd_stop) if long else min(liq_stop, dd_stop)
+            stop = liquidation + pad if long else liquidation - pad
         else:
             stop = entry_px - self.MANUAL_STOP_ATR * atr if long else entry_px + self.MANUAL_STOP_ATR * atr
-            stop = max(stop, dd_stop) if long else min(stop, dd_stop)
         notional = contracts * csize * entry_px
         if margin and margin > 0:
             lev = notional / margin
@@ -532,25 +538,28 @@ class AutonomousTrader:
 
         atr = pos.atr
         peak_fav = (pos.peak_price - pos.entry) if long else (pos.entry - pos.peak_price)
-        be_arm = self.MANUAL_BE_ARM_ATR if pos.is_manual else self.BREAKEVEN_ATR
-        lock_frac = self.MANUAL_LOCK_FRAC if pos.is_manual else self.PROFIT_LOCK_FRAC
-        trail_arm = self.MANUAL_TRAIL_ARM_ATR if pos.is_manual else self.TRAIL_ARM_ATR
-        trail_mult = (min(self._trail_mult(pos.peak_pnl_pct), self.MANUAL_TRAIL_MULT)
-                      if pos.is_manual else self._trail_mult(pos.peak_pnl_pct))
-        # Fee-aware breakeven: the lock may ONLY arm once the trade has moved
-        # far enough to clear round-trip fees with room — otherwise locking at
-        # the fee distance puts the stop above market and books a sub-fee scrap.
-        fee_buffer = pos.entry * self.TAKER_FEE * 2          # price move to cover round-trip fees
-        be_threshold = max(be_arm * atr, fee_buffer * self.BE_FEE_ARM_MULT)
-        if atr > 0 and peak_fav >= be_threshold:
-            # locked level clears fees with profit, and is always ≤ peak_fav
-            # (never above the peak → never an instant stop-out).
-            locked = max(fee_buffer * self.LOCK_FEE_FLOOR_MULT, lock_frac * peak_fav)
-            if long:
-                pos.stop = max(pos.stop, pos.entry + locked)
-            else:
-                pos.stop = min(pos.stop, pos.entry - locked)
-            pos.be_locked = True
+
+        # MANUAL trades: NO breakeven ratchet (it's what cut #3713/#3714 at
+        # breakeven). The downside stop stays near liquidation; we only add a
+        # LOOSE trail once the trade is a genuine winner (+3 ATR), trailing 2.5
+        # ATR behind the peak so it rides but still banks a real run.
+        if not pos.is_manual:
+            trail_arm = self.TRAIL_ARM_ATR
+            trail_mult = self._trail_mult(pos.peak_pnl_pct)
+            # Fee-aware breakeven: arm only once the move clears round-trip fees
+            # with room, so the lock never sits above market and books a sub-fee scrap.
+            fee_buffer = pos.entry * self.TAKER_FEE * 2
+            be_threshold = max(self.BREAKEVEN_ATR * atr, fee_buffer * self.BE_FEE_ARM_MULT)
+            if atr > 0 and peak_fav >= be_threshold:
+                locked = max(fee_buffer * self.LOCK_FEE_FLOOR_MULT, self.PROFIT_LOCK_FRAC * peak_fav)
+                if long:
+                    pos.stop = max(pos.stop, pos.entry + locked)
+                else:
+                    pos.stop = min(pos.stop, pos.entry - locked)
+                pos.be_locked = True
+        else:
+            trail_arm = self.MANUAL_TRAIL_ARM_ATR
+            trail_mult = self.MANUAL_TRAIL_MULT
 
         live_stop = pos.stop
         if atr > 0 and peak_fav >= trail_arm * atr:
