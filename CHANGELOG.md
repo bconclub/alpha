@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-13 14:50 IST · Scanner readiness bars: red→green heat gauge
+
+- Bars were all one blue. Now each readiness bar is colored by how close the setup is: **red/amber when cold, sliding to green as it nears firing** (smooth HSL heat, glow on the fill, % colored to match).
+- The closest lane per pair is highlighted (ring + "closest" tag); firing lane shows "▲ SIDE — FIRING".
+- `(SHA on commit)`
+
+
 ## 2026-06-13 14:43 IST · Strategy Scanner replaces the BB/momentum Options Chain panel
 
 - The old Options Chain panel ran on BB Width / Squeeze / Momentum — signals the autonomous trader no longer uses. Replaced with a **Strategy Scanner** driven by the live V3 lanes.

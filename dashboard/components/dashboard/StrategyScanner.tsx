@@ -22,11 +22,13 @@ function trend(htf: number | null | undefined) {
   return { icon: '→', text: '1h flat', cls: 'text-zinc-500' };
 }
 
-function barColor(status: string) {
-  if (status === 'READY') return 'bg-emerald-400';
-  if (status === 'CLOSE') return 'bg-amber-400';
-  if (status === 'SCANNING') return 'bg-sky-400';
-  return 'bg-zinc-600';
+// Heat scale: 0% = red (cold/nothing), rising through amber → lime → green as a
+// setup closes in on firing. Hue 0 (red) → 138 (green).
+function heat(readiness: number): string {
+  const r = Math.max(0, Math.min(100, readiness));
+  const hue = (r / 100) * 138;
+  const light = 44 + (r / 100) * 12;   // brighter as it heats up
+  return `hsl(${hue.toFixed(0)} 85% ${light.toFixed(0)}%)`;
 }
 
 function levTone(lev: number | null) {
@@ -35,19 +37,27 @@ function levTone(lev: number | null) {
   return 'text-emerald-300 bg-emerald-500/15 ring-emerald-500/30';
 }
 
-function LaneRow({ lane }: { lane: LiveLaneScan }) {
+function LaneRow({ lane, leader }: { lane: LiveLaneScan; leader: boolean }) {
   const ready = Math.max(0, Math.min(100, lane.readiness));
+  const color = heat(ready);
+  const firing = lane.status === 'READY';
   return (
-    <div className="rounded-lg bg-black/20 px-3 py-2.5">
+    <div
+      className={cn(
+        'rounded-lg px-3 py-2.5 transition-colors',
+        leader ? 'bg-white/[0.05] ring-1 ring-inset' : 'bg-black/20',
+      )}
+      style={leader ? { boxShadow: `inset 0 0 0 1px ${color}33` } : undefined}
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <SetupChip setup={lane.lane} />
-          {lane.status === 'READY' && (
-            <span className="text-[10px] font-bold text-emerald-400">▲ {lane.side}</span>
-          )}
+          {firing
+            ? <span className="text-[10px] font-bold text-emerald-400">▲ {lane.side} — FIRING</span>
+            : leader && <span className="text-[9px] font-bold uppercase tracking-wide text-zinc-500">closest</span>}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <span className="font-mono text-[11px] text-zinc-400">conf {lane.would_conf.toFixed(0)}</span>
+          <span className="font-mono text-[11px] text-zinc-500">conf {lane.would_conf.toFixed(0)}</span>
           {lane.would_lev != null && (
             <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset', levTone(lane.would_lev))}>
               {lane.would_lev}x
@@ -55,14 +65,19 @@ function LaneRow({ lane }: { lane: LiveLaneScan }) {
           )}
         </div>
       </div>
-      <div className="mt-2 flex items-center gap-2">
-        <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800">
-          <div className={cn('h-full rounded-full transition-all duration-500', barColor(lane.status))} style={{ width: `${ready}%` }} />
+      <div className="mt-2 flex items-center gap-2.5">
+        <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-zinc-800/80">
+          <div
+            className="h-full rounded-full transition-all duration-700 ease-out"
+            style={{ width: `${ready}%`, backgroundColor: color, boxShadow: ready > 8 ? `0 0 10px ${color}99` : undefined }}
+          />
         </div>
-        <span className="w-9 text-right font-mono text-[11px] text-zinc-300">{ready.toFixed(0)}%</span>
+        <span className="w-9 text-right font-mono text-xs font-semibold tabular-nums" style={{ color }}>
+          {ready.toFixed(0)}%
+        </span>
       </div>
       <p className="mt-1.5 text-[11px] text-zinc-500">
-        {lane.status === 'READY' ? 'firing now' : 'watching'}: <span className="text-zinc-400">{lane.watching}</span>
+        {firing ? 'firing now' : 'watching'}: <span className="text-zinc-300">{lane.watching}</span>
       </p>
     </div>
   );
@@ -98,7 +113,7 @@ function PairCard({ sig }: { sig: LiveSignal }) {
         <p className="py-4 text-center text-xs text-zinc-600">No scan yet…</p>
       ) : (
         <div className="space-y-2">
-          {lanes.map((l) => <LaneRow key={l.lane} lane={l} />)}
+          {lanes.map((l, i) => <LaneRow key={l.lane} lane={l} leader={i === 0 && l.readiness > 10} />)}
         </div>
       )}
     </div>
