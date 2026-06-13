@@ -182,6 +182,87 @@ def vwap_bounce_signal(rows: list[list[float]]) -> tuple[str, str, dict[str, Any
 
 LANES = (ema_pullback_signal, donchian_retest_signal, vwap_bounce_signal)
 
+LANE_DISPLAY = {
+    "FUT_EMA_PB": "EMA Pullback",
+    "FUT_DONCHIAN_RT": "Donchian Retest",
+    "FUT_VWAP": "VWAP Bounce",
+}
+
+
+def _prox(dist_pct: float, span: float) -> float:
+    """Closeness 0–95 from how far (in %) price is from a trigger level.
+    0 distance → 95 (about to fire), `span`% away → ~0."""
+    return max(0.0, min(95.0, 95.0 * (1.0 - abs(dist_pct) / span)))
+
+
+def _scan_lanes(rows: list[list[float]], htf: int, firing_lane: str | None) -> list[dict[str, Any]]:
+    """Per-lane proximity: how close each V3 strategy is to triggering, the
+    level it's watching, and the confidence it would fire at. Direction is
+    fixed by the 1h trend (longs in a 1h uptrend, shorts in a downtrend)."""
+    closed = rows[:-1]
+    closes = [float(r[4]) for r in closed]
+    if len(closes) < 60:
+        return []
+    close, prev = closes[-1], closes[-2]
+    ema8 = _ema(closes[-34:], 8)
+    ema21 = _ema(closes[-55:], 21)
+    gap = _pct_move(ema21, ema8)
+    ft = abs(_pct_move(prev, close))
+    vwap = _vwap_rows(closed[-60:])
+    history = closed[-21:-1]
+    upper = max(float(r[2]) for r in history)
+    lower = min(float(r[3]) for r in history)
+    width = _pct_move(lower, upper) if lower > 0 else 0.0
+
+    long = htf > 0
+    short = htf < 0
+    flat = htf == 0
+    side_word = "LONG" if long else ("SHORT" if short else "—")
+
+    def mk(lane: str, ready: float, watching: str, level: float, would_conf: float) -> dict[str, Any]:
+        ready = 0.0 if flat else ready
+        if firing_lane == lane:
+            st = "READY"
+        elif ready >= 78:
+            st = "CLOSE"
+        elif ready >= 35:
+            st = "SCANNING"
+        else:
+            st = "WAITING"
+        return {
+            "lane": lane, "name": LANE_DISPLAY.get(lane, lane), "status": st,
+            "readiness": round(ready, 0), "watching": watching,
+            "level": round(level, 2) if level else None,
+            "would_conf": round(would_conf, 0), "side": side_word if not flat else "—",
+        }
+
+    out: list[dict[str, Any]] = []
+
+    # EMA Pullback — waiting for a pullback that tags EMA8 with the trend
+    trend_ok = (long and gap > 0.06) or (short and gap < -0.06)
+    dist_ema = abs(_pct_move(ema8, close))
+    ready = _prox(dist_ema, 0.6) if trend_ok else min(30.0, abs(gap) / 0.06 * 30.0)
+    watch = f"pullback to EMA8 {ema8:,.0f}" if trend_ok else "needs a 1h-aligned trend"
+    out.append(mk("FUT_EMA_PB", ready, watch, ema8, _clamp(70.0 + abs(gap) * 60.0 + ft * 40.0, 70.0, 95.0)))
+
+    # Donchian Retest — waiting for a fresh break of the 20-bar channel
+    width_ok = width >= 0.30
+    if long:
+        dist_dc, lvl, label = abs(_pct_move(close, upper)), upper, f"break {upper:,.0f}"
+    else:
+        dist_dc, lvl, label = abs(_pct_move(close, lower)), lower, f"break {lower:,.0f}"
+    ready = _prox(dist_dc, 0.6) if (width_ok and not flat) else 15.0
+    watch = label if width_ok else "channel too tight"
+    out.append(mk("FUT_DONCHIAN_RT", ready, watch, lvl, _clamp(71.0 + width * 8.0, 70.0, 92.0)))
+
+    # VWAP Bounce — waiting for price to tag VWAP with the trend
+    dist_vwap = abs(_pct_move(vwap, close)) if vwap > 0 else 99.0
+    ready = _prox(dist_vwap, 0.5) if (trend_ok and vwap > 0) else min(25.0, abs(gap) / 0.06 * 25.0)
+    watch = f"tag VWAP {vwap:,.0f}" if (trend_ok and vwap > 0) else "needs a 1h-aligned trend"
+    out.append(mk("FUT_VWAP", ready, watch, vwap, _clamp(72.0 + abs(gap) * 50.0, 70.0, 92.0)))
+
+    return out
+
 
 class SignalEngine:
     """Per-pair live signal reader. One instance per traded pair."""
@@ -214,21 +295,20 @@ class SignalEngine:
         self._htf_cache = (loop.time(), d)
         return d
 
-    async def latest_signal(self) -> dict[str, Any] | None:
-        """Best current entry across all lanes, or None.
+    async def evaluate(self) -> dict[str, Any] | None:
+        """Full read for one pair: the firing `best` signal (if any) PLUS a
+        per-lane proximity scan for the dashboard. Returns None on fetch failure.
 
-        A signal must clear MIN_CONFIDENCE and be aligned with the 1h trend.
-        Returns the highest-confidence survivor with atr + htf_trend attached.
-        The result is also cached on `self._last` for status publishing.
+        Shape: {pair, mark, atr, htf_trend, status, best|None, lanes:[...]}
+        - `best` is a fireable entry (conf ≥ 85, 1h-aligned) — what the trader acts on.
+        - `lanes` is every V3 lane with how close it is to triggering right now.
         """
         try:
             rows = await self._fetch_rows()
         except Exception:
             logger.exception("signal fetch failed %s", self.pair)
-            self._last = None
             return None
         if len(rows) < 60:
-            self._last = None
             return None
         mark = float(rows[-1][4])
         atr = _atr_rows(rows[:-1])
@@ -247,24 +327,29 @@ class SignalEngine:
             conf = float(meta.get("confidence_score") or 0.0)
             if conf < MIN_CONFIDENCE:
                 continue
-            # 1h trend gate: flat hour or wrong way = not our trade.
             if htf == 0 or (htf > 0) != (direction == "long"):
-                continue
+                continue   # 1h flat / wrong way — not our trade
             if conf > best_conf:
                 best_conf = conf
                 best = {
-                    "pair": self.pair,
-                    "lane": meta.get("lane"),
-                    "direction": direction,
-                    "signal_key": signal_key,
-                    "confidence": conf,
-                    "htf_trend": htf,
-                    "atr": atr,
-                    "mark": mark,
-                    "metadata": meta,
+                    "pair": self.pair, "lane": meta.get("lane"), "direction": direction,
+                    "signal_key": signal_key, "confidence": conf, "htf_trend": htf,
+                    "atr": atr, "mark": mark, "metadata": meta,
                 }
-        self._last = best or {
-            "pair": self.pair, "lane": None, "direction": None,
-            "confidence": 0.0, "htf_trend": htf, "atr": atr, "mark": mark,
+
+        lanes = _scan_lanes(rows, htf, best["lane"] if best else None)
+        if best is not None:
+            status = "READY"
+        elif htf == 0:
+            status = "FLAT"
+        elif lanes and max(l["readiness"] for l in lanes) >= 78:
+            status = "CLOSE"
+        else:
+            status = "SCANNING"
+
+        result = {
+            "pair": self.pair, "mark": mark, "atr": atr, "htf_trend": htf,
+            "status": status, "best": best, "lanes": lanes,
         }
-        return best
+        self._last = result
+        return result

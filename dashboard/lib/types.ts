@@ -524,14 +524,35 @@ export interface Deposit {
   notes?: string | null;
 }
 
-// Live V3 signal board — engine upserts one row per traded pair every ~12s.
+// Live V3 scanner board — engine upserts one row per traded pair every ~12s.
+export interface LiveLaneScan {
+  lane: string;                   // FUT_EMA_PB | FUT_DONCHIAN_RT | FUT_VWAP
+  name: string;                   // "EMA Pullback" etc.
+  status: 'READY' | 'CLOSE' | 'SCANNING' | 'WAITING';
+  readiness: number;              // 0–95, how close to triggering
+  watching: string;               // human: "pullback to EMA8 63,800"
+  level: number | null;           // the price level it's watching
+  would_conf: number;             // confidence it would fire at
+  would_lev: number | null;       // leverage tier if it fired (10/25/50)
+  side: string;                   // LONG | SHORT | —
+}
+
+export interface LiveScan {
+  mark: number;
+  status: 'READY' | 'CLOSE' | 'SCANNING' | 'FLAT';
+  htf_trend: number | null;
+  in_position: boolean;
+  lanes: LiveLaneScan[];
+}
+
 export interface LiveSignal {
   pair: string;
-  lane: string | null;            // FUT_EMA_PB | FUT_DONCHIAN_RT | FUT_VWAP
+  lane: string | null;            // best firing lane
   direction: 'long' | 'short' | null;
-  confidence: number;             // 0–100
+  confidence: number;             // 0–100 (best)
   htf_trend: number | null;       // +1 up, -1 down, 0 flat
   would_lev: number | null;       // leverage if taken now (10/25/50)
   in_position: boolean;
+  scan: LiveScan | null;          // full per-lane proximity scan
   updated_at: string;
 }

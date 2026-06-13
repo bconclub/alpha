@@ -13,7 +13,7 @@ import {
 } from '@/lib/pnl-utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
-import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
+import { StrategyScanner } from '@/components/dashboard/StrategyScanner';
 import { ExitChip } from '@/components/ui/ExitChip';
 import { ArrowUp, ArrowDown } from 'lucide-react';
 
@@ -743,7 +743,7 @@ export default function DashboardPage() {
           </div>
         </div>
         <div className="lg:col-span-2">
-          <OptionsChainPanel />
+          <StrategyScanner />
         </div>
       </div>
     </div>

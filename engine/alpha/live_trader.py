@@ -246,13 +246,13 @@ class AutonomousTrader:
             except Exception:
                 logger.exception("manage failed %s", pair)
 
-        # 2. compute signals for ALL pairs (also publishes the live board)
-        signals: dict[str, dict[str, Any] | None] = {}
+        # 2. evaluate ALL pairs — firing `best` signal + per-lane proximity scan
+        results: dict[str, dict[str, Any] | None] = {}
         for pair, engine in self.engines.items():
             try:
-                signals[pair] = await engine.latest_signal()
+                results[pair] = await engine.evaluate()
             except Exception:
-                signals[pair] = None
+                results[pair] = None
 
         # 3. entry gates
         can_enter = not (self._killed or self.user_paused)
@@ -287,12 +287,13 @@ class AutonomousTrader:
                     break
                 if pair in self._positions:
                     continue
-                sig = signals.get(pair)
-                if sig:
-                    await self._open(sig)
+                res = results.get(pair)
+                best = res.get("best") if res else None
+                if best:
+                    await self._open(best)
 
-        # 5. publish the live signal board for the dashboard
-        await self._publish_signals(signals)
+        # 5. publish the scanner board for the dashboard
+        await self._publish_signals(results)
 
     # ── confidence → leverage with liquidation safety guard ─────────────
     def _leverage_for(self, conf: float, price: float, atr: float) -> float:
@@ -654,39 +655,45 @@ class AutonomousTrader:
             pass
         self._positions.pop(pos.pair, None)
 
-    # ── live signal board (dashboard) ───────────────────────────────────
-    async def _publish_signals(self, signals: dict[str, dict[str, Any] | None]) -> None:
+    # ── scanner board (dashboard) ───────────────────────────────────────
+    async def _publish_signals(self, results: dict[str, dict[str, Any] | None]) -> None:
         rows = []
         now_iso = datetime.now(timezone.utc).isoformat()
-        for pair, sig in signals.items():
+        for pair, res in results.items():
+            if not res:
+                continue
             pos = self._positions.get(pair)
             in_pos = pos is not None
-            if sig and sig.get("direction"):
-                conf = float(sig.get("confidence") or 0)
-                price = float(sig.get("mark") or 0)
-                atr = float(sig.get("atr") or 0)
-                rows.append({
-                    "pair": pair,
-                    "lane": sig.get("lane"),
-                    "direction": sig.get("direction"),
-                    "confidence": round(conf, 1),
-                    "htf_trend": sig.get("htf_trend"),
-                    "would_lev": int(self._leverage_for(conf, price, atr)) if (price > 0 and atr > 0) else None,
-                    "in_position": in_pos,
-                    "updated_at": now_iso,
+            best = res.get("best")
+            price = float(res.get("mark") or 0)
+            atr = float(res.get("atr") or 0)
+            conf = float(best.get("confidence") or 0) if best else 0.0
+            would_lev = int(self._leverage_for(conf, price, atr)) if (best and price > 0 and atr > 0) else None
+            # attach the leverage tier each lane would take if it fired now
+            lanes = []
+            for ln in (res.get("lanes") or []):
+                lc = float(ln.get("would_conf") or 0)
+                lanes.append({
+                    **ln,
+                    "would_lev": int(self._leverage_for(lc, price, atr)) if (price > 0 and atr > 0 and lc >= 85) else None,
                 })
-            else:
-                last = self.engines[pair]._last if pair in self.engines else None
-                rows.append({
-                    "pair": pair,
-                    "lane": None,
-                    "direction": None,
-                    "confidence": 0.0,
-                    "htf_trend": (last or {}).get("htf_trend") if last else None,
-                    "would_lev": None,
+            rows.append({
+                "pair": pair,
+                "lane": best.get("lane") if best else None,
+                "direction": best.get("direction") if best else None,
+                "confidence": round(conf, 1),
+                "htf_trend": res.get("htf_trend"),
+                "would_lev": would_lev,
+                "in_position": in_pos,
+                "scan": {
+                    "mark": price,
+                    "status": res.get("status"),
+                    "htf_trend": res.get("htf_trend"),
                     "in_position": in_pos,
-                    "updated_at": now_iso,
-                })
+                    "lanes": lanes,
+                },
+                "updated_at": now_iso,
+            })
         if not rows:
             return
         loop = asyncio.get_running_loop()

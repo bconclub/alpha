@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-13 14:43 IST · Strategy Scanner replaces the BB/momentum Options Chain panel
+
+- The old Options Chain panel ran on BB Width / Squeeze / Momentum — signals the autonomous trader no longer uses. Replaced with a **Strategy Scanner** driven by the live V3 lanes.
+- Engine: `strategy_v3.evaluate()` now returns a per-lane proximity scan (readiness 0-95, the level each setup is watching, the confidence + leverage it would fire at), alongside the firing `best` signal. `live_trader` publishes it to `live_signals.scan`.
+- Dashboard: new `StrategyScanner` per-pair card — 1h trend, SCANNING/CLOSING IN/READY status, and each V3 setup (EMA Pullback / Donchian / VWAP) with a readiness bar + what it is watching + would-be leverage. Deleted `OptionsChainPanel`.
+- User-facing: the home right panel now shows what is ACTUALLY being scanned (closest strategy, next breakout level), not dead options indicators.
+- `(SHA on commit)`
+
+
 ## 2026-06-13 14:33 IST · Remove Live Signals panel from home
 
 - User: remove the home "Live Signals" panel. Deleted the panel + its render/import; home is back to the prior layout. (Engine still publishes `live_signals`; just not shown.)
