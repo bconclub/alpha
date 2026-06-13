@@ -238,11 +238,13 @@ def _scan_lanes(rows: list[list[float]], htf: int, firing_lane: str | None) -> l
 
     out: list[dict[str, Any]] = []
 
+    weak = "1h flat — stand down" if flat else "5m trend too weak"
+
     # EMA Pullback — waiting for a pullback that tags EMA8 with the trend
     trend_ok = (long and gap > 0.06) or (short and gap < -0.06)
     dist_ema = abs(_pct_move(ema8, close))
     ready = _prox(dist_ema, 0.6) if trend_ok else min(30.0, abs(gap) / 0.06 * 30.0)
-    watch = f"pullback to EMA8 {ema8:,.0f}" if trend_ok else "needs a 1h-aligned trend"
+    watch = f"pullback to EMA8 {ema8:,.0f}" if trend_ok else weak
     out.append(mk("FUT_EMA_PB", ready, watch, ema8, _clamp(70.0 + abs(gap) * 60.0 + ft * 40.0, 70.0, 95.0)))
 
     # Donchian Retest — waiting for a fresh break of the 20-bar channel
@@ -252,13 +254,13 @@ def _scan_lanes(rows: list[list[float]], htf: int, firing_lane: str | None) -> l
     else:
         dist_dc, lvl, label = abs(_pct_move(close, lower)), lower, f"break {lower:,.0f}"
     ready = _prox(dist_dc, 0.6) if (width_ok and not flat) else 15.0
-    watch = label if width_ok else "channel too tight"
+    watch = ("1h flat — stand down" if flat else (label if width_ok else "channel too tight"))
     out.append(mk("FUT_DONCHIAN_RT", ready, watch, lvl, _clamp(71.0 + width * 8.0, 70.0, 92.0)))
 
     # VWAP Bounce — waiting for price to tag VWAP with the trend
     dist_vwap = abs(_pct_move(vwap, close)) if vwap > 0 else 99.0
     ready = _prox(dist_vwap, 0.5) if (trend_ok and vwap > 0) else min(25.0, abs(gap) / 0.06 * 25.0)
-    watch = f"tag VWAP {vwap:,.0f}" if (trend_ok and vwap > 0) else "needs a 1h-aligned trend"
+    watch = f"tag VWAP {vwap:,.0f}" if (trend_ok and vwap > 0) else weak
     out.append(mk("FUT_VWAP", ready, watch, vwap, _clamp(72.0 + abs(gap) * 50.0, 70.0, 92.0)))
 
     return out
