@@ -13,7 +13,6 @@ import {
 } from '@/lib/pnl-utils';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { LivePositions } from '@/components/dashboard/LivePositions';
-import LiveSignalsPanel from '@/components/LiveSignalsPanel';
 import { OptionsChainPanel } from '@/components/dashboard/OptionsChainPanel';
 import { ExitChip } from '@/components/ui/ExitChip';
 import { ArrowUp, ArrowDown } from 'lucide-react';
@@ -718,11 +717,6 @@ export default function DashboardPage() {
             </div>
           </div>
         </div>
-      </div>
-
-      {/* Live signals — what the autonomous trader sees right now */}
-      <div className="mb-4">
-        <LiveSignalsPanel />
       </div>
 
       {/* Live active positions (full strategy detail lives on the Strategy page;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-13 14:33 IST · Remove Live Signals panel from home
+
+- User: remove the home "Live Signals" panel. Deleted the panel + its render/import; home is back to the prior layout. (Engine still publishes `live_signals`; just not shown.)
+- `(SHA on commit)`
+
+
 ## 2026-06-13 14:24 IST · ONE autonomous live trader — paper + mirror removed
 
 - **Engine rebuild.** Retired the paper lab (`paper_futures.py`, `paper_options.py`) and the mirror (`live_mirror.py`). The validated V3 brain now lives in `strategy_v3.py` (signals only) and drives real Delta orders directly via `live_trader.py` (`AutonomousTrader`). One loop, no paper account, no copy step.
