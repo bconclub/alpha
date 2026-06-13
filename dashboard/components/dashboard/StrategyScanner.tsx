@@ -44,10 +44,10 @@ function LaneRow({ lane, leader }: { lane: LiveLaneScan; leader: boolean }) {
   return (
     <div
       className={cn(
-        'rounded-lg px-3 py-2.5 transition-colors',
-        leader ? 'bg-white/[0.05] ring-1 ring-inset' : 'bg-black/20',
+        'rounded-xl border px-3 py-2.5 backdrop-blur-md transition-colors',
+        leader ? 'border-white/15 bg-white/[0.07]' : 'border-white/5 bg-white/[0.02]',
       )}
-      style={leader ? { boxShadow: `inset 0 0 0 1px ${color}33` } : undefined}
+      style={leader ? { boxShadow: `0 0 0 1px ${color}22, inset 0 1px 0 rgba(255,255,255,0.05)` } : undefined}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
@@ -66,10 +66,17 @@ function LaneRow({ lane, leader }: { lane: LiveLaneScan; leader: boolean }) {
         </div>
       </div>
       <div className="mt-2 flex items-center gap-2.5">
-        <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-zinc-800/80">
+        <div
+          className="relative h-1.5 flex-1 overflow-hidden rounded-full"
+          style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.10) 0 4px, transparent 4px 11px)' }}
+        >
           <div
-            className="h-full rounded-full transition-all duration-700 ease-out"
-            style={{ width: `${ready}%`, backgroundColor: color, boxShadow: ready > 8 ? `0 0 10px ${color}99` : undefined }}
+            className="absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out"
+            style={{
+              width: `${ready}%`,
+              backgroundImage: `linear-gradient(90deg, ${color}55, ${color})`,
+              boxShadow: ready > 12 ? `0 0 8px ${color}55` : undefined,
+            }}
           />
         </div>
         <span className="w-9 text-right font-mono text-xs font-semibold tabular-nums" style={{ color }}>
@@ -92,7 +99,7 @@ function PairCard({ sig }: { sig: LiveSignal }) {
   const lanes = [...(scan?.lanes ?? [])].sort((a, b) => b.readiness - a.readiness);
 
   return (
-    <div className="rounded-xl border border-white/5 bg-[#16161c] p-4">
+    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.25)]">
       <div className="mb-3 flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2">
@@ -128,7 +135,7 @@ export function StrategyScanner() {
   });
 
   return (
-    <div className="rounded-2xl border border-white/5 bg-[#141419] p-4">
+    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
       <div className="mb-3">
         <h2 className="text-base font-bold text-white">Strategy Scanner 🎯</h2>
         <p className="text-[11px] text-zinc-500">Live V3 entry hunt — how close each setup is, the level it&apos;s watching, and the leverage it would take. Fires at conf ≥ 85, 1h-aligned.</p>

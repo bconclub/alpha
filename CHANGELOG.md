@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-13 15:51 IST · Coin icons + glassmorphic scanner with softer bars
+
+- **Market Overview**: brand-colored coin icons (BTC ₿ / ETH Ξ / SOL gradient / XRP) on each card.
+- **Strategy Scanner**: glassmorphism — translucent frosted cards (backdrop-blur, soft borders, depth shadow). Readiness bars lightened: faint **dashed track** (cut-cut) + soft **gradient fill** with a gentle glow instead of the heavy solid bar.
+- `(SHA on commit)`
+
+
 ## 2026-06-13 15:47 IST · Manual trades: ride to liquidation, let winners run, adopt fast
 
 - **Downside**: manual stop now sits just above LIQUIDATION (liq + 0.3 ATR), not a 2-ATR drawdown. #3715 stop widened 64,146 -> 63,137 (~0.16% -> 1.73% room). "Let it keep doing what it wants — only cut if it really goes bad."

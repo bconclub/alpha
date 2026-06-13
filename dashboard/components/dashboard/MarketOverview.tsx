@@ -5,6 +5,27 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatNumber, formatTimeAgo, cn } from '@/lib/utils';
 import type { StrategyLog, OpenPosition } from '@/lib/types';
 
+// ── Coin icons (brand-colored badges) ────────────────────────────────────
+
+const COIN: Record<string, { bg: string; glyph: string }> = {
+  BTC: { bg: '#f7931a', glyph: '₿' },
+  ETH: { bg: '#627eea', glyph: 'Ξ' },
+  SOL: { bg: 'linear-gradient(135deg,#9945FF,#14F195)', glyph: '◎' },
+  XRP: { bg: '#3a3f45', glyph: '✕' },
+};
+
+function CoinIcon({ asset }: { asset: string }) {
+  const c = COIN[asset] ?? { bg: '#3f3f46', glyph: asset.slice(0, 1) };
+  return (
+    <span
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[15px] font-bold text-white shadow-inner ring-1 ring-white/15"
+      style={{ background: c.bg }}
+    >
+      {c.glyph}
+    </span>
+  );
+}
+
 // ── Types ───────────────────────────────────────────────────────────────
 
 interface AssetCard {
@@ -72,8 +93,9 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
           : 'border-[#00c853]/20'
         : 'border-white/5',
     )}>
-      {/* Header: Asset only (no trend arrow) */}
-      <div className="mb-2">
+      {/* Header: coin icon + asset */}
+      <div className="mb-2 flex items-center gap-2">
+        <CoinIcon asset={card.asset} />
         <span className="font-bold text-white">{card.asset}</span>
       </div>
 
