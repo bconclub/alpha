@@ -458,7 +458,7 @@ class AlphaBot:
                 self.db,
                 self.alerts,
                 balance_fn=lambda: self._fetch_portfolio_usd(self.delta),
-                pairs=self.delta_pairs,
+                # pairs omitted → scans the curated liquid-majors universe
             )
         elif _live_flag or self._live_mode == "mirror":
             logger.info("AutonomousTrader armed but INACTIVE (PAPER_ONLY is on)")

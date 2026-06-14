@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-14 14:28 IST · Scanner + trader go multi-asset (liquid majors)
+
+- AutonomousTrader now scans a curated universe of liquid Delta USD perps (BTC, ETH, SOL, XRP, DOGE, AVAX, LINK, BNB, ADA, LTC, SUI, AAVE), resolved against the exchange live perp list at boot (drops any Delta does not list). Still opens MAX 2 at a time — picks the best setup ANYWHERE in the set.
+- Per-asset contract size read from the exchange (not just BTC/ETH); sizing skips an asset when one contract exceeds the $8 margin cap at the chosen leverage.
+- Each scanned pair publishes its own live_signals row, so the dashboard scanner lists every asset automatically.
+- `(SHA on commit)`
+
+
 ## 2026-06-14 13:43 IST · Scanner: plain "why no trade" line per pair
 
 - Each pair now shows a one-line reason when it is NOT trading: "1h flat (sideways)" / "no setup hit 85 confidence yet — closest X at conf N" / "X armed, waiting for price: <level>". Answers "why no trade" at a glance.

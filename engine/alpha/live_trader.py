@@ -41,6 +41,13 @@ from alpha.utils import setup_logger
 logger = setup_logger("live_trader")
 
 CONTRACT_SIZE: dict[str, float] = {"BTC": 0.001, "ETH": 0.01}
+
+# Liquid majors the scanner hunts across (resolved against the exchange's live
+# perp list at start — anything Delta doesn't list is dropped). The trader still
+# only opens MAX_OPEN at a time, picking the best setup anywhere in this set.
+MAJOR_BASES: list[str] = [
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK", "BNB", "ADA", "LTC", "SUI", "AAVE",
+]
 STRATEGY_TAG = "live_mirror"   # stable DB key for the live path (history continuity)
 
 
@@ -128,8 +135,11 @@ class AutonomousTrader:
         self.db = db
         self.alerts = alerts
         self.balance_fn = balance_fn
-        self.pairs = pairs or ["BTC/USD:USD", "ETH/USD:USD"]
-        self.engines: dict[str, SignalEngine] = {p: SignalEngine(p, exchange) for p in self.pairs}
+        # Desired universe as base assets; resolved to live perp symbols in start().
+        # Accepts bases ("BTC") or full symbols ("BTC/USD:USD").
+        self._desired_bases = [str(b).split("/")[0].upper() for b in (pairs or MAJOR_BASES)]
+        self.pairs: list[str] = []
+        self.engines: dict[str, SignalEngine] = {}
         self.is_active = False
         self.user_paused = False
         self._task: asyncio.Task[None] | None = None
@@ -138,23 +148,59 @@ class AutonomousTrader:
         self._daily_date = ""
         self._positions: dict[str, Position] = {}
 
+    # ── universe / contract size ───────────────────────────────────────
+    def _csize(self, pair: str) -> float | None:
+        """Contract size for a pair — exchange truth first, hardcoded fallback."""
+        try:
+            m = (getattr(self.exchange, "markets", None) or {}).get(pair) or {}
+            cs = float(m.get("contractSize") or 0)
+            if cs > 0:
+                return cs
+        except Exception:
+            pass
+        return CONTRACT_SIZE.get(pair.split("/")[0])
+
+    async def _resolve_universe(self) -> None:
+        """Resolve desired base assets → live USD-perp symbols Delta actually lists."""
+        markets = getattr(self.exchange, "markets", None)
+        if not markets:
+            try:
+                markets = await self.exchange.load_markets()
+            except Exception:
+                markets = {}
+        pairs: list[str] = []
+        for base in self._desired_bases:
+            sym = f"{base}/USD:USD"
+            m = (markets or {}).get(sym) or {}
+            is_perp = bool(m.get("swap") or m.get("contract")) and m.get("active", True) is not False
+            if m and is_perp:
+                pairs.append(sym)
+            elif base in ("BTC", "ETH"):
+                pairs.append(sym)   # always keep the core two even if markets didn't load
+        # de-dup, keep order
+        seen: set[str] = set()
+        self.pairs = [p for p in pairs if not (p in seen or seen.add(p))]
+        self.engines = {p: SignalEngine(p, self.exchange) for p in self.pairs}
+
     # ── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> None:
         if self.is_active:
             return
         self.is_active = True
+        await self._resolve_universe()
         await self._reattach()
+        bases = ", ".join(p.split("/")[0] for p in self.pairs)
         logger.warning(
             "🔴 AutonomousTrader ACTIVE — real money. $%.0f/trade · 10/25/50x by conf · "
-            "max %d open · day stop $%.2f · kill <$%.2f",
-            self.MARGIN_USD, self.MAX_OPEN, self.DAILY_LOSS_STOP, self.KILL_BALANCE,
+            "max %d open · day stop $%.2f · kill <$%.2f · scanning %d: %s",
+            self.MARGIN_USD, self.MAX_OPEN, self.DAILY_LOSS_STOP, self.KILL_BALANCE, len(self.pairs), bases,
         )
         try:
             await self.alerts._send(
                 "🔴 <b>LIVE TRADER ACTIVE — real money</b>\n"
                 f"${self.MARGIN_USD:.0f}/trade · 10/25/50x by confidence · max {self.MAX_OPEN} open\n"
                 f"Day stop −${abs(self.DAILY_LOSS_STOP):.0f} · kill &lt;${self.KILL_BALANCE:.0f}\n"
-                "Trading conf≥85 trend-aligned V3 signals on BTC + ETH.",
+                f"Scanning {len(self.pairs)} futures: {bases}",
                 allow_in_quiet=True,
             )
         except Exception:
@@ -212,7 +258,7 @@ class AutonomousTrader:
                 pair=pair,
                 direction=direction,
                 contracts=float(r.get("contracts") or r.get("amount") or 0),
-                csize=float(meta.get("contract_size") or CONTRACT_SIZE.get(pair.split("/")[0], 0.001)),
+                csize=float(meta.get("contract_size") or self._csize(pair) or 0.001),
                 entry=entry,
                 atr=float(meta.get("atr") or 0),
                 stop=float(r.get("stop_loss") or 0),
@@ -319,7 +365,7 @@ class AutonomousTrader:
     async def _open(self, sig: dict[str, Any]) -> None:
         pair = str(sig["pair"])
         base = pair.split("/")[0]
-        csize = CONTRACT_SIZE.get(base)
+        csize = self._csize(pair)
         if not csize:
             return
         direction = str(sig["direction"])
