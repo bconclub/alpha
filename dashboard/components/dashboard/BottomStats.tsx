@@ -5,7 +5,14 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn, formatCurrency } from '@/lib/utils';
 
 type TF = '24H' | '7D' | '14D' | '30D';
-const TF_HOURS: Record<TF, number> = { '24H': 24, '7D': 168, '14D': 336, '30D': 720 };
+// Calendar-day windows (local midnight). 24H = TODAY (yesterday-midnight→tonight),
+// not a rolling 24h — so Total P/L (24H) matches the "Today" detail exactly.
+const TF_DAYS: Record<TF, number> = { '24H': 1, '7D': 7, '14D': 14, '30D': 30 };
+function windowCutoff(tf: TF): number {
+  const mid = new Date();
+  mid.setHours(0, 0, 0, 0);
+  return mid.getTime() - (TF_DAYS[tf] - 1) * 86400_000;
+}
 
 function Spark({ values, color }: { values: number[]; color: string }) {
   if (values.length < 2) return <div className="h-8 w-24" />;
@@ -53,8 +60,8 @@ export function BottomStats() {
     const open = trades.filter((t) => t.status === 'open');
     const winningOpen = open.filter((t) => Number(t.current_pnl ?? 0) > 0).length;
 
-    // windowed (toggle) → win rate + P/L
-    const cutoff = Date.now() - TF_HOURS[tf] * 3600_000;
+    // windowed (toggle) → win rate + P/L, calendar-day aligned
+    const cutoff = windowCutoff(tf);
     const win = closed
       .filter((t) => new Date(t.closed_at ?? t.timestamp).getTime() >= cutoff)
       .sort((a, b) => new Date(a.closed_at ?? a.timestamp).getTime() - new Date(b.closed_at ?? b.timestamp).getTime());
@@ -106,7 +113,7 @@ export function BottomStats() {
             LIVE {liveDown ? 'DOWN' : liveOn ? 'ON' : 'OFF'}
           </span>
           <div className="flex gap-1">
-            {(Object.keys(TF_HOURS) as TF[]).map((k) => (
+            {(Object.keys(TF_DAYS) as TF[]).map((k) => (
               <button key={k} onClick={() => setTf(k)}
                 className={cn('rounded px-2 py-0.5 text-[10px] font-semibold transition-colors',
                   tf === k ? 'bg-white/10 text-white' : 'text-zinc-500 hover:text-zinc-300')}>

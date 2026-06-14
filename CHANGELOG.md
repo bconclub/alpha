@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-14 14:55 IST · KPI windows are calendar-day aligned (24H = today)
+
+- The Total P/L (24H) and Win Rate (24H) cards now use TODAY (local midnight to now), not a rolling 24-hour window. They match the "Today" detail row exactly (same P/L, same trade count). 7D/14D/30D are likewise full calendar days.
+- `(SHA on commit)`
+
+
 ## 2026-06-14 14:50 IST · Scanner: one fluid ranked list (hottest setup first, all assets)
 
 - Replaced the per-asset 3-lane cards with a single flat table: every asset x lane flattened into one list, sorted by readiness (firing on top, then closest-to-firing). The strongest setup anywhere floats to the top (e.g. ETH Donchian 88%).
