@@ -137,8 +137,7 @@ export function StrategyScanner() {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
       <div className="mb-3">
-        <h2 className="text-base font-bold text-white">Strategy Scanner 🎯</h2>
-        <p className="text-[11px] text-zinc-500">Live V3 entry hunt — how close each setup is, the level it&apos;s watching, and the leverage it would take. Fires at conf ≥ 85, 1h-aligned.</p>
+        <h2 className="text-base font-bold text-white">Scanner</h2>
       </div>
       {rows.length === 0 ? (
         <p className="py-8 text-center text-xs text-zinc-600">No signal data yet — engine publishes every ~12s.</p>
