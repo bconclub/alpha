@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-14 14:50 IST · Scanner: one fluid ranked list (hottest setup first, all assets)
+
+- Replaced the per-asset 3-lane cards with a single flat table: every asset x lane flattened into one list, sorted by readiness (firing on top, then closest-to-firing). The strongest setup anywhere floats to the top (e.g. ETH Donchian 88%).
+- Each row: asset + setup + side + readiness bar + conf + leverage + watched level; FIRING / IN TRADE tags. Cold setups hidden so it stays real setups not noise; always shows at least the top 8.
+- `(SHA on commit)`
+
+
 ## 2026-06-14 14:28 IST · Scanner + trader go multi-asset (liquid majors)
 
 - AutonomousTrader now scans a curated universe of liquid Delta USD perps (BTC, ETH, SOL, XRP, DOGE, AVAX, LINK, BNB, ADA, LTC, SUI, AAVE), resolved against the exchange live perp list at boot (drops any Delta does not list). Still opens MAX 2 at a time — picks the best setup ANYWHERE in the set.
