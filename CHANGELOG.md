@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-14 13:43 IST · Scanner: plain "why no trade" line per pair
+
+- Each pair now shows a one-line reason when it is NOT trading: "1h flat (sideways)" / "no setup hit 85 confidence yet — closest X at conf N" / "X armed, waiting for price: <level>". Answers "why no trade" at a glance.
+- `(SHA on commit)`
+
+
 ## 2026-06-13 15:51 IST · Coin icons + glassmorphic scanner with softer bars
 
 - **Market Overview**: brand-colored coin icons (BTC ₿ / ETH Ξ / SOL gradient / XRP) on each card.

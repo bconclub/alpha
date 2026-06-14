@@ -91,6 +91,28 @@ function LaneRow({ lane, leader }: { lane: LiveLaneScan; leader: boolean }) {
   );
 }
 
+// One plain-English line: why is there no trade right now?
+function whyNoTrade(scan: LiveSignal['scan'], lanes: LiveLaneScan[], inPos: boolean): { tone: string; text: string } | null {
+  if (inPos) return null;                       // there IS a trade — nothing to explain
+  if (scan?.status === 'READY') return null;    // firing right now
+  const htf = scan?.htf_trend;
+  if (htf === 0 || scan?.status === 'FLAT') {
+    return { tone: 'text-zinc-400', text: 'No trade — 1h trend is flat (sideways). The bot only enters with the hourly trend.' };
+  }
+  const top = lanes[0];
+  if (!top) return { tone: 'text-zinc-500', text: 'No trade — scanning…' };
+  if (top.would_conf < 85) {
+    return {
+      tone: 'text-amber-300/90',
+      text: `No trade — no setup has hit 85 confidence yet. Closest: ${top.name} at conf ${top.would_conf.toFixed(0)} (needs 85).`,
+    };
+  }
+  return {
+    tone: 'text-emerald-300/90',
+    text: `No trade yet — ${top.name} is armed (conf ${top.would_conf.toFixed(0)}); waiting for price: ${top.watching}.`,
+  };
+}
+
 function PairCard({ sig }: { sig: LiveSignal }) {
   const base = sig.pair.split('/')[0];
   const scan = sig.scan;
@@ -98,6 +120,7 @@ function PairCard({ sig }: { sig: LiveSignal }) {
   const t = trend(scan?.htf_trend ?? sig.htf_trend);
   const mark = scan?.mark ?? 0;
   const lanes = [...(scan?.lanes ?? [])].sort((a, b) => b.readiness - a.readiness);
+  const why = whyNoTrade(scan, lanes, sig.in_position);
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.25)]">
@@ -116,6 +139,12 @@ function PairCard({ sig }: { sig: LiveSignal }) {
           )}
         </div>
       </div>
+
+      {why && (
+        <div className={cn('mb-3 rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-[11px]', why.tone)}>
+          {why.text}
+        </div>
+      )}
 
       {lanes.length === 0 ? (
         <p className="py-4 text-center text-xs text-zinc-600">No scan yet…</p>
