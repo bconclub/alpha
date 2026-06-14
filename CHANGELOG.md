@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-14 15:04 IST · Leverage-aware profit floor — stop giving winners back
+
+- The ATR trail is blind to leverage: at 25-50x a +11% margin peak is only a ~0.4% price move (~1 ATR), so the 1.8-ATR trail rode SOL #3719 from +10.96% back to +1.45% breakeven.
+- Fix: autonomous trades now lock a floor of HALF the peak margin-PnL once peak >= 6%. So a +11% peak banks >= +5.5% instead of bleeding to breakeven. Ratchet-up only (never widens, never causes a noise-stop). Manual trades still ride to liquidation.
+- `(SHA on commit)`
+
+
 ## 2026-06-14 14:55 IST · KPI windows are calendar-day aligned (24H = today)
 
 - The Total P/L (24H) and Win Rate (24H) cards now use TODAY (local midnight to now), not a rolling 24-hour window. They match the "Today" detail row exactly (same P/L, same trade count). 7D/14D/30D are likewise full calendar days.

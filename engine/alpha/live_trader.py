@@ -102,6 +102,14 @@ class AutonomousTrader:
     NO_TRACTION_SEC = 60 * 60
     NO_TRACTION_ATR = 0.4
     MAX_HOLD_SEC = 24 * 60 * 60
+    # ── leverage-aware profit floor (06-14) ───────────────────────────────
+    # The ATR trail is blind to leverage: at 25-50x a "+11% margin" peak is a
+    # ~0.4% price move (≈1 ATR), so the 1.8-ATR trail rode SOL #3719 from
+    # +10.96% all the way back to +1.45% breakeven. Fix: once a trade is a real
+    # winner in MARGIN terms, lock in a fraction of the peak so it can't bleed
+    # back. Ratchet-up only (never widens) → safe, never causes a noise-stop.
+    PROFIT_FLOOR_ARM_PCT = 6.0     # arm once peak margin-PnL ≥ this
+    PROFIT_FLOOR_FRAC = 0.5        # then guarantee keeping this much of the peak
     # ── fee-aware breakeven (06-13 fix) ───────────────────────────────────
     # Round-trip taker fee = 0.1% of NOTIONAL → on BTC that's a ~0.1% price
     # move (~$64) just to break even, independent of leverage. The old lock
@@ -602,6 +610,16 @@ class AutonomousTrader:
                     pos.stop = max(pos.stop, pos.entry + locked)
                 else:
                     pos.stop = min(pos.stop, pos.entry - locked)
+                pos.be_locked = True
+            # Leverage-aware profit floor: keep half the peak MARGIN gain once it's
+            # a real winner, so a +11% peak can't bleed back to breakeven.
+            if pos.peak_pnl_pct >= self.PROFIT_FLOOR_ARM_PCT and pos.leverage > 0:
+                keep_pct = pos.peak_pnl_pct * self.PROFIT_FLOOR_FRAC          # margin %
+                offset = pos.entry * (keep_pct / 100.0) / pos.leverage        # → price move
+                if long:
+                    pos.stop = max(pos.stop, pos.entry + offset)
+                else:
+                    pos.stop = min(pos.stop, pos.entry - offset)
                 pos.be_locked = True
         else:
             trail_arm = self.MANUAL_TRAIL_ARM_ATR
