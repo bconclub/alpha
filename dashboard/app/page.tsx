@@ -608,27 +608,11 @@ export default function DashboardPage() {
         <div className="lg:col-span-3 space-y-4">
           <MarketOverview />
           <MarketSentiment />
-          <div className="bg-[#141419] border border-white/5 rounded-xl p-4">
-            <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Recent Trades</h3>
-            {recentTrades.length === 0 ? (
-              <p className="text-sm text-gray-600 text-center py-4">No recent trades</p>
-            ) : (
-              <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide">
-                {recentTrades.map((trade) => (
-                  <RecentTradeCard key={trade.id} trade={trade} />
-                ))}
-              </div>
-            )}
-          </div>
+          <BottomStats />
         </div>
         <div className="lg:col-span-2">
           <StrategyScanner />
         </div>
-      </div>
-
-      {/* Bottom KPI row */}
-      <div className="mt-4">
-        <BottomStats />
       </div>
     </div>
   );
