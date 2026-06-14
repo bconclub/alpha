@@ -67,15 +67,16 @@ function LaneRow({ lane, leader }: { lane: LiveLaneScan; leader: boolean }) {
       </div>
       <div className="mt-2 flex items-center gap-2.5">
         <div
-          className="relative h-1.5 flex-1 overflow-hidden rounded-full"
-          style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.10) 0 4px, transparent 4px 11px)' }}
+          className="relative h-2 flex-1 overflow-hidden rounded-full"
+          style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.08) 0 4px, transparent 4px 10px)' }}
         >
           <div
-            className="absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out"
+            className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out', ready >= 80 && 'animate-pulse')}
             style={{
-              width: `${ready}%`,
-              backgroundImage: `linear-gradient(90deg, ${color}55, ${color})`,
-              boxShadow: ready > 12 ? `0 0 8px ${color}55` : undefined,
+              width: `${Math.max(ready, 3)}%`,
+              background: color,
+              // glow grows as the setup heats up → it visibly "lights up" near firing
+              boxShadow: `0 0 ${(5 + ready * 0.14).toFixed(0)}px ${color}, 0 0 2px ${color}`,
             }}
           />
         </div>

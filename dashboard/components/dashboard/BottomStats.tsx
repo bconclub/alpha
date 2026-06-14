@@ -33,8 +33,8 @@ function Donut({ total, winning }: { total: number; winning: number }) {
 
 function Card({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-2xl border border-white/5 bg-[#141419] p-4">
-      <p className="text-[11px] uppercase tracking-wider text-zinc-500">{label}</p>
+    <div className="overflow-hidden rounded-2xl border border-white/5 bg-[#141419] p-4">
+      <p className="truncate text-[11px] uppercase tracking-wider text-zinc-500">{label}</p>
       <div className="mt-2 flex items-end justify-between gap-2">{children}</div>
     </div>
   );
@@ -116,7 +116,7 @@ export function BottomStats() {
           </div>
         </div>
 
-        <div className="flex items-center gap-4 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
           <span className="text-zinc-500">Today</span>
           <span className={cn('font-mono font-semibold', s.today.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
             {s.today.pnl >= 0 ? '+' : '−'}{formatCurrency(Math.abs(s.today.pnl))}
@@ -134,10 +134,10 @@ export function BottomStats() {
       </div>
 
       {/* KPI cards */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-5">
         <Card label="Portfolio Value">
           <div>
-            <div className="font-mono text-2xl font-bold text-white">{formatCurrency(s.delta)}</div>
+            <div className="font-mono text-xl font-bold whitespace-nowrap text-white">{formatCurrency(s.delta)}</div>
             <p className="mt-0.5 text-[11px] text-emerald-400">Delta · live</p>
           </div>
           <Spark values={s.deltaSpark} color="#34d399" />
@@ -145,7 +145,7 @@ export function BottomStats() {
 
         <Card label="Open Positions">
           <div>
-            <div className="font-mono text-2xl font-bold text-white">{s.openCount}</div>
+            <div className="font-mono text-xl font-bold whitespace-nowrap text-white">{s.openCount}</div>
             <p className="mt-0.5 text-[11px] text-zinc-400">{s.winningOpen} winning</p>
           </div>
           <Donut total={s.openCount} winning={s.winningOpen} />
@@ -153,7 +153,7 @@ export function BottomStats() {
 
         <Card label={`Win Rate (${tf})`}>
           <div>
-            <div className="font-mono text-2xl font-bold text-white">{s.winRate.toFixed(0)}%</div>
+            <div className="font-mono text-xl font-bold whitespace-nowrap text-white">{s.winRate.toFixed(0)}%</div>
             <p className="mt-0.5 text-[11px] text-zinc-400">{s.winN} trades</p>
           </div>
           <Spark values={s.rolling} color="#34d399" />
@@ -161,7 +161,7 @@ export function BottomStats() {
 
         <Card label={`Total P/L (${tf})`}>
           <div>
-            <div className={cn('font-mono text-2xl font-bold', pnlUp ? 'text-emerald-400' : 'text-red-400')}>
+            <div className={cn('font-mono text-xl font-bold whitespace-nowrap', pnlUp ? 'text-emerald-400' : 'text-red-400')}>
               {pnlUp ? '+' : '−'}{formatCurrency(Math.abs(s.pnlWin))}
             </div>
             <p className={cn('mt-0.5 text-[11px]', pnlUp ? 'text-emerald-400' : 'text-red-400')}>{capPct}</p>
@@ -171,7 +171,7 @@ export function BottomStats() {
 
         <Card label="Capital">
           <div className="w-full">
-            <div className="font-mono text-2xl font-bold text-white">{formatCurrency(s.capital)}</div>
+            <div className="font-mono text-xl font-bold whitespace-nowrap text-white">{formatCurrency(s.capital)}</div>
             <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
               <div className="h-full rounded-full bg-sky-400" style={{ width: '100%' }} />
             </div>
