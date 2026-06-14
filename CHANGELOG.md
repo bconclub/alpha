@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-14 15:07 IST · Scanner polish: top 7, dot meter, per-strategy/leverage colors, coin icons
+
+- Show only the top 7 setups; rows fade down the list (only the #1 "next to fire" is at full strength) — no more a screen full of green.
+- Readiness is now a DOT METER (dots fill left-to-right), not a solid filled bar.
+- Each strategy has its own color (EMA cyan / Donchian violet / VWAP amber); each leverage tier its own color (10x green / 25x amber / 50x red).
+- Coin icon next to every asset for quick scanning.
+- `(SHA on commit)`
+
+
 ## 2026-06-14 15:04 IST · Leverage-aware profit floor — stop giving winners back
 
 - The ATR trail is blind to leverage: at 25-50x a +11% margin peak is only a ~0.4% price move (~1 ATR), so the 1.8-ATR trail rode SOL #3719 from +10.96% back to +1.45% breakeven.

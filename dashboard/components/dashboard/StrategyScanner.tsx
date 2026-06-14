@@ -5,34 +5,48 @@ import { SetupChip } from '@/components/ui/SetupChip';
 import { cn } from '@/lib/utils';
 import type { LiveSignal } from '@/lib/types';
 
-// Heat scale: 0% = red (cold), rising through amber → green as a setup nears firing.
-function heat(readiness: number): string {
-  const r = Math.max(0, Math.min(100, readiness));
-  const hue = (r / 100) * 138;
-  const light = 44 + (r / 100) * 12;
-  return `hsl(${hue.toFixed(0)} 85% ${light.toFixed(0)}%)`;
+const TOP_N = 7;
+const DOTS = 16;
+
+// Per-strategy color — so the board isn't a wall of one color.
+const LANE_COLOR: Record<string, string> = {
+  FUT_EMA_PB: '#22d3ee',       // cyan
+  FUT_DONCHIAN_RT: '#a78bfa',  // violet
+  FUT_VWAP: '#f59e0b',         // amber
+};
+function laneColor(lane: string): string {
+  return LANE_COLOR[lane] ?? '#38bdf8';
 }
 
+// Per-leverage color.
 function levTone(lev: number | null) {
   if (lev === 50) return 'text-red-300 bg-red-500/15 ring-red-500/30';
   if (lev === 25) return 'text-amber-300 bg-amber-500/15 ring-amber-500/30';
-  return 'text-emerald-300 bg-emerald-500/15 ring-emerald-500/30';
+  if (lev === 10) return 'text-emerald-300 bg-emerald-500/15 ring-emerald-500/30';
+  return 'text-zinc-300 bg-zinc-500/15 ring-zinc-500/30';
 }
 
-// One flattened setup across the whole board: asset × lane.
+// Coin badge — brand-colored, glyph or ticker initial.
+const COIN: Record<string, { bg: string; glyph: string }> = {
+  BTC: { bg: '#f7931a', glyph: '₿' }, ETH: { bg: '#627eea', glyph: 'Ξ' },
+  SOL: { bg: 'linear-gradient(135deg,#9945FF,#14F195)', glyph: '◎' }, XRP: { bg: '#3a3f45', glyph: '✕' },
+  DOGE: { bg: '#c2a633', glyph: 'Ð' }, AVAX: { bg: '#e84142', glyph: 'A' },
+  LINK: { bg: '#2a5ada', glyph: '⬡' }, BNB: { bg: '#f3ba2f', glyph: 'B' },
+  ADA: { bg: '#0033ad', glyph: '₳' }, LTC: { bg: '#345d9d', glyph: 'Ł' },
+  SUI: { bg: '#4da2ff', glyph: 'S' }, AAVE: { bg: '#b6509e', glyph: 'A' },
+};
+function CoinBadge({ asset }: { asset: string }) {
+  const c = COIN[asset] ?? { bg: '#3f3f46', glyph: asset.slice(0, 1) };
+  return (
+    <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[12px] font-bold text-white ring-1 ring-white/15"
+      style={{ background: c.bg }}>{c.glyph}</span>
+  );
+}
+
 type Row = {
-  key: string;
-  asset: string;
-  lane: string;
-  name: string;
-  side: string;          // LONG | SHORT | —
-  htf: number | null;
-  readiness: number;
-  conf: number;
-  lev: number | null;
-  watching: string;
-  firing: boolean;       // this exact lane is the one firing
-  inPos: boolean;        // the asset has an open position
+  key: string; asset: string; lane: string; name: string; side: string;
+  readiness: number; conf: number; lev: number | null; watching: string;
+  firing: boolean; inPos: boolean;
 };
 
 function flatten(signals: LiveSignal[]): Row[] {
@@ -41,48 +55,65 @@ function flatten(signals: LiveSignal[]): Row[] {
     const asset = sig.pair.split('/')[0];
     const scan = sig.scan;
     if (!scan) continue;
-    const firingLane = sig.lane;       // best/firing lane for this asset (if any)
     for (const l of scan.lanes ?? []) {
       rows.push({
-        key: `${asset}:${l.lane}`,
-        asset,
-        lane: l.lane,
-        name: l.name,
-        side: l.side,
-        htf: scan.htf_trend,
-        readiness: Math.max(0, Math.min(100, l.readiness)),
-        conf: l.would_conf,
-        lev: l.would_lev,
-        watching: l.watching,
-        firing: scan.status === 'READY' && firingLane === l.lane,
-        inPos: !!scan.in_position,
+        key: `${asset}:${l.lane}`, asset, lane: l.lane, name: l.name, side: l.side,
+        readiness: Math.max(0, Math.min(100, l.readiness)), conf: l.would_conf, lev: l.would_lev,
+        watching: l.watching, firing: scan.status === 'READY' && sig.lane === l.lane, inPos: !!scan.in_position,
       });
     }
   }
-  // Hottest first: firing on top, then by readiness.
   rows.sort((a, b) => (Number(b.firing) - Number(a.firing)) || (b.readiness - a.readiness));
   return rows;
 }
 
+function DotMeter({ readiness, color, dim }: { readiness: number; color: string; dim: boolean }) {
+  const filled = Math.round((readiness / 100) * DOTS);
+  return (
+    <div className="flex flex-1 items-center gap-[3px]">
+      {Array.from({ length: DOTS }).map((_, i) => {
+        const on = i < filled;
+        return (
+          <span
+            key={i}
+            className="h-1.5 flex-1 rounded-full transition-colors"
+            style={{
+              background: on ? color : 'rgba(255,255,255,0.08)',
+              opacity: on && dim ? 0.6 : 1,
+              boxShadow: on && !dim && i === filled - 1 ? `0 0 6px ${color}` : undefined,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 function SignalRow({ r, rank }: { r: Row; rank: number }) {
-  const color = heat(r.readiness);
+  const color = laneColor(r.lane);
+  const top = rank === 0;
   const long = r.side === 'LONG';
-  const arrow = r.side === 'LONG' ? '▲' : r.side === 'SHORT' ? '▼' : '·';
+  const arrow = long ? '▲' : r.side === 'SHORT' ? '▼' : '·';
+  // fade rows down the list — only the top one is at full strength
+  const opacity = top ? 1 : Math.max(0.4, 1 - rank * 0.11);
+
   return (
     <div
       className={cn(
-        'rounded-xl border px-3 py-2.5 backdrop-blur-md transition-colors',
-        r.firing ? 'border-emerald-400/30 bg-emerald-400/[0.06]'
-          : rank === 0 ? 'border-white/15 bg-white/[0.06]' : 'border-white/5 bg-white/[0.02]',
+        'rounded-xl border px-3 py-2.5 backdrop-blur-md transition-all',
+        top ? 'border-white/20 bg-white/[0.07]' : 'border-white/5 bg-white/[0.02]',
       )}
+      style={{ opacity, boxShadow: top ? `0 0 0 1px ${color}33` : undefined }}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="w-12 shrink-0 font-mono text-sm font-bold text-white">{r.asset}</span>
+          <CoinBadge asset={r.asset} />
+          <span className="font-mono text-sm font-bold text-white">{r.asset}</span>
           <SetupChip setup={r.lane} />
           <span className={cn('text-[10px] font-bold', long ? 'text-emerald-400' : r.side === 'SHORT' ? 'text-red-400' : 'text-zinc-500')}>
             {arrow} {r.side}
           </span>
+          {top && !r.firing && <span className="rounded bg-white/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-300">next to fire</span>}
           {r.firing && <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">FIRING</span>}
           {r.inPos && <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold text-violet-300">IN TRADE</span>}
         </div>
@@ -95,16 +126,10 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
       </div>
 
       <div className="mt-2 flex items-center gap-2.5">
-        <div
-          className="relative h-2 flex-1 overflow-hidden rounded-full"
-          style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.08) 0 4px, transparent 4px 10px)' }}
-        >
-          <div
-            className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out', r.readiness >= 80 && 'animate-pulse')}
-            style={{ width: `${Math.max(r.readiness, 3)}%`, background: color, boxShadow: `0 0 ${(5 + r.readiness * 0.14).toFixed(0)}px ${color}, 0 0 2px ${color}` }}
-          />
-        </div>
-        <span className="w-9 text-right font-mono text-xs font-semibold tabular-nums" style={{ color }}>{r.readiness.toFixed(0)}%</span>
+        <DotMeter readiness={r.readiness} color={color} dim={!top} />
+        <span className="w-9 text-right font-mono text-xs font-semibold tabular-nums" style={{ color: top ? color : '#a1a1aa' }}>
+          {r.readiness.toFixed(0)}%
+        </span>
       </div>
 
       <p className="mt-1.5 truncate text-[11px] text-zinc-500">
@@ -117,16 +142,14 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
 export function StrategyScanner() {
   const { liveSignals } = useSupabase();
   const all = flatten(liveSignals ?? []);
-  // Show the ones that matter (closing in), but always keep at least the top 8.
-  const hot = all.filter((r) => r.firing || r.inPos || r.readiness >= 12);
-  const rows = (hot.length >= 8 ? hot : all.slice(0, 8));
+  const rows = all.slice(0, TOP_N);
   const assetCount = new Set(all.map((r) => r.asset)).size;
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-bold text-white">Scanner</h2>
-        <span className="text-[11px] text-zinc-500">{assetCount} assets · top setups first</span>
+        <span className="text-[11px] text-zinc-500">{assetCount} assets · top {TOP_N}</span>
       </div>
 
       {rows.length === 0 ? (
