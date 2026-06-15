@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-15 18:56 IST · Hard loss cap for non-peakers + harvest captures earlier
+
+- Analysis of 33 post-harvest trades: harvest works (7 profit-takes = +$5.04, banking +15-20%), but 8 hard-stops = -$5.11 nearly cancelled it. The losers ALL never peaked (0->-20, +4->-28) — no harvest protection, and 25x stops slipped past the ATR level on the 12s loop.
+- Fix: hard loss cap at -12% margin (~-$0.60), checked every tick, closes a bleeding non-peaker before it slips deeper. New exit reason loss_cap -> "CUT" (red). Autonomous only; manual rides to liquidation.
+- Harvest now arms at +4% (was +5%) and keeps 65% (was 60%) — captures the peakers a touch earlier/closer.
+- `(SHA on commit)`
+
+
 ## 2026-06-15 15:33 IST · KPI strip: replace duplicate Capital with a recent-trades W/L heatmap
 
 - Portfolio Value already shows the live balance, so the Capital card was a duplicate. Replaced it with a green/red squares strip of the last ~80 closed trades (newest on the right, snake-fills as trades close).

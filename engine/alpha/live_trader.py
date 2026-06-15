@@ -112,9 +112,15 @@ class AutonomousTrader:
     # time it armed, price had retraced below the floor → stop above market →
     # instant breakeven exit. Fix: harvest off the CURRENT gain (always ≤ price,
     # so no lag trap), ratcheting UP. Above +5% lock most of what's on the table.
-    PROFIT_ARM_PCT = 5.0           # start harvesting above +5% (user 06-15)
-    PROFIT_KEEP_FRAC = 0.6         # lock 60% of the CURRENT gain (ratchet up only)
+    PROFIT_ARM_PCT = 4.0           # start harvesting above +4% — capture a bit earlier/closer
+    PROFIT_KEEP_FRAC = 0.65        # lock 65% of the CURRENT gain (ratchet up only)
     PROFIT_TAKE_PCT = 18.0         # hard-bank a big spike outright
+    # ── hard loss cap (06-16) ─────────────────────────────────────────────
+    # The losers all NEVER peaked (0→−20, +4→−28): no harvest protection, so
+    # they rode the ATR stop down AND slipped past it on fast 25x moves (the 12s
+    # loop). Cap the per-trade loss in MARGIN terms, checked every tick, so one
+    # non-peaking trade can't erase a day. Autonomous only; manual rides to liq.
+    MAX_LOSS_PCT = -12.0           # close immediately at −12% margin (~−$0.60)
     # ── fee-aware breakeven (06-13 fix) ───────────────────────────────────
     # Round-trip taker fee = 0.1% of NOTIONAL → on BTC that's a ~0.1% price
     # move (~$64) just to break even, independent of leverage. The old lock
@@ -640,7 +646,9 @@ class AutonomousTrader:
             live_stop = max(live_stop, trail) if long else min(live_stop, trail)
 
         reason = ""
-        if (long and price <= live_stop) or (not long and price >= live_stop):
+        if (not pos.is_manual) and pnl_pct <= self.MAX_LOSS_PCT:
+            reason = "loss_cap"        # non-peaker bleeding out — cut before it slips deeper
+        elif (long and price <= live_stop) or (not long and price >= live_stop):
             if live_stop != pos.stop:
                 reason = "trail_stop"
             else:

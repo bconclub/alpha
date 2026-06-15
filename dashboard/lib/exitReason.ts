@@ -26,6 +26,7 @@ const SINGLE_PILL_MAP: Record<string, string> = {
   reconcile_gone: "RECONCILE GONE",
   // V3 autonomous trader exits — short, human, colored
   hard_stop: "STOP",
+  loss_cap: "CUT",
   trail_stop: "TRAIL",
   breakeven_stop: "BREAKEVEN",
   stagnant_exit: "STAGNANT",
@@ -67,6 +68,7 @@ export function parseExitReason(
 export function exitReasonColor(primary: string): string {
   switch (primary) {
     case "STOP":
+    case "CUT":
     case "LIQUIDATED":
       return "red";
     case "TRAIL":
