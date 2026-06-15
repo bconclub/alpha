@@ -46,7 +46,7 @@ function CoinBadge({ asset }: { asset: string }) {
 type Row = {
   key: string; asset: string; lane: string; name: string; side: string;
   readiness: number; conf: number; lev: number | null; watching: string;
-  firing: boolean; inPos: boolean;
+  firing: boolean; inPos: boolean; tradeable: boolean;
 };
 
 function flatten(signals: LiveSignal[]): Row[] {
@@ -56,10 +56,12 @@ function flatten(signals: LiveSignal[]): Row[] {
     const scan = sig.scan;
     if (!scan) continue;
     for (const l of scan.lanes ?? []) {
+      const tradeable = scan.tradeable !== false;
       rows.push({
         key: `${asset}:${l.lane}`, asset, lane: l.lane, name: l.name, side: l.side,
         readiness: Math.max(0, Math.min(100, l.readiness)), conf: l.would_conf, lev: l.would_lev,
-        watching: l.watching, firing: scan.status === 'READY' && sig.lane === l.lane, inPos: !!scan.in_position,
+        watching: l.watching, firing: tradeable && scan.status === 'READY' && sig.lane === l.lane,
+        inPos: !!scan.in_position, tradeable,
       });
     }
   }
@@ -67,20 +69,27 @@ function flatten(signals: LiveSignal[]): Row[] {
   return rows;
 }
 
-function DotMeter({ readiness, color, dim }: { readiness: number; color: string; dim: boolean }) {
+// Red → amber → green across the meter: each dot is colored by its POSITION,
+// so a filling meter reads as a trigger sequence (cold on the left, hot near firing).
+function heat(pct: number): string {
+  const r = Math.max(0, Math.min(100, pct));
+  return `hsl(${((r / 100) * 138).toFixed(0)} 85% 52%)`;
+}
+function DotMeter({ readiness, dim }: { readiness: number; dim: boolean }) {
   const filled = Math.round((readiness / 100) * DOTS);
   return (
     <div className="flex flex-1 items-center gap-[3px]">
       {Array.from({ length: DOTS }).map((_, i) => {
         const on = i < filled;
+        const c = heat((i / (DOTS - 1)) * 100);
         return (
           <span
             key={i}
             className="h-1.5 flex-1 rounded-full transition-colors"
             style={{
-              background: on ? color : 'rgba(255,255,255,0.08)',
-              opacity: on && dim ? 0.6 : 1,
-              boxShadow: on && !dim && i === filled - 1 ? `0 0 6px ${color}` : undefined,
+              background: on ? c : 'rgba(255,255,255,0.08)',
+              opacity: on && dim ? 0.65 : 1,
+              boxShadow: on && !dim && i === filled - 1 ? `0 0 6px ${c}` : undefined,
             }}
           />
         );
@@ -100,7 +109,7 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
   return (
     <div
       className={cn(
-        'rounded-xl border px-3 py-2.5 backdrop-blur-md transition-all',
+        'flex flex-1 flex-col justify-center rounded-xl border px-3 py-2.5 backdrop-blur-md transition-all',
         top ? 'border-white/20 bg-white/[0.07]' : 'border-white/5 bg-white/[0.02]',
       )}
       style={{ opacity, boxShadow: top ? `0 0 0 1px ${color}33` : undefined }}
@@ -113,7 +122,8 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
           <span className={cn('text-[10px] font-bold', long ? 'text-emerald-400' : r.side === 'SHORT' ? 'text-red-400' : 'text-zinc-500')}>
             {arrow} {r.side}
           </span>
-          {top && !r.firing && <span className="rounded bg-white/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-300">next to fire</span>}
+          {!r.tradeable && <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-400">watch</span>}
+          {r.tradeable && top && !r.firing && <span className="rounded bg-white/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-300">next to fire</span>}
           {r.firing && <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">FIRING</span>}
           {r.inPos && <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold text-violet-300">IN TRADE</span>}
         </div>
@@ -126,8 +136,8 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
       </div>
 
       <div className="mt-2 flex items-center gap-2.5">
-        <DotMeter readiness={r.readiness} color={color} dim={!top} />
-        <span className="w-9 text-right font-mono text-xs font-semibold tabular-nums" style={{ color: top ? color : '#a1a1aa' }}>
+        <DotMeter readiness={r.readiness} dim={!top} />
+        <span className="w-9 text-right font-mono text-xs font-semibold tabular-nums" style={{ color: heat(r.readiness) }}>
           {r.readiness.toFixed(0)}%
         </span>
       </div>
@@ -146,16 +156,16 @@ export function StrategyScanner() {
   const assetCount = new Set(all.map((r) => r.asset)).size;
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
+    <div className="flex h-full flex-col rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-bold text-white">Scanner</h2>
         <span className="text-[11px] text-zinc-500">{assetCount} assets · top {TOP_N}</span>
       </div>
 
       {rows.length === 0 ? (
-        <p className="py-8 text-center text-xs text-zinc-600">No signal data yet — engine publishes every ~12s.</p>
+        <p className="flex flex-1 items-center justify-center text-center text-xs text-zinc-600">No signal data yet — engine publishes every ~12s.</p>
       ) : (
-        <div className="space-y-2">
+        <div className="flex flex-1 flex-col gap-2">
           {rows.map((r, i) => <SignalRow key={r.key} r={r} rank={i} />)}
         </div>
       )}

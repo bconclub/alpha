@@ -542,6 +542,7 @@ export interface LiveScan {
   status: 'READY' | 'CLOSE' | 'SCANNING' | 'FLAT';
   htf_trend: number | null;
   in_position: boolean;
+  tradeable?: boolean;            // false = watch-only (scanned, not traded)
   lanes: LiveLaneScan[];
 }
 

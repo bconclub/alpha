@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-15 06:37 IST · Trade only 5 core pairs; scanner heat-sequence dots + matched height
+
+- Engine: AutonomousTrader now TRADES only BTC, ETH, SOL, XRP, DOGE. The other majors stay on the scan board but are watch-only — the bot won't open trades on them (user: "it's firing everywhere — keep these 5, pause the rest"). Existing non-core open trades manage out normally; manual adoption still works on any asset.
+- Scanner: watch-only rows tagged "watch"; dot meter is now a red->amber->green trigger sequence (colored by position); panel fills the column height so it lines up with the left side.
+- `(SHA on commit)`
+
+
 ## 2026-06-14 15:07 IST · Scanner polish: top 7, dot meter, per-strategy/leverage colors, coin icons
 
 - Show only the top 7 setups; rows fade down the list (only the #1 "next to fire" is at full strength) — no more a screen full of green.

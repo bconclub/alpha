@@ -81,6 +81,10 @@ class AutonomousTrader:
     MARGIN_USD = 5.0
     MARGIN_HARD_CAP = 8.0
     MAX_OPEN = 2                  # one per asset
+    # Trades ONLY these (the edge). The rest of the scan universe is watch-only —
+    # shown on the board but the bot won't open trades on them (user 06-14:
+    # "it's firing everywhere — keep these 5 as trading pairs, pause the rest").
+    TRADE_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
     TAKER_FEE = 0.0005
     DAILY_LOSS_STOP = -3.0
     KILL_BALANCE = 5.0
@@ -348,6 +352,8 @@ class AutonomousTrader:
                     break
                 if pair in self._positions:
                     continue
+                if pair.split("/")[0] not in self.TRADE_BASES:
+                    continue   # watch-only asset — scanned but not traded
                 res = results.get(pair)
                 best = res.get("best") if res else None
                 if best:
@@ -763,6 +769,7 @@ class AutonomousTrader:
                     "status": res.get("status"),
                     "htf_trend": res.get("htf_trend"),
                     "in_position": in_pos,
+                    "tradeable": pair.split("/")[0] in self.TRADE_BASES,
                     "lanes": lanes,
                 },
                 "updated_at": now_iso,
