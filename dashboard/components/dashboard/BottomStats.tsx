@@ -87,12 +87,15 @@ export function BottomStats() {
     const delta = Number(botStatus?.delta_balance ?? botStatus?.capital ?? 0);
     const capital = Number(botStatus?.capital ?? delta);
 
+    // recent W/L strip: most-recent ~80 closed trades, chronological (new on the right)
+    const dots = closed.slice(0, 80).reverse().map((t) => Number(t.pnl ?? 0));
+
     return {
       delta, deltaSpark: deltaSpark.length > 1 ? deltaSpark : [0, delta],
       openCount: open.length, winningOpen,
       winRate, rolling: rolling.length > 1 ? rolling : [winRate, winRate], winN: win.length,
       pnlWin, pnlSpark: pnlSpark.length > 1 ? pnlSpark : [0, pnlWin],
-      capital,
+      capital, dots,
       today: { wins: tWins, losses: todayT.length - tWins, total: todayT.length, fees, last10, pnl: todayT.reduce((x, t) => x + Number(t.pnl ?? 0), 0) },
     };
   }, [botStatus, trades, dailyPnL, tf]);
@@ -176,15 +179,23 @@ export function BottomStats() {
           <Spark values={s.pnlSpark} color={pnlUp ? '#34d399' : '#f87171'} />
         </Card>
 
-        <Card label="Capital">
-          <div className="w-full">
-            <div className="font-mono text-xl font-bold whitespace-nowrap text-white">{formatCurrency(s.capital)}</div>
-            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
-              <div className="h-full rounded-full bg-sky-400" style={{ width: '100%' }} />
-            </div>
-            <p className="mt-1 text-[11px] text-zinc-500">deployed on Delta</p>
+        <div className="overflow-hidden rounded-2xl border border-white/5 bg-[#141419] p-4">
+          <div className="flex items-baseline justify-between">
+            <p className="truncate text-[11px] uppercase tracking-wider text-zinc-500">Recent Trades</p>
+            <span className="text-[10px] text-zinc-600">{s.dots.length} · → newest</span>
           </div>
-        </Card>
+          <div className="mt-2 flex flex-wrap content-start gap-1">
+            {s.dots.length === 0 ? (
+              <span className="text-[11px] text-zinc-600">no trades yet</span>
+            ) : s.dots.map((p, i) => (
+              <span
+                key={i}
+                className={cn('h-2.5 w-2.5 rounded-[3px]', p > 0 ? 'bg-emerald-500' : p < 0 ? 'bg-red-500' : 'bg-zinc-600')}
+                title={`${p >= 0 ? '+' : ''}${p.toFixed(2)}`}
+              />
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );

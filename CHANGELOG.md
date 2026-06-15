@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-15 15:33 IST · KPI strip: replace duplicate Capital with a recent-trades W/L heatmap
+
+- Portfolio Value already shows the live balance, so the Capital card was a duplicate. Replaced it with a green/red squares strip of the last ~80 closed trades (newest on the right, snake-fills as trades close).
+- `(SHA on commit)`
+
+
 ## 2026-06-15 06:45 IST · Profit harvest above +5% (stop handing peaks back)
 
 - 06-14/15 review: entries (Donchian/EMA) hit +7 to +13.6% peaks but exited at breakeven. The old peak-based floor lagged on the 12s loop (armed above market -> instant breakeven exit).
