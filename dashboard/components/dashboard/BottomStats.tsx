@@ -87,8 +87,8 @@ export function BottomStats() {
     const delta = Number(botStatus?.delta_balance ?? botStatus?.capital ?? 0);
     const capital = Number(botStatus?.capital ?? delta);
 
-    // recent W/L strip: most-recent ~80 closed trades, chronological (new on the right)
-    const dots = closed.slice(0, 80).reverse().map((t) => Number(t.pnl ?? 0));
+    // recent W/L heatmap: most-recent 50 closed trades (5 rows × 10), chronological
+    const dots = closed.slice(0, 50).reverse().map((t) => Number(t.pnl ?? 0));
 
     return {
       delta, deltaSpark: deltaSpark.length > 1 ? deltaSpark : [0, delta],
@@ -184,17 +184,19 @@ export function BottomStats() {
             <p className="truncate text-[11px] uppercase tracking-wider text-zinc-500">Recent Trades</p>
             <span className="text-[10px] text-zinc-600">{s.dots.length} · → newest</span>
           </div>
-          <div className="mt-2 flex flex-wrap content-start gap-1">
-            {s.dots.length === 0 ? (
-              <span className="text-[11px] text-zinc-600">no trades yet</span>
-            ) : s.dots.map((p, i) => (
-              <span
-                key={i}
-                className={cn('h-2.5 w-2.5 rounded-[3px]', p > 0 ? 'bg-emerald-500' : p < 0 ? 'bg-red-500' : 'bg-zinc-600')}
-                title={`${p >= 0 ? '+' : ''}${p.toFixed(2)}`}
-              />
-            ))}
-          </div>
+          {s.dots.length === 0 ? (
+            <p className="mt-2 text-[11px] text-zinc-600">no trades yet</p>
+          ) : (
+            <div className="mt-2 grid grid-cols-10 gap-1">
+              {s.dots.map((p, i) => (
+                <span
+                  key={i}
+                  className={cn('aspect-square w-full rounded-[3px]', p > 0 ? 'bg-emerald-500' : p < 0 ? 'bg-red-500' : 'bg-zinc-600')}
+                  title={`${p >= 0 ? '+' : ''}${p.toFixed(2)}`}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
