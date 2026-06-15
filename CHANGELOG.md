@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-15 06:45 IST · Profit harvest above +5% (stop handing peaks back)
+
+- 06-14/15 review: entries (Donchian/EMA) hit +7 to +13.6% peaks but exited at breakeven. The old peak-based floor lagged on the 12s loop (armed above market -> instant breakeven exit).
+- Fix: harvest off the CURRENT gain. Above +5% PnL the stop locks 60% of the live gain and ratchets up (always below price -> no lag trap): a +13% run now banks ~+8%, a +8% run ~+5%. Hard take-profit at +18%. Autonomous trades only; manual still rides to liquidation.
+- New exit reason profit_take -> "PROFIT" pill on the board.
+- `(SHA on commit)`
+
+
 ## 2026-06-15 06:37 IST · Trade only 5 core pairs; scanner heat-sequence dots + matched height
 
 - Engine: AutonomousTrader now TRADES only BTC, ETH, SOL, XRP, DOGE. The other majors stay on the scan board but are watch-only — the bot won't open trades on them (user: "it's firing everywhere — keep these 5, pause the rest"). Existing non-core open trades manage out normally; manual adoption still works on any asset.

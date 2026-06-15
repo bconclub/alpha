@@ -106,14 +106,15 @@ class AutonomousTrader:
     NO_TRACTION_SEC = 60 * 60
     NO_TRACTION_ATR = 0.4
     MAX_HOLD_SEC = 24 * 60 * 60
-    # ── leverage-aware profit floor (06-14) ───────────────────────────────
-    # The ATR trail is blind to leverage: at 25-50x a "+11% margin" peak is a
-    # ~0.4% price move (≈1 ATR), so the 1.8-ATR trail rode SOL #3719 from
-    # +10.96% all the way back to +1.45% breakeven. Fix: once a trade is a real
-    # winner in MARGIN terms, lock in a fraction of the peak so it can't bleed
-    # back. Ratchet-up only (never widens) → safe, never causes a noise-stop.
-    PROFIT_FLOOR_ARM_PCT = 6.0     # arm once peak margin-PnL ≥ this
-    PROFIT_FLOOR_FRAC = 0.5        # then guarantee keeping this much of the peak
+    # ── profit harvest (06-15) ────────────────────────────────────────────
+    # We keep hitting +7-13% peaks (Donchian/EMA find the move) but hand them
+    # back to breakeven. The old PEAK-based floor lagged on the 12s loop: by the
+    # time it armed, price had retraced below the floor → stop above market →
+    # instant breakeven exit. Fix: harvest off the CURRENT gain (always ≤ price,
+    # so no lag trap), ratcheting UP. Above +5% lock most of what's on the table.
+    PROFIT_ARM_PCT = 5.0           # start harvesting above +5% (user 06-15)
+    PROFIT_KEEP_FRAC = 0.6         # lock 60% of the CURRENT gain (ratchet up only)
+    PROFIT_TAKE_PCT = 18.0         # hard-bank a big spike outright
     # ── fee-aware breakeven (06-13 fix) ───────────────────────────────────
     # Round-trip taker fee = 0.1% of NOTIONAL → on BTC that's a ~0.1% price
     # move (~$64) just to break even, independent of leverage. The old lock
@@ -617,10 +618,12 @@ class AutonomousTrader:
                 else:
                     pos.stop = min(pos.stop, pos.entry - locked)
                 pos.be_locked = True
-            # Leverage-aware profit floor: keep half the peak MARGIN gain once it's
-            # a real winner, so a +11% peak can't bleed back to breakeven.
-            if pos.peak_pnl_pct >= self.PROFIT_FLOOR_ARM_PCT and pos.leverage > 0:
-                keep_pct = pos.peak_pnl_pct * self.PROFIT_FLOOR_FRAC          # margin %
+            # Profit harvest: above +5%, lock 60% of the CURRENT gain. Uses the
+            # live PnL (not the peak), so the locked stop is always BELOW price —
+            # no lag trap — and only ratchets up, so a +13% run banks ~+8%, a
+            # +8% run banks ~+5%, instead of bleeding to breakeven.
+            if pnl_pct >= self.PROFIT_ARM_PCT and pos.leverage > 0:
+                keep_pct = pnl_pct * self.PROFIT_KEEP_FRAC                    # margin %
                 offset = pos.entry * (keep_pct / 100.0) / pos.leverage        # → price move
                 if long:
                     pos.stop = max(pos.stop, pos.entry + offset)
@@ -642,6 +645,8 @@ class AutonomousTrader:
                 reason = "trail_stop"
             else:
                 reason = "breakeven_stop" if pos.be_locked else "hard_stop"
+        elif (not pos.is_manual) and pnl_pct >= self.PROFIT_TAKE_PCT:
+            reason = "profit_take"      # hard-bank a big spike (user: harvest the peaks)
         elif (not pos.is_manual) and atr > 0 and age >= self.STAGNATION_SEC and abs(price - pos.entry) < self.STAGNATION_ATR * atr:
             reason = "stagnant_exit"
         elif (not pos.is_manual) and atr > 0 and age >= self.NO_TRACTION_SEC and pnl_usd < 0 and peak_fav < self.NO_TRACTION_ATR * atr:

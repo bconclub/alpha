@@ -16,6 +16,7 @@ const SINGLE_PILL_MAP: Record<string, string> = {
   breakeven: "BREAKEVEN",
   dead: "DEAD",
   profit_harvest: "PROFIT",
+  profit_take: "PROFIT",
   pre_expiry: "PRE-EXPIRY",
   peak: "PEAK",
   expired_itm: "EXPIRED ITM",
