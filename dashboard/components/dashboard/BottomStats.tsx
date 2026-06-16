@@ -40,9 +40,9 @@ function Donut({ total, winning }: { total: number; winning: number }) {
 
 function Card({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="overflow-hidden rounded-2xl border border-white/5 bg-[#141419] p-4">
+    <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-white/5 bg-[#141419] p-4">
       <p className="truncate text-[11px] uppercase tracking-wider text-zinc-500">{label}</p>
-      <div className="mt-2 flex items-end justify-between gap-2">{children}</div>
+      <div className="mt-2 flex flex-1 items-center justify-between gap-2">{children}</div>
     </div>
   );
 }
@@ -134,12 +134,6 @@ export function BottomStats() {
           <span className="text-zinc-400 font-mono">{s.today.wins}W / {s.today.losses}L</span>
           <span className="text-zinc-400 font-mono">{s.today.total} trades</span>
           <span className="text-zinc-400 font-mono">fees ${s.today.fees.toFixed(2)}</span>
-          <div className="flex gap-1">
-            {Array.from({ length: 10 }).map((_, i) => {
-              const slot = s.today.last10[i];
-              return <span key={i} className={cn('h-3 w-3 rounded-sm', !slot ? 'bg-zinc-700/50' : slot.pnl > 0 ? 'bg-emerald-500' : slot.pnl < 0 ? 'bg-red-500' : 'bg-zinc-500')} />;
-            })}
-          </div>
         </div>
       </div>
 
@@ -179,25 +173,35 @@ export function BottomStats() {
           <Spark values={s.pnlSpark} color={pnlUp ? '#34d399' : '#f87171'} />
         </Card>
 
-        <div className="overflow-hidden rounded-2xl border border-white/5 bg-[#141419] p-4">
-          <div className="flex items-baseline justify-between">
-            <p className="truncate text-[11px] uppercase tracking-wider text-zinc-500">Recent Trades</p>
-            <span className="text-[10px] text-zinc-600">{s.dots.length} · → newest</span>
-          </div>
-          {s.dots.length === 0 ? (
-            <p className="mt-2 text-[11px] text-zinc-600">no trades yet</p>
-          ) : (
-            <div className="mt-2 grid grid-cols-10 gap-1">
-              {s.dots.map((p, i) => (
-                <span
-                  key={i}
-                  className={cn('aspect-square w-full rounded-[3px]', p > 0 ? 'bg-emerald-500' : p < 0 ? 'bg-red-500' : 'bg-zinc-600')}
-                  title={`${p >= 0 ? '+' : ''}${p.toFixed(2)}`}
-                />
-              ))}
+        {(() => {
+          const greens = s.dots.filter((p) => p > 0).length;
+          const pct = s.dots.length ? Math.round((greens / s.dots.length) * 100) : 0;
+          return (
+            <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-white/5 bg-[#141419] p-4">
+              <div className="flex items-baseline justify-between">
+                <p className="text-[11px] uppercase tracking-wider text-zinc-500">
+                  <span className="font-mono text-sm font-bold text-white">{pct}%</span> won
+                </p>
+                <span className="text-[10px] text-zinc-600">{greens}/{s.dots.length} · → newest</span>
+              </div>
+              {s.dots.length === 0 ? (
+                <p className="mt-2 flex flex-1 items-center text-[11px] text-zinc-600">no trades yet</p>
+              ) : (
+                <div className="mt-2 flex flex-1 items-center">
+                  <div className="grid w-full grid-cols-10 gap-1">
+                    {s.dots.map((p, i) => (
+                      <span
+                        key={i}
+                        className={cn('aspect-square w-full rounded-[3px]', p > 0 ? 'bg-emerald-500' : p < 0 ? 'bg-red-500' : 'bg-zinc-600')}
+                        title={`${p >= 0 ? '+' : ''}${p.toFixed(2)}`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          );
+        })()}
       </div>
     </div>
   );

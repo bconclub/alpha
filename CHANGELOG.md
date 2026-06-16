@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-16 10:56 IST · KPI strip cleanup: drop top-10 squares, win% on the 50-grid, center cards
+
+- Removed the redundant 10-square row from the header (the 50-grid already shows it).
+- The 50-trade grid now headers with WIN % (e.g. "62% won" + greens/total) instead of a "Recent Trades" label.
+- All KPI cards vertically center their content (h-full + flex), killing the dead space under shorter cards.
+- `(SHA on commit)`
+
+
 ## 2026-06-16 10:26 IST · Raise entry confidence gate 85 -> 90 (fewer, higher-conviction trades)
 
 - User call: only take conf >= 90 setups now (was 85). Fewer, pickier entries. Leverage tiers unchanged (90-91->10x, 92-96->25x, 97+->50x); the -12% loss cap remains the backstop on the 25x cohort. Now that confidence persists correctly, we can measure conf-vs-outcome on real data and revisit.
