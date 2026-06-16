@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-16 10:26 IST · Raise entry confidence gate 85 -> 90 (fewer, higher-conviction trades)
+
+- User call: only take conf >= 90 setups now (was 85). Fewer, pickier entries. Leverage tiers unchanged (90-91->10x, 92-96->25x, 97+->50x); the -12% loss cap remains the backstop on the 25x cohort. Now that confidence persists correctly, we can measure conf-vs-outcome on real data and revisit.
+- `(SHA on commit)`
+
+
 ## 2026-06-16 10:07 IST · Fix confidence persistence + show it on the board
 
 - Bug: confidence_score + htf_trend were written at entry but the 12s manage-loop overwrote metadata without them, so the board showed "—" (looked like blind trades). Now carried on the Position and re-written every update; re-attach restores them too.

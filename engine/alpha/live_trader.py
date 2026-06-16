@@ -779,7 +779,7 @@ class AutonomousTrader:
                 lc = float(ln.get("would_conf") or 0)
                 lanes.append({
                     **ln,
-                    "would_lev": int(self._leverage_for(lc, price, atr)) if (price > 0 and atr > 0 and lc >= 85) else None,
+                    "would_lev": int(self._leverage_for(lc, price, atr)) if (price > 0 and atr > 0 and lc >= 90) else None,
                 })
             rows.append({
                 "pair": pair,

@@ -25,8 +25,9 @@ from alpha.utils import setup_logger
 logger = setup_logger("strategy_v3")
 
 # Entry conviction floor — below this no lane trades. The autonomous trader maps
-# everything ABOVE this to leverage tiers (85–91→10x, 92–96→25x, 97+→50x).
-MIN_CONFIDENCE = 85.0
+# everything ABOVE this to leverage tiers (90–91→10x, 92–96→25x, 97+→50x).
+# Raised 85→90 (user 06-16): fewer, higher-conviction entries only.
+MIN_CONFIDENCE = 90.0
 
 # Higher-timeframe gate (1h EMA 8/21 drift): longs need a 1h uptrend, shorts a
 # 1h downtrend, a flat hour = stand down.
