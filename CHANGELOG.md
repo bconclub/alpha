@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-06-16 10:07 IST · Fix confidence persistence + show it on the board
+
+- Bug: confidence_score + htf_trend were written at entry but the 12s manage-loop overwrote metadata without them, so the board showed "—" (looked like blind trades). Now carried on the Position and re-written every update; re-attach restores them too.
+- Dashboard CONF column was reading meta.confidence (engine writes confidence_score) — fixed the field name, so confidence now shows.
+- Finding (not yet changed): 10x trades +$0.40 / 67% win vs 25x trades -$1.85 / 43% win over last 45 — the high-leverage tier is the bleed. Recommend lowering leverage; awaiting user call.
+- `(SHA on commit)`
+
+
 ## 2026-06-15 18:56 IST · Hard loss cap for non-peakers + harvest captures earlier
 
 - Analysis of 33 post-harvest trades: harvest works (7 profit-takes = +$5.04, banking +15-20%), but 8 hard-stops = -$5.11 nearly cancelled it. The losers ALL never peaked (0->-20, +4->-28) — no harvest protection, and 25x stops slipped past the ATR level on the 12s loop.

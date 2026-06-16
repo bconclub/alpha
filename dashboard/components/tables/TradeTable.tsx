@@ -1651,8 +1651,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs">
                           {(() => {
                             const meta = (trade as any).metadata || {};
-                            const conf = meta.confidence;
-                            if (conf == null || !Number.isFinite(conf)) {
+                            const conf = meta.confidence_score ?? meta.confidence;
+                            if (conf == null || !Number.isFinite(Number(conf))) {
                               return <span className="text-zinc-600">&mdash;</span>;
                             }
                             const score = Math.round(Number(conf));

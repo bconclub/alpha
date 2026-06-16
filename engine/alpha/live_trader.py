@@ -70,6 +70,9 @@ class Position:
     opened_mono: float = 0.0
     is_manual: bool = False
     liq: float = 0.0
+    confidence: float | None = None   # entry confidence (persisted through manage updates)
+    htf_trend: int | None = None
+    lane: str = ""
 
     @property
     def is_long(self) -> bool:
@@ -290,6 +293,9 @@ class AutonomousTrader:
                 opened_mono=opened_mono,
                 is_manual=bool(meta.get("manual")),
                 liq=float(meta.get("liq_price") or 0),
+                confidence=(float(meta["confidence_score"]) if meta.get("confidence_score") is not None else None),
+                htf_trend=(int(meta["htf_trend"]) if meta.get("htf_trend") is not None else None),
+                lane=str(meta.get("lane") or ("MANUAL" if meta.get("manual") else "")),
             )
             # Manual trades: re-apply the current ride-to-liquidation policy on
             # boot (a stale tight stop stored from an older policy would cut the
@@ -460,6 +466,7 @@ class AutonomousTrader:
             pair=pair, direction=direction, contracts=contracts, csize=csize,
             entry=fill, atr=atr, stop=stop, margin=margin, leverage=lev,
             peak_price=fill, opened_mono=asyncio.get_running_loop().time(),
+            confidence=round(conf, 1), htf_trend=sig.get("htf_trend"), lane=lane,
         )
         self._positions[pair] = pos       # source of truth: order filled
         pos.row_id = await self.db.log_trade(row)
@@ -550,7 +557,7 @@ class AutonomousTrader:
             pair=pair, direction=side, contracts=contracts, csize=csize, entry=entry_px,
             atr=atr, stop=stop, margin=margin, leverage=lev, peak_price=entry_px,
             opened_mono=asyncio.get_running_loop().time(), is_manual=True,
-            liq=float(liquidation or 0),
+            liq=float(liquidation or 0), lane="MANUAL",
         )
         self._positions[pair] = pos
         pos.row_id = await self.db.log_trade(row)
@@ -680,6 +687,11 @@ class AutonomousTrader:
                         "peak_price": pos.peak_price,
                         "be_locked": pos.be_locked,
                         "liq_price": round(pos.liq, 4) if pos.liq else None,
+                        # preserve entry context so it isn't wiped each tick (was the
+                        # bug: confidence/htf showed "—" on the board after 12s)
+                        "confidence_score": pos.confidence,
+                        "htf_trend": pos.htf_trend,
+                        "lane": pos.lane,
                     },
                 },
             )
