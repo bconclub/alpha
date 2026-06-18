@@ -51,9 +51,13 @@ export function BottomStats() {
   const { botStatus, trades, dailyPnL } = useSupabase();
   const [tf, setTf] = useState<TF>('24H');
 
+  // Live status from the bot's heartbeat freshness, not a one-off state string —
+  // so a momentary 'error' during a restart can't get stuck showing DOWN.
+  const hbTs = botStatus?.timestamp ? new Date(botStatus.timestamp).getTime() : 0;
+  const stale = !hbTs || (Date.now() - hbTs) > 4 * 60 * 1000;   // no heartbeat in 4 min
   const botState = botStatus?.bot_state ?? 'paused';
-  const liveOn = botState === 'running';
-  const liveDown = botState === 'error';
+  const liveOn = botState === 'running' && !stale;
+  const liveDown = stale || botState === 'error';
 
   const s = useMemo(() => {
     const closed = trades.filter((t) => t.status === 'closed');
