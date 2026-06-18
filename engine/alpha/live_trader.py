@@ -81,16 +81,18 @@ class Position:
 
 class AutonomousTrader:
     POLL_SEC = 12
-    MARGIN_USD = 5.0
-    MARGIN_HARD_CAP = 8.0
-    MAX_OPEN = 2                  # one per asset
+    # Sized for the live ~$4.77 account (user 06-19: "take it live, whatever we
+    # have"). $4 money-in, one trade at a time (can't fund two), trade down to $2.
+    MARGIN_USD = 4.0
+    MARGIN_HARD_CAP = 4.5         # never try a trade that needs more than we have
+    MAX_OPEN = 1                  # only ~$4.77 — one position at a time
     # Trades ONLY these (the edge). The rest of the scan universe is watch-only —
     # shown on the board but the bot won't open trades on them (user 06-14:
     # "it's firing everywhere — keep these 5 as trading pairs, pause the rest").
     TRADE_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
     TAKER_FEE = 0.0005
     DAILY_LOSS_STOP = -3.0
-    KILL_BALANCE = 5.0
+    KILL_BALANCE = 2.0           # trade down to $2 on the small live account
     # confidence → leverage tiers (never 100x)
     LEV_TIERS = ((97.0, 50.0), (92.0, 25.0), (0.0, 10.0))   # (min_conf, leverage), high→low
     LIQ_SAFETY = 0.85            # the 1.6×ATR stop must sit within this fraction of the liq distance

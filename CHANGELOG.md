@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-18 22:00 IST · Resume live on the small account ($4.77): resize + lower floor
+
+- User: paper is gone, run it live with whatever we have. Resized for ~$4.77: $4 money-in (was $5), hard cap $4.5 so orders never exceed balance, MAX_OPEN 1 (can't fund two), kill floor $2 (was $5). PAPER_ONLY flipped to 0 on the VPS to re-enable the live trader.
+- Rules otherwise unchanged: conf>=90 gate, 10/25/50x tiers, -12% loss cap, profit harvest.
+- `(SHA on commit)`
+
+
 ## 2026-06-16 10:56 IST · KPI strip cleanup: drop top-10 squares, win% on the 50-grid, center cards
 
 - Removed the redundant 10-square row from the header (the 50-grid already shows it).
