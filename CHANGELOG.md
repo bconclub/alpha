@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-06-27 14:20 IST · Strategy fix batch from 10-day post-mortem (flat 10x, time-stop, chop gate, drop VWAP)
+
+Applied everything the Jun15-26 data taught us (gross ~flat, fees the whole loss, conf not predictive, winners work fast, we sit out chop):
+- **Flat 10x** — leverage no longer scales with confidence (not predictive; 25x cost ~2x fees + asymmetric losses). Conf still GATES (>=90), never sizes. Halves fee/trade, symmetric risk.
+- **6-min time-stop** — if a trade hasn't peaked >=+3% by 6 min, cut it. Hold-time data: <5min was the only green bucket (+$0.84); 5-15min was the entire bleed (-$10.51).
+- **Chop filter** — 1h trend gate tightened 0.05 -> 0.12, so we only trade clearly-trending hours (52% of old entries never reached +5%).
+- **Dropped VWAP** — never fired once in 10 days. EMA + Donchian only.
+- New exit reason time_stop -> "TIME" pill. Kept -12% loss cap + profit harvest. Sized for small account ($4/trade, max 1 open, $2 kill).
+- `(SHA on commit)`
+
+
 ## 2026-06-18 22:00 IST · Resume live on the small account ($4.77): resize + lower floor
 
 - User: paper is gone, run it live with whatever we have. Resized for ~$4.77: $4 money-in (was $5), hard cap $4.5 so orders never exceed balance, MAX_OPEN 1 (can't fund two), kill floor $2 (was $5). PAPER_ONLY flipped to 0 on the VPS to re-enable the live trader.

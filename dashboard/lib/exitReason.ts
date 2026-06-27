@@ -29,6 +29,7 @@ const SINGLE_PILL_MAP: Record<string, string> = {
   loss_cap: "CUT",
   trail_stop: "TRAIL",
   breakeven_stop: "BREAKEVEN",
+  time_stop: "TIME",
   stagnant_exit: "STAGNANT",
   no_traction: "NO TRACTION",
   max_hold: "MAX HOLD",
@@ -75,6 +76,7 @@ export function exitReasonColor(primary: string): string {
       return "green";
     case "BREAKEVEN":
       return "gray";
+    case "TIME":
     case "STAGNANT":
     case "NO TRACTION":
     case "MAX HOLD":

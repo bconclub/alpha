@@ -94,7 +94,11 @@ class AutonomousTrader:
     DAILY_LOSS_STOP = -3.0
     KILL_BALANCE = 2.0           # trade down to $2 on the small live account
     # confidence → leverage tiers (never 100x)
-    LEV_TIERS = ((97.0, 50.0), (92.0, 25.0), (0.0, 10.0))   # (min_conf, leverage), high→low
+    # FLAT 10x (06-26): confidence is NOT predictive of outcome (90-91/92-94/95-96
+    # all ~33-46% win, all net-negative), and 25x cost ~2x the fee + had asymmetric
+    # losses (max loss > max win). So leverage no longer scales with confidence —
+    # confidence only GATES entry, it never sizes it. Halves fees, symmetric risk.
+    LEV_TIERS = ((0.0, 10.0),)
     LIQ_SAFETY = 0.85            # the 1.6×ATR stop must sit within this fraction of the liq distance
     # V3 exit engine (identical constants to the validated lanes)
     STOP_ATR_MULT = 1.6
@@ -111,6 +115,13 @@ class AutonomousTrader:
     NO_TRACTION_SEC = 60 * 60
     NO_TRACTION_ATR = 0.4
     MAX_HOLD_SEC = 24 * 60 * 60
+    # ── time-stop (06-26) ─────────────────────────────────────────────────
+    # Hold-time data: <5min trades net +$0.84 (the only green bucket); the
+    # 5-15min bucket was the entire bleed (-$10.51). Trades that work, work fast.
+    # If a trade hasn't shown real traction by ~6 min, it's not our trade — cut it
+    # before it drifts into the death zone (and frees the slot for a fresh setup).
+    TIME_STOP_SEC = 6 * 60
+    TIME_STOP_MIN_PEAK = 3.0      # if peak margin-PnL never reached +3% by then → out
     # ── profit harvest (06-15) ────────────────────────────────────────────
     # We keep hitting +7-13% peaks (Donchian/EMA find the move) but hand them
     # back to breakeven. The old PEAK-based floor lagged on the 12s loop: by the
@@ -215,15 +226,15 @@ class AutonomousTrader:
         await self._reattach()
         bases = ", ".join(p.split("/")[0] for p in self.pairs)
         logger.warning(
-            "🔴 AutonomousTrader ACTIVE — real money. $%.0f/trade · 10/25/50x by conf · "
-            "max %d open · day stop $%.2f · kill <$%.2f · scanning %d: %s",
-            self.MARGIN_USD, self.MAX_OPEN, self.DAILY_LOSS_STOP, self.KILL_BALANCE, len(self.pairs), bases,
+            "🔴 AutonomousTrader ACTIVE — real money. $%.0f/trade · flat 10x · conf≥90 gate · "
+            "6min time-stop · max %d open · kill <$%.2f · scanning %d: %s",
+            self.MARGIN_USD, self.MAX_OPEN, self.KILL_BALANCE, len(self.pairs), bases,
         )
         try:
             await self.alerts._send(
                 "🔴 <b>LIVE TRADER ACTIVE — real money</b>\n"
-                f"${self.MARGIN_USD:.0f}/trade · 10/25/50x by confidence · max {self.MAX_OPEN} open\n"
-                f"Day stop −${abs(self.DAILY_LOSS_STOP):.0f} · kill &lt;${self.KILL_BALANCE:.0f}\n"
+                f"${self.MARGIN_USD:.0f}/trade · flat 10x · conf≥90 · max {self.MAX_OPEN} open\n"
+                f"6min time-stop · −12% loss cap · kill &lt;${self.KILL_BALANCE:.0f}\n"
                 f"Scanning {len(self.pairs)} futures: {bases}",
                 allow_in_quiet=True,
             )
@@ -664,6 +675,8 @@ class AutonomousTrader:
                 reason = "breakeven_stop" if pos.be_locked else "hard_stop"
         elif (not pos.is_manual) and pnl_pct >= self.PROFIT_TAKE_PCT:
             reason = "profit_take"      # hard-bank a big spike (user: harvest the peaks)
+        elif (not pos.is_manual) and age >= self.TIME_STOP_SEC and pos.peak_pnl_pct < self.TIME_STOP_MIN_PEAK:
+            reason = "time_stop"        # never got going in ~6 min → not our trade
         elif (not pos.is_manual) and atr > 0 and age >= self.STAGNATION_SEC and abs(price - pos.entry) < self.STAGNATION_ATR * atr:
             reason = "stagnant_exit"
         elif (not pos.is_manual) and atr > 0 and age >= self.NO_TRACTION_SEC and pnl_usd < 0 and peak_fav < self.NO_TRACTION_ATR * atr:

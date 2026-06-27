@@ -32,7 +32,10 @@ MIN_CONFIDENCE = 90.0
 # Higher-timeframe gate (1h EMA 8/21 drift): longs need a 1h uptrend, shorts a
 # 1h downtrend, a flat hour = stand down.
 HTF_TIMEFRAME = "1h"
-HTF_MIN_GAP_PCT = 0.05
+# Raised 0.05→0.12 (06-26): only trade clearly-trending hours. The data showed
+# 52% of entries never reached +5% (chop) and the loss came from those — a
+# stronger 1h-trend requirement is the chop filter that skips dead/ranging tape.
+HTF_MIN_GAP_PCT = 0.12
 HTF_CACHE_SEC = 300.0
 
 TIMEFRAME = "5m"
@@ -181,7 +184,8 @@ def vwap_bounce_signal(rows: list[list[float]]) -> tuple[str, str, dict[str, Any
     return None
 
 
-LANES = (ema_pullback_signal, donchian_retest_signal, vwap_bounce_signal)
+# VWAP dropped (06-26): never fired a single live trade in 10 days. EMA + Donchian only.
+LANES = (ema_pullback_signal, donchian_retest_signal)
 
 LANE_DISPLAY = {
     "FUT_EMA_PB": "EMA Pullback",
@@ -257,12 +261,6 @@ def _scan_lanes(rows: list[list[float]], htf: int, firing_lane: str | None) -> l
     ready = _prox(dist_dc, 0.6) if (width_ok and not flat) else 15.0
     watch = ("1h flat — stand down" if flat else (label if width_ok else "channel too tight"))
     out.append(mk("FUT_DONCHIAN_RT", ready, watch, lvl, _clamp(71.0 + width * 8.0, 70.0, 92.0)))
-
-    # VWAP Bounce — waiting for price to tag VWAP with the trend
-    dist_vwap = abs(_pct_move(vwap, close)) if vwap > 0 else 99.0
-    ready = _prox(dist_vwap, 0.5) if (trend_ok and vwap > 0) else min(25.0, abs(gap) / 0.06 * 25.0)
-    watch = f"tag VWAP {vwap:,.0f}" if (trend_ok and vwap > 0) else weak
-    out.append(mk("FUT_VWAP", ready, watch, vwap, _clamp(72.0 + abs(gap) * 50.0, 70.0, 92.0)))
 
     return out
 
