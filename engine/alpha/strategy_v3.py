@@ -138,10 +138,12 @@ class SignalEngine:
         d_dn = _pct_move(lower, mark)      # inverse gap down (positive when above lower)
         near_up = max(0.0, min(95.0, 95.0 * (1.0 - abs(d_up) / 1.2)))
         near_dn = max(0.0, min(95.0, 95.0 * (1.0 - abs(_pct_move(mark, lower)) / 1.2)))
+        def fp(x: float) -> str:   # price with sane precision for sub-$1 assets
+            return f"{x:,.0f}" if x >= 100 else (f"{x:.3f}" if x >= 1 else f"{x:.4f}")
         if near_up >= near_dn:
-            side, ready, watching, level = "LONG", near_up, f"break {upper:,.0f} (4h box high)", upper
+            side, ready, watching, level = "LONG", near_up, f"break {fp(upper)} (4h box high)", upper
         else:
-            side, ready, watching, level = "SHORT", near_dn, f"break {lower:,.0f} (4h box low)", lower
+            side, ready, watching, level = "SHORT", near_dn, f"break {fp(lower)} (4h box low)", lower
         if best:
             status = "READY"
         elif ready >= 78:
