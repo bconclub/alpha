@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-07-03 12:29 IST · Let movers run + pyramid the winners
+
+User call (07-03): "give movers time to move; if it's moving, keep building on it."
+- **Tiered harvest** replaces the flat 65% lock: +4-8% keeps 50% (room to breathe), +8-15% keeps 65%, +15%+ keeps 80%. The +18% hard-take is GONE — big runs trail (hard bank only at +40%).
+- **Pyramid**: once a trade is +6% and still at its highs, add ONE unit ($4 @ 10x). Stop instantly snaps to combined breakeven+fees, so a pyramided trade can never end red. Telegram "PRESSING THE WINNER" alert.
+- Time-stop unchanged (proven: killed zero winners, avg cut at +0.9% peak).
+- `(SHA on commit)`
+
+
 ## 2026-06-27 14:20 IST · Strategy fix batch from 10-day post-mortem (flat 10x, time-stop, chop gate, drop VWAP)
 
 Applied everything the Jun15-26 data taught us (gross ~flat, fees the whole loss, conf not predictive, winners work fast, we sit out chop):

@@ -73,6 +73,7 @@ class Position:
     confidence: float | None = None   # entry confidence (persisted through manage updates)
     htf_trend: int | None = None
     lane: str = ""
+    adds: int = 0                     # pyramid units added on top of the entry
 
     @property
     def is_long(self) -> bool:
@@ -128,9 +129,18 @@ class AutonomousTrader:
     # time it armed, price had retraced below the floor → stop above market →
     # instant breakeven exit. Fix: harvest off the CURRENT gain (always ≤ price,
     # so no lag trap), ratcheting UP. Above +5% lock most of what's on the table.
-    PROFIT_ARM_PCT = 4.0           # start harvesting above +4% — capture a bit earlier/closer
-    PROFIT_KEEP_FRAC = 0.65        # lock 65% of the CURRENT gain (ratchet up only)
-    PROFIT_TAKE_PCT = 18.0         # hard-bank a big spike outright
+    # 07-03 (user): "give movers time to move; if it's moving, keep building on it."
+    # Winners peaked +7-9% but banked $0.07-0.18 — the flat 65% lock choked them.
+    # Now TIERED: loose early (room to breathe), tight only when big. And the +18%
+    # hard-take is gone — a monster run trails instead of being cut.
+    PROFIT_ARM_PCT = 4.0           # harvesting still arms above +4%
+    PROFIT_TAKE_PCT = 40.0         # only a true moonshot is banked outright
+    # ── pyramid (07-03) ───────────────────────────────────────────────────
+    # Press the good entries: once a trade is +6% and still at its highs, ADD one
+    # unit ($4 @ 10x). After the add, the stop snaps to combined breakeven+fees so
+    # a pyramided trade can never turn into a loser.
+    ADD_ARM_PCT = 6.0
+    MAX_ADDS = 1
     # ── hard loss cap (06-16) ─────────────────────────────────────────────
     # The losers all NEVER peaked (0→−20, +4→−28): no harvest protection, so
     # they rode the ATR stop down AND slipped past it on fast 25x moves (the 12s
@@ -595,12 +605,80 @@ class AutonomousTrader:
         return True
 
     # ── manage / close ─────────────────────────────────────────────────
+    def _keep_frac(self, pnl_pct: float) -> float:
+        """Tiered harvest: breathe early, clamp only when the win is big.
+        +4-8%: keep 50% · +8-15%: keep 65% · +15%+: keep 80%."""
+        if pnl_pct >= 15.0:
+            return 0.80
+        if pnl_pct >= 8.0:
+            return 0.65
+        return 0.50
+
     def _trail_mult(self, peak_pnl_pct: float) -> float:
         if peak_pnl_pct >= self.TRAIL_TIGHT_2_PEAK:
             return self.TRAIL_TIGHT_2_MULT
         if peak_pnl_pct >= self.TRAIL_TIGHT_1_PEAK:
             return self.TRAIL_TIGHT_1_MULT
         return self.TRAIL_ATR_MULT
+
+    async def _pyramid(self, pos: Position, price: float) -> bool:
+        """Add one unit to a winning position. Combined stop snaps to breakeven+fees
+        so the pyramided trade can never end red. Returns True if added."""
+        lev = pos.leverage or 10.0
+        csize = pos.csize
+        contracts_add = float(int(self.MARGIN_USD * lev / (price * csize)))
+        if contracts_add < 1:
+            margin_one = price * csize / lev
+            if margin_one > self.MARGIN_HARD_CAP:
+                pos.adds = self.MAX_ADDS   # can't afford an add on this asset — don't retry every tick
+                return False
+            contracts_add = 1.0
+        margin_add = contracts_add * price * csize / lev
+        # only add what the account can actually fund
+        try:
+            bal = await self.balance_fn()
+        except Exception:
+            bal = None
+        if bal is None or bal < (pos.margin + margin_add) * 1.15:
+            pos.adds = self.MAX_ADDS
+            return False
+        long = pos.is_long
+        order = await self.exchange.create_order(pos.pair, "market", "buy" if long else "sell", contracts_add)
+        fill = float(order.get("average") or order.get("price") or price)
+        old_entry, old_ct = pos.entry, pos.contracts
+        pos.entry = (pos.entry * pos.contracts + fill * contracts_add) / (pos.contracts + contracts_add)
+        pos.contracts += contracts_add
+        pos.margin += margin_add
+        pos.adds += 1
+        # never let a pyramided trade turn into a loser: stop >= combined BE + fees
+        fee_buffer = pos.entry * self.TAKER_FEE * 2
+        if long:
+            pos.stop = max(pos.stop, pos.entry + fee_buffer)
+        else:
+            pos.stop = min(pos.stop, pos.entry - fee_buffer)
+        if pos.row_id:
+            await self.db.update_trade(pos.row_id, {
+                "entry_price": round(pos.entry, 6),
+                "amount": pos.contracts,
+                "contracts": pos.contracts,
+                "cost": round(pos.margin, 4),
+                "collateral": round(pos.margin, 4),
+                "stop_loss": round(pos.stop, 4),
+            })
+        logger.warning(
+            "🔺 PYRAMID id=%s %s +%.0f ct @ %.2f (entry %.2f→%.2f, margin $%.2f) stop→BE %.2f",
+            pos.row_id, pos.pair, contracts_add, fill, old_entry, pos.entry, pos.margin, pos.stop,
+        )
+        try:
+            await self.alerts._send(
+                f"🔺 <b>PRESSING THE WINNER</b>\n"
+                f"{pos.pair.split('/')[0]} {pos.direction.upper()} +{int(contracts_add)} ct @ {fill:,.2f}\n"
+                f"Money in now ${pos.margin:.2f} · stop locked at breakeven — can't go red",
+                allow_in_quiet=True,
+            )
+        except Exception:
+            pass
+        return True
 
     async def _manage_position(self, pos: Position) -> None:
         # Heal a failed open-insert so the dashboard/trade board see the position.
@@ -644,12 +722,11 @@ class AutonomousTrader:
                 else:
                     pos.stop = min(pos.stop, pos.entry - locked)
                 pos.be_locked = True
-            # Profit harvest: above +5%, lock 60% of the CURRENT gain. Uses the
-            # live PnL (not the peak), so the locked stop is always BELOW price —
-            # no lag trap — and only ratchets up, so a +13% run banks ~+8%, a
-            # +8% run banks ~+5%, instead of bleeding to breakeven.
+            # Profit harvest off the CURRENT gain (never above price → no lag trap),
+            # ratchet-up only. TIERED so movers get room early and only big wins
+            # get clamped hard (user 07-03: "give movers time to move").
             if pnl_pct >= self.PROFIT_ARM_PCT and pos.leverage > 0:
-                keep_pct = pnl_pct * self.PROFIT_KEEP_FRAC                    # margin %
+                keep_pct = pnl_pct * self._keep_frac(pnl_pct)                 # margin %
                 offset = pos.entry * (keep_pct / 100.0) / pos.leverage        # → price move
                 if long:
                     pos.stop = max(pos.stop, pos.entry + offset)
@@ -664,6 +741,19 @@ class AutonomousTrader:
         if atr > 0 and peak_fav >= trail_arm * atr:
             trail = pos.peak_price - trail_mult * atr if long else pos.peak_price + trail_mult * atr
             live_stop = max(live_stop, trail) if long else min(live_stop, trail)
+
+        # Pyramid: press a proven mover ONCE — +6% and still at its highs (user
+        # 07-03: "if the movement is there, keep building on it").
+        if (not pos.is_manual and pos.adds < self.MAX_ADDS
+                and pnl_pct >= self.ADD_ARM_PCT
+                and (pos.peak_pnl_pct - pnl_pct) <= 1.5):
+            try:
+                added = await self._pyramid(pos, price)
+                if added:
+                    # entry/margin changed — recompute this tick's numbers next poll
+                    return
+            except Exception:
+                logger.exception("pyramid add failed %s", pos.pair)
 
         reason = ""
         if (not pos.is_manual) and pnl_pct <= self.MAX_LOSS_PCT:
