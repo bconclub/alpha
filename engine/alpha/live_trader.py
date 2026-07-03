@@ -86,7 +86,7 @@ class AutonomousTrader:
     # have"). $4 money-in, one trade at a time (can't fund two), trade down to $2.
     MARGIN_USD = 4.0
     MARGIN_HARD_CAP = 4.5         # never try a trade that needs more than we have
-    MAX_OPEN = 1                  # only ~$4.77 — one position at a time
+    MAX_OPEN = 2                  # V4 rides last hours-days — allow 2 concurrent ($8 of ~$12.6)
     # Trades ONLY these (the edge). The rest of the scan universe is watch-only —
     # shown on the board but the bot won't open trades on them (user 06-14:
     # "it's firing everywhere — keep these 5 as trading pairs, pause the rest").
@@ -100,29 +100,35 @@ class AutonomousTrader:
     # losses (max loss > max win). So leverage no longer scales with confidence —
     # confidence only GATES entry, it never sizes it. Halves fees, symmetric risk.
     LEV_TIERS = ((0.0, 10.0),)
-    LIQ_SAFETY = 0.85            # the 1.6×ATR stop must sit within this fraction of the liq distance
-    # V3 exit engine (identical constants to the validated lanes)
-    STOP_ATR_MULT = 1.6
-    BREAKEVEN_ATR = 1.2
+    LIQ_SAFETY = 0.85            # the initial stop must sit within this fraction of the liq distance
+    # ── V4 exit engine (07-03): TREND RIDER — the trail IS the management ──
+    # Backtested on 20 days of real Delta candles (fees + our sizing): 4h
+    # Donchian-20 + 3×ATR chandelier = +$12.86 while the 5m scalper lost $19 and
+    # every faster config lost $27-44. Rules: initial stop 3×ATR(4h); trail
+    # 3×ATR from peak, ratchet-only; NO time-stop, NO harvest choke, NO breakeven
+    # snatching — a ride lasts hours/days and only ends when the trend bends.
+    STOP_ATR_MULT = 3.0           # initial stop = entry ∓ 3×ATR(4h)
+    BREAKEVEN_ATR = 999.0         # disabled for V4 (kept for manual-trade math paths)
     PROFIT_LOCK_FRAC = 0.4
-    TRAIL_ARM_ATR = 1.0
-    TRAIL_ATR_MULT = 1.8
-    TRAIL_TIGHT_1_PEAK = 15.0
-    TRAIL_TIGHT_1_MULT = 1.2
-    TRAIL_TIGHT_2_PEAK = 30.0
-    TRAIL_TIGHT_2_MULT = 0.8
-    STAGNATION_SEC = 75 * 60
+    TRAIL_ARM_ATR = 0.0           # trail is live from entry (chandelier from peak)
+    TRAIL_ATR_MULT = 3.0
+    TRAIL_TIGHT_1_PEAK = 9999.0   # no tightening — the ride breathes
+    TRAIL_TIGHT_1_MULT = 3.0
+    TRAIL_TIGHT_2_PEAK = 9999.0
+    TRAIL_TIGHT_2_MULT = 3.0
+    STAGNATION_SEC = 9999999      # disabled — rides are allowed to pause
     STAGNATION_ATR = 0.5
-    NO_TRACTION_SEC = 60 * 60
+    NO_TRACTION_SEC = 9999999     # disabled
     NO_TRACTION_ATR = 0.4
-    MAX_HOLD_SEC = 24 * 60 * 60
+    MAX_HOLD_SEC = 7 * 24 * 60 * 60   # safety only — rides can last days
     # ── time-stop (06-26) ─────────────────────────────────────────────────
     # Hold-time data: <5min trades net +$0.84 (the only green bucket); the
     # 5-15min bucket was the entire bleed (-$10.51). Trades that work, work fast.
     # If a trade hasn't shown real traction by ~6 min, it's not our trade — cut it
     # before it drifts into the death zone (and frees the slot for a fresh setup).
-    TIME_STOP_SEC = 6 * 60
-    TIME_STOP_MIN_PEAK = 3.0      # if peak margin-PnL never reached +3% by then → out
+    # V4: time-stop DISABLED — it was right for 5m scalps; a 4h ride needs hours.
+    TIME_STOP_SEC = 9999999
+    TIME_STOP_MIN_PEAK = 3.0
     # ── profit harvest (06-15) ────────────────────────────────────────────
     # We keep hitting +7-13% peaks (Donchian/EMA find the move) but hand them
     # back to breakeven. The old PEAK-based floor lagged on the 12s loop: by the
@@ -133,20 +139,24 @@ class AutonomousTrader:
     # Winners peaked +7-9% but banked $0.07-0.18 — the flat 65% lock choked them.
     # Now TIERED: loose early (room to breathe), tight only when big. And the +18%
     # hard-take is gone — a monster run trails instead of being cut.
-    PROFIT_ARM_PCT = 4.0           # harvesting still arms above +4%
-    PROFIT_TAKE_PCT = 40.0         # only a true moonshot is banked outright
+    # V4: harvest choke DISABLED — the 3×ATR trail manages the ride end-to-end.
+    PROFIT_ARM_PCT = 9999.0
+    PROFIT_TAKE_PCT = 9999.0
     # ── pyramid (07-03) ───────────────────────────────────────────────────
     # Press the good entries: once a trade is +6% and still at its highs, ADD one
     # unit ($4 @ 10x). After the add, the stop snaps to combined breakeven+fees so
     # a pyramided trade can never turn into a loser.
-    ADD_ARM_PCT = 6.0
-    MAX_ADDS = 1
+    # V4: pyramid parked (its BE-snap would fight the wide trail) — revisit with live data.
+    ADD_ARM_PCT = 9999.0
+    MAX_ADDS = 0
     # ── hard loss cap (06-16) ─────────────────────────────────────────────
     # The losers all NEVER peaked (0→−20, +4→−28): no harvest protection, so
     # they rode the ATR stop down AND slipped past it on fast 25x moves (the 12s
     # loop). Cap the per-trade loss in MARGIN terms, checked every tick, so one
     # non-peaking trade can't erase a day. Autonomous only; manual rides to liq.
-    MAX_LOSS_PCT = -12.0           # close immediately at −12% margin (~−$0.60)
+    # V4: widened to a CATASTROPHIC breaker only. The tested 3×ATR(4h) stop is
+    # ~15-20% margin at 10x; -12% would cut inside it and invalidate the backtest.
+    MAX_LOSS_PCT = -25.0           # circuit-breaker beyond the tested stop (gaps only)
     # ── fee-aware breakeven (06-13 fix) ───────────────────────────────────
     # Round-trip taker fee = 0.1% of NOTIONAL → on BTC that's a ~0.1% price
     # move (~$64) just to break even, independent of leverage. The old lock
@@ -236,16 +246,16 @@ class AutonomousTrader:
         await self._reattach()
         bases = ", ".join(p.split("/")[0] for p in self.pairs)
         logger.warning(
-            "🔴 AutonomousTrader ACTIVE — real money. $%.0f/trade · flat 10x · conf≥90 gate · "
-            "6min time-stop · max %d open · kill <$%.2f · scanning %d: %s",
+            "🔴 AutonomousTrader ACTIVE — V4 TREND RIDER. $%.0f/trade · flat 10x · 4h Donchian-20 "
+            "breakout · 3×ATR trail · max %d open · kill <$%.2f · scanning %d: %s",
             self.MARGIN_USD, self.MAX_OPEN, self.KILL_BALANCE, len(self.pairs), bases,
         )
         try:
             await self.alerts._send(
-                "🔴 <b>LIVE TRADER ACTIVE — real money</b>\n"
-                f"${self.MARGIN_USD:.0f}/trade · flat 10x · conf≥90 · max {self.MAX_OPEN} open\n"
-                f"6min time-stop · −12% loss cap · kill &lt;${self.KILL_BALANCE:.0f}\n"
-                f"Scanning {len(self.pairs)} futures: {bases}",
+                "🔴 <b>V4 TREND RIDER LIVE — real money</b>\n"
+                f"${self.MARGIN_USD:.0f}/trade · flat 10x · max {self.MAX_OPEN} open\n"
+                f"Entry: 4h Donchian-20 breakout · Exit: 3×ATR trail (ride till it bends)\n"
+                f"Backtest 20d: +$12.86 vs scalper −$19 · Scanning {len(self.pairs)}: {bases}",
                 allow_in_quiet=True,
             )
         except Exception:

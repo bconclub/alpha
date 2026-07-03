@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-03 20:31 IST · ALPHA V4 — 4h TREND RIDER (backtested rebuild, not a tweak)
+
+User: "quick fixes did not work — go through everything, find what works, capture the market, get in early, STAY in."
+Backtested 6 configs on 20 days of real Delta candles (our sizing $4@10x, fees in):
+5m scalper (actual) -$19.20 · 15m Donchian -$44.48 · 1h fast-invalidation -$28.31 · 1h Donchian wide -$9.04 · **4h Donchian-20 + 3xATR trail +$12.86** (15 trades, 4/5 assets green). Slower = better, unambiguously.
+
+- **Entry**: 4h close beyond the prior 20-bar (~3.3-day) box high/low. Long above, short below. One entry per breakout candle. No confidence theater, no extra gates — the box IS the filter.
+- **Exit**: 3xATR(4h) chandelier from peak, ratchet-only. NO time-stop, NO harvest choke, NO breakeven snatch, NO tightening — the ride ends when the trend bends. Catastrophic breaker at -25% margin (gaps only). Max hold 7d (safety).
+- **Sizing**: $4 @ flat 10x, max 2 open, 5 core pairs tradeable (BTC skipped while 1 contract > $4.5 margin cap). Manual trades unchanged (adopt, ride to liq).
+- Pyramid parked (BE-snap would fight the wide trail); scalper exits (time-stop etc.) retired with the scalper.
+- Expect ~0.5-1 entries/day TOTAL, holds of hours-days. Fees become a rounding error.
+- `(SHA on commit)`
+
+
 ## 2026-07-03 12:29 IST · Let movers run + pyramid the winners
 
 User call (07-03): "give movers time to move; if it's moving, keep building on it."
