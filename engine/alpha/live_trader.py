@@ -202,6 +202,7 @@ class AutonomousTrader:
         self._daily_realized = 0.0
         self._daily_date = ""
         self._positions: dict[str, Position] = {}
+        self._atr4h: dict[str, tuple[float, float]] = {}   # pair -> (mono_ts, 4h ATR)
 
     # ── universe / contract size ───────────────────────────────────────
     def _csize(self, pair: str) -> float | None:
@@ -711,6 +712,25 @@ class AutonomousTrader:
         pos.peak_price = max(pos.peak_price, price) if long else min(pos.peak_price, price)
         age = asyncio.get_running_loop().time() - pos.opened_mono
 
+        # V4 fidelity: refresh the 4h ATR (~15 min cache) so the trail tightens
+        # as breakout volatility cools — the backtest recomputed ATR every candle.
+        # Frozen entry-ATR left trails far wider than tested (XRP #4036 round-
+        # tripped a +39% peak inside a stale-wide trail).
+        if not pos.is_manual:
+            mono = asyncio.get_running_loop().time()
+            ts_c, cached = self._atr4h.get(pos.pair, (0.0, 0.0))
+            if mono - ts_c > 900:
+                try:
+                    raw = await self.exchange.fetch_ohlcv(pos.pair, "4h", limit=20)
+                    fresh = _atr_rows([[float(x) for x in r] for r in raw[:-1]])
+                    if fresh > 0:
+                        self._atr4h[pos.pair] = (mono, fresh)
+                        pos.atr = fresh
+                except Exception:
+                    pass
+            elif cached > 0:
+                pos.atr = cached
+
         atr = pos.atr
         peak_fav = (pos.peak_price - pos.entry) if long else (pos.entry - pos.peak_price)
 
@@ -783,6 +803,11 @@ class AutonomousTrader:
             reason = "no_traction"
         elif age >= self.MAX_HOLD_SEC:
             reason = "max_hold"
+
+        # V4: persist the chandelier ratchet — once the trail has tightened
+        # (e.g. after an ATR refresh), a later volatility spike can't re-widen it.
+        if not pos.is_manual:
+            pos.stop = live_stop
 
         if pos.row_id:
             await self.db.update_trade(

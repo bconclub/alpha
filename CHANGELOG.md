@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-05 15:07 IST · V4 trail fidelity: live 4h ATR refresh + persistent ratchet
+
+- Diagnosed the 40h open trades (both managed correctly, riding by design). Found a fidelity bug: the trail used the ATR FROZEN AT ENTRY — and we always enter on a breakout when vol is spiking, so live trails were wider than the backtested strategy (XRP #4036 round-tripped a +39% peak inside a stale 5.3%-wide trail).
+- Fix: refresh the 4h ATR every ~15 min while managing, so the trail tightens as breakout volatility cools (matches the backtest, which recomputed ATR every candle). Chandelier ratchet now persists — a later vol spike can't re-widen a tightened trail.
+- Verified before deploy: neither open trade force-closes (XRP keeps +12% margin of room, ETH +23%), both just get correctly tighter trails.
+- `(SHA on commit)`
+
+
 ## 2026-07-03 20:31 IST · ALPHA V4 — 4h TREND RIDER (backtested rebuild, not a tweak)
 
 User: "quick fixes did not work — go through everything, find what works, capture the market, get in early, STAY in."
