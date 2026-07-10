@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-10 · ALPHA V5 — 1h TREND RIDER, 4h-ALIGNED (full-data rebuild)
+
+User: "go through the entire database, do a proper analysis, trades every day, capture moments, the system is broken — fix it."
+
+**DB verdict (402 closed since 06-01, net −$50.82):** the entire loss is trades that never peaked past +5% margin (231 trades, −$53.80); movers (peak ≥10%) were net POSITIVE. Junk entries were the problem; exits never were. **30d backtest sweep (real Delta 5m candles, fees, 17 configs):** momentum-burst scalps −$48…−$100; every harvest/time-stop variant negative (capping winners kills the fat tail that pays); V4 4h as-is +$0.16 (breakeven in chop, 0.7 trades/day); **1h Donchian-20 + 4h alignment + 3×ATR(1h) trail +$6.50, 89 trades (~3/day)** ← shipped.
+
+- **Entry**: 1h close beyond the prior 20-bar box, ONLY in the 4h regime direction (last closed 4h close vs 4h Donchian-20 midline; cached 15 min, fail-closed). One entry per breakout candle.
+- **Exit**: unchanged philosophy, faster clock — 3×ATR(1h) stop + chandelier ratchet (ATR refreshed ~15 min). Trail is 5-6× tighter in price terms than V4: a +30% margin peak exits ≈ +20% instead of round-tripping red (#4036-4039). Breaker −15% (beyond tested stop). Max hold 72h.
+- **Sizing**: $3 @ flat 10x, MAX_OPEN 3 ($9 of the $9.82 account when signals cluster).
+- **Backtest harness committed**: `engine/scripts/backtest_v5.py` (public candles, no keys) — tune there, not on the account.
+- Honest expectations: thin edge, one 30d window, best-of-sweep bias. Judge after ~60-90 trades (2-4 weeks). Losing streaks of 5-8 are normal at ~39% wr; daily −$3 stop bounds the damage.
+- `(SHA on commit)`
+
+
 ## 2026-07-05 15:07 IST · V4 trail fidelity: live 4h ATR refresh + persistent ratchet
 
 - Diagnosed the 40h open trades (both managed correctly, riding by design). Found a fidelity bug: the trail used the ATR FROZEN AT ENTRY — and we always enter on a breakout when vol is spiking, so live trails were wider than the backtested strategy (XRP #4036 round-tripped a +39% peak inside a stale 5.3%-wide trail).

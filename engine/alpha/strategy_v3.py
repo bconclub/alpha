@@ -1,22 +1,24 @@
-"""V4 signal engine — 4h trend rider (Donchian breakout), signals only.
+"""V5 signal engine — 1h trend rider (Donchian breakout, 4h-aligned), signals only.
 
-Why V4 (07-03 backtest on 20 days of real Delta candles, our sizing + fees):
-    5m scalper (what we ran):      253 trades  −$19.20
-    15m Donchian trail:            366 trades  −$44.48
-    1h  fast-invalidation:         130 trades  −$28.31
-    1h  Donchian wide trail:        76 trades   −$9.04
-    4h  Donchian-20 + 3ATR trail:   15 trades  +$12.86   ← the only green config
+Why V5 (07-10, 30-day backtest on real Delta 5m candles, our sizing + fees):
+    momentum-burst scalps (8 variants):  −$48 … −$100   more trades ≠ more money
+    every harvest / time-stop variant:   negative        capping winners kills the edge
+    4h Donchian-20 + 3ATR (V4 as-is):     21 trades  +$0.16   breakeven in chop
+    1h Donchian-20 + 3ATR trail:         106 trades  +$1.48
+    1h Donchian-20 + 3ATR + 4h align:     89 trades  +$6.50   ← winner, ~3 signals/day
 
-The gradient was unambiguous: slower = better; 4h flips positive. It is also the
-user's stated thesis: "get in early, stay in the market; if it goes against us,
-cut out; if it's staying, we stay and take the money."
+DB truth (402 closed since 06-01, −$50.82 net): the entire loss is trades that
+never peaked past +5% margin; movers (peak ≥10%) were net positive. Entries were
+the problem, exits never were. V5 keeps the ride-the-tail exit but moves to the
+1h box so the trail is 5-6× tighter in price terms — a +30% peak exits ≈ +20%
+instead of round-tripping red (V4 trades #4036-4039).
 
-Signal: a 4h close beyond the prior 20-bar (≈3.3-day) high/low box. Long above,
-short below. Fresh breaks only (one entry per breakout candle). The 4h box IS
-the higher-timeframe filter — no extra gates, no confidence theater.
+Signal: a 1h close beyond the prior 20-bar high/low box, taken ONLY in the
+direction of the 4h regime (last closed 4h close vs the 4h Donchian-20 midline).
+Fresh breaks only (one entry per breakout candle).
 
 This module stays PURE READ: fetches candles, returns the current signal per
-pair. The trader (`live_trader.py`) manages entries/exits (3×ATR(4h) chandelier).
+pair. The trader (`live_trader.py`) manages entries/exits (3×ATR(1h) chandelier).
 """
 
 from __future__ import annotations
@@ -26,12 +28,15 @@ from typing import Any
 
 from alpha.utils import setup_logger
 
-logger = setup_logger("strategy_v4")
+logger = setup_logger("strategy_v5")
 
-TIMEFRAME = "4h"
+TIMEFRAME = "1h"
 CANDLE_LIMIT = 60
-CHANNEL_LEN = 20            # Donchian box length (backtested: N=20 on 4h)
+CHANNEL_LEN = 20            # Donchian box length (backtested: N=20 on 1h)
 TRAIL_ATR_MULT = 3.0        # published so the trader + docs share one number
+HTF_TIMEFRAME = "4h"        # regime filter: trade only with the 4h box direction
+HTF_CHANNEL_LEN = 20
+HTF_CACHE_SEC = 900.0       # refresh the 4h regime every ~15 min per pair
 
 # Kept for back-compat imports elsewhere in the engine.
 MIN_CONFIDENCE = 90.0
@@ -70,17 +75,46 @@ def _pct_move(start: float, end: float) -> float:
 
 
 class SignalEngine:
-    """Per-pair 4h Donchian breakout reader. One instance per traded pair."""
+    """Per-pair 1h Donchian breakout reader (4h-aligned). One instance per traded pair."""
 
     def __init__(self, pair: str, exchange: Any) -> None:
         self.pair = pair
         self.exchange = exchange
         self._last: dict[str, Any] | None = None
         self._last_signal_key: str | None = None   # one entry per breakout candle
+        self._htf: tuple[float, int] | None = None  # (monotonic_ts, trend −1/0/+1)
 
     async def _fetch_rows(self) -> list[list[float]]:
         rows = await self.exchange.fetch_ohlcv(self.pair, TIMEFRAME, limit=CANDLE_LIMIT)
         return [[float(x) for x in row] for row in rows]
+
+    async def _htf_trend(self) -> int | None:
+        """4h regime: +1 above the 4h Donchian-20 midline, −1 below, 0 on it.
+
+        Cached ~15 min so the 12s trader loop doesn't double the API load.
+        On fetch failure the stale value is served regardless of age; if we have
+        never fetched, return None → caller fails CLOSED (no entry without regime).
+        """
+        mono = asyncio.get_running_loop().time()
+        if self._htf is not None and mono - self._htf[0] <= HTF_CACHE_SEC:
+            return self._htf[1]
+        try:
+            raw = await self.exchange.fetch_ohlcv(
+                self.pair, HTF_TIMEFRAME, limit=HTF_CHANNEL_LEN + 2
+            )
+            rows = [[float(x) for x in row] for row in raw]
+        except Exception:
+            logger.exception("4h regime fetch failed %s", self.pair)
+            return self._htf[1] if self._htf is not None else None
+        if len(rows) < HTF_CHANNEL_LEN + 2:
+            return self._htf[1] if self._htf is not None else None
+        closed = rows[:-1]                          # regime from CLOSED 4h candles
+        box = closed[-(HTF_CHANNEL_LEN + 1):-1]     # 20 bars before the deciding one
+        mid = (max(r[2] for r in box) + min(r[3] for r in box)) / 2.0
+        close = closed[-1][4]
+        trend = 1 if close > mid else (-1 if close < mid else 0)
+        self._htf = (mono, trend)
+        return trend
 
     async def evaluate(self) -> dict[str, Any] | None:
         """Full read: the firing `best` signal (if any) + a proximity scan.
@@ -105,9 +139,9 @@ class SignalEngine:
         mark = float(rows[-1][4])
         atr = _atr_rows(closed)
         width = _pct_move(lower, upper) if lower > 0 else 0.0
-        # cosmetic trend hint for the dashboard (box mid-point drift)
-        mid = (upper + lower) / 2.0
-        htf = 1 if close > mid else (-1 if close < mid else 0)
+        # real 4h regime (cached ~15 min) — the backtested alignment gate
+        htf_raw = await self._htf_trend()
+        htf = htf_raw if htf_raw is not None else 0
 
         best: dict[str, Any] | None = None
         direction = None
@@ -115,6 +149,12 @@ class SignalEngine:
             direction = "long"
         elif close < lower:
             direction = "short"
+        # 4h alignment gate BEFORE the dedupe key: a filtered breakout must not
+        # burn the one-entry-per-candle key (the regime can flip mid-candle).
+        if direction == "long" and htf_raw != 1:
+            direction = None
+        elif direction == "short" and htf_raw != -1:
+            direction = None
         if direction:
             key = f"{ts}:{direction}"
             if key != self._last_signal_key:
@@ -122,14 +162,14 @@ class SignalEngine:
                 bp = _pct_move(upper, close) if direction == "long" else abs(_pct_move(lower, close))
                 conf = _clamp(90.0 + min(bp, 1.0) * 8.0, 90.0, 98.0)   # cosmetic, flat 10x anyway
                 best = {
-                    "pair": self.pair, "lane": "FUT_DONCHIAN_4H", "direction": direction,
+                    "pair": self.pair, "lane": "FUT_DONCHIAN_1H", "direction": direction,
                     "signal_key": key, "confidence": conf, "htf_trend": htf,
                     "atr": atr, "mark": mark,
                     "metadata": {
-                        "lane": "FUT_DONCHIAN_4H", "timeframe": TIMEFRAME,
+                        "lane": "FUT_DONCHIAN_1H", "timeframe": TIMEFRAME,
                         "channel_len": CHANNEL_LEN, "upper": upper, "lower": lower,
                         "channel_width_pct": width, "breakout_pct": bp,
-                        "confidence_score": conf,
+                        "confidence_score": conf, "htf_trend_4h": htf,
                     },
                 }
 
@@ -140,10 +180,14 @@ class SignalEngine:
         near_dn = max(0.0, min(95.0, 95.0 * (1.0 - abs(_pct_move(mark, lower)) / 1.2)))
         def fp(x: float) -> str:   # price with sane precision for sub-$1 assets
             return f"{x:,.0f}" if x >= 100 else (f"{x:.3f}" if x >= 1 else f"{x:.4f}")
+        regime = "4h↑" if htf_raw == 1 else ("4h↓" if htf_raw == -1 else "4h·")
         if near_up >= near_dn:
-            side, ready, watching, level = "LONG", near_up, f"break {fp(upper)} (4h box high)", upper
+            side, ready, watching, level = "LONG", near_up, f"break {fp(upper)} (1h box high · {regime})", upper
         else:
-            side, ready, watching, level = "SHORT", near_dn, f"break {fp(lower)} (4h box low)", lower
+            side, ready, watching, level = "SHORT", near_dn, f"break {fp(lower)} (1h box low · {regime})", lower
+        # a side the 4h regime blocks can never fire — show it as gated
+        if (side == "LONG" and htf_raw != 1) or (side == "SHORT" and htf_raw != -1):
+            watching += " — gated"
         if best:
             status = "READY"
         elif ready >= 78:
@@ -151,7 +195,7 @@ class SignalEngine:
         else:
             status = "SCANNING"
         lanes = [{
-            "lane": "FUT_DONCHIAN_4H", "name": "Donchian 4h",
+            "lane": "FUT_DONCHIAN_1H", "name": "Donchian 1h",
             "status": "READY" if best else ("CLOSE" if ready >= 78 else ("SCANNING" if ready >= 35 else "WAITING")),
             "readiness": round(ready, 0), "watching": watching,
             "level": round(level, 2) if level else None,
