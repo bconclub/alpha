@@ -180,14 +180,16 @@ class SignalEngine:
         near_dn = max(0.0, min(95.0, 95.0 * (1.0 - abs(_pct_move(mark, lower)) / 1.2)))
         def fp(x: float) -> str:   # price with sane precision for sub-$1 assets
             return f"{x:,.0f}" if x >= 100 else (f"{x:.3f}" if x >= 1 else f"{x:.4f}")
-        regime = "4h↑" if htf_raw == 1 else ("4h↓" if htf_raw == -1 else "4h·")
+        # ASCII only: this text round-trips through the DB/dashboard pipeline,
+        # which mangles multibyte chars (mojibake seen live on 07-10).
+        regime = "4h UP" if htf_raw == 1 else ("4h DOWN" if htf_raw == -1 else "4h FLAT")
         if near_up >= near_dn:
-            side, ready, watching, level = "LONG", near_up, f"break {fp(upper)} (1h box high · {regime})", upper
+            side, ready, watching, level = "LONG", near_up, f"break {fp(upper)} (1h box high, {regime})", upper
         else:
-            side, ready, watching, level = "SHORT", near_dn, f"break {fp(lower)} (1h box low · {regime})", lower
+            side, ready, watching, level = "SHORT", near_dn, f"break {fp(lower)} (1h box low, {regime})", lower
         # a side the 4h regime blocks can never fire — show it as gated
         if (side == "LONG" and htf_raw != 1) or (side == "SHORT" and htf_raw != -1):
-            watching += " — gated"
+            watching += " - gated"
         if best:
             status = "READY"
         elif ready >= 78:
