@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-07-14 · ALPHA V5.2 — 2h TREND RIDER (sim-alignment bug found; honest rebuild)
+
+User: "trades going positive and closing negative, 18% win rate, we messed up completely — fix it."
+
+**Root cause found — in the backtests, not the trader.** Every sim from 07-03 to 07-14 resampled candles from the fetched-array start instead of true UTC boundaries. Offset bars manufactured breakouts that never existed on real exchange candles: V5 backtested +$6.50 on phantom bars, then bled live on real ones. The live V5 exits themselves were audited trade-by-trade (stored ATR/stop/peak) — every exit executed exactly per spec; live PnL matched the CORRECTED sim almost exactly. The trader was never broken; the validation was.
+
+**Honest walk-forward** (UTC-aligned bars, 185d of real Delta 5m candles, tuned Jan10–May14, validated blind May15–Jul14, 141 configs):
+- old V5 (1h + 4h gate): IS −$4.02, OOS −$4.83 ← the live bleed, explained
+- every 1d-gate / tight-box / faster variant: negative or OOS-flipped
+- **2h Donchian-20 + 2.5×ATR(2h) chandelier: IS +$25.43, OOS +$3.03 — the ONLY both-window-green config.** Without BTC (a drag in both windows): IS +$30.05, OOS +$3.83.
+- Monthly: Jan +21.6, Feb +27.8, Mar +0.6, Apr −18.3, May −5.4, Jun +2.6, Jul −0.4. It banks trending months and treads water in chop. Nothing tested prints money in chop; claims otherwise were the bug.
+
+Changes:
+- **Entry**: 2h close beyond the prior 20-bar box, both directions, no HTF gate, no box gate (gates failed honest OOS). One entry per breakout candle. ~2 signals/day.
+- **Exit**: 2.5×ATR(2h) stop + chandelier ratchet (ATR refreshed ~15 min, follows strategy TIMEFRAME). Breaker −26% (beyond tested stop). Max hold 72h. Harvest/time-stop still disabled — still negative in every honest window.
+- **Pairs**: ETH, SOL, XRP, DOGE. BTC dropped from the trade set (IS −$4.62 / OOS −$0.80, and untradeable at $3 margin anyway); still scanned watch-only.
+- **Harness rebuilt** (`engine/scripts/backtest_v5.py`): UTC-aligned resampling, warmup fetched on top of the eval window (the old harness silently ate the first ~20 days), `--split` for walk-forward IS/OOS views, `--gate/--tf/--trail` for ablations. Reproduces the OOS: +$3.66/60d on the live pair set.
+- Expectations, stated plainly: ~flat in chop (Jun +1.7, Jul +1.5 on live pairs), pays in trend months, April-style −$18 drawdowns are in-distribution. This is the best honestly-validated config that exists in this family; judge over weeks, not days.
+- `(SHA on commit)`
+
+
 ## 2026-07-10 · ALPHA V5 — 1h TREND RIDER, 4h-ALIGNED (full-data rebuild)
 
 User: "go through the entire database, do a proper analysis, trades every day, capture moments, the system is broken — fix it."

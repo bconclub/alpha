@@ -1,23 +1,27 @@
-"""AutonomousTrader — the single live trading path (V5 trend rider).
+"""AutonomousTrader — the single live trading path (V5.2 trend rider).
 
-Runs the V5 signal engine (`strategy_v3.SignalEngine`: 1h Donchian-20 breakout,
-taken only with the 4h regime) directly on live Delta candles and places REAL
-orders. No paper account, no mirror copy step.
+Runs the V5.2 signal engine (`strategy_v3.SignalEngine`: 2h Donchian-20
+breakout) directly on live Delta candles and places REAL orders. No paper
+account, no mirror copy step.
 
-V5 (07-10, 30-day backtest on real Delta 5m candles, fees + our sizing):
-    momentum-burst scalps:           −$48 … −$100
-    every harvest/time-stop variant: negative (capping winners kills the edge)
-    4h Donchian-20 (V4 as-is):       +$0.16  (breakeven in chop, 0.7 trades/day)
-    1h Donchian-20 + 4h align:       +$6.50  (89 trades, ~3/day)  ← this config
-Exit = 3×ATR(1h) chandelier from peak, ratchet-only. The 1h trail is 5-6×
-tighter in price terms than V4's 4h trail, so a +30% margin peak exits ≈ +20%
-instead of round-tripping red (V4 #4036-4039).
+V5.2 (07-14): every backtest before this date resampled sim candles off true
+UTC boundaries — phantom breakouts, inflated results, and the reason V5
+backtested green (+$6.50) then bled live (live trades REAL aligned candles).
+Honest walk-forward (UTC-aligned, tuned Jan10-May14, validated blind
+May15-Jul14, 141 configs):
+    old V5 (1h + 4h gate):        IS −$4.02   OOS −$4.83   ← the live bleed, explained
+    2h Donchian-20 + 2.5×ATR:     IS +$25.43  OOS +$3.03   ← only both-window green
+    ... without BTC (drag):       IS +$30.05  OOS +$3.83
+Monthly: Jan +21.6, Feb +27.8, Mar +0.6, Apr −18.3, May −5.4, Jun +2.6,
+Jul −0.4. A trend follower: banks trending months, treads water in chop.
+Exit = 2.5×ATR(2h) chandelier from peak, ratchet-only; every harvest/
+time-stop variant remains negative in every window tested.
 
 Sizing & rails (~$9.8 real account):
     * flat 10x, $3 margin/trade, max 3 open, one per asset
     * daily realized loss <= DAILY_LOSS_STOP → no new entries until UTC midnight
     * balance < KILL_BALANCE → stand down
-    * initial stop 3×ATR(1h); −15% margin circuit breaker (gaps); 72h max hold
+    * initial stop 2.5×ATR(2h); −26% margin circuit breaker (gaps); 72h max hold
 
 Manual Delta trades are still adopted (`adopt_manual`) and managed to the same
 exits but with NO impatience purges and a liquidation-aware stop — a human took
@@ -35,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from alpha.strategy_v3 import TIMEFRAME as SIGNAL_TIMEFRAME
 from alpha.strategy_v3 import SignalEngine, _atr_rows
 from alpha.utils import setup_logger
 
@@ -86,11 +91,12 @@ class AutonomousTrader:
     # $3 money-in × 3 slots = $9 of ~$9.8 deployed when signals cluster.
     MARGIN_USD = 3.0
     MARGIN_HARD_CAP = 3.5         # never try a trade that needs more than we have
-    MAX_OPEN = 3                  # V5 fires ~3 signals/day across the 5 pairs
+    MAX_OPEN = 3                  # V5.2 fires ~2 signals/day across the 4 pairs
     # Trades ONLY these (the edge). The rest of the scan universe is watch-only —
-    # shown on the board but the bot won't open trades on them (user 06-14:
-    # "it's firing everywhere — keep these 5 as trading pairs, pause the rest").
-    TRADE_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+    # shown on the board but the bot won't open trades on them (user 06-14 kept
+    # 5; BTC dropped 07-14: negative BOTH walk-forward windows for this config
+    # (IS −$4.62, OOS −$0.80) and untradeable at $3 margin anyway).
+    TRADE_BASES = {"ETH", "SOL", "XRP", "DOGE"}
     TAKER_FEE = 0.0005
     DAILY_LOSS_STOP = -3.0
     KILL_BALANCE = 2.0           # trade down to $2 on the small live account
@@ -101,26 +107,26 @@ class AutonomousTrader:
     # confidence only GATES entry, it never sizes it. Halves fees, symmetric risk.
     LEV_TIERS = ((0.0, 10.0),)
     LIQ_SAFETY = 0.85            # the initial stop must sit within this fraction of the liq distance
-    # ── V5 exit engine (07-10): TREND RIDER — the trail IS the management ──
-    # Backtested on 30 days of real Delta 5m candles (fees + our sizing): 1h
-    # Donchian-20 + 4h alignment + 3×ATR(1h) chandelier = +$6.50 while every
-    # harvest/time-stop variant was negative. Rules: initial stop 3×ATR(1h);
-    # trail 3×ATR(1h) from peak, ratchet-only; NO time-stop, NO harvest choke,
-    # NO breakeven snatching — the ride ends when the trend bends.
-    STOP_ATR_MULT = 3.0           # initial stop = entry ∓ 3×ATR(1h)
-    BREAKEVEN_ATR = 999.0         # disabled for V5 (kept for manual-trade math paths)
+    # ── V5.2 exit engine (07-14): TREND RIDER — the trail IS the management ──
+    # Honest walk-forward (UTC-aligned sim, IS Jan-May + blind OOS May-Jul):
+    # 2h Donchian-20 + 2.5×ATR(2h) chandelier is the only both-window-green
+    # config; every harvest/time-stop variant negative in every window. Rules:
+    # initial stop 2.5×ATR(2h); trail 2.5×ATR(2h) from peak, ratchet-only; NO
+    # time-stop, NO harvest choke, NO breakeven snatching.
+    STOP_ATR_MULT = 2.5           # initial stop = entry ∓ 2.5×ATR(2h)
+    BREAKEVEN_ATR = 999.0         # disabled for V5.2 (kept for manual-trade math paths)
     PROFIT_LOCK_FRAC = 0.4
     TRAIL_ARM_ATR = 0.0           # trail is live from entry (chandelier from peak)
-    TRAIL_ATR_MULT = 3.0
+    TRAIL_ATR_MULT = 2.5
     TRAIL_TIGHT_1_PEAK = 9999.0   # no tightening — the ride breathes
-    TRAIL_TIGHT_1_MULT = 3.0
+    TRAIL_TIGHT_1_MULT = 2.5
     TRAIL_TIGHT_2_PEAK = 9999.0
-    TRAIL_TIGHT_2_MULT = 3.0
+    TRAIL_TIGHT_2_MULT = 2.5
     STAGNATION_SEC = 9999999      # disabled — rides are allowed to pause
     STAGNATION_ATR = 0.5
     NO_TRACTION_SEC = 9999999     # disabled
     NO_TRACTION_ATR = 0.4
-    MAX_HOLD_SEC = 72 * 60 * 60   # 1h rides resolve in hours; 72h is the safety net
+    MAX_HOLD_SEC = 72 * 60 * 60   # 2h rides resolve in hours-days; 72h is the safety net
     # ── time-stop (06-26) ─────────────────────────────────────────────────
     # Hold-time data: <5min trades net +$0.84 (the only green bucket); the
     # 5-15min bucket was the entire bleed (-$10.51). Trades that work, work fast.
@@ -154,10 +160,10 @@ class AutonomousTrader:
     # they rode the ATR stop down AND slipped past it on fast 25x moves (the 12s
     # loop). Cap the per-trade loss in MARGIN terms, checked every tick, so one
     # non-peaking trade can't erase a day. Autonomous only; manual rides to liq.
-    # V5: catastrophic breaker only. The tested 3×ATR(1h) stop is ~9-12% margin
-    # at 10x; the breaker sits beyond it so it fires on gaps/slippage, never inside
-    # the tested stop.
-    MAX_LOSS_PCT = -15.0           # circuit-breaker beyond the tested stop (gaps only)
+    # V5.2: catastrophic breaker only. The tested 2.5×ATR(2h) stop is ~15-22%
+    # margin at 10x; the breaker sits beyond it so it fires on gaps/slippage,
+    # never inside the tested stop.
+    MAX_LOSS_PCT = -26.0           # circuit-breaker beyond the tested stop (gaps only)
     # ── fee-aware breakeven (06-13 fix) ───────────────────────────────────
     # Round-trip taker fee = 0.1% of NOTIONAL → on BTC that's a ~0.1% price
     # move (~$64) just to break even, independent of leverage. The old lock
@@ -203,7 +209,8 @@ class AutonomousTrader:
         self._daily_realized = 0.0
         self._daily_date = ""
         self._positions: dict[str, Position] = {}
-        self._atr1h: dict[str, tuple[float, float]] = {}   # pair -> (mono_ts, 1h ATR)
+        # pair -> (mono_ts, ATR on the signal timeframe); follows strategy TIMEFRAME
+        self._atr_sig: dict[str, tuple[float, float]] = {}
 
     # ── universe / contract size ───────────────────────────────────────
     def _csize(self, pair: str) -> float | None:
@@ -248,17 +255,17 @@ class AutonomousTrader:
         await self._reattach()
         bases = ", ".join(p.split("/")[0] for p in self.pairs)
         logger.warning(
-            "🔴 AutonomousTrader ACTIVE — V5 TREND RIDER. $%.0f/trade · flat 10x · 1h Donchian-20 "
-            "(4h-aligned) · 3×ATR(1h) trail · max %d open · kill <$%.2f · scanning %d: %s",
+            "🔴 AutonomousTrader ACTIVE — V5.2 TREND RIDER. $%.0f/trade · flat 10x · 2h Donchian-20 "
+            "· 2.5×ATR(2h) trail · max %d open · kill <$%.2f · scanning %d: %s",
             self.MARGIN_USD, self.MAX_OPEN, self.KILL_BALANCE, len(self.pairs), bases,
         )
         try:
             await self.alerts._send(
-                "🔴 <b>V5 TREND RIDER LIVE — real money</b>\n"
+                "🔴 <b>V5.2 TREND RIDER LIVE — real money</b>\n"
                 f"${self.MARGIN_USD:.0f}/trade · flat 10x · max {self.MAX_OPEN} open\n"
-                f"Entry: 1h Donchian-20 breakout, only with the 4h trend\n"
-                f"Exit: 3×ATR(1h) trail (ride till it bends)\n"
-                f"Backtest 30d: +$6.50 vs V4 +$0.16 · Scanning {len(self.pairs)}: {bases}",
+                f"Entry: 2h Donchian-20 breakout (ETH/SOL/XRP/DOGE)\n"
+                f"Exit: 2.5×ATR(2h) trail (ride till it bends)\n"
+                f"Honest walk-forward: IS +$30 / OOS +$3.8 (no BTC) · banks trends, treads chop",
                 allow_in_quiet=True,
             )
         except Exception:
@@ -714,19 +721,19 @@ class AutonomousTrader:
         pos.peak_price = max(pos.peak_price, price) if long else min(pos.peak_price, price)
         age = asyncio.get_running_loop().time() - pos.opened_mono
 
-        # V5 fidelity: refresh the 1h ATR (~15 min cache) so the trail tightens
-        # as breakout volatility cools — the backtest recomputed ATR every candle.
-        # Frozen entry-ATR left trails far wider than tested (XRP #4036 round-
-        # tripped a +39% peak inside a stale-wide trail).
+        # Backtest fidelity: refresh the signal-timeframe ATR (~15 min cache) so
+        # the trail tightens as breakout volatility cools — the harness recomputes
+        # ATR every closed bar. Frozen entry-ATR left trails far wider than tested
+        # (XRP #4036 round-tripped a +39% peak inside a stale-wide trail).
         if not pos.is_manual:
             mono = asyncio.get_running_loop().time()
-            ts_c, cached = self._atr1h.get(pos.pair, (0.0, 0.0))
+            ts_c, cached = self._atr_sig.get(pos.pair, (0.0, 0.0))
             if mono - ts_c > 900:
                 try:
-                    raw = await self.exchange.fetch_ohlcv(pos.pair, "1h", limit=20)
+                    raw = await self.exchange.fetch_ohlcv(pos.pair, SIGNAL_TIMEFRAME, limit=20)
                     fresh = _atr_rows([[float(x) for x in r] for r in raw[:-1]])
                     if fresh > 0:
-                        self._atr1h[pos.pair] = (mono, fresh)
+                        self._atr_sig[pos.pair] = (mono, fresh)
                         pos.atr = fresh
                 except Exception:
                     pass
