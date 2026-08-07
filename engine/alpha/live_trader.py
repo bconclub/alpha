@@ -146,8 +146,14 @@ class AutonomousTrader:
     # Now TIERED: loose early (room to breathe), tight only when big. And the +18%
     # hard-take is gone — a monster run trails instead of being cut.
     # V5: harvest choke DISABLED — backtested; every harvest variant net-negative.
+    # V5.3 (08-07, USER'S INFORMED CHOICE): hard take-profit at +25% margin.
+    # Walk-forward price quoted and accepted: trail-only was +$5.51 over the
+    # Feb-Aug 6mo (+$4.10 IS / +$1.41 OOS); TP25 costs ~$7 vs that (−$2.78 IS /
+    # +$0.87 OOS) but is the only TP tier green in the recent chop window and
+    # banks wins instead of round-tripping peaks. User: "if we go to that peak,
+    # we take out and get out no matter what." Revisit at the 4-green-weeks gate.
     PROFIT_ARM_PCT = 9999.0
-    PROFIT_TAKE_PCT = 9999.0
+    PROFIT_TAKE_PCT = 25.0
     # ── pyramid (07-03) ───────────────────────────────────────────────────
     # Press the good entries: once a trade is +6% and still at its highs, ADD one
     # unit ($4 @ 10x). After the add, the stop snaps to combined breakeven+fees so
@@ -261,10 +267,10 @@ class AutonomousTrader:
         )
         try:
             await self.alerts._send(
-                "🔴 <b>V5.2 TREND RIDER LIVE — real money</b>\n"
+                "🔴 <b>V5.3 TREND RIDER LIVE — real money</b>\n"
                 f"${self.MARGIN_USD:.0f}/trade · flat 10x · max {self.MAX_OPEN} open\n"
                 f"Entry: 2h Donchian-20 breakout (ETH/SOL/XRP/DOGE)\n"
-                f"Exit: 2.5×ATR(2h) trail (ride till it bends)\n"
+                f"Exit: 2.5×ATR(2h) trail · hard bank at +{self.PROFIT_TAKE_PCT:.0f}%\n"
                 f"Honest walk-forward: IS +$30 / OOS +$3.8 (no BTC) · banks trends, treads chop",
                 allow_in_quiet=True,
             )

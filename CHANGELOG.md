@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-07 · V5.3 — hard take-profit +25% (user's informed choice)
+
+User, after three price quotes: "if we go to that peak, we take out and get out no matter what — at least we can get something out of it."
+
+- One constant: `PROFIT_TAKE_PCT 9999 → 25.0`. Any trade touching +25% margin closes at market on the next 12s tick. Everything else (2h Donchian-20 entries, 2.5×ATR trail, 72h cap) unchanged.
+- Price, quoted and accepted (190d walk-forward, UTC-aligned): trail-only = +$4.10 IS / +$1.41 OOS (+$5.51 total, both windows green — the untouched system's best honest reading yet); TP25 = −$2.78 IS / +$0.87 OOS. TP25 is the only TP tier green in the recent chop window; +15/+30 are worse everywhere. Expected cost ≈ $7/6mo vs trail-only in exchange for banked wins instead of round-tripped peaks.
+- Decision rule stays: judge at the 4-consecutive-green-weeks gate; scale capital only after live proof. If the trend returns and TP25 visibly amputates riders, revisit with the same harness.
+- `(SHA on commit)`
+
+
 ## 2026-07-14 · ALPHA V5.2 — 2h TREND RIDER (sim-alignment bug found; honest rebuild)
 
 User: "trades going positive and closing negative, 18% win rate, we messed up completely — fix it."
