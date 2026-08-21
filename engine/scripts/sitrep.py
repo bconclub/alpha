@@ -59,14 +59,22 @@ async def main() -> None:
         if bal_total:
             print(f"ACCOUNT: ${bal_total:.2f} total, ${bal_free:.2f} free")
         for p in positions:
-            side = p.get("side") or "?"
+            contracts = float(p.get("contracts") or 0)
+            side = p.get("side") or ("long" if contracts > 0 else "short")
             entry = float(p.get("entryPrice") or 0)
             mark = float(p.get("markPrice") or 0)
-            upnl = float(p.get("unrealizedPnl") or 0)
-            sym = (p.get("symbol") or "?").split("/")[0]
-            chg = (mark - entry) / entry * 100 if entry else 0
+            sym_full = p.get("symbol") or "?"
+            sym = sym_full.split("/")[0]
+            if not mark:  # delta position payload lacks mark — use ticker
+                try:
+                    mark = float((await ex.fetch_ticker(sym_full)).get("last") or 0)
+                except Exception:
+                    mark = 0.0
+            csize = float((ex.market(sym_full).get("contractSize") if sym_full in ex.markets else 0) or 0)
+            chg = (mark - entry) / entry * 100 if (entry and mark) else 0
             if side == "short":
                 chg = -chg
+            upnl = (mark - entry) * abs(contracts) * csize * (1 if side != "short" else -1) if mark else 0.0
             print(f"POSITION: {sym} {side.upper()} entry={entry:g} mark={mark:g} "
                   f"px_move={chg:+.2f}% uPnL=${upnl:+.3f}")
         if not positions:
