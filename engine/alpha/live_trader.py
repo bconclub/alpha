@@ -90,13 +90,17 @@ class AutonomousTrader:
     # Sized for the live ~$9.8 account (user 07-10: "be a little aggressive").
     # $3 money-in × 3 slots = $9 of ~$9.8 deployed when signals cluster.
     MARGIN_USD = 3.0
-    MARGIN_HARD_CAP = 3.5         # never try a trade that needs more than we have
+    # 9.5 admits 1-contract BTC (~$7.8) and SOL (~$9.1) minimums — user's
+    # informed choice 2026-08-21. Those trades run 2.6-3x oversized vs the $3
+    # sim sizing; a single 2.5xATR stop on them costs ~$1.5-1.9.
+    MARGIN_HARD_CAP = 9.5
     MAX_OPEN = 3                  # V5.2 fires ~2 signals/day across the 4 pairs
     # Trades ONLY these (the edge). The rest of the scan universe is watch-only —
-    # shown on the board but the bot won't open trades on them (user 06-14 kept
-    # 5; BTC dropped 07-14: negative BOTH walk-forward windows for this config
-    # (IS −$4.62, OOS −$0.80) and untradeable at $3 margin anyway).
-    TRADE_BASES = {"ETH", "SOL", "XRP", "DOGE"}
+    # shown on the board but the bot won't open trades on them. BTC re-added
+    # 08-21 (user's informed choice): green last 30d (+$2.25) but negative in
+    # the Jan-Jul walk-forward AND the Jun-Jul chop window (−$3.73) — it rides
+    # trend regimes only, and 1 ct costs ~$7.8 margin (63% of a $12 account).
+    TRADE_BASES = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
     TAKER_FEE = 0.0005
     DAILY_LOSS_STOP = -3.0
     KILL_BALANCE = 2.0           # trade down to $2 on the small live account
