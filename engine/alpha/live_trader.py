@@ -382,6 +382,23 @@ class AutonomousTrader:
                 results[pair] = None
 
         # 3. entry gates
+        if self._killed:
+            # auto-unlatch once balance recovers (1.5x hysteresis so a reading
+            # that hovers at the kill line can't flap the switch)
+            try:
+                recov = await self.balance_fn()
+            except Exception:
+                recov = None
+            if recov is not None and recov >= self.KILL_BALANCE * 1.5:
+                self._killed = False
+                logger.warning("KILL SWITCH RELEASED: balance $%.2f >= $%.2f — resuming entries", recov, self.KILL_BALANCE * 1.5)
+                try:
+                    await self.alerts._send(
+                        f"🟢 <b>LIVE KILL SWITCH RELEASED</b>\nBalance ${recov:.2f} recovered. Entries resumed.",
+                        allow_in_quiet=True,
+                    )
+                except Exception:
+                    pass
         can_enter = not (self._killed or self.user_paused)
         if can_enter and self._daily_realized <= self.DAILY_LOSS_STOP:
             can_enter = False
