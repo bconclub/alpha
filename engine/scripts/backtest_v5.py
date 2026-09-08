@@ -211,6 +211,9 @@ def _table(rows: list[tuple[str, list[dict]]], days: int, label: str) -> None:
 
 
 def main() -> None:
+    print("WARNING: legacy per-pair model omits live TP/loss caps and portfolio constraints. "
+          "Its maxDD is not portfolio drawdown. Use portfolio_replay.py for constrained research; "
+          "neither tool establishes live-fill parity.", file=sys.stderr)
     ap = argparse.ArgumentParser(description="V5.2 trend-rider backtest (Delta public candles)")
     ap.add_argument("--days", type=int, default=30, help="evaluation window (warmup fetched on top)")
     ap.add_argument("--pairs", default="ETH,SOL,XRP,DOGE", help="live trade set; add BTC for ablation")
