@@ -1,0 +1,102 @@
+[
+  {
+    "closed_count": 95,
+    "closed_net": -9.943755109244027,
+    "end_equity": 4.196244890755966,
+    "profit_factor": 0.7147936271236178,
+    "sampled_equity_max_drawdown": -15.885685895874113,
+    "skips": {
+      "size_or_margin": 220,
+      "portfolio_gate": 19
+    },
+    "name": "current_2026-06-15",
+    "open_count": 0
+  },
+  {
+    "closed_count": 25,
+    "closed_net": -6.375168917387616,
+    "end_equity": 7.42605526401438,
+    "profit_factor": 0.5034513897785848,
+    "sampled_equity_max_drawdown": -7.534196690024234,
+    "skips": {
+      "size_or_margin": 30
+    },
+    "name": "current_2026-08-23",
+    "open_count": 1
+  },
+  {
+    "closed_count": 83,
+    "closed_net": -7.047579619912548,
+    "end_equity": 7.09242038008745,
+    "profit_factor": 0.7614298697595228,
+    "sampled_equity_max_drawdown": -17.623591421631172,
+    "skips": {
+      "size_or_margin": 190,
+      "portfolio_gate": 16
+    },
+    "name": "trail_only_2026-06-15",
+    "open_count": 0
+  },
+  {
+    "closed_count": 19,
+    "closed_net": -5.852465770313871,
+    "end_equity": 7.866012204063636,
+    "profit_factor": 0.29026516819124615,
+    "sampled_equity_max_drawdown": -7.828169750468076,
+    "skips": {
+      "size_or_margin": 30
+    },
+    "name": "trail_only_2026-08-23",
+    "open_count": 1
+  },
+  {
+    "closed_count": 126,
+    "closed_net": -9.638673079302619,
+    "end_equity": 4.501326920697381,
+    "profit_factor": 0.7932727283207738,
+    "sampled_equity_max_drawdown": -17.57413073026349,
+    "skips": {
+      "portfolio_gate": 9,
+      "size_or_margin": 107
+    },
+    "name": "without_btc_2026-06-15",
+    "open_count": 0
+  },
+  {
+    "closed_count": 27,
+    "closed_net": -6.824892294069989,
+    "end_equity": 6.976331887332002,
+    "profit_factor": 0.3722396317893427,
+    "sampled_equity_max_drawdown": -8.862597589399492,
+    "skips": {
+      "size_or_margin": 13,
+      "portfolio_gate": 1
+    },
+    "name": "without_btc_2026-08-23",
+    "open_count": 1
+  },
+  {
+    "closed_count": 56,
+    "closed_net": 0.43182649357174246,
+    "end_equity": 14.571826493571754,
+    "profit_factor": 1.1672505980226784,
+    "sampled_equity_max_drawdown": -0.8023472028256933,
+    "skips": {
+      "size_or_margin": 297
+    },
+    "name": "risk_1pct_2026-06-15",
+    "open_count": 0
+  },
+  {
+    "closed_count": 9,
+    "closed_net": -0.27106900635495723,
+    "end_equity": 13.820534448131047,
+    "profit_factor": 0.5218381172753368,
+    "sampled_equity_max_drawdown": -0.5347069641673272,
+    "skips": {
+      "size_or_margin": 48
+    },
+    "name": "risk_1pct_2026-08-23",
+    "open_count": 1
+  }
+]

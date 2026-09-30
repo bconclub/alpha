@@ -1,0 +1,624 @@
+From 3b96567b2076dc3b9762c014ee2dc8f30dd0b876 Mon Sep 17 00:00:00 2001
+From: bconclub <bconclubx@gmail.com>
+Date: Tue, 8 Sep 2026 13:04:54 +0530
+Subject: [PATCH] Add capital-constrained research replay and documented
+ comparisons [skip ci]
+
+---
+ dashboard/package.json                  |   2 +-
+ engine/VERSION                          |   2 +-
+ engine/scripts/REPLAY_RESEARCH.md       |  92 +++++++++
+ engine/scripts/backtest_v5.py           |   3 +
+ engine/scripts/compare_replays.py       |  42 ++++
+ engine/scripts/fetch_replay_data.py     |  59 ++++++
+ engine/scripts/portfolio_replay.py      | 251 ++++++++++++++++++++++++
+ engine/scripts/test_portfolio_replay.py |  92 +++++++++
+ 8 files changed, 541 insertions(+), 2 deletions(-)
+ create mode 100644 engine/scripts/REPLAY_RESEARCH.md
+ create mode 100644 engine/scripts/compare_replays.py
+ create mode 100644 engine/scripts/fetch_replay_data.py
+ create mode 100644 engine/scripts/portfolio_replay.py
+ create mode 100644 engine/scripts/test_portfolio_replay.py
+
+diff --git a/dashboard/package.json b/dashboard/package.json
+index 744f217..22c6736 100644
+--- a/dashboard/package.json
++++ b/dashboard/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "alpha-dashboard",
+-  "version": "0.53.5",
++  "version": "0.53.6",
+   "private": true,
+   "scripts": {
+     "dev": "next dev",
+diff --git a/engine/VERSION b/engine/VERSION
+index 01f56d0..634a51e 100644
+--- a/engine/VERSION
++++ b/engine/VERSION
+@@ -1 +1 @@
+-0.53.5
++0.53.6
+diff --git a/engine/scripts/REPLAY_RESEARCH.md b/engine/scripts/REPLAY_RESEARCH.md
+new file mode 100644
+index 0000000..baff441
+--- /dev/null
++++ b/engine/scripts/REPLAY_RESEARCH.md
+@@ -0,0 +1,92 @@
++# Portfolio research changes, September 8, 2026
++
++## Outcome
++
++No tested variant establishes a profitable replacement. The changes provide a
++reproducible, capital-constrained research tool. They do not alter live execution.
++
++Two independent historical windows, each starting flat with $14.14:
++
++| Scenario | June 15-August 22 equity change | August 23-September 7 equity change |
++|---|---:|---:|
++| Current rule approximation | -$9.94 | -$6.71 |
++| Disable +25% take-profit | -$7.05 | -$6.27 |
++| Exclude BTC | -$9.64 | -$7.16 |
++| 1% estimated stop risk, 2% total risk | +$0.43 | -$0.32 |
++
++Recent window closed-trade net for risk sizing was -$0.2711; one position remained
++open. Including marked exposure and estimated exit fees gives -$0.3195 equity
++change. Do not confuse these metrics. Its sampled drawdown was $0.5347 versus
++$7.5342 for the current-rule approximation. Smaller sizing reduces exposure and
++rejects many trades; it does not establish improved signal quality.
++
++The windows are historical diagnostic cohorts, NOT untouched out-of-sample tests.
++Each starts fresh with the same balance and has no carried positions. They are
++not a reproduction of historical account performance or a continuous compound
++return. Current rules are applied retrospectively even when older live versions
++used different rules.
++
++## Changes
++
++- Chronological shared cash/margin allocation, deterministic pair order, one
++  position per pair and three concurrent positions maximum.
++- Integer contracts and metadata-driven contract units; a one-contract minimum
++  can no longer create an unaffordable simulated position.
++- Optional estimated account-risk sizing. Risk includes assumed fees/slippage,
++  but gaps can exceed the estimate. Existing risk reservations are conservative
++  entry-risk estimates, not dynamically reduced by a favorable trail.
++- ATR includes the just-closed signal candle, using the live indicator helper.
++- +25% target, -26% margin cap, ATR trail and 72h hold limit.
++- Adverse gap fills and configurable slippage; deterministic stop-before-target
++  handling when both occur in a single OHLC candle.
++- Daily cost/loss accounting, balance kill/recovery gate and funding-event input.
++  Daily accounting intentionally uses costs when incurred, unlike live's current
++  closed-trade counter. It is a proposed research control, not exact live parity.
++- Closed profit, open positions, cash and marked equity are separate. Drawdown is
++  calculated chronologically from bar-close equity including estimated exit fees.
++- Strict missing/duplicate/misaligned candle rejection.
++- Public-only dataset downloader and fixed scenario comparison command.
++- Legacy backtest prints a prominent warning about unsupported live conclusions.
++
++## Data and assumptions
++
++Public Delta India data, 25,920 five-minute candles per pair including warmup.
++BTC=0.001, ETH=0.01, SOL=1, XRP=1, DOGE=100 underlying units per contract, from
++current product metadata. Historical contract validity still needs confirmation.
++
++Source dataset SHA256:
++`c7f7018ddbcd0c303a7556828d0410b4de08be7460d4f602918a8d532be1237b`
++
++Fee assumption: 0.059% per side; adverse slippage: 5 basis points per fill.
++Funding is NOT verified in this dataset and excluded from these numbers. The
++replay can consume funding events, but an absent series is not evidence of zero
++funding. Funding could erase the small earlier-period gain.
++
++Remaining limitations: five-minute extrema differ from 12-second live samples;
++ATR refresh timing differs from live's 15-minute cache; no liquidation, outages,
++partial fills, manual adoption, intrabar equity drawdown, or restarts modeled.
++Historical execution reconciliation is still required. A passing unit test suite
++does not establish live-fill parity.
++
++## Reproduce
++
++From repository root, using a Python 3.10+ interpreter:
++
++```sh
++python -m unittest discover -s engine/scripts -p test_portfolio_replay.py -v
++python engine/scripts/fetch_replay_data.py --start 2026-06-15 --end 2026-09-08 --output audit-market-2026-09-08.json
++python engine/scripts/compare_replays.py audit-market-2026-09-08.json --output-dir research-results-2026-09-08
++```
++
++Downloaded data and full trade/equity outputs remain local. Summary figures above
++are provided for review; commands recreate outputs without credentials. Public
++history can be revised, so retain the original dataset/hash when reproducing.
++
++## Next decision gate
++
++Reconcile historical fills/fees/funding, verify replay against representative live
++trades, and run a frozen paper configuration on future data. Do not optimize more
++parameters against these same windows and call the winner out-of-sample. Only
++after those checks can a strategy change be judged. This branch intentionally
++contains no live trader changes and must not be presented as a profit-producing
++upgrade.
+diff --git a/engine/scripts/backtest_v5.py b/engine/scripts/backtest_v5.py
+index 7a03908..98a4a08 100644
+--- a/engine/scripts/backtest_v5.py
++++ b/engine/scripts/backtest_v5.py
+@@ -211,6 +211,9 @@ def _table(rows: list[tuple[str, list[dict]]], days: int, label: str) -> None:
+ 
+ 
+ def main() -> None:
++    print("WARNING: legacy per-pair model omits live TP/loss caps and portfolio constraints. "
++          "Its maxDD is not portfolio drawdown. Use portfolio_replay.py for constrained research; "
++          "neither tool establishes live-fill parity.", file=sys.stderr)
+     ap = argparse.ArgumentParser(description="V5.2 trend-rider backtest (Delta public candles)")
+     ap.add_argument("--days", type=int, default=30, help="evaluation window (warmup fetched on top)")
+     ap.add_argument("--pairs", default="ETH,SOL,XRP,DOGE", help="live trade set; add BTC for ablation")
+diff --git a/engine/scripts/compare_replays.py b/engine/scripts/compare_replays.py
+new file mode 100644
+index 0000000..eddd603
+--- /dev/null
++++ b/engine/scripts/compare_replays.py
+@@ -0,0 +1,42 @@
++"""Fixed research comparisons; no optimization, no promotion, no live orders."""
++import argparse
++import hashlib
++import json
++from pathlib import Path
++from portfolio_replay import Config,replay,timestamp
++
++
++def main():
++    ap=argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('data',type=Path)
++    ap.add_argument('--output-dir',type=Path,required=True)
++    ap.add_argument('--balance',type=float,default=14.14)
++    ap.add_argument('--start',default='2026-06-15')
++    ap.add_argument('--split',default='2026-08-23')
++    ap.add_argument('--end',default='2026-09-08')
++    args=ap.parse_args()
++    if not timestamp(args.start)<timestamp(args.split)<timestamp(args.end):
++        raise ValueError('Require start < split < end')
++    raw=args.data.read_bytes();data=json.loads(raw.decode('utf-8-sig'))
++    pairs=['BTC','ETH','SOL','XRP','DOGE']
++    scenarios=[('current',Config(balance=args.balance),pairs),
++               ('trail_only',Config(balance=args.balance,take_pct=0),pairs),
++               ('without_btc',Config(balance=args.balance),pairs[1:]),
++               ('risk_1pct',Config(balance=args.balance,risk_pct=1,total_risk_pct=2),pairs)]
++    args.output_dir.mkdir(parents=True,exist_ok=True)
++    summary=[]
++    for label,cfg,universe in scenarios:
++        for start,end in [(args.start,args.split),(args.split,args.end)]:
++            result=replay(data,cfg,timestamp(start),timestamp(end),universe)
++            name=label+'_'+start
++            result['data_sha256']=hashlib.sha256(raw).hexdigest()
++            (args.output_dir/(name+'.json')).write_text(json.dumps(result,indent=2),encoding='utf-8')
++            row={k:result[k] for k in ['closed_count','closed_net','end_equity',
++                  'profit_factor','sampled_equity_max_drawdown','skips']}
++            row.update(name=name,open_count=len(result['open_positions']),
++                       equity_change=result['end_equity']-args.balance)
++            summary.append(row);print(json.dumps(row),flush=True)
++    (args.output_dir/'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
++
++
++if __name__=='__main__':main()
+diff --git a/engine/scripts/fetch_replay_data.py b/engine/scripts/fetch_replay_data.py
+new file mode 100644
+index 0000000..9a3164d
+--- /dev/null
++++ b/engine/scripts/fetch_replay_data.py
+@@ -0,0 +1,59 @@
++"""Download public Delta India candles and current contract metadata; no auth."""
++import argparse
++from datetime import datetime, timezone
++import hashlib
++import json
++from pathlib import Path
++import time
++import urllib.request
++from portfolio_replay import timestamp
++
++BASE='https://api.india.delta.exchange/v2'
++
++
++def get(path):
++    for attempt in range(3):
++        try:
++            req=urllib.request.Request(BASE+path,headers={'User-Agent':'Alpha-research-audit'})
++            payload=json.load(urllib.request.urlopen(req,timeout=30))
++            if not payload.get('success',False):raise ValueError('Exchange unsuccessful response')
++            return payload['result']
++        except Exception:
++            if attempt==2:raise
++            time.sleep(2**attempt)
++
++
++def main():
++    ap=argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('--start',required=True)
++    ap.add_argument('--end',required=True)
++    ap.add_argument('--output',required=True,type=Path)
++    args=ap.parse_args()
++    start,end=timestamp(args.start),timestamp(args.end)
++    if start>=end or end>int(time.time())//300*300:raise ValueError('Invalid completed-bar interval')
++    products=get('/products')
++    contracts={}
++    for p in products:
++        for pair in ('BTC','ETH','SOL','XRP','DOGE'):
++            if p['symbol']==pair+'USD':contracts[pair]=float(p['contract_value'])
++    if len(contracts)!=5:raise ValueError('Missing perpetual metadata')
++    candles={}
++    for pair in contracts:
++        rows={}
++        cur=(start-5*86400)//300*300
++        while cur<end:
++            stop=min(cur+1500*300,end)
++            for r in get(f'/history/candles?resolution=5m&symbol={pair}USD&start={cur}&end={stop}'):
++                if cur<=r['time']<end:rows[r['time']]=r
++            cur=stop
++        candles[pair]=sorted(rows.values(),key=lambda r:r['time'])
++        print(pair,len(candles[pair]),flush=True)
++    payload=dict(candles=candles,contracts=contracts,funding_verified=False,
++                 source=BASE,retrieved_at=datetime.now(timezone.utc).isoformat(),
++                 metadata_warning='Current contract values; historical validity unverified')
++    raw=json.dumps(payload,sort_keys=True).encode()
++    args.output.write_bytes(raw)
++    print('SHA256',hashlib.sha256(raw).hexdigest())
++
++
++if __name__=='__main__':main()
+diff --git a/engine/scripts/portfolio_replay.py b/engine/scripts/portfolio_replay.py
+new file mode 100644
+index 0000000..5ca5d13
+--- /dev/null
++++ b/engine/scripts/portfolio_replay.py
+@@ -0,0 +1,251 @@
++"""Research only: chronological, capital-constrained OHLC replay. Never places orders.
++
++Input JSON: {candles: {BTC: [{time,open,high,low,close}, ...]},
++             contracts: {BTC: 0.001}, funding: [{time,pair,rate,mark}, ...]}.
++Funding rate is positive when longs pay shorts. Contract units must match the
++historical venue. Missing funding is explicitly reported, not treated as verified.
++Five-minute OHLC cannot reproduce the live 12-second price path or API failures.
++"""
++from __future__ import annotations
++
++import argparse
++from collections import Counter
++from dataclasses import asdict, dataclass
++from datetime import datetime, timezone
++import json
++import math
++from pathlib import Path
++import sys
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from alpha.strategy_v3 import _atr_rows
++
++
++@dataclass(frozen=True)
++class Config:
++    balance: float = 14.14
++    margin: float = 3.0
++    margin_cap: float = 9.5
++    leverage: float = 10.0
++    max_open: int = 3
++    fee: float = 0.00059  # scenario assumption, reconcile against actual fills
++    slippage_bps: float = 5.0
++    take_pct: float = 25.0  # zero disables target
++    loss_pct: float = 26.0
++    trail: float = 2.5
++    daily_loss: float = 3.0
++    kill_balance: float = 2.0
++    risk_pct: float = 0.0  # zero reproduces fixed-margin sizing
++    total_risk_pct: float = 0.0
++
++
++def validate(data, cfg):
++    for k, value in asdict(cfg).items():
++        if not math.isfinite(value) or value < 0:
++            raise ValueError(f"Invalid {k}")
++    if min(cfg.balance, cfg.margin, cfg.leverage, cfg.max_open, cfg.trail, cfg.loss_pct) <= 0:
++        raise ValueError("Balance, sizing, leverage, slots, trail and loss cap must be positive")
++    for pair, rows in data['candles'].items():
++        if not rows or data['contracts'].get(pair, 0) <= 0:
++            raise ValueError(f"Missing candles/contract units for {pair}")
++        prev = None
++        for r in rows:
++            t = r['time']
++            o, h, l, c = [float(r[k]) for k in ('open', 'high', 'low', 'close')]
++            if t % 300 or (prev is not None and t != prev + 300):
++                raise ValueError(f"Missing, duplicate or misaligned 5m data: {pair} {t}")
++            if not all(math.isfinite(v) and v > 0 for v in (o,h,l,c)) or not l <= min(o,c) <= max(o,c) <= h:
++                raise ValueError(f"Invalid OHLC: {pair} {t}")
++            prev = t
++    for f in data.get('funding', []):
++        if (f['pair'] not in data['candles'] or f['time'] % 300
++                or not math.isfinite(f['rate']) or not math.isfinite(f['mark']) or f['mark'] <= 0):
++            raise ValueError('Invalid funding event')
++
++
++def signals(rows):
++    """Complete UTC 2h bars, prior-20 box, ATR includes just-closed signal bar."""
++    buckets = {}
++    for r in rows:
++        buckets.setdefault(r['time'] // 7200, []).append(r)
++    bars = []
++    events = {}
++    for bucket, rs in sorted(buckets.items()):
++        if len(rs) != 24:
++            continue
++        bar = [bucket*7200, rs[0]['open'], max(r['high'] for r in rs),
++               min(r['low'] for r in rs), rs[-1]['close'], 0]
++        bars.append(bar)
++        if len(bars) < 36:  # same minimum warmup as SignalEngine
++            continue
++        upper = max(b[2] for b in bars[-21:-1])
++        lower = min(b[3] for b in bars[-21:-1])
++        direction = 1 if bar[4] > upper else (-1 if bar[4] < lower else 0)
++        events[(bucket+1)*7200] = (direction, _atr_rows(bars))
++    return events
++
++
++def replay(data, cfg, start, end, pairs=None):
++    validate(data, cfg)
++    pairs = list(pairs or data['candles'])  # deterministic priority, never hindsight ranked
++    if start >= end or start % 300 or end % 300 or len(pairs) != len(set(pairs)) or not pairs:
++        raise ValueError('Invalid interval or pair list')
++    for pair in pairs:
++        rows = data['candles'][pair]
++        if rows[0]['time'] > start - 36*7200 or rows[-1]['time'] + 300 < end:
++            raise ValueError(f'Insufficient warmup/evaluation coverage: {pair}')
++    index = {p:{r['time']:r for r in data['candles'][p]} for p in pairs}
++    sigs = {p:signals(data['candles'][p]) for p in pairs}
++    times = sorted({t for p in pairs for t in index[p] if start <= t < end})
++    funding = {}
++    for event in data.get('funding', []):
++        funding.setdefault(event['time'], []).append(event)
++    cash = cfg.balance
++    positions, closed, curve = {}, [], []
++    skips = Counter()
++    day, day_net = None, 0.0
++    killed = False
++    slip = cfg.slippage_bps / 10000
++
++    def close(pair, price, ts, reason):
++        nonlocal cash, day_net
++        p = positions.pop(pair)
++        fill = price * (1 - p['side']*slip)
++        gross = p['side']*(fill-p['entry'])*p['units']
++        fee = fill*p['units']*cfg.fee
++        cash += gross-fee
++        net = gross-fee-p['entry_fee']+p['funding']
++        day_net += gross-fee  # fees/funding charged to day when incurred
++        closed.append(dict(pair=pair, opened=p['opened'], closed=ts, reason=reason,
++                           pnl=net, entry=p['entry'], exit=fill, margin=p['margin']))
++
++    for t in times:
++        if t//86400 != day:
++            day, day_net = t//86400, 0.0
++        for f in funding.get(t, []):
++            if f['pair'] in positions:
++                p = positions[f['pair']]
++                amount = -p['side']*p['units']*f['mark']*f['rate']
++                p['funding'] += amount
++                cash += amount
++                day_net += amount
++        # Existing positions get gap exits before new allocations at this open.
++        for pair in list(positions):
++            p, r = positions[pair], index[pair][t]
++            if t in sigs[pair]:
++                p['atr'] = sigs[pair][t][1]
++            cap = p['entry']*(1-p['side']*cfg.loss_pct/100/cfg.leverage)
++            stop = max(p['stop'],cap) if p['side']==1 else min(p['stop'],cap)
++            if p['side']*(r['open']-stop) <= 0:
++                close(pair,r['open'],t,'gap_stop')
++            elif t-p['opened'] >= 72*3600:
++                close(pair,r['open'],t,'max_hold')
++        if killed and cash >= cfg.kill_balance*1.5:
++            killed = False
++        if cash < cfg.kill_balance:
++            killed = True
++        for pair in pairs:
++            signal = sigs[pair].get(t)
++            if not signal or not signal[0] or pair in positions:
++                continue
++            if killed or day_net <= -cfg.daily_loss or len(positions)>=cfg.max_open:
++                skips['portfolio_gate'] += 1
++                continue
++            side,a = signal
++            price = index[pair][t]['open']*(1+side*slip)
++            unit = data['contracts'][pair]
++            per_contract_risk = (min(cfg.trail*a,price*cfg.loss_pct/100/cfg.leverage)
++                                 +price*(2*cfg.fee+2*slip))*unit
++            risk_equity = max(0, cash+sum(
++                p['side']*(index[b][t]['open']-p['entry'])*p['units']
++                -index[b][t]['open']*p['units']*cfg.fee for b,p in positions.items()))
++            if cfg.risk_pct:
++                n = math.floor(risk_equity*cfg.risk_pct/100/per_contract_risk)
++            else:
++                n = max(1,math.floor(cfg.margin*cfg.leverage/(price*unit)))
++            margin = n*unit*price/cfg.leverage
++            entry_fee = price*n*unit*cfg.fee
++            free = cash-sum(p['margin'] for p in positions.values())
++            # Also reserve adverse open MTM and estimated liquidation fee.
++            free += sum(min(0,p['side']*(index[b][t]['open']-p['entry'])*p['units'])
++                        for b,p in positions.items())
++            reserve = sum(p['units']*index[b][t]['open']*cfg.fee for b,p in positions.items())
++            risk = n*per_contract_risk
++            if n<1 or margin>cfg.margin_cap or margin+2*entry_fee+reserve>free:
++                skips['size_or_margin'] += 1
++                continue
++            if cfg.total_risk_pct and risk+sum(p['risk'] for p in positions.values())>risk_equity*cfg.total_risk_pct/100:
++                skips['risk_budget'] += 1
++                continue
++            cash -= entry_fee
++            day_net -= entry_fee
++            positions[pair] = dict(side=side,entry=price,units=n*unit,margin=margin,
++                                   stop=price-side*cfg.trail*a,atr=a,peak=price,
++                                   opened=t,entry_fee=entry_fee,funding=0.0,risk=risk)
++        # Unknown intrabar path: old protective level wins if stop and TP both hit.
++        # New extrema only adjust the NEXT bar's trail, never retroactive exits.
++        for pair in list(positions):
++            p,r = positions[pair],index[pair][t]
++            side = p['side']
++            cap = p['entry']*(1-side*cfg.loss_pct/100/cfg.leverage)
++            stop = max(p['stop'],cap) if side==1 else min(p['stop'],cap)
++            hit = r['low']<=stop if side==1 else r['high']>=stop
++            target = p['entry']*(1+side*cfg.take_pct/100/cfg.leverage)
++            take = cfg.take_pct>0 and (r['high']>=target if side==1 else r['low']<=target)
++            if hit:
++                close(pair,stop,t+300,'stop')
++            elif take:
++                close(pair,target,t+300,'profit_take')
++            else:
++                p['peak'] = max(p['peak'],r['high']) if side==1 else min(p['peak'],r['low'])
++                trail = p['peak']-side*cfg.trail*p['atr']
++                p['stop'] = max(p['stop'],trail) if side==1 else min(p['stop'],trail)
++        equity = cash+sum(p['side']*(index[b][t]['close']-p['entry'])*p['units']
++                          -index[b][t]['close']*p['units']*cfg.fee for b,p in positions.items())
++        curve.append(dict(time=t+300,equity=equity,cash=cash))
++    peak,dd = cfg.balance,0.0
++    for point in curve:
++        peak=max(peak,point['equity']); dd=min(dd,point['equity']-peak)
++    wins=sum(x['pnl'] for x in closed if x['pnl']>0)
++    losses=-sum(x['pnl'] for x in closed if x['pnl']<0)
++    return dict(config=asdict(cfg),start=start,end=end,pairs=pairs,
++                closed_count=len(closed),closed_net=sum(x['pnl'] for x in closed),
++                profit_factor=wins/losses if losses else None,
++                end_cash=cash,end_equity=curve[-1]['equity'] if curve else cash,
++                sampled_equity_max_drawdown=dd,skips=dict(skips),open_positions=positions,
++                trades=closed,equity_curve=curve,
++                funding_verified=bool(data.get('funding_verified',False)),
++                limitations=['5m OHLC approximation, not live-fill parity',
++                             'Drawdown sampled at bar close; intrabar loss may be larger',
++                             'Contract metadata must be verified historically',
++                             'No exchange liquidation, outage or restart simulation',
++                             'Unverified funding must not support promotion'])
++
++
++def timestamp(value):
++    dt=datetime.fromisoformat(value.replace('Z','+00:00'))
++    return int(dt.replace(tzinfo=timezone.utc).timestamp() if dt.tzinfo is None else dt.timestamp())
++
++
++def main():
++    ap=argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('data',type=Path)
++    ap.add_argument('--start',required=True)
++    ap.add_argument('--end',required=True)
++    ap.add_argument('--output',required=True,type=Path)
++    ap.add_argument('--balance',type=float,default=14.14)
++    ap.add_argument('--pairs',default='BTC,ETH,SOL,XRP,DOGE')
++    ap.add_argument('--take-pct',type=float,default=25)
++    ap.add_argument('--risk-pct',type=float,default=0)
++    ap.add_argument('--total-risk-pct',type=float,default=0)
++    args=ap.parse_args()
++    result=replay(json.loads(args.data.read_text(encoding='utf-8-sig')),
++                  Config(balance=args.balance,take_pct=args.take_pct,risk_pct=args.risk_pct,
++                         total_risk_pct=args.total_risk_pct),timestamp(args.start),timestamp(args.end),
++                  args.pairs.split(','))
++    args.output.write_text(json.dumps(result,indent=2,allow_nan=False),encoding='utf-8')
++    print(json.dumps({k:v for k,v in result.items() if k not in ('trades','equity_curve','open_positions')},indent=2))
++
++
++if __name__=='__main__':
++    main()
+diff --git a/engine/scripts/test_portfolio_replay.py b/engine/scripts/test_portfolio_replay.py
+new file mode 100644
+index 0000000..3cb42a9
+--- /dev/null
++++ b/engine/scripts/test_portfolio_replay.py
+@@ -0,0 +1,92 @@
++"""Deterministic research-engine checks; no network or exchange credentials."""
++import unittest
++from unittest.mock import patch
++from portfolio_replay import Config, replay, signals, validate
++
++START=36*7200
++
++
++def fixture(pairs=('BTC',), prices=None):
++    prices=prices or [(100,100,100,100)]
++    candles={}
++    for pair in pairs:
++        rows=[dict(time=t,open=100,high=100,low=100,close=100)
++              for t in range(0,START,300)]
++        rows.extend(dict(time=START+i*300,open=o,high=h,low=l,close=c)
++                    for i,(o,h,l,c) in enumerate(prices))
++        candles[pair]=rows
++    return dict(candles=candles,contracts={p:1 for p in pairs})
++
++
++class ReplayTests(unittest.TestCase):
++    def run_case(self,data,cfg=None,side=1,atr=2):
++        end=data['candles']['BTC'][-1]['time']+300
++        with patch('portfolio_replay.signals',return_value={START:(side,atr)}):
++            return replay(data,cfg or Config(balance=30,margin=10,margin_cap=12),START,end)
++
++    def test_minimum_contract_cannot_overspend(self):
++        r=self.run_case(fixture(),Config(balance=6,margin_cap=12))
++        self.assertEqual(r['closed_count'],0)
++        self.assertEqual(r['skips']['size_or_margin'],1)
++        self.assertFalse(r['open_positions'])
++
++    def test_simultaneous_entries_reserve_margin(self):
++        r=self.run_case(fixture(('BTC','ETH')),Config(balance=15,margin_cap=12))
++        self.assertEqual(list(r['open_positions']),['BTC'])
++        self.assertEqual(r['skips']['size_or_margin'],1)
++
++    def test_stop_precedes_target_when_both_hit(self):
++        r=self.run_case(fixture(prices=[(100,104,96,100)]))
++        self.assertEqual(r['trades'][0]['reason'],'stop')
++        self.assertLess(r['closed_net'],0)
++
++    def test_take_profit_and_disable(self):
++        data=fixture(prices=[(100,104,100,103)])
++        r=self.run_case(data)
++        self.assertEqual(r['trades'][0]['reason'],'profit_take')
++        trail=self.run_case(data,Config(balance=30,margin=10,margin_cap=12,take_pct=0))
++        self.assertEqual(trail['closed_count'],0)
++        self.assertTrue(trail['open_positions'])
++
++    def test_gap_does_not_fill_at_old_stop(self):
++        r=self.run_case(fixture(prices=[(100,100,100,100),(90,91,89,90)]))
++        self.assertEqual(r['trades'][0]['reason'],'gap_stop')
++        self.assertLess(r['trades'][0]['exit'],90)
++
++    def test_short_take_profit(self):
++        r=self.run_case(fixture(prices=[(100,100,96,97)]),side=-1)
++        self.assertEqual(r['trades'][0]['reason'],'profit_take')
++        self.assertGreater(r['closed_net'],0)
++
++    def test_open_profit_not_reported_realized(self):
++        r=self.run_case(fixture(prices=[(100,101,100,101)]))
++        self.assertEqual(r['closed_net'],0)
++        self.assertGreater(r['end_equity'],r['end_cash'])
++
++    def test_risk_budget_rejects_minimum(self):
++        r=self.run_case(fixture(),Config(balance=6.77,margin_cap=12,risk_pct=1))
++        self.assertFalse(r['open_positions'])
++
++    def test_funding_charged_once_to_cash_and_trade(self):
++        data=fixture(prices=[(100,100,100,100),(100,104,100,103)])
++        data['funding']=[dict(time=START+300,pair='BTC',rate=.001,mark=100)]
++        funded=self.run_case(data)
++        del data['funding']
++        baseline=self.run_case(data)
++        self.assertAlmostEqual(baseline['end_cash']-funded['end_cash'],.1)
++        self.assertAlmostEqual(baseline['closed_net']-funded['closed_net'],.1)
++
++    def test_missing_candle_fails_closed(self):
++        data=fixture();del data['candles']['BTC'][4]
++        with self.assertRaises(ValueError):validate(data,Config())
++
++    def test_signal_atr_includes_breakout_bar(self):
++        data=fixture()
++        r=data['candles']['BTC'][-2]
++        r.update(high=114,close=114)
++        event=signals(data['candles']['BTC'])[START]
++        self.assertEqual(event[0],1)
++        self.assertAlmostEqual(event[1],1)
++
++
++if __name__=='__main__':unittest.main()
+-- 
+2.52.0.windows.1
+
