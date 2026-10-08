@@ -1,0 +1,56 @@
+{
+  "checked_at": "2026-09-17T06:09:15.5462812Z",
+  "service": "active",
+  "balance": 7.5,
+  "free_balance": 7.5,
+  "last_reported_closed_id": 4130,
+  "open_trade": null,
+  "closed_since_previous_baseline": 18,
+  "wins": 9,
+  "losses": 9,
+  "recorded_net_pnl": 0.7748,
+  "reported_failures": {
+    "journal_file_missing": true,
+    "telegram_health_warning_at": "2026-09-17T00:08:43Z",
+    "morning_summary_event_loop_failure_at": "2026-09-15T06:30:00Z",
+    "sitrep_short_sign_bug": true,
+    "command_poll_disconnect_at": "2026-09-17T00:42:33Z",
+    "self_heal_db_disconnect_at": "2026-09-16T10:46:40Z",
+    "afternoon_summary_event_loop_failure_at": "2026-09-16T12:00:00Z",
+    "evening_summary_event_loop_failure_at": "2026-09-16T16:30:00Z",
+    "night_summary_event_loop_failure_at": "2026-09-17T02:30:00Z"
+  },
+  "coverage": "Active service; feed fresh 06:07:55 UTC. Exchange balance/free 7.50, no positions; no trade rows above 4130. Telegram health failures at 00:03:43 and 00:08:43 UTC, command polling RemoteProtocolError ConnectionTerminated at 00:42:33 UTC, night summary missing event loop at 02:30 UTC. Independent DB read succeeds; bot reporting recovery unverified. Historical closed totals unchanged. No production changes.",
+  "latest_interval": {
+    "log_coverage": "Repeated Telegram, command polling and night summary failures; historical completeness unverified",
+    "recorded_realized_pnl": 0,
+    "new_trade_rows": 0,
+    "new_closes": 0,
+    "open_pnl": 0
+  },
+  "open_trades": [],
+  "latest_close": {
+    "gross_pnl": -0.7613,
+    "id": 4130,
+    "closed_at": "2026-09-16T19:44:14.816607Z",
+    "estimated_gross_giveback_usd": 1.058,
+    "estimated_gross_peak_usd": 0.2967,
+    "exit_net_margin_pct": -27.2595,
+    "reason": "loss_cap",
+    "net_pnl": -0.7908,
+    "peak_margin_pct": 10.2275
+  },
+  "latest_closes": [
+    {
+      "gross_pnl": -0.7613,
+      "id": 4130,
+      "closed_at": "2026-09-16T19:44:14.816607Z",
+      "estimated_gross_giveback_usd": 1.058,
+      "estimated_gross_peak_usd": 0.2967,
+      "exit_net_margin_pct": -27.2595,
+      "reason": "loss_cap",
+      "net_pnl": -0.7908,
+      "peak_margin_pct": 10.2275
+    }
+  ]
+}
