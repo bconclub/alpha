@@ -1,0 +1,12 @@
+{
+  "appId": "club.bcon.alpha",
+  "appName": "Alpha",
+  "webDir": "www",
+  "server": {
+    "url": "https://alphabot-alpha.vercel.app",
+    "cleartext": false
+  },
+  "android": {
+    "backgroundColor": "#0a0a0a"
+  }
+}

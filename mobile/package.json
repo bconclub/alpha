@@ -1,0 +1,17 @@
+{
+  "name": "alpha-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Android wrapper for the Alpha dashboard (alphabot-alpha.vercel.app)",
+  "scripts": {
+    "sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/core": "^7.6.9"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^7.6.9"
+  }
+}
