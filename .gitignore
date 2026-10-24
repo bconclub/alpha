@@ -31,3 +31,5 @@ NUL
 .claude/
 mobile/node_modules/
 dist/
+engine/fcm-service-account.json
+mobile/android/app/google-services.json
