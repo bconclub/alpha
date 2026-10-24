@@ -30,3 +30,4 @@ NUL
 # Claude
 .claude/
 mobile/node_modules/
+dist/
