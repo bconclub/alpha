@@ -133,19 +133,15 @@ export function PnLCalendar({ dailyStats, year, month }: PnLCalendarProps) {
               {hasTrades && stats && (
                 <>
                   {/* Net P&L */}
-                  <span className={cn(
-                    'text-[9px] font-mono font-bold leading-tight mt-0.5',
-                    pnl >= 0 ? 'text-white' : 'text-white',
-                  )}>
+                  <span className="text-[10px] sm:text-[9px] font-mono font-bold leading-tight mt-0.5 text-white">
                     {pnl >= 0 ? '+' : ''}{pnl < 10 && pnl > -10 ? pnl.toFixed(2) : pnl.toFixed(1)}
                   </span>
-                  {/* Fees */}
-                  <span className="text-[7px] font-mono leading-tight text-white/50 truncate w-full text-center">
+                  {/* Fees + trade count: too small to read on phones, shown from sm up */}
+                  <span className="hidden sm:block text-[7px] font-mono leading-tight text-white/50 truncate w-full text-center">
                     fees: ${stats.fees < 10 ? stats.fees.toFixed(2) : stats.fees.toFixed(1)}
                   </span>
-                  {/* Trade count */}
-                  <span className="text-[7px] font-mono leading-tight text-white/50">
-                    {stats.trades} trade{stats.trades !== 1 ? 's' : ''}
+                  <span className="text-[8px] sm:text-[7px] font-mono leading-tight text-white/60">
+                    {stats.trades}<span className="hidden sm:inline"> trade{stats.trades !== 1 ? 's' : ''}</span>
                   </span>
                 </>
               )}

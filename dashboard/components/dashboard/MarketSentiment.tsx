@@ -65,14 +65,14 @@ export function MarketSentiment() {
 
   return (
     <div className="rounded-2xl border border-white/5 bg-[#141419] p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div>
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h2 className="text-sm font-bold uppercase tracking-wider text-gray-400">Market Sentiment &amp; Volatility</h2>
-          <div className="mt-1 flex items-center gap-3 text-[11px]">
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
             <span className="flex items-center gap-1.5 text-zinc-400"><span className="h-2 w-2 rounded-full bg-orange-400" /> BTC</span>
             <span className="flex items-center gap-1.5 text-zinc-400"><span className="h-2 w-2 rounded-full bg-violet-400" /> ETH</span>
             <span className="flex items-center gap-1.5 text-zinc-500"><span className="h-2 w-2 rounded-sm bg-sky-500/40" /> Volatility</span>
-            <span className="text-zinc-600">· moves indexed to window start</span>
+            <span className="hidden text-zinc-600 sm:inline">· moves indexed to window start</span>
           </div>
         </div>
         <div className="flex gap-1">

@@ -262,6 +262,17 @@ function getStatusBadgeVariant(status: Trade['status']) {
   return map[status];
 }
 
+/** Sort choices for the mobile card view (desktop sorts by column header). */
+const MOBILE_SORT_OPTIONS: { value: string; label: string }[] = [
+  { value: 'timestamp:desc', label: 'Sort: Newest' },
+  { value: 'timestamp:asc', label: 'Sort: Oldest' },
+  { value: 'pnl:desc', label: 'Sort: Biggest win' },
+  { value: 'pnl:asc', label: 'Sort: Biggest loss' },
+  { value: 'pnl_pct:desc', label: 'Sort: Best %' },
+  { value: 'hold_ms:desc', label: 'Sort: Longest hold' },
+  { value: 'pair:asc', label: 'Sort: Pair A–Z' },
+];
+
 function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): number {
   let aVal: string | number = (a[key as keyof Trade] as string | number | undefined | null) ?? 0;
   let bVal: string | number = (b[key as keyof Trade] as string | number | undefined | null) ?? 0;
@@ -269,6 +280,11 @@ function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): num
   if (key === 'timestamp') {
     aVal = new Date(aVal as string).getTime();
     bVal = new Date(bVal as string).getTime();
+  } else if (key === 'hold_ms') {
+    const hold = (t: Trade) =>
+      t.closed_at ? new Date(t.closed_at).getTime() - new Date(t.timestamp).getTime() : 0;
+    aVal = hold(a);
+    bVal = hold(b);
   }
 
   if (typeof aVal === 'string' && typeof bVal === 'string') {
@@ -918,6 +934,21 @@ export default function TradeTable({ trades }: TradeTableProps) {
               <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H12.5A1.5 1.5 0 0 1 14 5.5v1.382a1.5 1.5 0 0 1-.44 1.06l-.293.294a1 1 0 0 0-.293.707V12.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 12.5v-9Z" />
             </svg>
           </button>
+          <select
+            aria-label="Sort trades"
+            value={`${sortKey}:${sortDir}`}
+            onChange={(e) => {
+              const [k, d] = e.target.value.split(':');
+              setSortKey(k);
+              setSortDir(d as SortDirection);
+              setPage(1);
+            }}
+            className="h-9 min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 text-xs font-medium text-zinc-300 outline-none focus:border-zinc-500"
+          >
+            {MOBILE_SORT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
         </div>
         {filtersOpen && (
           <div className="mt-2 space-y-3 rounded-lg border border-zinc-700/50 bg-zinc-800/50 p-3">

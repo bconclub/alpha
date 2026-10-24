@@ -359,7 +359,28 @@ export default function StrategiesPage() {
         {recentClosedTrades.length === 0 ? (
           <div className="p-6 text-sm text-zinc-500">No closed trades in this window.</div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          {/* Phones: compact rows instead of a 920px table */}
+          <div className="divide-y divide-zinc-900 md:hidden">
+            {recentClosedTrades.slice(0, 80).map((trade) => (
+              <div key={trade.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-zinc-100">{shortPair(trade.pair)}</span>
+                    <SetupChip setup={canonicalSetup(trade.setup_type)} />
+                  </div>
+                  <div className="mt-1 font-mono text-[11px] text-zinc-500">
+                    {formatDate(trade.timestamp)} · {formatDuration(holdSeconds(trade))} · peak {pct(trade.peak_pnl)}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className={cn('font-mono text-sm font-semibold', getPnLColor(trade.pnl))}>{formatPnL(trade.pnl)}</div>
+                  <div className="text-[11px] text-zinc-500">{trade.exit_reason || 'Unknown'}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[920px] text-left text-sm">
               <thead className="bg-zinc-900/70 text-[10px] uppercase tracking-wider text-zinc-500">
                 <tr>
@@ -396,6 +417,7 @@ export default function StrategiesPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </section>
     </div>

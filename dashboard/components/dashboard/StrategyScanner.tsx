@@ -114,12 +114,12 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
       )}
       style={{ opacity, boxShadow: top ? `0 0 0 1px ${color}33` : undefined }}
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <CoinBadge asset={r.asset} />
           <span className="font-mono text-sm font-bold text-white">{r.asset}</span>
           <SetupChip setup={r.lane} />
-          <span className={cn('text-[10px] font-bold', long ? 'text-emerald-400' : r.side === 'SHORT' ? 'text-red-400' : 'text-zinc-500')}>
+          <span className={cn('whitespace-nowrap text-[10px] font-bold', long ? 'text-emerald-400' : r.side === 'SHORT' ? 'text-red-400' : 'text-zinc-500')}>
             {arrow} {r.side}
           </span>
           {!r.tradeable && <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-400">watch</span>}
@@ -128,7 +128,7 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
           {r.inPos && <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold text-violet-300">IN TRADE</span>}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span className="font-mono text-[11px] text-zinc-500">conf {r.conf.toFixed(0)}</span>
+          <span className="hidden font-mono text-[11px] text-zinc-500 sm:inline">conf {r.conf.toFixed(0)}</span>
           {r.lev != null && (
             <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-bold ring-1 ring-inset', levTone(r.lev))}>{r.lev}x</span>
           )}

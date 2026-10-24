@@ -41,7 +41,7 @@ function Donut({ total, winning }: { total: number; winning: number }) {
 function Card({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-white/5 bg-[#141419] p-4">
-      <p className="truncate text-[11px] uppercase tracking-wider text-zinc-500">{label}</p>
+      <p className="text-[11px] uppercase leading-tight tracking-wider text-zinc-500">{label}</p>
       <div className="mt-2 flex flex-1 items-center justify-between gap-2">{children}</div>
     </div>
   );

@@ -137,7 +137,7 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
       {/* Active position */}
       {pos && (
         <div className={cn(
-          'mt-2 px-2 py-1 rounded text-[10px] font-medium truncate',
+          'mt-2 px-2 py-1 rounded text-[10px] font-medium break-words',
           pos.position_type === 'short'
             ? 'bg-[#ff1744]/10 text-[#ff1744]'
             : 'bg-[#00c853]/10 text-[#00c853]',

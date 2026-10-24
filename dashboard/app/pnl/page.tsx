@@ -207,13 +207,16 @@ export default function PnLPage() {
   const monthLabel = new Date(year, month).toLocaleString('en-US', { month: 'long', year: 'numeric' });
 
   const { winDays, lossDays } = useMemo(() => {
+    // Count only the month on screen, not all-time
+    const prefix = `${year}-${String(month + 1).padStart(2, '0')}-`;
     let w = 0, l = 0;
-    for (const s of Array.from(dailyStats.values())) {
+    for (const [key, s] of Array.from(dailyStats.entries())) {
+      if (!key.startsWith(prefix)) continue;
       if (s.pnl > 0) w++;
       else if (s.pnl < 0) l++;
     }
     return { winDays: w, lossDays: l };
-  }, [dailyStats]);
+  }, [dailyStats, year, month]);
 
   const prevMonth = () => {
     if (month === 0) { setYear(y => y - 1); setMonth(11); }
@@ -280,7 +283,7 @@ export default function PnLPage() {
             <StatCard 
               label="Gross P&L" 
               value={formatPnL(stats.grossPnl)}
-              subtext={`${((stats.grossPnl / (Math.abs(stats.grossPnl) + 0.001)) * 100).toFixed(0)}% win ratio`}
+              subtext="before fees"
               color={stats.grossPnl >= 0 ? 'text-green-400' : 'text-red-400'}
             />
             <StatCard 
@@ -303,7 +306,7 @@ export default function PnLPage() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
                 <div className="text-xs text-gray-500 mb-1">Best Trade</div>
-                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.bestTrade)}</div>
+                <div className="text-sm font-mono text-green-400">{formatPnL(stats.bestTrade)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Worst Trade</div>
@@ -311,11 +314,11 @@ export default function PnLPage() {
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Avg Winner</div>
-                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner)}</div>
+                <div className="text-sm font-mono text-green-400">{formatPnL(stats.avgWinner)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Avg Loser</div>
-                <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser)}</div>
+                <div className="text-sm font-mono text-red-400">{formatPnL(-stats.avgLoser)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Profit Factor</div>
@@ -337,11 +340,11 @@ export default function PnLPage() {
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Win Amount</div>
-                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner * stats.wins)}</div>
+                <div className="text-sm font-mono text-green-400">{formatPnL(stats.avgWinner * stats.wins)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Loss Amount</div>
-                <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser * stats.losses)}</div>
+                <div className="text-sm font-mono text-red-400">{formatPnL(-stats.avgLoser * stats.losses)}</div>
               </div>
             </div>
           </div>
