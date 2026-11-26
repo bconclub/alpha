@@ -26,7 +26,7 @@ export function RecentTrades() {
   );
 
   return (
-    <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4">
+    <section className="rounded-xl border border-white/[0.08] bg-[#101114] p-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-semibold text-white">Recent trades</h2>
         <Link href="/trades" className="flex items-center gap-1 text-xs font-medium text-zinc-400 hover:text-white">
@@ -44,8 +44,8 @@ export function RecentTrades() {
             return (
               <li key={t.id} className="flex items-center gap-3 py-2.5">
                 <span className={cn(
-                  'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold',
-                  long ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400',
+                  'w-4 shrink-0 text-center text-xs',
+                  long ? 'text-emerald-400' : 'text-red-400',
                 )}>
                   {long ? '▲' : '▼'}
                 </span>

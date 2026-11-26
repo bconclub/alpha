@@ -90,7 +90,6 @@ function DotMeter({ readiness, dim }: { readiness: number; dim: boolean }) {
             style={{
               background: on ? c : 'rgba(255,255,255,0.08)',
               opacity: on && dim ? 0.65 : 1,
-              boxShadow: on && !dim && i === filled - 1 ? `0 0 6px ${c}` : undefined,
             }}
           />
         );
@@ -105,15 +104,15 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
   const long = r.side === 'LONG';
   const arrow = long ? '▲' : r.side === 'SHORT' ? '▼' : '·';
   // fade rows down the list — only the top one is at full strength
-  const opacity = top ? 1 : Math.max(0.4, 1 - rank * 0.11);
+  const opacity = r.tradeable ? 1 : 0.5;   // dim only what the bot will not trade
 
   return (
     <div
       className={cn(
-        'flex flex-1 flex-col justify-center rounded-xl border px-3 py-2.5 backdrop-blur-md transition-all',
-        top ? 'border-white/20 bg-white/[0.07]' : 'border-white/5 bg-white/[0.02]',
+        'flex flex-col justify-center rounded-lg border px-3 py-2.5',
+        top ? 'border-white/15 bg-white/[0.04]' : 'border-transparent',
       )}
-      style={{ opacity, boxShadow: top ? `0 0 0 1px ${color}33` : undefined }}
+      style={{ opacity }}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
@@ -157,7 +156,7 @@ export function StrategyScanner() {
   const assetCount = new Set(all.map((r) => r.asset)).size;
 
   return (
-    <div className="flex h-full flex-col rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
+    <div className="flex h-full flex-col rounded-xl border border-white/[0.08] bg-[#101114] p-4">
       <div className="mb-3 flex items-center justify-between">
         <div><h2 className="text-base font-semibold text-white">What the bot is watching</h2><p className="mt-0.5 text-[11px] text-zinc-500">Bar fills as price nears a breakout. 100% = it enters.</p></div>
         <span className="text-[11px] text-zinc-500">{assetCount} assets · top {TOP_N}</span>
@@ -166,7 +165,7 @@ export function StrategyScanner() {
       {rows.length === 0 ? (
         <p className="flex flex-1 items-center justify-center text-center text-xs text-zinc-600">No signal data yet — engine publishes every ~12s.</p>
       ) : (
-        <div className="flex flex-1 flex-col gap-2">
+        <div className="flex flex-col gap-1">
           {rows.map((r, i) => <SignalRow key={r.key} r={r} rank={i} />)}
         </div>
       )}
