@@ -1,437 +1,205 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import { ArrowRight } from 'lucide-react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
-import { getSupabase } from '@/lib/supabase';
-import { SetupChip } from '@/components/ui/SetupChip';
-import { cn, formatDate, formatDuration, formatPnL, getPnLColor } from '@/lib/utils';
-import type { SetupConfig, Trade } from '@/lib/types';
+import { cn, formatDuration, formatPnL, getPnLColor } from '@/lib/utils';
+import type { Trade } from '@/lib/types';
 
-type TimeWindow = 'today' | '7d' | '14d' | '28d';
-
-const TIME_WINDOWS: { key: TimeWindow; label: string }[] = [
-  { key: 'today', label: 'Today' },
-  { key: '7d', label: '7 days' },
-  { key: '14d', label: '14 days' },
-  { key: '28d', label: '28 days' },
+// The live trader runs ONE strategy. These mirror the constants in
+// engine/alpha/live_trader.py and engine/alpha/strategy_v3.py; if a number
+// changes there, change it here.
+const RULES: { label: string; value: string }[] = [
+  { label: 'Gets in', value: 'When a 2-hour candle closes above the highest high, or below the lowest low, of the last 20 candles. Up = long, down = short.' },
+  { label: 'Stop-loss', value: '2.5 × ATR from entry. Follows price as the trade moves in our favour, never moves back.' },
+  { label: 'Takes profit', value: 'At +25% on the money put in.' },
+  { label: 'Safety cap', value: 'Cuts the trade at -26% if price gaps past the stop.' },
+  { label: 'Longest hold', value: '72 hours.' },
+  { label: 'Size', value: 'About $3 per trade at 10x. Up to 3 trades open at once.' },
+  { label: 'Stands down', value: 'If balance drops under $2, or the day is down $3.' },
 ];
 
-// The autonomous trader's live setups (V3 lanes + adopted manual trades).
-const LIVE_SETUPS = ['EMA_PULLBACK', 'DONCHIAN', 'VWAP', 'MANUAL'] as const;
-const LIVE_SETUP_SET = new Set<string>(LIVE_SETUPS);
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+type Window = '7d' | '28d' | '90d' | 'all';
+const WINDOWS: { key: Window; label: string; days: number | null }[] = [
+  { key: '7d', label: '7 days', days: 7 },
+  { key: '28d', label: '28 days', days: 28 },
+  { key: '90d', label: '90 days', days: 90 },
+  { key: 'all', label: 'All', days: null },
+];
 
-type SetupStats = {
-  setup: string;
-  enabled: boolean;
-  trades: Trade[];
-  total: number;
-  wins: number;
-  losses: number;
-  net: number;
-  gross: number;
-  fees: number;
-  winRate: number;
-  avgPeak: number;
-  avgCapture: number;
-  avgHoldSec: number;
-  bestPeak: number;
-  lastTrade?: Trade;
-};
-
-function canonicalSetup(setup: string | null | undefined): string {
-  let raw = (setup || '').trim().toUpperCase();
-  if (!raw) return 'UNLABELED';
-  // Live trader rows: strip LIVE_ then fold the FUT_ lane ids to short names.
-  if (raw.startsWith('LIVE_')) raw = raw.slice(5);
-  if (raw === 'MANUAL') return 'MANUAL';
-  if (raw.startsWith('FUT_')) {
-    if (raw.includes('DONCHIAN')) return 'DONCHIAN';
-    if (raw.includes('EMA_PB') || raw.includes('EMA_PULLBACK')) return 'EMA_PULLBACK';
-    if (raw.includes('VWAP')) return 'VWAP';
-    if (raw.includes('SFP')) return 'LIQ_SWEEP';
-  }
-  // legacy options setups (history)
-  if (raw === 'BB_SQUEEZE' || raw === 'BB_SQUEEZE_BREAKOUT' || raw === 'SQUEEZE_BREAKOUT') return 'SQUEEZE';
-  if (raw === 'MOMENTUM_BURST' || raw === 'MOMENTUM_BURST_ENTRY') return 'MOM_BURST';
-  if (raw === 'MOVE_PULLBACK' || raw === 'PULL_BACK') return 'PULLBACK';
-  if (raw === 'PREMIUM_WAVE' || raw === 'WAVE') return 'PREMIUM_WAVE';
-  if (raw === 'FVG_REVERSAL' || raw === 'FVG_REVERSE') return 'FVG_CHOCH';
-  return raw;
+function isCurrentStrategy(t: Trade): boolean {
+  return (t.setup_type || '').toUpperCase().includes('DONCHIAN');
 }
 
-function getWindowCutoff(window: TimeWindow): Date {
-  const now = new Date();
-  if (window === '7d') return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  if (window === '14d') return new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-  if (window === '28d') return new Date(now.getTime() - 28 * 24 * 60 * 60 * 1000);
-
-  const istNow = new Date(now.getTime() + IST_OFFSET_MS);
-  const startIst = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate());
-  return new Date(startIst - IST_OFFSET_MS);
+function holdSeconds(t: Trade): number {
+  const start = new Date(t.timestamp).getTime();
+  const end = t.closed_at ? new Date(t.closed_at).getTime() : Date.now();
+  return Number.isFinite(start) && end >= start ? Math.round((end - start) / 1000) : 0;
 }
 
-function getTradeTime(trade: Trade): number {
-  return new Date(trade.timestamp).getTime();
-}
-
-function holdSeconds(trade: Trade): number {
-  const start = new Date(trade.timestamp).getTime();
-  const end = trade.closed_at ? new Date(trade.closed_at).getTime() : Date.now();
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
-  return Math.round((end - start) / 1000);
-}
-
-function pct(value: number | null | undefined): string {
-  const n = Number(value ?? 0);
-  const sign = n > 0 ? '+' : '';
-  return `${sign}${n.toFixed(2)}%`;
-}
-
-function capturePct(trade: Trade): number | null {
-  const peak = Number(trade.peak_pnl ?? 0);
-  const taken = Number(trade.pnl_pct ?? 0);
-  if (peak <= 0) return null;
-  return (taken / peak) * 100;
-}
-
-function formatSetupName(setup: string): string {
-  if (setup === 'EMA_PULLBACK') return 'EMA Pullback';
-  if (setup === 'DONCHIAN') return 'Donchian Retest';
-  if (setup === 'VWAP') return 'VWAP Bounce';
-  if (setup === 'MANUAL') return 'Manual (yours)';
-  if (setup === 'MOM_BURST') return 'Momentum Burst';
-  if (setup === 'TREND_FLOW') return 'Trend Flow';
-  if (setup === 'PREMIUM_WAVE') return 'Premium Wave';
-  if (setup === 'UNLABELED') return 'Unlabeled';
-  return setup.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function shortPair(pair: string): string {
-  const m = pair.match(/^(\w+)\/.*-(\d{6})-(\d+)-([CP])$/);
-  if (!m) return pair.replace('/USD:USD', '');
-  const [, asset, , strike, cp] = m;
-  return `${asset} ${strike}${cp}`;
-}
-
-function buildConfigMap(configs: SetupConfig[]): Record<string, SetupConfig> {
-  const map: Record<string, SetupConfig> = {};
-  for (const config of configs) {
-    map[canonicalSetup(config.setup_type)] = config;
-  }
-  return map;
-}
-
-function computeStats(setup: string, trades: Trade[], configMap: Record<string, SetupConfig>): SetupStats {
-  const setupTrades = trades.filter((trade) => canonicalSetup(trade.setup_type) === setup);
-  const wins = setupTrades.filter((trade) => Number(trade.pnl ?? 0) > 0).length;
-  const losses = setupTrades.length - wins;
-  const net = setupTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
-  const gross = setupTrades.reduce((sum, trade) => sum + Number(trade.gross_pnl ?? trade.pnl ?? 0), 0);
-  const fees = setupTrades.reduce((sum, trade) => sum + Number(trade.entry_fee ?? 0) + Number(trade.exit_fee ?? 0), 0);
-  const peaks = setupTrades.map((trade) => Number(trade.peak_pnl ?? 0));
-  const captures = setupTrades.map(capturePct).filter((value): value is number => value != null);
-  const holdTotal = setupTrades.reduce((sum, trade) => sum + holdSeconds(trade), 0);
-
-  return {
-    setup,
-    enabled: configMap[setup]?.enabled ?? true,
-    trades: setupTrades,
-    total: setupTrades.length,
-    wins,
-    losses,
-    net,
-    gross,
-    fees,
-    winRate: setupTrades.length ? (wins / setupTrades.length) * 100 : 0,
-    avgPeak: peaks.length ? peaks.reduce((sum, value) => sum + value, 0) / peaks.length : 0,
-    avgCapture: captures.length ? captures.reduce((sum, value) => sum + value, 0) / captures.length : 0,
-    avgHoldSec: setupTrades.length ? holdTotal / setupTrades.length : 0,
-    bestPeak: peaks.length ? Math.max(...peaks) : 0,
-    lastTrade: setupTrades[0],
-  };
+function summarize(list: Trade[]) {
+  const wins = list.filter((t) => Number(t.pnl ?? 0) > 0).length;
+  const losses = list.filter((t) => Number(t.pnl ?? 0) < 0).length;
+  const net = list.reduce((s, t) => s + Number(t.pnl ?? 0), 0);
+  const fees = list.reduce((s, t) => s + Number(t.entry_fee ?? 0) + Number(t.exit_fee ?? 0), 0);
+  const hold = list.length ? list.reduce((s, t) => s + holdSeconds(t), 0) / list.length : 0;
+  return { total: list.length, wins, losses, net, fees, hold, winRate: wins + losses ? (wins / (wins + losses)) * 100 : 0 };
 }
 
 export default function StrategiesPage() {
-  const { trades, setupConfigs, refreshViews } = useSupabase();
-  const [timeWindow, setTimeWindow] = useState<TimeWindow>('today');
-  const [savingSetup, setSavingSetup] = useState<string | null>(null);
+  const { trades, liveSignals } = useSupabase();
+  const [win, setWin] = useState<Window>('28d');
 
-  const cutoff = useMemo(() => getWindowCutoff(timeWindow), [timeWindow]);
-  const configMap = useMemo(() => buildConfigMap(setupConfigs), [setupConfigs]);
-
-  const recentClosedTrades = useMemo(() => {
+  const closed = useMemo(() => {
+    const days = WINDOWS.find((w) => w.key === win)?.days ?? null;
+    const cutoff = days == null ? 0 : Date.now() - days * 86_400_000;
     return trades
-      .filter((trade) => trade.status === 'closed')
-      .filter((trade) => getTradeTime(trade) >= cutoff.getTime())
-      .filter((trade) => LIVE_SETUP_SET.has(canonicalSetup(trade.setup_type)))
-      .sort((a, b) => getTradeTime(b) - getTradeTime(a));
-  }, [trades, cutoff]);
+      .filter((t) => t.status === 'closed' && isCurrentStrategy(t))
+      .filter((t) => new Date(t.closed_at || t.timestamp).getTime() >= cutoff);
+  }, [trades, win]);
 
-  const setupOrder = useMemo(() => {
-    const found = new Set<string>(LIVE_SETUPS);
-    for (const trade of recentClosedTrades) {
-      found.add(canonicalSetup(trade.setup_type));
+  const all = useMemo(() => summarize(closed), [closed]);
+  const longs = useMemo(() => summarize(closed.filter((t) => t.position_type !== 'short')), [closed]);
+  const shorts = useMemo(() => summarize(closed.filter((t) => t.position_type === 'short')), [closed]);
+
+  const byCoin = useMemo(() => {
+    const map = new Map<string, Trade[]>();
+    for (const t of closed) {
+      const coin = t.pair.split('/')[0];
+      map.set(coin, [...(map.get(coin) ?? []), t]);
     }
-    return Array.from(found).filter((setup) => setup !== 'UNLABELED' || recentClosedTrades.some((trade) => canonicalSetup(trade.setup_type) === 'UNLABELED'));
-  }, [recentClosedTrades]);
+    return Array.from(map.entries())
+      .map(([coin, list]) => ({ coin, ...summarize(list) }))
+      .sort((a, b) => b.net - a.net);
+  }, [closed]);
 
-  const setupStats = useMemo(() => {
-    return setupOrder
-      .map((setup) => computeStats(setup, recentClosedTrades, configMap))
-      .sort((a, b) => {
-        if (b.total !== a.total) return b.total - a.total;
-        return a.net - b.net;
-      });
-  }, [setupOrder, recentClosedTrades, configMap]);
-
-  const totals = useMemo(() => {
-    const wins = recentClosedTrades.filter((trade) => Number(trade.pnl ?? 0) > 0).length;
-    const net = recentClosedTrades.reduce((sum, trade) => sum + Number(trade.pnl ?? 0), 0);
-    const avgPeak = recentClosedTrades.length
-      ? recentClosedTrades.reduce((sum, trade) => sum + Number(trade.peak_pnl ?? 0), 0) / recentClosedTrades.length
-      : 0;
-    const avgHold = recentClosedTrades.length
-      ? recentClosedTrades.reduce((sum, trade) => sum + holdSeconds(trade), 0) / recentClosedTrades.length
-      : 0;
-    return {
-      trades: recentClosedTrades.length,
-      winRate: recentClosedTrades.length ? (wins / recentClosedTrades.length) * 100 : 0,
-      net,
-      avgPeak,
-      avgHold,
-    };
-  }, [recentClosedTrades]);
-
-  const handleSetupToggle = useCallback(async (setup: string, enabled: boolean) => {
-    const client = getSupabase();
-    if (!client) return;
-    setSavingSetup(setup);
-    try {
-      const existing = setupConfigs.find((config) => canonicalSetup(config.setup_type) === setup);
-      const setupTypeForDb = existing?.setup_type ?? setup;
-      await client.from('setup_config').upsert({
-        setup_type: setupTypeForDb,
-        enabled,
-        updated_at: new Date().toISOString(),
-      });
-      await client.from('bot_commands').insert({
-        command: 'update_config',
-        params: { setup_type: setupTypeForDb, enabled },
-        executed: false,
-      });
-      refreshViews();
-    } finally {
-      setSavingSetup(null);
+  // Which coins the engine will actually trade vs only watch, straight from its scan.
+  const { trading, watching } = useMemo(() => {
+    const trading: string[] = [];
+    const watching: string[] = [];
+    for (const s of liveSignals ?? []) {
+      if (!s.scan) continue;
+      (s.scan.tradeable === false ? watching : trading).push(s.pair.split('/')[0]);
     }
-  }, [refreshViews, setupConfigs]);
+    return { trading: trading.sort(), watching: watching.sort() };
+  }, [liveSignals]);
+
+  const maxAbs = Math.max(0.01, ...byCoin.map((c) => Math.abs(c.net)));
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-white">Strategy Performance</h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            Recent performance by the setups Alpha is actually trading.
-          </p>
+    <div className="space-y-4 pb-6">
+      <div>
+        <h1 className="text-xl font-semibold text-white">Strategy</h1>
+        <p className="mt-1 text-sm text-zinc-500">One strategy is live. This is what it does and how it has done.</p>
+      </div>
+
+      {/* What is running */}
+      <section className="rounded-xl border border-white/[0.08] bg-[#101114] p-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-base font-semibold text-white">2-hour breakout</h2>
+          <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+            <span className="h-2 w-2 rounded-full bg-emerald-400" />
+            In use
+          </span>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {TIME_WINDOWS.map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => setTimeWindow(key)}
-              className={cn(
-                'rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
-                timeWindow === key
-                  ? 'bg-sky-500/20 text-sky-200 ring-1 ring-sky-400/30'
-                  : 'bg-zinc-900 text-zinc-400 ring-1 ring-zinc-800 hover:text-zinc-200',
-              )}
-            >
-              {label}
-            </button>
+        <p className="mt-1 text-sm text-zinc-400">
+          Waits for price to break out of its recent range, then rides the move with a trailing stop.
+        </p>
+
+        <dl className="mt-4 divide-y divide-white/[0.06] border-t border-white/[0.06]">
+          {RULES.map((r) => (
+            <div key={r.label} className="grid grid-cols-[6.5rem_1fr] gap-3 py-2.5 text-sm">
+              <dt className="text-zinc-500">{r.label}</dt>
+              <dd className="text-zinc-200">{r.value}</dd>
+            </div>
           ))}
-          <button
-            onClick={refreshViews}
-            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-300 ring-1 ring-zinc-800 hover:text-white"
-          >
-            <RefreshCw size={13} />
-            Refresh
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-        {[
-          ['Trades', totals.trades.toString(), 'text-zinc-100'],
-          ['Win Rate', `${totals.winRate.toFixed(0)}%`, totals.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'],
-          ['Net P&L', formatPnL(totals.net), getPnLColor(totals.net)],
-          ['Avg Peak', pct(totals.avgPeak), 'text-emerald-300'],
-          ['Avg Hold', formatDuration(totals.avgHold), 'text-zinc-100'],
-        ].map(([label, value, color]) => (
-          <div key={label} className="rounded-md border border-zinc-800 bg-[#0d1117] p-3">
-            <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
-            <div className={cn('mt-1 font-mono text-lg font-semibold', color)}>{value}</div>
+          <div className="grid grid-cols-[6.5rem_1fr] gap-3 py-2.5 text-sm">
+            <dt className="text-zinc-500">Trades</dt>
+            <dd className="text-zinc-200">{trading.length ? trading.join(', ') : 'Waiting for scan data'}</dd>
           </div>
-        ))}
-      </div>
+          {watching.length > 0 && (
+            <div className="grid grid-cols-[6.5rem_1fr] gap-3 py-2.5 text-sm">
+              <dt className="text-zinc-500">Only watches</dt>
+              <dd className="text-zinc-500">{watching.join(', ')}</dd>
+            </div>
+          )}
+        </dl>
+      </section>
 
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-        {setupStats.map((stats) => {
-          const hasTrades = stats.total > 0;
-          const cold = hasTrades && stats.winRate < 35 && stats.net < 0;
-          const hot = hasTrades && stats.winRate >= 50 && stats.net > 0;
-
-          return (
-            <section
-              key={stats.setup}
-              className={cn(
-                'rounded-lg border bg-[#0d1117] p-4',
-                cold ? 'border-red-500/30' : hot ? 'border-emerald-500/30' : 'border-zinc-800',
-              )}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <SetupChip setup={stats.setup} />
-                    <span className="text-sm font-semibold text-white">{formatSetupName(stats.setup)}</span>
-                    {hot && <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-emerald-300">Working</span>}
-                    {cold && <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-red-300">Bleeding</span>}
-                  </div>
-                  <p className="mt-1 text-xs text-zinc-500">
-                    {hasTrades
-                      ? `${stats.wins} wins / ${stats.losses} losses in selected window`
-                      : 'No closed trades in selected window'}
-                  </p>
-                </div>
-                <button
-                  disabled={savingSetup === stats.setup}
-                  onClick={() => handleSetupToggle(stats.setup, !stats.enabled)}
-                  className={cn(
-                    'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
-                    stats.enabled ? 'bg-emerald-500' : 'bg-zinc-700',
-                    savingSetup === stats.setup && 'opacity-60',
-                  )}
-                  title={stats.enabled ? 'Disable setup' : 'Enable setup'}
-                >
-                  <span
-                    className={cn(
-                      'inline-block h-4 w-4 rounded-full bg-white transition-transform',
-                      stats.enabled ? 'translate-x-6' : 'translate-x-1',
-                    )}
-                  />
-                </button>
-              </div>
-
-              <div className="mt-4 grid grid-cols-3 gap-3 md:grid-cols-6">
-                <Metric label="Trades" value={stats.total.toString()} />
-                <Metric label="Win" value={`${stats.winRate.toFixed(0)}%`} color={stats.winRate >= 50 ? 'text-emerald-300' : 'text-red-300'} />
-                <Metric label="Net" value={formatPnL(stats.net)} color={getPnLColor(stats.net)} />
-                <Metric label="Avg Peak" value={pct(stats.avgPeak)} color="text-emerald-300" />
-                <Metric label="Capture" value={`${stats.avgCapture.toFixed(0)}%`} color={stats.avgCapture >= 50 ? 'text-emerald-300' : 'text-amber-300'} />
-                <Metric label="Hold" value={formatDuration(stats.avgHoldSec)} />
-              </div>
-
-              {stats.lastTrade && (
-                <div className="mt-4 rounded-md bg-zinc-950/70 px-3 py-2 text-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-semibold text-zinc-200">Last trade</span>
-                    <span className="font-mono text-zinc-500">{formatDate(stats.lastTrade.timestamp)}</span>
-                  </div>
-                  <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
-                    <Mini label="Pair" value={shortPair(stats.lastTrade.pair)} />
-                    <Mini label="Net" value={formatPnL(stats.lastTrade.pnl)} color={getPnLColor(stats.lastTrade.pnl)} />
-                    <Mini label="Peak" value={pct(stats.lastTrade.peak_pnl)} color="text-emerald-300" />
-                    <Mini label="Taken" value={pct(stats.lastTrade.pnl_pct)} color={getPnLColor(stats.lastTrade.pnl_pct ?? 0)} />
-                    <Mini label="Exit" value={stats.lastTrade.exit_reason || 'Unknown'} />
-                  </div>
-                </div>
-              )}
-            </section>
-          );
-        })}
-      </div>
-
-      <section className="rounded-lg border border-zinc-800 bg-[#0d1117]">
-        <div className="border-b border-zinc-800 px-4 py-3">
-          <h2 className="text-sm font-semibold text-white">Recent Setup Trades</h2>
+      {/* How it has done */}
+      <section className="rounded-xl border border-white/[0.08] bg-[#101114]">
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <h2 className="text-base font-semibold text-white">Results</h2>
+          <div className="flex gap-1">
+            {WINDOWS.map((w) => (
+              <button
+                key={w.key}
+                onClick={() => setWin(w.key)}
+                className={cn(
+                  'rounded-md px-2.5 py-1.5 text-xs font-medium',
+                  win === w.key ? 'bg-white/10 text-white' : 'text-zinc-500 hover:text-zinc-300',
+                )}
+              >
+                {w.label}
+              </button>
+            ))}
+          </div>
         </div>
-        {recentClosedTrades.length === 0 ? (
-          <div className="p-6 text-sm text-zinc-500">No closed trades in this window.</div>
+
+        {all.total === 0 ? (
+          <p className="border-t border-white/[0.06] p-6 text-center text-sm text-zinc-500">No closed trades in this period.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[920px] text-left text-sm">
-              <thead className="bg-zinc-900/70 text-[10px] uppercase tracking-wider text-zinc-500">
-                <tr>
-                  <th className="px-4 py-3">Time</th>
-                  <th className="px-4 py-3">Pair</th>
-                  <th className="px-4 py-3">Setup</th>
-                  <th className="px-4 py-3 text-right">Net</th>
-                  <th className="px-4 py-3 text-right">P&L %</th>
-                  <th className="px-4 py-3 text-right">Peak</th>
-                  <th className="px-4 py-3 text-right">Capture</th>
-                  <th className="px-4 py-3 text-right">Hold</th>
-                  <th className="px-4 py-3">Exit</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentClosedTrades.slice(0, 80).map((trade) => {
-                  const capture = capturePct(trade);
-                  return (
-                    <tr key={trade.id} className="border-t border-zinc-900 text-zinc-300">
-                      <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-zinc-500">{formatDate(trade.timestamp)}</td>
-                      <td className="whitespace-nowrap px-4 py-3 font-semibold text-zinc-100">{shortPair(trade.pair)}</td>
-                      <td className="whitespace-nowrap px-4 py-3"><SetupChip setup={canonicalSetup(trade.setup_type)} /></td>
-                      <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', getPnLColor(trade.pnl))}>{formatPnL(trade.pnl)}</td>
-                      <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', getPnLColor(trade.pnl_pct ?? 0))}>{pct(trade.pnl_pct)}</td>
-                      <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-emerald-300">{pct(trade.peak_pnl)}</td>
-                      <td className={cn('whitespace-nowrap px-4 py-3 text-right font-mono', capture != null && capture >= 50 ? 'text-emerald-300' : 'text-amber-300')}>
-                        {capture == null ? '-' : `${capture.toFixed(0)}%`}
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-400">{formatDuration(holdSeconds(trade))}</td>
-                      <td className="whitespace-nowrap px-4 py-3 text-xs text-zinc-400">{trade.exit_reason || 'Unknown'}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <div className="grid grid-cols-2 gap-px border-y border-white/[0.08] bg-white/[0.08] sm:grid-cols-4">
+              <Stat label="Net result" value={formatPnL(all.net)} tone={getPnLColor(all.net)} sub={`after $${all.fees.toFixed(2)} fees`} />
+              <Stat label="Trades" value={String(all.total)} sub={`${all.wins} won · ${all.losses} lost`} />
+              <Stat label="Win rate" value={`${all.winRate.toFixed(0)}%`} sub="of trades that moved" />
+              <Stat label="Typical hold" value={formatDuration(all.hold)} sub="per trade" />
+            </div>
+
+            <div className="grid grid-cols-2 gap-px border-b border-white/[0.08] bg-white/[0.08]">
+              <Stat label="▲ Longs" value={formatPnL(longs.net)} tone={getPnLColor(longs.net)} sub={`${longs.wins} won · ${longs.losses} lost`} />
+              <Stat label="▼ Shorts" value={formatPnL(shorts.net)} tone={getPnLColor(shorts.net)} sub={`${shorts.wins} won · ${shorts.losses} lost`} />
+            </div>
+
+            <div className="p-4">
+              <h3 className="text-xs text-zinc-500">By coin</h3>
+              <ul className="mt-2 space-y-2.5">
+                {byCoin.map((c) => (
+                  <li key={c.coin} className="grid grid-cols-[3.5rem_1fr_auto] items-center gap-3 text-sm">
+                    <span className="font-semibold text-white">{c.coin}</span>
+                    <div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+                        <div
+                          className={cn('h-full rounded-full', c.net >= 0 ? 'bg-emerald-400' : 'bg-red-400')}
+                          style={{ width: `${Math.max(3, (Math.abs(c.net) / maxAbs) * 100)}%` }}
+                        />
+                      </div>
+                      <p className="mt-1 text-[11px] text-zinc-500">{c.wins} won · {c.losses} lost</p>
+                    </div>
+                    <span className={cn('font-mono text-sm tabular-nums', getPnLColor(c.net))}>{formatPnL(c.net)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </>
         )}
+
+        <Link href="/trades" className="flex items-center justify-between border-t border-white/[0.06] px-4 py-3 text-sm text-zinc-400 hover:text-white">
+          See every trade <ArrowRight className="h-4 w-4" />
+        </Link>
       </section>
     </div>
   );
 }
 
-function Metric({
-  label,
-  value,
-  color = 'text-zinc-100',
-}: {
-  label: string;
-  value: string;
-  color?: string;
-}) {
+function Stat({ label, value, sub, tone = 'text-white' }: { label: string; value: string; sub?: string; tone?: string }) {
   return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
-      <div className={cn('mt-1 font-mono text-sm font-semibold', color)}>{value}</div>
-    </div>
-  );
-}
-
-function Mini({
-  label,
-  value,
-  color = 'text-zinc-300',
-}: {
-  label: string;
-  value: string;
-  color?: string;
-}) {
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-zinc-600">{label}</div>
-      <div className={cn('mt-0.5 truncate font-mono text-xs', color)}>{value}</div>
+    <div className="bg-[#101114] p-4">
+      <p className="text-xs text-zinc-500">{label}</p>
+      <p className={cn('mt-1 font-mono text-xl font-semibold tabular-nums', tone)}>{value}</p>
+      {sub && <p className="mt-0.5 text-[11px] text-zinc-500">{sub}</p>}
     </div>
   );
 }
