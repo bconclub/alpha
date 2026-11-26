@@ -16,23 +16,23 @@ interface SidebarContextValue {
 }
 
 const SidebarContext = createContext<SidebarContextValue>({
-  collapsed: true,
+  collapsed: false,
   setCollapsed: () => {},
   toggle: () => {},
 });
 
 export function SidebarProvider({ children }: { children: ReactNode }) {
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
 
   // Restore from localStorage on mount
   useEffect(() => {
-    const saved = localStorage.getItem('alpha-sidebar-collapsed');
+    const saved = localStorage.getItem('alpha-sidebar-collapsed-v2');
     if (saved !== null) setCollapsed(saved === 'true');
   }, []);
 
   // Persist to localStorage on change
   useEffect(() => {
-    localStorage.setItem('alpha-sidebar-collapsed', String(collapsed));
+    localStorage.setItem('alpha-sidebar-collapsed-v2', String(collapsed));
   }, [collapsed]);
 
   const toggle = useCallback(() => setCollapsed((c) => !c), []);

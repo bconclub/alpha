@@ -403,19 +403,23 @@ class AutonomousTrader:
                     )
                 except Exception:
                     pass
-        can_enter = not (self._killed or self.user_paused)
-        if can_enter and self._daily_realized <= self.DAILY_LOSS_STOP:
-            can_enter = False
+        block: str | None = None
+        if self._killed:
+            block = f"kill switch latched (balance fell under ${self.KILL_BALANCE:.2f})"
+        elif self.user_paused:
+            block = "paused from the dashboard"
+        elif self._daily_realized <= self.DAILY_LOSS_STOP:
+            block = f"daily loss stop hit (${self._daily_realized:+.2f} today)"
         bal: float | None = None
-        if can_enter:
+        if block is None:
             try:
                 bal = await self.balance_fn()
             except Exception:
                 bal = None
             if bal is None:
-                can_enter = False
+                block = "could not read the exchange balance"
             elif bal < self.KILL_BALANCE:
-                can_enter = False
+                block = f"balance ${bal:.2f} under the ${self.KILL_BALANCE:.2f} kill line"
                 if not self._killed:
                     self._killed = True
                     logger.error("KILL SWITCH: balance $%.2f < $%.2f — standing down", bal, self.KILL_BALANCE)
@@ -427,23 +431,47 @@ class AutonomousTrader:
                         )
                     except Exception:
                         pass
+        can_enter = block is None
 
         # 4. open new trades on the best fresh signals (1 per asset, MAX_OPEN cap)
-        if can_enter:
-            for pair in self.pairs:
-                if len(self._positions) >= self.MAX_OPEN:
-                    break
-                if pair in self._positions:
-                    continue
-                if pair.split("/")[0] not in self.TRADE_BASES:
-                    continue   # watch-only asset — scanned but not traded
-                res = results.get(pair)
-                best = res.get("best") if res else None
-                if best:
-                    await self._open(best)
+        for pair in self.pairs:
+            if pair in self._positions:
+                continue
+            if pair.split("/")[0] not in self.TRADE_BASES:
+                continue   # watch-only asset — scanned but not traded
+            res = results.get(pair)
+            best = res.get("best") if res else None
+            if not best:
+                continue
+            if not can_enter:
+                await self._note_skip(best, block or "entries blocked")
+            elif len(self._positions) >= self.MAX_OPEN:
+                await self._note_skip(best, f"already holding the maximum {self.MAX_OPEN} trades")
+            else:
+                await self._open(best)
 
         # 5. publish the scanner board for the dashboard
         await self._publish_signals(results)
+
+    # ── missed-entry audit trail ─────────────────────────────────────────
+    async def _note_skip(self, sig: dict[str, Any], why: str) -> None:
+        """Record a signal that fired but did not become a trade.
+
+        A signal key is consumed the moment it fires, so a blocked or failed
+        entry used to vanish with only a VPS log line. Writing it to
+        activity_log puts the reason on the dashboard. Never raises.
+        """
+        pair = str(sig.get("pair") or "?")
+        direction = str(sig.get("direction") or "?")
+        logger.warning("MISSED ENTRY %s %s — %s", pair, direction, why)
+        try:
+            await self.db.log_activity(
+                "live_skip", pair,
+                f"{pair.split('/')[0]} {direction} signal not taken: {why}",
+                metadata={"direction": direction, "reason": why, "signal_key": sig.get("signal_key")},
+            )
+        except Exception:
+            logger.exception("could not record missed entry %s", pair)
 
     # ── confidence → leverage with liquidation safety guard ─────────────
     def _leverage_for(self, conf: float, price: float, atr: float) -> float:
@@ -464,18 +492,22 @@ class AutonomousTrader:
         base = pair.split("/")[0]
         csize = self._csize(pair)
         if not csize:
+            await self._note_skip(sig, "contract size unknown for this market")
             return
         direction = str(sig["direction"])
         conf = float(sig.get("confidence") or 0)
         atr = float(sig.get("atr") or 0)
         if atr <= 0:
+            await self._note_skip(sig, "ATR unavailable, cannot place a stop")
             return
         try:
             ticker = await self.exchange.fetch_ticker(pair)
             price = float(ticker.get("last") or 0)
-        except Exception:
+        except Exception as exc:
+            await self._note_skip(sig, f"price fetch failed: {str(exc)[:160]}")
             return
         if price <= 0:
+            await self._note_skip(sig, "exchange returned no price")
             return
 
         lev = self._leverage_for(conf, price, atr)
@@ -484,7 +516,7 @@ class AutonomousTrader:
         if contracts < 1:
             margin_one = price * csize / lev
             if margin_one > self.MARGIN_HARD_CAP:
-                logger.info("Skip %s — 1 contract needs $%.2f margin (> cap $%.2f)", pair, margin_one, self.MARGIN_HARD_CAP)
+                await self._note_skip(sig, f"1 contract needs ${margin_one:.2f} margin, over the ${self.MARGIN_HARD_CAP:.2f} cap")
                 return
             contracts = 1.0
         margin = contracts * price * csize / lev
@@ -496,8 +528,9 @@ class AutonomousTrader:
             except Exception:
                 pass  # already set / not required
             order = await self.exchange.create_order(pair, "market", "buy" if long else "sell", contracts)
-        except Exception:
+        except Exception as exc:
             logger.exception("LIVE order failed %s %s x%.0f", pair, direction, contracts)
+            await self._note_skip(sig, f"exchange rejected the order ({contracts:.0f} ct, ${margin:.2f} margin): {str(exc)[:200]}")
             return
         fill = float(order.get("average") or order.get("price") or price)
         stop = fill - self.STOP_ATR_MULT * atr if long else fill + self.STOP_ATR_MULT * atr
