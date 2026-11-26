@@ -9,8 +9,6 @@ import { computePnLStats, istTodayStartMs } from '@/lib/pnl-utils';
 
 // Heartbeat older than this = the engine is not reporting in.
 const STALE_SEC = 5 * 60;
-// No trade for this long while funded = worth a visible nudge.
-const QUIET_DAYS = 3;
 
 type Health = 'live' | 'paused' | 'stale' | 'offline';
 
@@ -92,7 +90,6 @@ export function StatusHero() {
 
   const lastTrade = closed[0];
   const lastTradeMs = lastTrade ? new Date(lastTrade.closed_at || lastTrade.timestamp).getTime() : null;
-  const quietDays = lastTradeMs ? (now - lastTradeMs) / 86_400_000 : null;
 
   // ── Missed entries: the engine logs every fired signal it could not take ──
   const missed = useMemo(() => {
@@ -135,8 +132,6 @@ export function StatusHero() {
     : next?.firing ? `${next.asset} breakout firing now.`
     : `Watching ${tradeableCount || 'the'} markets for a breakout.`;
 
-  const showQuietWarning =
-    health === 'live' && openCount === 0 && quietDays != null && quietDays >= QUIET_DAYS && balance >= 3;
   const showLowBalance = health === 'live' && balance > 0 && balance < 3;
 
   return (
@@ -165,13 +160,11 @@ export function StatusHero() {
           </div>
         )}
 
-        {!missed && (showQuietWarning || showLowBalance) && (
+        {!missed && showLowBalance && (
           <div className="mt-3 flex items-start gap-2.5 rounded-lg border-l-2 border-amber-400 bg-amber-400/[0.06] px-3 py-2 text-[13px] leading-snug text-amber-200">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
-              {showLowBalance
-                ? `Balance ${formatCurrency(balance)} is below the ~$3 needed per trade. Entries will fail until you top up.`
-                : `No trade in ${Math.floor(quietDays!)} days even though the account is funded. If breakouts have come and gone, check the engine logs.`}
+              {`Balance ${formatCurrency(balance)} is below the ~$3 needed per trade. Entries will fail until you top up.`}
             </span>
           </div>
         )}
