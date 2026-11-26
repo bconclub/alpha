@@ -65,7 +65,8 @@ function flatten(signals: LiveSignal[]): Row[] {
       });
     }
   }
-  rows.sort((a, b) => (Number(b.firing) - Number(a.firing)) || (b.readiness - a.readiness));
+  // tradeable assets first: a watch-only coin must never sit in the "next to fire" slot
+  rows.sort((a, b) => (Number(b.firing) - Number(a.firing)) || (Number(b.tradeable) - Number(a.tradeable)) || (b.readiness - a.readiness));
   return rows;
 }
 
@@ -122,7 +123,7 @@ function SignalRow({ r, rank }: { r: Row; rank: number }) {
           <span className={cn('text-[10px] font-bold', long ? 'text-emerald-400' : r.side === 'SHORT' ? 'text-red-400' : 'text-zinc-500')}>
             {arrow} {r.side}
           </span>
-          {!r.tradeable && <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-400">watch</span>}
+          {!r.tradeable && <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-400">watch only</span>}
           {r.tradeable && top && !r.firing && <span className="rounded bg-white/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-zinc-300">next to fire</span>}
           {r.firing && <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">FIRING</span>}
           {r.inPos && <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold text-violet-300">IN TRADE</span>}
@@ -158,7 +159,7 @@ export function StrategyScanner() {
   return (
     <div className="flex h-full flex-col rounded-2xl border border-white/10 bg-white/[0.04] p-4 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-base font-bold text-white">Scanner</h2>
+        <div><h2 className="text-base font-semibold text-white">What the bot is watching</h2><p className="mt-0.5 text-[11px] text-zinc-500">Bar fills as price nears a breakout. 100% = it enters.</p></div>
         <span className="text-[11px] text-zinc-500">{assetCount} assets · top {TOP_N}</span>
       </div>
 

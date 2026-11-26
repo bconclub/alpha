@@ -228,7 +228,6 @@ export function Sidebar() {
                 key={item.href}
                 href={item.href}
                 title={collapsed ? item.name : undefined}
-                onClick={() => { if (!collapsed) toggle(); }}
                 className={cn(
                   'flex items-center rounded-lg text-sm font-medium transition-all duration-150',
                   collapsed
