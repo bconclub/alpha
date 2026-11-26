@@ -1,5 +1,6 @@
 'use client';
 
+import { tradeStory } from '@/lib/tradeStory';
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import type { Trade, Strategy, Exchange, PositionType, OptionsState } from '@/lib/types';
 import {
@@ -8,6 +9,7 @@ import {
   formatPnL,
   formatPercentage,
   formatDate,
+  formatShortDate,
   formatDuration,
   cn,
   getPnLColor,
@@ -1028,139 +1030,94 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     </div>
                   )}
                   <div className={cn(
-                    'border rounded-lg p-3',
+                    'rounded-xl border p-3.5',
                     trade.status === 'open'
-                      ? 'bg-zinc-900/60 border-zinc-700'
-                      : 'bg-zinc-900/40 border-zinc-800/50',
+                      ? 'bg-[#101114] border-amber-400/30'
+                      : 'bg-[#101114] border-white/[0.08]',
                   )}>
-                    {/* Top row: Pair + Type + P&L */}
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono text-zinc-500">
-                          #{typeof trade.id === 'string' && trade.id.length > 6
-                            ? trade.id.slice(-6)
-                            : trade.id}
-                        </span>
-                        <span className="text-sm font-semibold text-white">
-                          {isOptionTrade(trade) ? displayOptionPair(trade.pair) : displayPair(trade.pair)}
-                        </span>
-                        <span className={cn('text-[10px] font-medium', getPositionTypeColor(trade.position_type))}>
-                          {isOptionTrade(trade) ? 'OPT' : getPositionTypeLabel(trade.position_type)}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-right">
-                          <span
-                            className={cn(
-                              'text-sm font-mono font-semibold',
-                              getPnLColor(display.pnl),
+                    {(() => {
+                      const opt = isOptionTrade(trade);
+                      const short = trade.position_type === 'short';
+                      const exitReason = trade.status !== 'open' ? getExitReason(trade) : null;
+                      const story = trade.status === 'closed'
+                        ? tradeStory({ ...trade, isOption: opt }, exitReason)
+                        : null;
+                      const moneyIn = getMoneyIn(trade);
+                      const fees = (trade.entry_fee ?? 0) + (trade.exit_fee ?? 0);
+                      const tone = display.pnl > 0 ? 'text-emerald-400' : display.pnl < 0 ? 'text-red-400' : 'text-zinc-300';
+                      return (
+                        <>
+                          {/* 1. What and how it ended */}
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex min-w-0 items-center gap-2.5">
+                              <span className={cn(
+                                'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-base',
+                                opt ? 'bg-zinc-700/40 text-zinc-300' : short ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400',
+                              )}>
+                                {opt ? '◆' : short ? '▼' : '▲'}
+                              </span>
+                              <div className="min-w-0">
+                                <p className="truncate text-[15px] font-semibold text-white">
+                                  {opt ? displayOptionPair(trade.pair) : extractBaseAsset(trade.pair)}
+                                  <span className="ml-1.5 text-xs font-medium text-zinc-400">
+                                    {opt ? 'option' : short ? 'short · bet on a fall' : 'long · bet on a rise'}
+                                  </span>
+                                </p>
+                                <p className="text-xs text-zinc-500">{formatShortDate(trade.timestamp)}</p>
+                              </div>
+                            </div>
+                            <div className="shrink-0 text-right">
+                              <p className={cn('font-mono text-base font-semibold tabular-nums', tone)}>
+                                {formatPnL(display.pnl)}
+                              </p>
+                              <p className="font-mono text-[11px] tabular-nums text-zinc-500">
+                                {display.pnlPct != null
+                                  ? (opt && display.pnlPct < -100 ? '-100%' : formatPercentage(display.pnlPct))
+                                  : ''}
+                                {display.isUnrealized ? ' live' : ''}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* 2. Entry to exit */}
+                          <div className="mt-3 flex items-center gap-2 rounded-lg bg-black/25 px-3 py-2 font-mono text-xs tabular-nums">
+                            <span className="text-zinc-500">in</span>
+                            <span className="text-zinc-200">{formatPrice(trade.price)}</span>
+                            <span className="h-px flex-1 bg-zinc-700" />
+                            {trade.exit_price != null ? (
+                              <>
+                                {story?.move && story.moveHelped != null && (
+                                  <span className={story.moveHelped ? 'text-emerald-400' : 'text-red-400'}>
+                                    {trade.exit_price > trade.price ? '↑' : '↓'}
+                                  </span>
+                                )}
+                                <span className="h-px flex-1 bg-zinc-700" />
+                                <span className="text-zinc-500">out</span>
+                                <span className="text-zinc-200">{formatPrice(trade.exit_price)}</span>
+                              </>
+                            ) : (
+                              <span className="text-amber-300">still open</span>
                             )}
-                          >
-                            {formatPnL(display.pnl)}
-                          </span>
-                          {display.isUnrealized && (
-                            <span className="text-[9px] text-zinc-500 ml-1">live</span>
-                          )}
-                          {trade.status === 'closed' && (display.grossPnl != null || trade.gross_pnl != null) && (
-                            <div className="text-[10px] text-zinc-500 font-mono">
-                              gross {formatPnL(display.grossPnl ?? trade.gross_pnl ?? 0)} · fees -${((trade.entry_fee ?? 0) + (trade.exit_fee ?? 0)).toFixed(4)}
+                          </div>
+
+                          {/* 3. What happened, in words */}
+                          {story && (
+                            <div className="mt-2.5 space-y-1 text-[13px] leading-snug text-zinc-300">
+                              <p>
+                                {story.move && (
+                                  <span className={story.moveHelped == null ? '' : story.moveHelped ? 'text-emerald-300' : 'text-red-300'}>
+                                    {story.move}{story.moveHelped == null ? '' : story.moveHelped ? ', the right way' : ', the wrong way'}.{' '}
+                                  </span>
+                                )}
+                                {story.why}
+                              </p>
+                              {story.regret && <p className="text-amber-300/90">{story.regret}</p>}
                             </div>
                           )}
-                        </div>
-                        {trade.status === 'open' && (
-                          <button
-                            onClick={() => handleClose(String(trade.id), trade.pair)}
-                            disabled={closingIds.has(String(trade.id))}
-                            className={cn(
-                              'px-2 py-1 rounded text-[10px] font-semibold',
-                              closingIds.has(String(trade.id))
-                                ? 'bg-zinc-700/50 text-zinc-500 cursor-wait'
-                                : 'bg-[#ff1744]/10 text-[#ff1744] active:bg-[#ff1744]/20',
-                            )}
-                          >
-                            {closingIds.has(String(trade.id)) ? 'Closing...' : 'Close'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    {/* Prices row */}
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mb-1">
-                      <span className="text-zinc-400">
-                        Entry: <span className="font-mono text-zinc-300">
-                          {isOptionTrade(trade) ? formatPrice(trade.price) : formatPrice(trade.price)}
-                        </span>
-                      </span>
-                      {trade.exit_price != null && (
-                        <span className="text-zinc-400">
-                          Exit: <span className="font-mono text-zinc-300">
-                            {isOptionTrade(trade) ? formatPrice(trade.exit_price) : formatPrice(trade.exit_price)}
-                          </span>
-                        </span>
-                      )}
-                      {trade.exchange === 'delta' && (
-                        <span className="text-zinc-500 font-mono">
-                          {trade.contracts ?? trade.amount} {isOptionTrade(trade) ? 'opt' : 'contracts'}
-                        </span>
-                      )}
-                    </div>
-                    {/* Details row */}
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
-                      <span>{formatDate(trade.timestamp)}</span>
-                      <span className={cn('inline-flex rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset', getMarketInfo(trade).cls)}>
-                        {getMarketInfo(trade).label}
-                      </span>
-                      <span className={cn(
-                        'inline-flex rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset',
-                        isManualTrade(trade)
-                          ? 'bg-violet-500/15 text-violet-300 ring-violet-500/30'
-                          : 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
-                      )}>
-                        {isManualTrade(trade) ? 'Manual' : 'Alpha'}
-                      </span>
-                      {inferSetupType(trade) && (
-                        <SetupChip setup={inferSetupType(trade)} secondEntry={isSecondEntryTrade(trade)} />
-                      )}
-                      {trade.leverage > 1 && (
-                        <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
-                      )}
-                      {(() => {
-                        const m = getMoneyIn(trade);
-                        return m != null ? <span className="font-mono text-amber-300">${m.toFixed(2)} in</span> : null;
-                      })()}
-                      {display.pnlPct != null && (
-                        <span className={cn('font-mono', getPnLColor(display.pnlPct))}>
-                          {isOptionTrade(trade) && display.pnlPct < -100
-                            ? '-100% (liq)'
-                            : formatPercentage(display.pnlPct)}
-                          {display.isUnrealized ? ' (unr)' : ''}
-                        </span>
-                      )}
-                      <span className={cn('font-mono font-semibold', getRiskRewardColor(getRiskRewardRatio(trade)))}>
-                        R:R {getRiskRewardRatio(trade)}
-                      </span>
-                      {trade.peak_pnl != null && trade.status === 'closed' && (() => {
-                        const taken = display.pnlPct ?? 0;
-                        const peak = trade.peak_pnl;
-                        const capture = peak > 0 ? Math.round((taken / peak) * 100) : null;
-                        return (
-                          <span className="font-mono text-zinc-400">
-                            <span className="text-emerald-400">
-                              pk {peak >= 0 ? '+' : ''}{peak.toFixed(2)}%
-                            </span>
-                            {capture != null && (
-                              <span className={cn(
-                                'ml-1',
-                                capture >= 80 ? 'text-emerald-400' :
-                                capture >= 50 ? 'text-yellow-400' :
-                                capture >= 0 ? 'text-orange-400' : 'text-red-400'
-                              )}>
-                                ({capture}%)
-                              </span>
-                            )}
-                          </span>
-                        );
-                      })()}
-                      <HoldTimeCell trade={trade} now={now} />
+
+                          {/* Open trade: live state + close */}
+                          {trade.status === 'open' && (
+                            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
                       {trade.status === 'open' && (() => {
                         const asset = extractBaseAsset(trade.pair);
                         // Priority: live API (3s) → bot DB price (~10s) → strategy_log (~5min)
@@ -1189,11 +1146,69 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           </>
                         );
                       })()}
-                      {trade.status !== 'open' && (() => {
-                        const reason = getExitReason(trade);
-                        return reason ? <ExitChip exit={reason} /> : null;
-                      })()}
-                    </div>
+                              <button
+                                onClick={() => handleClose(String(trade.id), trade.pair)}
+                                disabled={closingIds.has(String(trade.id))}
+                                className={cn(
+                                  'ml-auto rounded-lg px-3 py-1.5 text-xs font-semibold',
+                                  closingIds.has(String(trade.id))
+                                    ? 'bg-zinc-700/50 text-zinc-500 cursor-wait'
+                                    : 'bg-[#ff1744]/10 text-[#ff1744] active:bg-[#ff1744]/20',
+                                )}
+                              >
+                                {closingIds.has(String(trade.id)) ? 'Closing...' : 'Close now'}
+                              </button>
+                            </div>
+                          )}
+
+                          {/* 4. The few numbers that matter */}
+                          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+                            <span className="inline-flex items-center gap-1">held <HoldTimeCell trade={trade} now={now} /></span>
+                            {moneyIn != null && <span>${moneyIn.toFixed(2)} put in</span>}
+                            {trade.leverage > 1 && <span>{formatLeverage(trade.leverage)}</span>}
+                            {exitReason && <span className="ml-auto"><ExitChip exit={exitReason} /></span>}
+                          </div>
+
+                          {/* 5. Everything else, on demand */}
+                          <details className="group mt-2">
+                            <summary className="cursor-pointer list-none text-xs text-zinc-500 marker:hidden [&::-webkit-details-marker]:hidden">
+                              <span className="group-open:hidden">More details</span>
+                              <span className="hidden group-open:inline">Hide details</span>
+                            </summary>
+                            <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5 border-t border-zinc-800 pt-2 text-xs">
+                              <dt className="text-zinc-500">Trade</dt>
+                              <dd className="text-right font-mono text-zinc-300">#{String(trade.id).slice(-6)}</dd>
+                              <dt className="text-zinc-500">Opened</dt>
+                              <dd className="text-right font-mono text-zinc-300">{formatDate(trade.timestamp)}</dd>
+                              <dt className="text-zinc-500">Size</dt>
+                              <dd className="text-right font-mono text-zinc-300">{trade.contracts ?? trade.amount} {opt ? 'opt' : 'contracts'}</dd>
+                              {trade.status === 'closed' && (
+                                <>
+                                  <dt className="text-zinc-500">Before fees</dt>
+                                  <dd className="text-right font-mono text-zinc-300">{formatPnL(display.grossPnl ?? trade.gross_pnl ?? trade.pnl)}</dd>
+                                  <dt className="text-zinc-500">Fees</dt>
+                                  <dd className="text-right font-mono text-zinc-300">-${fees.toFixed(4)}</dd>
+                                </>
+                              )}
+                              {trade.peak_pnl != null && trade.status === 'closed' && (
+                                <>
+                                  <dt className="text-zinc-500">Best point reached</dt>
+                                  <dd className="text-right font-mono text-zinc-300">{trade.peak_pnl >= 0 ? '+' : ''}{trade.peak_pnl.toFixed(2)}%</dd>
+                                </>
+                              )}
+                              <dt className="text-zinc-500">Setup</dt>
+                              <dd className="flex justify-end">
+                                {inferSetupType(trade)
+                                  ? <SetupChip setup={inferSetupType(trade)} secondEntry={isSecondEntryTrade(trade)} />
+                                  : <span className="text-zinc-600">n/a</span>}
+                              </dd>
+                              <dt className="text-zinc-500">Placed by</dt>
+                              <dd className="text-right text-zinc-300">{isManualTrade(trade) ? 'You' : 'Alpha'} · {getMarketInfo(trade).label}</dd>
+                            </dl>
+                          </details>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
               );
