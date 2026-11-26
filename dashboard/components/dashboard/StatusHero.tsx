@@ -48,7 +48,7 @@ function Tile({
 }
 
 export function StatusHero() {
-  const { botStatus, isConnected, trades, openPositions, liveSignals } = useSupabase();
+  const { botStatus, isConnected, trades, openPositions, liveSignals, activityFeed } = useSupabase();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 5000);
@@ -95,6 +95,16 @@ export function StatusHero() {
   const lastTrade = closed[0];
   const lastTradeMs = lastTrade ? new Date(lastTrade.closed_at || lastTrade.timestamp).getTime() : null;
   const quietDays = lastTradeMs ? (now - lastTradeMs) / 86_400_000 : null;
+
+  // ── Missed entries: the engine logs every fired signal it could not take ──
+  const missed = useMemo(() => {
+    const m = (activityFeed ?? []).find((e) => e.description?.includes('signal not taken'));
+    if (!m) return null;
+    const ts = new Date(m.timestamp).getTime();
+    if (now - ts > 7 * 86_400_000) return null;
+    if (lastTradeMs && ts < lastTradeMs) return null;   // a trade has landed since
+    return { text: m.description, ts };
+  }, [activityFeed, lastTradeMs, now]);
 
   // ── What happens next: closest tradeable setup ──────────────────────
   const next = useMemo(() => {
@@ -150,12 +160,19 @@ export function StatusHero() {
               {lastSeenMs ? `last check ${ago(now - lastSeenMs)}` : isConnected ? 'waiting for data' : 'no connection'}
             </span>
           </div>
-          <span className="text-[11px] uppercase tracking-[0.16em] text-zinc-600">Delta · live money</span>
+          <span className="hidden text-[11px] uppercase tracking-[0.16em] text-zinc-600 sm:inline">Delta · live money</span>
         </div>
 
         <h1 className="mt-4 text-xl font-semibold tracking-tight text-white sm:text-2xl">{headline}</h1>
 
-        {(showQuietWarning || showLowBalance) && (
+        {missed && (
+          <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-red-400/25 bg-red-400/[0.07] px-3.5 py-2.5 text-[13px] leading-snug text-red-200">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span><span className="font-semibold">Missed trade · {ago(now - missed.ts)}.</span> {missed.text}</span>
+          </div>
+        )}
+
+        {!missed && (showQuietWarning || showLowBalance) && (
           <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] px-3.5 py-2.5 text-[13px] leading-snug text-amber-200">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>

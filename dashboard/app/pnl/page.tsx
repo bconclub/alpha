@@ -303,7 +303,7 @@ export default function PnLPage() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
                 <div className="text-xs text-gray-500 mb-1">Best Trade</div>
-                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.bestTrade)}</div>
+                <div className="text-sm font-mono text-green-400">{formatPnL(stats.bestTrade)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Worst Trade</div>
@@ -311,11 +311,11 @@ export default function PnLPage() {
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Avg Winner</div>
-                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner)}</div>
+                <div className="text-sm font-mono text-green-400">{formatPnL(stats.avgWinner)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Avg Loser</div>
-                <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser)}</div>
+                <div className="text-sm font-mono text-red-400">{formatPnL(-Math.abs(stats.avgLoser))}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Profit Factor</div>
@@ -337,11 +337,11 @@ export default function PnLPage() {
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Win Amount</div>
-                <div className="text-sm font-mono text-green-400">+{formatPnL(stats.avgWinner * stats.wins)}</div>
+                <div className="text-sm font-mono text-green-400">{formatPnL(stats.avgWinner * stats.wins)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Loss Amount</div>
-                <div className="text-sm font-mono text-red-400">-{formatPnL(stats.avgLoser * stats.losses)}</div>
+                <div className="text-sm font-mono text-red-400">{formatPnL(-Math.abs(stats.avgLoser * stats.losses))}</div>
               </div>
             </div>
           </div>
