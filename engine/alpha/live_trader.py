@@ -71,6 +71,7 @@ class Position:
     pending_row: dict[str, Any] | None = None
     peak_price: float = 0.0
     peak_pnl_pct: float = 0.0
+    low_pnl_pct: float = 0.0          # worst point reached (most negative P&L %), display only
     be_locked: bool = False
     opened_mono: float = 0.0
     is_manual: bool = False
@@ -342,6 +343,7 @@ class AutonomousTrader:
                 row_id=int(r["id"]),
                 peak_price=float(meta.get("peak_price") or entry),
                 peak_pnl_pct=float(r.get("peak_pnl") or 0),
+                low_pnl_pct=float(meta.get("low_pnl") or 0),
                 be_locked=bool(meta.get("be_locked")),
                 opened_mono=opened_mono,
                 is_manual=bool(meta.get("manual")),
@@ -778,6 +780,7 @@ class AutonomousTrader:
         pnl_usd = (price - pos.entry) * pos.contracts * pos.csize * (1 if long else -1)
         pnl_pct = (pnl_usd / pos.margin * 100.0) if pos.margin > 0 else 0.0
         pos.peak_pnl_pct = max(pos.peak_pnl_pct, pnl_pct)
+        pos.low_pnl_pct = min(pos.low_pnl_pct, pnl_pct)
         pos.peak_price = max(pos.peak_price, price) if long else min(pos.peak_price, price)
         age = asyncio.get_running_loop().time() - pos.opened_mono
 
@@ -894,6 +897,7 @@ class AutonomousTrader:
                         "atr": atr,
                         "contract_size": pos.csize,
                         "peak_price": pos.peak_price,
+                        "low_pnl": round(pos.low_pnl_pct, 4),
                         "be_locked": pos.be_locked,
                         "liq_price": round(pos.liq, 4) if pos.liq else None,
                         # preserve entry context so it isn't wiped each tick (was the
