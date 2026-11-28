@@ -1178,7 +1178,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           {/* 4. How it ended */}
                           {(exitReason || peakPrice != null) && (
                             <div className="mt-2.5 flex items-center justify-between gap-2 text-xs text-zinc-500">
-                              <span className="font-mono tabular-nums">{peakPrice != null ? `best price ${formatPrice(peakPrice)}` : ''}</span>
+                              <span className="font-mono tabular-nums">
+                                {typeof meta.banked_gross === 'number' && Number(meta.scaled ?? 0) > 0 && (meta.banked_gross as number) !== 0
+                                  ? <span className="text-emerald-400">banked {formatPnL((meta.banked_gross as number) - Number(meta.banked_fees ?? 0))} on the way</span>
+                                  : peakPrice != null ? `best price ${formatPrice(peakPrice)}` : ''}
+                              </span>
                               {exitReason && <ExitChip exit={exitReason} />}
                             </div>
                           )}
