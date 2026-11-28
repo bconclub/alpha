@@ -13,7 +13,7 @@ import type { Trade } from '@/lib/types';
 const RULES: { label: string; value: string }[] = [
   { label: 'Gets in', value: 'When a 2-hour candle closes above the highest high, or below the lowest low, of the last 20 candles. Up = long, down = short.' },
   { label: 'Stop-loss', value: '2.5 × ATR from entry. Follows price as the trade moves in our favour, never moves back.' },
-  { label: 'Takes profit', value: 'At +25% on the money put in.' },
+  { label: 'Takes profit', value: 'In steps: sells a third at +12%, another third at +25%, and lets the last third ride the trailing stop. A position of one contract cannot be split, so it closes whole at +25%.' },
   { label: 'Safety cap', value: 'Cuts the trade at -26% if price gaps past the stop.' },
   { label: 'Longest hold', value: '72 hours.' },
   { label: 'Size', value: 'About $3 per trade at 10x. Up to 3 trades open at once.' },

@@ -72,6 +72,12 @@ class Position:
     peak_price: float = 0.0
     peak_pnl_pct: float = 0.0
     low_pnl_pct: float = 0.0          # worst point reached (most negative P&L %), display only
+    orig_contracts: float = 0.0       # size at entry (scale-out fractions are of this)
+    orig_margin: float = 0.0          # margin at entry (final P&L % is on this)
+    scaled: int = 0                   # ladder rungs already handled
+    scale_fails: int = 0
+    banked_gross: float = 0.0         # realized by scale-outs so far
+    banked_fees: float = 0.0
     be_locked: bool = False
     opened_mono: float = 0.0
     is_manual: bool = False
@@ -159,6 +165,15 @@ class AutonomousTrader:
     # we take out and get out no matter what." Revisit at the 4-green-weeks gate.
     PROFIT_ARM_PCT = 9999.0
     PROFIT_TAKE_PCT = 25.0
+    # ── Scale-out ladder (11-28, user: "gradually take winnings") ─────────
+    # (profit % on margin, fraction of the ORIGINAL size to sell). The last
+    # piece is never sold here: it rides the trail. A 1-contract position can't
+    # be split, so it keeps the all-out PROFIT_TAKE_PCT exit instead.
+    # 180d sim, 5 coins, $3 sizing: all-out TP25 +$6.19, this ladder on the
+    # splittable coins +$5.78, trail-only +$10.12. Roughly neutral vs TP25,
+    # smaller drawdown; it costs the big runners part of their size.
+    SCALE_OUT_LEVELS = ((12.0, 1 / 3), (25.0, 1 / 3))
+    SCALE_OUT_MAX_FAILS = 3
     # ── pyramid (07-03) ───────────────────────────────────────────────────
     # Press the good entries: once a trade is +6% and still at its highs, ADD one
     # unit ($4 @ 10x). After the add, the stop snaps to combined breakeven+fees so
@@ -338,12 +353,21 @@ class AutonomousTrader:
                 entry=entry,
                 atr=float(meta.get("atr") or 0),
                 stop=float(r.get("stop_loss") or 0),
-                margin=float(r.get("collateral") or self.MARGIN_USD),
+                margin=(
+                    float(meta["orig_margin"]) * float(r.get("contracts") or r.get("amount") or 0) / float(meta["orig_contracts"])
+                    if meta.get("orig_margin") and meta.get("orig_contracts")
+                    else float(r.get("collateral") or self.MARGIN_USD)
+                ),
                 leverage=float(r.get("leverage") or 10.0),
                 row_id=int(r["id"]),
                 peak_price=float(meta.get("peak_price") or entry),
                 peak_pnl_pct=float(r.get("peak_pnl") or 0),
                 low_pnl_pct=float(meta.get("low_pnl") or 0),
+                orig_contracts=float(meta.get("orig_contracts") or r.get("contracts") or r.get("amount") or 0),
+                orig_margin=float(meta.get("orig_margin") or r.get("collateral") or self.MARGIN_USD),
+                scaled=int(meta.get("scaled") or 0),
+                banked_gross=float(meta.get("banked_gross") or 0),
+                banked_fees=float(meta.get("banked_fees") or 0),
                 be_locked=bool(meta.get("be_locked")),
                 opened_mono=opened_mono,
                 is_manual=bool(meta.get("manual")),
@@ -777,6 +801,8 @@ class AutonomousTrader:
         if price <= 0:
             return
         long = pos.is_long
+        if not pos.orig_contracts:
+            pos.orig_contracts, pos.orig_margin = pos.contracts, pos.margin
         pnl_usd = (price - pos.entry) * pos.contracts * pos.csize * (1 if long else -1)
         pnl_pct = (pnl_usd / pos.margin * 100.0) if pos.margin > 0 else 0.0
         pos.peak_pnl_pct = max(pos.peak_pnl_pct, pnl_pct)
@@ -865,7 +891,7 @@ class AutonomousTrader:
                 reason = "trail_stop"
             else:
                 reason = "breakeven_stop" if pos.be_locked else "hard_stop"
-        elif (not pos.is_manual) and pnl_pct >= self.PROFIT_TAKE_PCT:
+        elif (not pos.is_manual) and pnl_pct >= self.PROFIT_TAKE_PCT and not self._can_scale(pos):
             reason = "profit_take"      # hard-bank a big spike (user: harvest the peaks)
         elif (not pos.is_manual) and age >= self.TIME_STOP_SEC and pos.peak_pnl_pct < self.TIME_STOP_MIN_PEAK:
             reason = "time_stop"        # never got going in ~6 min → not our trade
@@ -898,6 +924,11 @@ class AutonomousTrader:
                         "contract_size": pos.csize,
                         "peak_price": pos.peak_price,
                         "low_pnl": round(pos.low_pnl_pct, 4),
+                        "orig_contracts": pos.orig_contracts or pos.contracts,
+                        "orig_margin": round(pos.orig_margin or pos.margin, 4),
+                        "scaled": pos.scaled,
+                        "banked_gross": round(pos.banked_gross, 4),
+                        "banked_fees": round(pos.banked_fees, 4),
                         "be_locked": pos.be_locked,
                         "liq_price": round(pos.liq, 4) if pos.liq else None,
                         # preserve entry context so it isn't wiped each tick (was the
@@ -910,6 +941,86 @@ class AutonomousTrader:
             )
         if reason:
             await self._close(pos, price, reason)
+        elif not pos.is_manual:
+            await self._scale_out(pos, price, pnl_pct)
+
+    # ── scale-out: bank part of a winner, let the rest ride ──────────────
+    def _can_scale(self, pos: Position) -> bool:
+        """True if this position is big enough to be sold in pieces. Such a
+        position never takes the all-out PROFIT_TAKE_PCT exit: the ladder banks
+        the pieces and the last one rides the trail."""
+        return (pos.orig_contracts or pos.contracts) >= 2
+
+    async def _scale_out(self, pos: Position, price: float, pnl_pct: float) -> None:
+        if pos.scaled >= len(self.SCALE_OUT_LEVELS):
+            return
+        level, frac = self.SCALE_OUT_LEVELS[pos.scaled]
+        if pnl_pct < level:
+            return
+        orig = pos.orig_contracts or pos.contracts
+        qty = float(int(round(orig * frac)))
+        if qty < 1 and pos.contracts > 1:
+            qty = 1.0
+        if qty < 1 or pos.contracts - qty < 1:
+            pos.scaled += 1            # nothing sellable at this rung; the last piece rides
+            return
+        long = pos.is_long
+        try:
+            order = await self.exchange.create_order(
+                pos.pair, "market", "sell" if long else "buy", qty,
+                None, {"reduce_only": True},
+            )
+        except Exception:
+            pos.scale_fails += 1
+            logger.exception("scale-out order failed %s (attempt %d)", pos.pair, pos.scale_fails)
+            if pos.scale_fails >= self.SCALE_OUT_MAX_FAILS:
+                pos.scaled += 1
+                pos.scale_fails = 0
+            return
+        pos.scale_fails = 0
+        fill = float(order.get("average") or order.get("price") or price)
+        gross = (fill - pos.entry) * qty * pos.csize * (1 if long else -1)
+        fees = qty * pos.csize * (pos.entry + fill) / 2 * self.TAKER_FEE * 2
+        pos.banked_gross += gross
+        pos.banked_fees += fees
+        self._daily_realized += gross - fees
+        pos.margin *= (pos.contracts - qty) / pos.contracts
+        pos.contracts -= qty
+        pos.scaled += 1
+        if pos.row_id:
+            # collateral/cost stay at the ORIGINAL money in; contracts is what is
+            # still open (reattach + reconciler read it). Remaining margin is
+            # rebuilt from orig_margin * contracts / orig_contracts on reattach.
+            await self.db.update_trade(pos.row_id, {
+                "amount": pos.contracts,
+                "contracts": pos.contracts,
+                "metadata": {
+                    "source": "autonomous", "manual": False, "atr": pos.atr,
+                    "contract_size": pos.csize, "peak_price": pos.peak_price,
+                    "low_pnl": round(pos.low_pnl_pct, 4),
+                    "orig_contracts": pos.orig_contracts,
+                    "orig_margin": round(pos.orig_margin, 4),
+                    "scaled": pos.scaled,
+                    "banked_gross": round(pos.banked_gross, 4),
+                    "banked_fees": round(pos.banked_fees, 4),
+                    "be_locked": pos.be_locked,
+                    "liq_price": round(pos.liq, 4) if pos.liq else None,
+                    "confidence_score": pos.confidence, "htf_trend": pos.htf_trend, "lane": pos.lane,
+                },
+            })
+        logger.warning(
+            "💰 SCALE-OUT id=%s %s sold %.0f of %.0f ct @ %s (+%.1f%%) banked $%+.3f, %.0f ct riding",
+            pos.row_id, pos.pair, qty, orig, fill, pnl_pct, gross - fees, pos.contracts,
+        )
+        try:
+            await self.alerts._send(
+                f"💰 <b>BANKED PART OF A WINNER</b>\n"
+                f"{pos.pair.split('/')[0]} {pos.direction.upper()} sold {int(qty)} of {int(orig)} at +{pnl_pct:.0f}%\n"
+                f"Banked ${gross - fees:+.3f} · {int(pos.contracts)} still riding",
+                allow_in_quiet=True,
+            )
+        except Exception:
+            pass
 
     async def _close(self, pos: Position, ref_price: float, reason: str) -> None:
         long = pos.is_long
@@ -937,12 +1048,19 @@ class AutonomousTrader:
         notional = pos.contracts * pos.csize * (pos.entry + fill) / 2
         fees = notional * self.TAKER_FEE * 2
         net = gross - fees
-        self._daily_realized += net
+        self._daily_realized += net          # scale-outs were added when they happened
+        # the trade's record is the WHOLE trade: what was banked on the way + this last piece
+        gross += pos.banked_gross
+        fees += pos.banked_fees
+        net = gross - fees
+        total_margin = pos.orig_margin or pos.margin
         if pos.row_id:
             await self.db.update_trade(
                 pos.row_id,
                 {
                     "status": "closed",
+                    "amount": pos.orig_contracts or pos.contracts,
+                    "contracts": pos.orig_contracts or pos.contracts,
                     "closed_at": datetime.now(timezone.utc).isoformat(),
                     "exit_price": fill,
                     "current_price": fill,
@@ -951,7 +1069,7 @@ class AutonomousTrader:
                     "exit_fee": round(fees / 2, 4),
                     "net_pnl": round(net, 4),
                     "pnl": round(net, 4),
-                    "pnl_pct": round((net / pos.margin * 100.0) if pos.margin else 0.0, 4),
+                    "pnl_pct": round((net / total_margin * 100.0) if total_margin else 0.0, 4),
                     "exit_reason": reason,
                     "reason": reason,
                 },
