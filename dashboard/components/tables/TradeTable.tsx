@@ -1,6 +1,5 @@
 'use client';
 
-import { tradeStory } from '@/lib/tradeStory';
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import type { Trade, Strategy, Exchange, PositionType, OptionsState } from '@/lib/types';
 import {
@@ -1039,9 +1038,20 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       const opt = isOptionTrade(trade);
                       const short = trade.position_type === 'short';
                       const exitReason = trade.status !== 'open' ? getExitReason(trade) : null;
-                      const story = trade.status === 'closed'
-                        ? tradeStory({ ...trade, isOption: opt }, exitReason)
+                      const meta = (trade.metadata || {}) as Record<string, unknown>;
+                      const pctNow = display.pnlPct;
+                      const peakPct = trade.peak_pnl != null ? Math.max(trade.peak_pnl, pctNow ?? trade.peak_pnl) : null;
+                      // Worst point: tracked by the engine from v0.53.6; older losing
+                      // trades fall back to their final result, older winners have none.
+                      const lowRaw = typeof meta.low_pnl === 'number' ? (meta.low_pnl as number) : null;
+                      const lowPct = lowRaw != null
+                        ? Math.min(lowRaw, pctNow ?? lowRaw)
+                        : (pctNow != null && pctNow < 0 ? pctNow : null);
+                      const peakPrice = typeof meta.peak_price === 'number' ? (meta.peak_price as number) : null;
+                      const helped = trade.exit_price != null
+                        ? (opt ? trade.exit_price > trade.price : short ? trade.exit_price < trade.price : trade.exit_price > trade.price)
                         : null;
+                      const sgn = (n: number) => `${n > 0 ? '+' : ''}${n.toFixed(1)}%`;
                       const moneyIn = getMoneyIn(trade);
                       const fees = (trade.entry_fee ?? 0) + (trade.exit_fee ?? 0);
                       const tone = display.pnl > 0 ? 'text-emerald-400' : display.pnl < 0 ? 'text-red-400' : 'text-zinc-300';
@@ -1060,7 +1070,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                                 <p className="truncate text-[15px] font-semibold text-white">
                                   {opt ? displayOptionPair(trade.pair) : extractBaseAsset(trade.pair)}
                                   <span className="ml-1.5 text-xs font-medium text-zinc-400">
-                                    {opt ? 'option' : short ? 'short · bet on a fall' : 'long · bet on a rise'}
+                                    {opt ? 'option' : short ? 'short' : 'long'}
                                   </span>
                                 </p>
                                 <p className="text-xs text-zinc-500">{formatShortDate(trade.timestamp)}</p>
@@ -1086,8 +1096,8 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             <span className="h-px flex-1 bg-zinc-700" />
                             {trade.exit_price != null ? (
                               <>
-                                {story?.move && story.moveHelped != null && (
-                                  <span className={story.moveHelped ? 'text-emerald-400' : 'text-red-400'}>
+                                {helped != null && trade.exit_price !== trade.price && (
+                                  <span className={helped ? 'text-emerald-400' : 'text-red-400'}>
                                     {trade.exit_price > trade.price ? '↑' : '↓'}
                                   </span>
                                 )}
@@ -1100,20 +1110,24 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             )}
                           </div>
 
-                          {/* 3. What happened, in words */}
-                          {story && (
-                            <div className="mt-2.5 space-y-1 text-[13px] leading-snug text-zinc-300">
-                              <p>
-                                {story.move && (
-                                  <span className={story.moveHelped == null ? '' : story.moveHelped ? 'text-emerald-300' : 'text-red-300'}>
-                                    {story.move}{story.moveHelped == null ? '' : story.moveHelped ? ', the right way' : ', the wrong way'}.{' '}
-                                  </span>
-                                )}
-                                {story.why}
-                              </p>
-                              {story.regret && <p className="text-amber-300/90">{story.regret}</p>}
-                            </div>
-                          )}
+                          {/* 3. The numbers */}
+                          <div className="mt-2.5 grid grid-cols-3 gap-px overflow-hidden rounded-lg bg-white/[0.06] text-center">
+                            {([
+                              ['Peak', peakPct != null ? sgn(peakPct) : '—', peakPct != null && peakPct > 0 ? 'text-emerald-400' : 'text-zinc-300'],
+                              ['Low', lowPct != null ? sgn(lowPct) : '—', lowPct != null && lowPct < 0 ? 'text-red-400' : 'text-zinc-300'],
+                              ['Held', null, 'text-zinc-200'],
+                              ['Put in', moneyIn != null ? `$${moneyIn.toFixed(2)}` : '—', 'text-zinc-200'],
+                              ['Leverage', trade.leverage > 1 ? formatLeverage(trade.leverage) : '1x', 'text-zinc-200'],
+                              ['Fees', trade.status === 'closed' ? `$${fees.toFixed(3)}` : '—', 'text-zinc-200'],
+                            ] as [string, string | null, string][]).map(([label, value, color]) => (
+                              <div key={label} className="bg-[#101114] px-1 py-2">
+                                <p className="text-[10px] text-zinc-500">{label}</p>
+                                <p className={cn('mt-0.5 font-mono text-[13px] font-semibold tabular-nums', color)}>
+                                  {value ?? <HoldTimeCell trade={trade} now={now} />}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
 
                           {/* Open trade: live state + close */}
                           {trade.status === 'open' && (
@@ -1161,13 +1175,13 @@ export default function TradeTable({ trades }: TradeTableProps) {
                             </div>
                           )}
 
-                          {/* 4. The few numbers that matter */}
-                          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
-                            <span className="inline-flex items-center gap-1">held <HoldTimeCell trade={trade} now={now} /></span>
-                            {moneyIn != null && <span>${moneyIn.toFixed(2)} put in</span>}
-                            {trade.leverage > 1 && <span>{formatLeverage(trade.leverage)}</span>}
-                            {exitReason && <span className="ml-auto"><ExitChip exit={exitReason} /></span>}
-                          </div>
+                          {/* 4. How it ended */}
+                          {(exitReason || peakPrice != null) && (
+                            <div className="mt-2.5 flex items-center justify-between gap-2 text-xs text-zinc-500">
+                              <span className="font-mono tabular-nums">{peakPrice != null ? `best price ${formatPrice(peakPrice)}` : ''}</span>
+                              {exitReason && <ExitChip exit={exitReason} />}
+                            </div>
+                          )}
 
                           {/* 5. Everything else, on demand */}
                           <details className="group mt-2">
